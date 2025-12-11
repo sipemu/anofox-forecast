@@ -1,13 +1,17 @@
 //! TSB (Teunter-Syntetos-Babai) method for intermittent demand forecasting.
 //!
 //! TSB models demand probability and demand size separately, then combines them.
-//! Unlike Croston, TSB allows the probability estimate to decrease over time
-//! during periods of no demand.
+//! The implementation matches statsforecast's approach:
+//! - SES is applied to the **non-zero demand values only**
+//! - SES is applied to a **probability series** (0/1 binary indicating demand occurrence)
+//! - The forecast is: demand_level * probability
+//!
+//! Reference: Teunter, R. H., Syntetos, A. A., & Babai, M. Z. (2011).
+//! "Intermittent demand: Linking forecasting to inventory obsolescence."
 
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
 use crate::models::Forecaster;
-use crate::utils::optimization::{nelder_mead, NelderMeadConfig};
 
 /// TSB method for intermittent demand forecasting.
 #[derive(Debug, Clone)]
@@ -16,11 +20,9 @@ pub struct TSB {
     alpha_d: f64,
     /// Smoothing parameter for probability.
     alpha_p: f64,
-    /// Whether to optimize parameters.
-    optimize: bool,
-    /// Estimated demand level.
+    /// Estimated demand level (SES on non-zero demands).
     demand_level: Option<f64>,
-    /// Estimated demand probability.
+    /// Estimated demand probability (SES on 0/1 probability series).
     probability: Option<f64>,
     /// Fitted values.
     fitted: Option<Vec<f64>>,
@@ -32,11 +34,12 @@ pub struct TSB {
 
 impl TSB {
     /// Create a new TSB model with default parameters.
+    ///
+    /// Default alpha_d = 0.1 and alpha_p = 0.1, matching statsforecast defaults.
     pub fn new() -> Self {
         Self {
             alpha_d: 0.1,
             alpha_p: 0.1,
-            optimize: false,
             demand_level: None,
             probability: None,
             fitted: None,
@@ -49,13 +52,6 @@ impl TSB {
     pub fn with_params(mut self, alpha_d: f64, alpha_p: f64) -> Self {
         self.alpha_d = alpha_d.clamp(0.01, 0.99);
         self.alpha_p = alpha_p.clamp(0.01, 0.99);
-        self.optimize = false;
-        self
-    }
-
-    /// Enable parameter optimization.
-    pub fn optimized(mut self) -> Self {
-        self.optimize = true;
         self
     }
 
@@ -79,75 +75,28 @@ impl TSB {
         self.probability
     }
 
-    /// Compute objective (MSE) for parameter optimization.
-    fn compute_mse(values: &[f64], alpha_d: f64, alpha_p: f64) -> f64 {
-        let n = values.len();
-        if n < 4 {
-            return f64::INFINITY;
+    /// Apply Simple Exponential Smoothing to a series.
+    ///
+    /// Returns (forecast, fitted_values) where forecast is the one-step-ahead prediction.
+    /// Matches statsforecast's _ses_forecast implementation.
+    fn ses_forecast(x: &[f64], alpha: f64) -> (f64, Vec<f64>) {
+        if x.is_empty() {
+            return (0.0, vec![]);
         }
 
-        // Find first demand to initialize
-        let first_idx = match values.iter().position(|&v| v > 0.0) {
-            Some(idx) => idx,
-            None => return f64::INFINITY,
-        };
+        let complement = 1.0 - alpha;
+        let mut fitted = vec![f64::NAN; x.len()];
+        fitted[0] = x[0];
 
-        // Initialize
-        let mut demand_level = values[first_idx];
-        let mut probability = 0.5; // Start with 50% probability
-
-        let mut sse = 0.0;
-        let mut count = 0;
-
-        for &y in values.iter().skip(first_idx + 1) {
-            // Compute forecast
-            let forecast = demand_level * probability;
-            let error = y - forecast;
-            sse += error * error;
-            count += 1;
-
-            // Update
-            if y > 0.0 {
-                demand_level = alpha_d * y + (1.0 - alpha_d) * demand_level;
-                probability = alpha_p * 1.0 + (1.0 - alpha_p) * probability;
-            } else {
-                probability = alpha_p * 0.0 + (1.0 - alpha_p) * probability;
-            }
+        for i in 1..x.len() {
+            fitted[i] = alpha * x[i - 1] + complement * fitted[i - 1];
         }
 
-        if count == 0 {
-            f64::INFINITY
-        } else {
-            sse / count as f64
-        }
-    }
+        // One-step-ahead forecast
+        let forecast = alpha * x[x.len() - 1] + complement * fitted[x.len() - 1];
+        fitted[0] = f64::NAN;
 
-    /// Optimize parameters using Nelder-Mead.
-    fn optimize_params(values: &[f64]) -> (f64, f64) {
-        let objective = |params: &[f64]| {
-            let alpha_d = params[0];
-            let alpha_p = params[1];
-            if alpha_d <= 0.01 || alpha_d >= 0.99 || alpha_p <= 0.01 || alpha_p >= 0.99 {
-                return f64::INFINITY;
-            }
-            Self::compute_mse(values, alpha_d, alpha_p)
-        };
-
-        let config = NelderMeadConfig {
-            tolerance: 1e-4,
-            ..Default::default()
-        };
-
-        let result = nelder_mead(
-            objective,
-            &[0.1, 0.1],
-            Some(&[(0.01, 0.99), (0.01, 0.99)]),
-            config,
-        );
-        (
-            result.optimal_point[0].clamp(0.01, 0.99),
-            result.optimal_point[1].clamp(0.01, 0.99),
-        )
+        (forecast, fitted)
     }
 }
 
@@ -162,62 +111,78 @@ impl Forecaster for TSB {
         let values = series.primary_values();
         self.n = values.len();
 
-        if values.len() < 4 {
+        if values.len() < 2 {
             return Err(ForecastError::InsufficientData {
-                needed: 4,
+                needed: 2,
                 got: values.len(),
             });
         }
 
-        // Find first demand
-        let first_idx =
-            values
-                .iter()
-                .position(|&v| v > 0.0)
-                .ok_or(ForecastError::ComputationError(
-                    "No demand occurrences in series".to_string(),
-                ))?;
-
-        // Count demands
-        let demand_count = values.iter().filter(|&&v| v > 0.0).count();
-        if demand_count < 2 {
-            return Err(ForecastError::ComputationError(
-                "Insufficient demand occurrences (need at least 2)".to_string(),
-            ));
+        // Handle all-zero case
+        if values.iter().all(|&v| v == 0.0) {
+            self.demand_level = Some(0.0);
+            self.probability = Some(0.0);
+            self.fitted = Some(vec![0.0; values.len()]);
+            self.residuals = Some(vec![0.0; values.len()]);
+            return Ok(());
         }
 
-        // Optimize if requested
-        if self.optimize {
-            let (alpha_d, alpha_p) = Self::optimize_params(values);
-            self.alpha_d = alpha_d;
-            self.alpha_p = alpha_p;
-        }
+        // Extract non-zero demands (statsforecast's _demand function)
+        let demands: Vec<f64> = values.iter().copied().filter(|&v| v > 0.0).collect();
 
-        // Fit the model
-        let mut demand_level = values[first_idx];
-        let mut probability = 0.5;
-        let mut fitted = vec![0.0; values.len()];
-        let mut residuals = vec![0.0; values.len()];
+        // Create probability series: 1.0 if demand, 0.0 otherwise (statsforecast's _probability)
+        let probabilities: Vec<f64> = values
+            .iter()
+            .map(|&v| if v != 0.0 { 1.0 } else { 0.0 })
+            .collect();
 
-        for (i, &y) in values.iter().enumerate() {
-            // Compute forecast
-            let forecast = demand_level * probability;
-            fitted[i] = forecast;
-            residuals[i] = y - forecast;
+        // Apply SES to demands (non-zero values only)
+        let (demand_forecast, demand_fitted) = Self::ses_forecast(&demands, self.alpha_d);
 
-            // Update (skip first demand point for initialization)
-            if i >= first_idx {
-                if y > 0.0 {
-                    demand_level = self.alpha_d * y + (1.0 - self.alpha_d) * demand_level;
-                    probability = self.alpha_p * 1.0 + (1.0 - self.alpha_p) * probability;
+        // Apply SES to probability series (0/1 values)
+        let (prob_forecast, prob_fitted) = Self::ses_forecast(&probabilities, self.alpha_p);
+
+        self.demand_level = Some(demand_forecast);
+        self.probability = Some(prob_forecast);
+
+        // Expand demand fitted values back to original series length
+        // (statsforecast's _expand_fitted_demand)
+        let mut demand_fitted_expanded = vec![f64::NAN; values.len()];
+        let mut demand_idx = 0;
+        for (i, &v) in values.iter().enumerate() {
+            if v > 0.0 {
+                if demand_idx < demand_fitted.len() {
+                    demand_fitted_expanded[i] = demand_fitted[demand_idx];
                 } else {
-                    probability = self.alpha_p * 0.0 + (1.0 - self.alpha_p) * probability;
+                    demand_fitted_expanded[i] = demand_forecast;
                 }
+                demand_idx += 1;
+            } else {
+                // For zero periods, use the last available demand forecast
+                demand_fitted_expanded[i] = if demand_idx > 0 && demand_idx <= demand_fitted.len() {
+                    demand_fitted[demand_idx - 1]
+                } else if demand_idx > 0 {
+                    demand_forecast
+                } else {
+                    f64::NAN
+                };
             }
         }
 
-        self.demand_level = Some(demand_level);
-        self.probability = Some(probability);
+        // Compute fitted values: demand_fitted * prob_fitted
+        let fitted: Vec<f64> = demand_fitted_expanded
+            .iter()
+            .zip(prob_fitted.iter())
+            .map(|(&d, &p)| if d.is_nan() || p.is_nan() { f64::NAN } else { d * p })
+            .collect();
+
+        // Compute residuals
+        let residuals: Vec<f64> = values
+            .iter()
+            .zip(fitted.iter())
+            .map(|(&y, &f)| if f.is_nan() { f64::NAN } else { y - f })
+            .collect();
+
         self.fitted = Some(fitted);
         self.residuals = Some(residuals);
 
@@ -232,15 +197,12 @@ impl Forecaster for TSB {
             return Ok(Forecast::from_values(Vec::new()));
         }
 
-        // TSB forecast: decreasing probability over time
-        let mut values = Vec::with_capacity(horizon);
-        let mut prob = probability;
-
-        for _ in 0..horizon {
-            values.push(demand_level * prob);
-            // Probability decays assuming no demand
-            prob *= 1.0 - self.alpha_p;
-        }
+        // TSB forecast: constant value = demand_level * probability
+        // The forecast is flat (same value for all horizons), matching statsforecast behavior.
+        // The probability decay during fitting captures historical patterns,
+        // but the forecast represents the expected demand rate going forward.
+        let forecast_value = demand_level * probability;
+        let values = vec![forecast_value; horizon];
 
         Ok(Forecast::from_values(values))
     }
@@ -252,19 +214,21 @@ impl Forecaster for TSB {
             return Ok(point_forecast);
         }
 
-        // Compute variance from residuals
+        // Compute variance from residuals (excluding NaN values)
         let residuals = self.residuals.as_ref().ok_or(ForecastError::FitRequired)?;
-        let variance = if residuals.len() > 1 {
-            let mean_resid: f64 = residuals.iter().sum::<f64>() / residuals.len() as f64;
-            residuals
+        let valid_residuals: Vec<f64> = residuals.iter().copied().filter(|r| !r.is_nan()).collect();
+
+        let std_dev = if valid_residuals.len() > 1 {
+            let mean_resid: f64 = valid_residuals.iter().sum::<f64>() / valid_residuals.len() as f64;
+            let variance = valid_residuals
                 .iter()
                 .map(|r| (r - mean_resid).powi(2))
                 .sum::<f64>()
-                / (residuals.len() - 1) as f64
+                / (valid_residuals.len() - 1) as f64;
+            variance.sqrt()
         } else {
-            1.0
+            0.0
         };
-        let std_dev = variance.sqrt();
 
         let z = crate::utils::quantile_normal(0.5 + level / 2.0);
 
@@ -295,17 +259,14 @@ impl Forecaster for TSB {
     }
 
     fn name(&self) -> &str {
-        if self.optimize {
-            "TSB (Optimized)"
-        } else {
-            "TSB"
-        }
+        "TSB"
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use approx::assert_relative_eq;
     use chrono::{Duration, TimeZone, Utc};
 
     fn make_timestamps(n: usize) -> Vec<chrono::DateTime<Utc>> {
@@ -336,20 +297,22 @@ mod tests {
     }
 
     #[test]
-    fn tsb_decreasing_forecast() {
+    fn tsb_flat_forecast() {
         let ts = make_intermittent_series();
         let mut model = TSB::new();
         model.fit(&ts).unwrap();
 
         let forecast = model.predict(10).unwrap();
 
-        // TSB forecast should decrease over time (probability decay)
-        for i in 1..forecast.horizon() {
+        // TSB forecast should be flat (same value for all horizons)
+        // This matches statsforecast behavior where forecast = demand_level * probability
+        let first = forecast.primary()[0];
+        for (i, &val) in forecast.primary().iter().enumerate() {
             assert!(
-                forecast.primary()[i] <= forecast.primary()[i - 1],
-                "TSB forecast should decrease: {} > {} at index {}",
-                forecast.primary()[i],
-                forecast.primary()[i - 1],
+                (val - first).abs() < 1e-10,
+                "TSB forecast should be flat: {} != {} at index {}",
+                val,
+                first,
                 i
             );
         }
@@ -363,17 +326,6 @@ mod tests {
 
         assert!((model.alpha_d() - 0.2).abs() < 1e-10);
         assert!((model.alpha_p() - 0.3).abs() < 1e-10);
-    }
-
-    #[test]
-    fn tsb_optimized() {
-        let ts = make_intermittent_series();
-        let mut model = TSB::new().optimized();
-        model.fit(&ts).unwrap();
-
-        // Parameters should be within valid range
-        assert!(model.alpha_d() > 0.0 && model.alpha_d() < 1.0);
-        assert!(model.alpha_p() > 0.0 && model.alpha_p() < 1.0);
     }
 
     #[test]
@@ -392,8 +344,8 @@ mod tests {
 
     #[test]
     fn tsb_insufficient_data() {
-        let timestamps = make_timestamps(3);
-        let values = vec![1.0, 0.0, 2.0];
+        let timestamps = make_timestamps(1);
+        let values = vec![1.0];
         let ts = TimeSeries::univariate(timestamps, values).unwrap();
 
         let mut model = TSB::new();
@@ -404,13 +356,19 @@ mod tests {
     }
 
     #[test]
-    fn tsb_no_demands() {
+    fn tsb_all_zeros() {
         let timestamps = make_timestamps(10);
         let values = vec![0.0; 10];
         let ts = TimeSeries::univariate(timestamps, values).unwrap();
 
         let mut model = TSB::new();
-        assert!(model.fit(&ts).is_err());
+        model.fit(&ts).unwrap();
+
+        // All-zero series should produce zero forecasts
+        let forecast = model.predict(5).unwrap();
+        for &val in forecast.primary() {
+            assert!((val - 0.0).abs() < 1e-10);
+        }
     }
 
     #[test]
@@ -455,9 +413,6 @@ mod tests {
     fn tsb_name() {
         let model = TSB::new();
         assert_eq!(model.name(), "TSB");
-
-        let optimized = TSB::new().optimized();
-        assert_eq!(optimized.name(), "TSB (Optimized)");
     }
 
     #[test]
@@ -465,5 +420,35 @@ mod tests {
         let model = TSB::default();
         assert!((model.alpha_d() - 0.1).abs() < 1e-10);
         assert!((model.alpha_p() - 0.1).abs() < 1e-10);
+    }
+
+    /// Validation test comparing TSB output with statsforecast.
+    ///
+    /// Data: Simple continuous series (all non-zero values)
+    /// When all values are non-zero, TSB essentially becomes SES because:
+    /// - _demand extracts all values
+    /// - _probability is all 1s, so SES on it gives 1.0
+    /// - forecast = demand_ses_forecast * 1.0 = demand_ses_forecast
+    ///
+    /// Reference: statsforecast.models.TSB(alpha_d=0.1, alpha_p=0.1)
+    #[test]
+    fn tsb_matches_statsforecast_continuous() {
+        // Simple continuous data (no zeros)
+        let timestamps = make_timestamps(10);
+        let values = vec![50.0, 48.0, 52.0, 49.0, 51.0, 48.0, 50.0, 52.0, 49.0, 51.0];
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = TSB::new();
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(12).unwrap();
+
+        // Expected from statsforecast.models.TSB(alpha_d=0.1, alpha_p=0.1)
+        // For continuous data: forecast = SES(demands) * SES(all-1s) ≈ SES(demands) * 1.0
+        let expected = 50.056; // From Python validation
+
+        for &pred in forecast.primary() {
+            assert_relative_eq!(pred, expected, epsilon = 0.1);
+        }
     }
 }

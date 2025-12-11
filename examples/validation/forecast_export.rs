@@ -11,6 +11,7 @@ use anofox_forecast::models::arima::{AutoARIMA, ARIMA};
 use anofox_forecast::models::baseline::{Naive, RandomWalkWithDrift, SeasonalNaive};
 use anofox_forecast::models::exponential::{
     AutoETS, AutoETSConfig, HoltLinearTrend, HoltWinters, SeasonalType, SimpleExponentialSmoothing,
+    ETS, ETSSpec,
 };
 use anofox_forecast::models::intermittent::{Croston, TSB};
 use anofox_forecast::models::theta::Theta;
@@ -253,8 +254,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // 4. Simple Exponential Smoothing - NO native intervals
+        // Use fixed alpha=0.1 to match statsforecast validation
         {
-            let mut model = SimpleExponentialSmoothing::auto();
+            let mut model = SimpleExponentialSmoothing::new(0.1);
             if let Some(result) = run_model(&mut model, &ts, "SES", series_type, false) {
                 all_results.push(result);
                 println!("  ✓ SES (point only)");
@@ -262,8 +264,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // 5. Holt's Linear Trend - has native intervals
+        // statsforecast's Holt is actually ETS(A,A,N), so we use that for comparison
         {
-            let mut model = HoltLinearTrend::auto();
+            let mut model = ETS::new(ETSSpec::aan(), SEASONAL_PERIOD);
             if let Some(result) = run_model(&mut model, &ts, "Holt", series_type, true) {
                 all_results.push(result);
                 println!("  ✓ Holt");
