@@ -18,3 +18,96 @@ rand = "0.8"
 
 [dev-dependencies]
 approx = "0.5"
+
+# Examples
+[[example]]
+name = "quickstart"
+path = "examples/quickstart.rs"
+
+[[example]]
+name = "arima"
+path = "examples/forecasting/arima.rs"
+
+[[example]]
+name = "exponential"
+path = "examples/forecasting/exponential.rs"
+
+[[example]]
+name = "baseline"
+path = "examples/forecasting/baseline.rs"
+
+[[example]]
+name = "theta"
+path = "examples/forecasting/theta.rs"
+
+[[example]]
+name = "intermittent"
+path = "examples/forecasting/intermittent.rs"
+
+[[example]]
+name = "ensemble"
+path = "examples/forecasting/ensemble.rs"
+
+[[example]]
+name = "basic_features"
+path = "examples/features/basic_features.rs"
+
+[[example]]
+name = "distribution"
+path = "examples/features/distribution.rs"
+
+[[example]]
+name = "autocorrelation"
+path = "examples/features/autocorrelation.rs"
+
+[[example]]
+name = "entropy"
+path = "examples/features/entropy.rs"
+
+[[example]]
+name = "complexity"
+path = "examples/features/complexity.rs"
+
+[[example]]
+name = "stl_decomposition"
+path = "examples/analysis/stl_decomposition.rs"
+
+[[example]]
+name = "changepoint"
+path = "examples/analysis/changepoint.rs"
+
+[[example]]
+name = "outlier_detection"
+path = "examples/analysis/outlier_detection.rs"
+
+[[example]]
+name = "seasonality"
+path = "examples/analysis/seasonality.rs"
+
+[[example]]
+name = "time_series_clustering"
+path = "examples/clustering/time_series_clustering.rs"
+
+[[example]]
+name = "scaling"
+path = "examples/transform/scaling.rs"
+
+[[example]]
+name = "boxcox"
+path = "examples/transform/boxcox.rs"
+
+[[example]]
+name = "window"
+path = "examples/transform/window.rs"
+
+[[example]]
+name = "metrics"
+path = "examples/validation/metrics.rs"
+
+[[example]]
+name = "cross_validation"
+path = "examples/validation/cross_validation.rs"
+
+[[example]]
+name = "diagnostics"
+path = "examples/validation/diagnostics.rs"
