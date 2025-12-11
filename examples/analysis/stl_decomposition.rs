@@ -123,10 +123,10 @@ fn main() {
         "t", "Original", "Trend", "Seasonal", "Remainder"
     );
     println!("{:-<46}", "");
-    for i in 0..period {
+    for (i, &value) in series.iter().enumerate().take(period) {
         println!(
             "{:>4} {:>10.4} {:>10.4} {:>10.4} {:>10.4}",
-            i, series[i], result.trend[i], result.seasonal[i], result.remainder[i]
+            i, value, result.trend[i], result.seasonal[i], result.remainder[i]
         );
     }
 

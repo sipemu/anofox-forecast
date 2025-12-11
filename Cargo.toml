@@ -111,3 +111,7 @@ path = "examples/validation/cross_validation.rs"
 [[example]]
 name = "diagnostics"
 path = "examples/validation/diagnostics.rs"
+
+[[example]]
+name = "forecast_export"
+path = "examples/validation/forecast_export.rs"

@@ -141,15 +141,10 @@ fn main() {
     );
     println!("{:-<68}", "");
 
-    for i in 0..series.len() {
+    for (i, &value) in series.iter().enumerate() {
         println!(
             "{:>6} {:>10.2} {:>10.4} {:>10.4} {:>10.4} {:>10.4}",
-            i,
-            series[i],
-            centered.data[i],
-            standardized.data[i],
-            normalized.data[i],
-            robust.data[i]
+            i, value, centered.data[i], standardized.data[i], normalized.data[i], robust.data[i]
         );
     }
 

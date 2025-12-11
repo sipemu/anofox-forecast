@@ -15,11 +15,15 @@ fn main() {
         .map(|i| Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap() + Duration::hours(i))
         .collect();
 
+    // Generate data with trend, seasonality, and meaningful noise
+    // Using deterministic pseudo-random noise for reproducibility
     let values: Vec<f64> = (0..100)
         .map(|i| {
-            10.0 + 0.5 * i as f64  // trend
-                + 2.0 * (i as f64 * 0.3).sin()  // cyclical component
-                + 0.3 * ((i as f64 * 0.1).cos()) // noise
+            let trend = 10.0 + 0.5 * i as f64;
+            let seasonal = 2.0 * (i as f64 * 0.3).sin();
+            // Add meaningful noise (deterministic but irregular)
+            let noise = ((i * 17 + 7) % 13) as f64 - 6.0; // Range roughly -6 to +6
+            trend + seasonal + noise
         })
         .collect();
 
