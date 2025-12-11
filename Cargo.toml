@@ -1,0 +1,20 @@
+[package]
+name = "anofox-forecast"
+version = "0.1.0"
+edition = "2021"
+authors = ["Simon M"]
+description = "Time series forecasting library - Rust port of anofox-time"
+license = "MIT"
+repository = "https://github.com/DataZooDE/anofox-forecast"
+keywords = ["time-series", "forecasting", "arima", "ets", "statistics"]
+categories = ["science", "mathematics"]
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+faer = "0.23"
+statrs = "0.18"
+thiserror = "2.0"
+rand = "0.8"
+
+[dev-dependencies]
+approx = "0.5"
