@@ -11,7 +11,7 @@ categories = ["science", "mathematics"]
 
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
-faer = "0.23"
+faer = { version = "0.23", default-features = false, features = ["std", "linalg"] }
 statrs = "0.18"
 thiserror = "2.0"
 rand = "0.8"

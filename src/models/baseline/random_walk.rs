@@ -8,7 +8,7 @@ use crate::models::Forecaster;
 
 /// Random walk with drift forecaster.
 ///
-/// The forecast is: y_hat[t+h] = y[t] + h * drift
+/// The forecast is: y_hat\[t+h\] = y\[t\] + h * drift
 /// where drift is the average change in the series.
 #[derive(Debug, Clone, Default)]
 pub struct RandomWalkWithDrift {

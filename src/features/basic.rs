@@ -8,7 +8,7 @@
 /// * `series` - Input time series
 ///
 /// # Returns
-/// Sum of x[i]^2 for all i
+/// Sum of x\[i\]^2 for all i
 pub fn abs_energy(series: &[f64]) -> f64 {
     series.iter().map(|x| x * x).sum()
 }
@@ -23,7 +23,7 @@ pub fn absolute_maximum(series: &[f64]) -> f64 {
 
 /// Returns the sum of absolute differences between consecutive values.
 ///
-/// sum(|x[i+1] - x[i]|) for i = 0..n-1
+/// sum(|x\[i+1\] - x\[i\]|) for i = 0..n-1
 pub fn absolute_sum_of_changes(series: &[f64]) -> f64 {
     if series.len() < 2 {
         return 0.0;
@@ -68,7 +68,7 @@ pub fn mean_change(series: &[f64]) -> f64 {
 
 /// Returns the mean of the central approximation of the second derivative.
 ///
-/// (x[i+2] - 2*x[i+1] + x[i]) / 2
+/// (x\[i+2\] - 2*x\[i+1\] + x\[i\]) / 2
 pub fn mean_second_derivative_central(series: &[f64]) -> f64 {
     if series.len() < 3 {
         return f64::NAN;
