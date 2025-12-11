@@ -1,12 +1,14 @@
 # anofox-forecast
 
+[![CI](https://github.com/sipemu/anofox-forecast/actions/workflows/ci.yml/badge.svg)](https://github.com/sipemu/anofox-forecast/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/anofox-forecast.svg)](https://crates.io/crates/anofox-forecast)
 [![Documentation](https://docs.rs/anofox-forecast/badge.svg)](https://docs.rs/anofox-forecast)
+[![codecov](https://codecov.io/gh/sipemu/anofox-forecast/branch/main/graph/badge.svg)](https://codecov.io/gh/sipemu/anofox-forecast)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-A comprehensive time series forecasting library for Rust.
+Time series forecasting library for Rust.
 
-This library provides 35+ forecasting models, 76+ statistical features for time series analysis, and tools for seasonality decomposition, changepoint detection, anomaly detection, and clustering. It is a Rust port of the C++ library [anofox-time](https://github.com/DataZooDE/anofox-time).
+Provides 35+ forecasting models, 76+ statistical features, seasonality decomposition, changepoint detection, anomaly detection, and time series clustering. Rust port of [anofox-time](https://github.com/DataZooDE/anofox-time) (C++).
 
 ## Features
 
