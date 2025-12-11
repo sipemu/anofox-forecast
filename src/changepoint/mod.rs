@@ -25,5 +25,7 @@
 pub mod cost;
 pub mod pelt;
 
-pub use cost::{l1_cost, l2_cost, normal_cost, poisson_cost, segment_cost, total_cost, CostFunction};
+pub use cost::{
+    l1_cost, l2_cost, normal_cost, poisson_cost, segment_cost, total_cost, CostFunction,
+};
 pub use pelt::{pelt_detect, PeltConfig, PeltResult};

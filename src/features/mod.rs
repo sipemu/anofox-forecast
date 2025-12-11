@@ -65,7 +65,8 @@ pub use trend::{
 };
 
 pub use change::{
-    change_quantiles, energy_ratio_by_chunks, percentage_of_reoccurring_datapoints_to_all_datapoints,
+    change_quantiles, energy_ratio_by_chunks,
+    percentage_of_reoccurring_datapoints_to_all_datapoints,
     percentage_of_reoccurring_values_to_all_values, ratio_value_number_to_time_series_length,
     sum_of_reoccurring_data_points, sum_of_reoccurring_values,
 };

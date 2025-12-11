@@ -87,9 +87,7 @@ impl Forecaster for RandomWalkWithDrift {
             return Ok(Forecast::new());
         }
 
-        let predictions: Vec<f64> = (1..=horizon)
-            .map(|h| last + (h as f64) * drift)
-            .collect();
+        let predictions: Vec<f64> = (1..=horizon).map(|h| last + (h as f64) * drift).collect();
 
         Ok(Forecast::from_values(predictions))
     }
@@ -119,7 +117,9 @@ impl Forecaster for RandomWalkWithDrift {
         }
 
         Ok(Forecast::from_values_with_intervals(
-            predictions, lower, upper,
+            predictions,
+            lower,
+            upper,
         ))
     }
 

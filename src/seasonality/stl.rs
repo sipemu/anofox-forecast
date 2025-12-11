@@ -81,9 +81,9 @@ impl STL {
         // Default parameters following Cleveland et al. (1990)
         let ns = seasonal_period;
         let nt = (1.5 * seasonal_period as f64 / (1.0 - 1.5 / ns as f64)).ceil() as usize;
-        let nt = if nt % 2 == 0 { nt + 1 } else { nt }; // Must be odd
+        let nt = if nt.is_multiple_of(2) { nt + 1 } else { nt }; // Must be odd
         let nl = seasonal_period;
-        let nl = if nl % 2 == 0 { nl + 1 } else { nl }; // Must be odd
+        let nl = if nl.is_multiple_of(2) { nl + 1 } else { nl }; // Must be odd
 
         Self {
             seasonal_period,
@@ -98,13 +98,13 @@ impl STL {
 
     /// Set custom seasonal smoothness (ns parameter).
     pub fn with_seasonal_smoothness(mut self, ns: usize) -> Self {
-        self.seasonal_smoothness = if ns % 2 == 0 { ns + 1 } else { ns };
+        self.seasonal_smoothness = if ns.is_multiple_of(2) { ns + 1 } else { ns };
         self
     }
 
     /// Set custom trend smoothness (nt parameter).
     pub fn with_trend_smoothness(mut self, nt: usize) -> Self {
-        self.trend_smoothness = if nt % 2 == 0 { nt + 1 } else { nt };
+        self.trend_smoothness = if nt.is_multiple_of(2) { nt + 1 } else { nt };
         self
     }
 
@@ -153,8 +153,11 @@ impl STL {
             // Inner loop
             for _ in 0..self.inner_iterations {
                 // Step 1: Detrending
-                let detrended: Vec<f64> =
-                    series.iter().zip(trend.iter()).map(|(y, t)| y - t).collect();
+                let detrended: Vec<f64> = series
+                    .iter()
+                    .zip(trend.iter())
+                    .map(|(y, t)| y - t)
+                    .collect();
 
                 // Step 2: Cycle-subseries smoothing
                 let cycle_subseries = self.smooth_cycle_subseries(&detrended, &weights);
@@ -227,8 +230,11 @@ impl STL {
             }
 
             // Smooth the subseries
-            let smoothed =
-                self.loess_smooth_subseries(&subseries_values, self.seasonal_smoothness, &subseries_weights);
+            let smoothed = self.loess_smooth_subseries(
+                &subseries_values,
+                self.seasonal_smoothness,
+                &subseries_weights,
+            );
 
             // Put smoothed values back
             for (&idx, &smooth_val) in subseries_indices.iter().zip(smoothed.iter()) {
@@ -251,7 +257,7 @@ impl STL {
 
         for i in 0..n {
             // Determine window
-            let start = if i >= half_span { i - half_span } else { 0 };
+            let start = i.saturating_sub(half_span);
             let end = (i + half_span + 1).min(n);
 
             // Compute weighted average (simplified LOESS)
@@ -303,11 +309,11 @@ impl STL {
         let half = window / 2;
         let mut result = vec![0.0; n];
 
-        for i in 0..n {
-            let start = if i >= half { i - half } else { 0 };
+        for (i, res) in result.iter_mut().enumerate() {
+            let start = i.saturating_sub(half);
             let end = (i + half + 1).min(n);
             let sum: f64 = series[start..end].iter().sum();
-            result[i] = sum / (end - start) as f64;
+            *res = sum / (end - start) as f64;
         }
 
         result
@@ -325,7 +331,7 @@ impl STL {
 
         for i in 0..n {
             // Determine window
-            let start = if i >= half_span { i - half_span } else { 0 };
+            let start = i.saturating_sub(half_span);
             let end = (i + half_span + 1).min(n);
 
             // Compute weighted local regression (simplified to weighted mean)
@@ -364,7 +370,7 @@ impl STL {
         // Compute median absolute deviation
         let mut sorted = abs_remainder.clone();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let median = if n % 2 == 0 {
+        let median = if n.is_multiple_of(2) {
             (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
         } else {
             sorted[n / 2]
@@ -414,7 +420,8 @@ mod tests {
         (0..n)
             .map(|i| {
                 let trend = 0.1 * i as f64;
-                let seasonal = 10.0 * ((2.0 * std::f64::consts::PI * i as f64 / period as f64).sin());
+                let seasonal =
+                    10.0 * ((2.0 * std::f64::consts::PI * i as f64 / period as f64).sin());
                 trend + seasonal
             })
             .collect()
@@ -470,7 +477,8 @@ mod tests {
         let series: Vec<f64> = (0..n)
             .map(|i| {
                 let trend = 2.0 * i as f64;
-                let seasonal = 0.1 * ((2.0 * std::f64::consts::PI * i as f64 / period as f64).sin());
+                let seasonal =
+                    0.1 * ((2.0 * std::f64::consts::PI * i as f64 / period as f64).sin());
                 trend + seasonal
             })
             .collect();

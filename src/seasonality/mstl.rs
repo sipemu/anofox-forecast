@@ -42,7 +42,6 @@ impl MSTLResult {
         }
 
         let seasonal = &self.seasonal_components[period_idx];
-        let n = seasonal.len();
 
         let var_remainder = variance(&self.remainder);
         let seasonal_plus_remainder: Vec<f64> = seasonal
@@ -56,12 +55,11 @@ impl MSTLResult {
             return Some(0.0);
         }
 
-        Some((1.0 - var_remainder / var_sr).max(0.0).min(1.0))
+        Some((1.0 - var_remainder / var_sr).clamp(0.0, 1.0))
     }
 
     /// Get trend strength.
     pub fn trend_strength(&self) -> f64 {
-        let n = self.trend.len();
         let var_remainder = variance(&self.remainder);
         let trend_plus_remainder: Vec<f64> = self
             .trend
@@ -75,7 +73,7 @@ impl MSTLResult {
             return 0.0;
         }
 
-        (1.0 - var_remainder / var_tr).max(0.0).min(1.0)
+        (1.0 - var_remainder / var_tr).clamp(0.0, 1.0)
     }
 }
 

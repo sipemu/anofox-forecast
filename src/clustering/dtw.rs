@@ -25,10 +25,7 @@ pub fn dtw_distance(a: &[f64], b: &[f64]) -> f64 {
     for i in 1..=n {
         for j in 1..=m {
             let cost = (a[i - 1] - b[j - 1]).abs();
-            dtw[i][j] = cost
-                + dtw[i - 1][j]
-                    .min(dtw[i][j - 1])
-                    .min(dtw[i - 1][j - 1]);
+            dtw[i][j] = cost + dtw[i - 1][j].min(dtw[i][j - 1]).min(dtw[i - 1][j - 1]);
         }
     }
 
@@ -64,10 +61,7 @@ pub fn dtw_distance_windowed(a: &[f64], b: &[f64], window: usize) -> f64 {
 
         for j in j_start..=j_end {
             let cost = (a[i - 1] - b[j - 1]).abs();
-            dtw[i][j] = cost
-                + dtw[i - 1][j]
-                    .min(dtw[i][j - 1])
-                    .min(dtw[i - 1][j - 1]);
+            dtw[i][j] = cost + dtw[i - 1][j].min(dtw[i][j - 1]).min(dtw[i - 1][j - 1]);
         }
     }
 
@@ -92,10 +86,7 @@ pub fn dtw_path(a: &[f64], b: &[f64]) -> Vec<(usize, usize)> {
     for i in 1..=n {
         for j in 1..=m {
             let cost = (a[i - 1] - b[j - 1]).abs();
-            dtw[i][j] = cost
-                + dtw[i - 1][j]
-                    .min(dtw[i][j - 1])
-                    .min(dtw[i - 1][j - 1]);
+            dtw[i][j] = cost + dtw[i - 1][j].min(dtw[i][j - 1]).min(dtw[i - 1][j - 1]);
         }
     }
 

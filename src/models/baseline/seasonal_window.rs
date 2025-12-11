@@ -248,7 +248,10 @@ mod tests {
 
     fn make_timestamps(n: usize) -> Vec<chrono::DateTime<Utc>> {
         (0..n)
-            .map(|i| Utc.with_ymd_and_hms(2024, 1, 1, i as u32 % 24, 0, 0).unwrap())
+            .map(|i| {
+                Utc.with_ymd_and_hms(2024, 1, 1, i as u32 % 24, 0, 0)
+                    .unwrap()
+            })
             .collect()
     }
 
@@ -377,7 +380,7 @@ mod tests {
         let values = vec![
             10.0, 20.0, 30.0, 40.0, // Cycle 1
             12.0, 22.0, 32.0, 42.0, // Cycle 2 (slightly higher)
-            8.0, 18.0, 28.0, 38.0,  // Cycle 3 (slightly lower)
+            8.0, 18.0, 28.0, 38.0, // Cycle 3 (slightly lower)
         ];
         let ts = TimeSeries::univariate(timestamps, values).unwrap();
 

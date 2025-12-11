@@ -16,7 +16,10 @@ pub struct ScaleResult {
 impl ScaleResult {
     /// Inverse transform to recover original scale.
     pub fn inverse(&self) -> Vec<f64> {
-        self.data.iter().map(|&x| x * self.scale + self.center).collect()
+        self.data
+            .iter()
+            .map(|&x| x * self.scale + self.center)
+            .collect()
     }
 
     /// Transform new data using the same parameters.
@@ -24,7 +27,9 @@ impl ScaleResult {
         if self.scale.abs() < 1e-10 {
             return vec![0.0; data.len()];
         }
-        data.iter().map(|&x| (x - self.center) / self.scale).collect()
+        data.iter()
+            .map(|&x| (x - self.center) / self.scale)
+            .collect()
     }
 }
 
@@ -124,7 +129,11 @@ pub fn scale_to_range(series: &[f64], min_val: f64, max_val: f64) -> Vec<f64> {
     let normalized = normalize(series);
     let target_range = max_val - min_val;
 
-    normalized.data.iter().map(|&x| x * target_range + min_val).collect()
+    normalized
+        .data
+        .iter()
+        .map(|&x| x * target_range + min_val)
+        .collect()
 }
 
 /// Center data by subtracting the mean.
@@ -155,7 +164,7 @@ fn compute_median(values: &[f64]) -> f64 {
     let mut sorted = values.to_vec();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let n = sorted.len();
-    if n % 2 == 0 {
+    if n.is_multiple_of(2) {
         (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
     } else {
         sorted[n / 2]

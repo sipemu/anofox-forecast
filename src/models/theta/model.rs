@@ -134,11 +134,11 @@ impl Theta {
         let mut trend = vec![f64::NAN; series.len()];
 
         for i in half..(series.len() - half) {
-            let sum: f64 = if period % 2 == 0 {
+            let sum: f64 = if period.is_multiple_of(2) {
                 // Even period: weighted endpoints
                 let mut s = 0.5 * series[i - half] + 0.5 * series[i + half];
-                for j in (i - half + 1)..(i + half) {
-                    s += series[j];
+                for &val in series.iter().take(i + half).skip(i - half + 1) {
+                    s += val;
                 }
                 s / period as f64
             } else {
@@ -335,14 +335,18 @@ impl Forecaster for Theta {
         }
 
         self.level = Some(level);
-        self.seasonals = if seasonals.is_empty() { None } else { Some(seasonals) };
+        self.seasonals = if seasonals.is_empty() {
+            None
+        } else {
+            Some(seasonals)
+        };
         self.fitted = Some(fitted);
 
         // Calculate residual variance
         let valid_residuals: Vec<f64> = residuals[1..].to_vec();
         if !valid_residuals.is_empty() {
-            let variance = valid_residuals.iter().map(|r| r * r).sum::<f64>()
-                / valid_residuals.len() as f64;
+            let variance =
+                valid_residuals.iter().map(|r| r * r).sum::<f64>() / valid_residuals.len() as f64;
             self.residual_variance = Some(variance);
         }
 
@@ -445,7 +449,9 @@ mod tests {
     #[test]
     fn theta_basic() {
         let timestamps = make_timestamps(50);
-        let values: Vec<f64> = (0..50).map(|i| 10.0 + 0.5 * i as f64 + (i as f64 * 0.3).sin()).collect();
+        let values: Vec<f64> = (0..50)
+            .map(|i| 10.0 + 0.5 * i as f64 + (i as f64 * 0.3).sin())
+            .collect();
         let ts = TimeSeries::univariate(timestamps, values).unwrap();
 
         let mut model = Theta::new();
@@ -516,7 +522,9 @@ mod tests {
     #[test]
     fn theta_confidence_intervals() {
         let timestamps = make_timestamps(50);
-        let values: Vec<f64> = (0..50).map(|i| 10.0 + i as f64 * 0.5 + (i as f64 * 0.2).sin()).collect();
+        let values: Vec<f64> = (0..50)
+            .map(|i| 10.0 + i as f64 * 0.5 + (i as f64 * 0.2).sin())
+            .collect();
         let ts = TimeSeries::univariate(timestamps, values).unwrap();
 
         let mut model = Theta::new();

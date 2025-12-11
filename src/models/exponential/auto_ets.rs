@@ -5,24 +5,19 @@
 
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
-use crate::models::exponential::ets::{ETS, ETSSpec, ErrorType, SeasonalType, TrendType};
+use crate::models::exponential::ets::{ETSSpec, ErrorType, SeasonalType, TrendType, ETS};
 use crate::models::Forecaster;
 
 /// Selection criterion for AutoETS.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SelectionCriterion {
     /// Akaike Information Criterion
     AIC,
     /// Corrected Akaike Information Criterion
+    #[default]
     AICc,
     /// Bayesian Information Criterion
     BIC,
-}
-
-impl Default for SelectionCriterion {
-    fn default() -> Self {
-        Self::AICc
-    }
 }
 
 /// Configuration for AutoETS.
@@ -155,7 +150,11 @@ impl AutoETS {
         };
 
         let trend_types = if self.config.allow_damped {
-            vec![TrendType::None, TrendType::Additive, TrendType::AdditiveDamped]
+            vec![
+                TrendType::None,
+                TrendType::Additive,
+                TrendType::AdditiveDamped,
+            ]
         } else {
             vec![TrendType::None, TrendType::Additive]
         };
@@ -165,7 +164,11 @@ impl AutoETS {
         } else if self.config.additive_only || !self.config.allow_multiplicative_seasonal {
             vec![SeasonalType::None, SeasonalType::Additive]
         } else {
-            vec![SeasonalType::None, SeasonalType::Additive, SeasonalType::Multiplicative]
+            vec![
+                SeasonalType::None,
+                SeasonalType::Additive,
+                SeasonalType::Multiplicative,
+            ]
         };
 
         for &error in &error_types {
@@ -173,12 +176,11 @@ impl AutoETS {
                 for &seasonal in &seasonal_types {
                     // Skip invalid combinations
                     // Multiplicative errors with additive components can be problematic
-                    if error == ErrorType::Multiplicative {
-                        if trend == TrendType::Additive || trend == TrendType::AdditiveDamped {
-                            if seasonal == SeasonalType::Additive {
-                                continue; // M,A,A and M,Ad,A can be unstable
-                            }
-                        }
+                    if error == ErrorType::Multiplicative
+                        && (trend == TrendType::Additive || trend == TrendType::AdditiveDamped)
+                        && seasonal == SeasonalType::Additive
+                    {
+                        continue; // M,A,A and M,Ad,A can be unstable
                     }
                     candidates.push(ETSSpec::new(error, trend, seasonal));
                 }
@@ -228,7 +230,11 @@ impl Forecaster for AutoETS {
 
         // Fit each candidate and track scores
         for spec in candidates {
-            let period = if spec.has_seasonal() { seasonal_period } else { 1 };
+            let period = if spec.has_seasonal() {
+                seasonal_period
+            } else {
+                1
+            };
 
             // Check if we have enough data for this specification
             let min_len = if spec.has_seasonal() { 2 * period } else { 2 };
@@ -251,7 +257,8 @@ impl Forecaster for AutoETS {
         }
 
         // Sort model scores
-        self.model_scores.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        self.model_scores
+            .sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
         self.selected_model = best_model;
         self.selected_spec = best_spec;
@@ -266,12 +273,18 @@ impl Forecaster for AutoETS {
     }
 
     fn predict(&self, horizon: usize) -> Result<Forecast> {
-        let model = self.selected_model.as_ref().ok_or(ForecastError::FitRequired)?;
+        let model = self
+            .selected_model
+            .as_ref()
+            .ok_or(ForecastError::FitRequired)?;
         model.predict(horizon)
     }
 
     fn predict_with_intervals(&self, horizon: usize, level: f64) -> Result<Forecast> {
-        let model = self.selected_model.as_ref().ok_or(ForecastError::FitRequired)?;
+        let model = self
+            .selected_model
+            .as_ref()
+            .ok_or(ForecastError::FitRequired)?;
         model.predict_with_intervals(horizon, level)
     }
 

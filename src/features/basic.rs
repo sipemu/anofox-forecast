@@ -103,7 +103,7 @@ pub fn median(series: &[f64]) -> f64 {
     let mut sorted = series.to_vec();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let n = sorted.len();
-    if n % 2 == 0 {
+    if n.is_multiple_of(2) {
         (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
     } else {
         sorted[n / 2]
@@ -309,7 +309,11 @@ mod tests {
     fn mean_second_derivative_central_linear() {
         // Linear function: second derivative is 0
         let series = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-        assert_relative_eq!(mean_second_derivative_central(&series), 0.0, epsilon = 1e-10);
+        assert_relative_eq!(
+            mean_second_derivative_central(&series),
+            0.0,
+            epsilon = 1e-10
+        );
     }
 
     #[test]

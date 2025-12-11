@@ -14,7 +14,7 @@ mod holt_winters;
 mod ses;
 
 pub use auto_ets::{AutoETS, AutoETSConfig, SelectionCriterion};
-pub use ets::{ErrorType, ETS, ETSSpec, SeasonalType as ETSSeasonalType, TrendType};
+pub use ets::{ETSSpec, ErrorType, SeasonalType as ETSSeasonalType, TrendType, ETS};
 pub use holt::HoltLinearTrend;
 pub use holt_winters::{HoltWinters, SeasonalType};
 pub use ses::SimpleExponentialSmoothing;

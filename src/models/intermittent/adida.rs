@@ -148,7 +148,9 @@ impl Forecaster for ADIDA {
         // Determine aggregation level
         let level = if self.auto_aggregate {
             let mean_interval = Self::mean_inter_demand_interval(values);
-            (mean_interval.round() as usize).max(1).min(values.len() / 2)
+            (mean_interval.round() as usize)
+                .max(1)
+                .min(values.len() / 2)
         } else {
             self.aggregation_level.unwrap_or(1)
         };
@@ -172,7 +174,11 @@ impl Forecaster for ADIDA {
 
         // Compute fitted values (constant forecast at original frequency)
         let fitted = vec![forecast; values.len()];
-        let residuals: Vec<f64> = values.iter().zip(fitted.iter()).map(|(y, f)| y - f).collect();
+        let residuals: Vec<f64> = values
+            .iter()
+            .zip(fitted.iter())
+            .map(|(y, f)| y - f)
+            .collect();
 
         self.fitted = Some(fitted);
         self.residuals = Some(residuals);
@@ -203,7 +209,10 @@ impl Forecaster for ADIDA {
         let residuals = self.residuals.as_ref().ok_or(ForecastError::FitRequired)?;
         let variance = if residuals.len() > 1 {
             let mean_resid: f64 = residuals.iter().sum::<f64>() / residuals.len() as f64;
-            residuals.iter().map(|r| (r - mean_resid).powi(2)).sum::<f64>()
+            residuals
+                .iter()
+                .map(|r| (r - mean_resid).powi(2))
+                .sum::<f64>()
                 / (residuals.len() - 1) as f64
         } else {
             1.0
@@ -212,8 +221,16 @@ impl Forecaster for ADIDA {
 
         let z = crate::utils::quantile_normal(0.5 + level / 2.0);
 
-        let lower: Vec<f64> = point_forecast.primary().iter().map(|&f| f - z * std_dev).collect();
-        let upper: Vec<f64> = point_forecast.primary().iter().map(|&f| f + z * std_dev).collect();
+        let lower: Vec<f64> = point_forecast
+            .primary()
+            .iter()
+            .map(|&f| f - z * std_dev)
+            .collect();
+        let upper: Vec<f64> = point_forecast
+            .primary()
+            .iter()
+            .map(|&f| f + z * std_dev)
+            .collect();
 
         Ok(Forecast::from_values_with_intervals(
             point_forecast.primary().to_vec(),

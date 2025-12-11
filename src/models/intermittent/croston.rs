@@ -172,8 +172,10 @@ impl Croston {
             Self::compute_mse(values, alpha)
         };
 
-        let mut config = NelderMeadConfig::default();
-        config.tolerance = 1e-4;
+        let config = NelderMeadConfig {
+            tolerance: 1e-4,
+            ..Default::default()
+        };
 
         let result = nelder_mead(objective, &[0.1], Some(&[(0.01, 0.99)]), config);
         result.optimal_point[0].clamp(0.01, 0.99)
@@ -325,7 +327,10 @@ impl Forecaster for Croston {
         let residuals = self.residuals.as_ref().ok_or(ForecastError::FitRequired)?;
         let variance = if residuals.len() > 1 {
             let mean_resid: f64 = residuals.iter().sum::<f64>() / residuals.len() as f64;
-            residuals.iter().map(|r| (r - mean_resid).powi(2)).sum::<f64>()
+            residuals
+                .iter()
+                .map(|r| (r - mean_resid).powi(2))
+                .sum::<f64>()
                 / (residuals.len() - 1) as f64
         } else {
             1.0
@@ -334,8 +339,16 @@ impl Forecaster for Croston {
 
         let z = crate::utils::quantile_normal(0.5 + level / 2.0);
 
-        let lower: Vec<f64> = point_forecast.primary().iter().map(|&f| f - z * std_dev).collect();
-        let upper: Vec<f64> = point_forecast.primary().iter().map(|&f| f + z * std_dev).collect();
+        let lower: Vec<f64> = point_forecast
+            .primary()
+            .iter()
+            .map(|&f| f - z * std_dev)
+            .collect();
+        let upper: Vec<f64> = point_forecast
+            .primary()
+            .iter()
+            .map(|&f| f + z * std_dev)
+            .collect();
 
         Ok(Forecast::from_values_with_intervals(
             point_forecast.primary().to_vec(),

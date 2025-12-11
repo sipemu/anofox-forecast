@@ -3,6 +3,6 @@
 //! The Theta method decomposes a time series using "theta lines" and
 //! combines forecasts from different components.
 
-mod theta;
+mod model;
 
-pub use theta::Theta;
+pub use model::Theta;

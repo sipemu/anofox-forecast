@@ -173,7 +173,7 @@ impl HoltLinearTrend {
     /// Initialize level and trend using first observations.
     fn initialize_state(values: &[f64]) -> (f64, f64) {
         if values.len() < 2 {
-            return (values.get(0).copied().unwrap_or(0.0), 0.0);
+            return (values.first().copied().unwrap_or(0.0), 0.0);
         }
 
         // Use first value as initial level
@@ -357,7 +357,9 @@ impl Forecaster for HoltLinearTrend {
         }
 
         Ok(Forecast::from_values_with_intervals(
-            predictions, lower, upper,
+            predictions,
+            lower,
+            upper,
         ))
     }
 
@@ -413,7 +415,9 @@ mod tests {
     #[test]
     fn holt_auto_optimization() {
         let timestamps = make_timestamps(30);
-        let values: Vec<f64> = (0..30).map(|i| 10.0 + 1.5 * i as f64 + (i as f64 * 0.5).sin()).collect();
+        let values: Vec<f64> = (0..30)
+            .map(|i| 10.0 + 1.5 * i as f64 + (i as f64 * 0.5).sin())
+            .collect();
         let ts = TimeSeries::univariate(timestamps, values).unwrap();
 
         let mut model = HoltLinearTrend::auto();

@@ -2,6 +2,6 @@
 //!
 //! Combines multiple forecasting models for improved accuracy.
 
-mod ensemble;
+mod model;
 
-pub use ensemble::{CombinationMethod, Ensemble};
+pub use model::{CombinationMethod, Ensemble};

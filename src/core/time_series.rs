@@ -76,10 +76,8 @@ impl CalendarAnnotations {
 
     pub fn is_business_day(&self, timestamp: &DateTime<Utc>) -> bool {
         let weekday = timestamp.weekday();
-        !matches!(
-            weekday,
-            chrono::Weekday::Sat | chrono::Weekday::Sun
-        ) && !self.is_holiday(timestamp)
+        !matches!(weekday, chrono::Weekday::Sat | chrono::Weekday::Sun)
+            && !self.is_holiday(timestamp)
     }
 }
 
@@ -539,7 +537,8 @@ impl TimeSeries {
                     })
                     .collect();
 
-                let timestamps: Vec<_> = valid_indices.iter().map(|&i| self.timestamps[i]).collect();
+                let timestamps: Vec<_> =
+                    valid_indices.iter().map(|&i| self.timestamps[i]).collect();
                 let values: Vec<Vec<f64>> = self
                     .values
                     .iter()
@@ -641,7 +640,10 @@ impl TimeSeries {
     /// Infer frequency from timestamps.
     pub fn infer_frequency(&self, tolerance: f64) -> Result<Duration> {
         if self.len() < 2 {
-            return Err(ForecastError::InsufficientData { needed: 2, got: self.len() });
+            return Err(ForecastError::InsufficientData {
+                needed: 2,
+                got: self.len(),
+            });
         }
 
         // Calculate all differences
@@ -661,7 +663,9 @@ impl TimeSeries {
             .iter()
             .max_by_key(|(_, &count)| count)
             .map(|(&diff, &count)| (diff, count))
-            .ok_or(ForecastError::FrequencyInference("empty spacing data".to_string()))?;
+            .ok_or(ForecastError::FrequencyInference(
+                "empty spacing data".to_string(),
+            ))?;
 
         // Check if modal is unique enough
         let total_count: usize = counts.values().sum();
@@ -679,7 +683,10 @@ impl TimeSeries {
     /// Infer frequency respecting business day calendar.
     pub fn infer_frequency_calendar(&self, tolerance: f64) -> Result<Duration> {
         if self.len() < 2 {
-            return Err(ForecastError::InsufficientData { needed: 2, got: self.len() });
+            return Err(ForecastError::InsufficientData {
+                needed: 2,
+                got: self.len(),
+            });
         }
 
         // Filter to business days only if calendar is present
@@ -714,7 +721,9 @@ impl TimeSeries {
             .iter()
             .max_by_key(|(_, &count)| count)
             .map(|(&diff, &count)| (diff, count))
-            .ok_or(ForecastError::FrequencyInference("empty spacing data".to_string()))?;
+            .ok_or(ForecastError::FrequencyInference(
+                "empty spacing data".to_string(),
+            ))?;
 
         let total_count: usize = counts.values().sum();
         let modal_ratio = modal_count as f64 / total_count as f64;
@@ -757,7 +766,11 @@ fn interpolate_series(values: &[f64], fill_edges: bool) -> Vec<f64> {
             let end = i;
 
             // Get boundary values
-            let left = if start > 0 { Some(result[start - 1]) } else { None };
+            let left = if start > 0 {
+                Some(result[start - 1])
+            } else {
+                None
+            };
             let right = if end < n { Some(result[end]) } else { None };
 
             // Interpolate or fill edges
@@ -772,14 +785,10 @@ fn interpolate_series(values: &[f64], fill_edges: bool) -> Vec<f64> {
                     }
                 }
                 (Some(l), None) if fill_edges => {
-                    for idx in start..end {
-                        result[idx] = l;
-                    }
+                    result[start..end].fill(l);
                 }
                 (None, Some(r)) if fill_edges => {
-                    for idx in start..end {
-                        result[idx] = r;
-                    }
+                    result[start..end].fill(r);
                 }
                 _ => {
                     // Leave as NaN if can't interpolate
@@ -807,7 +816,10 @@ mod tests {
 
     fn make_daily_timestamps(n: usize) -> Vec<DateTime<Utc>> {
         (0..n)
-            .map(|i| Utc.with_ymd_and_hms(2024, 1, 1 + i as u32, 0, 0, 0).unwrap())
+            .map(|i| {
+                Utc.with_ymd_and_hms(2024, 1, 1 + i as u32, 0, 0, 0)
+                    .unwrap()
+            })
             .collect()
     }
 
@@ -1071,20 +1083,23 @@ mod tests {
         assert!(ts.is_holiday(&timestamps[1]));
         assert!(!ts.is_holiday(&timestamps[0]));
         assert!(ts.has_regressors());
-        assert_eq!(ts.regressor("promo"), Some([0.0, 1.0, 0.0, 1.0, 0.0].as_slice()));
+        assert_eq!(
+            ts.regressor("promo"),
+            Some([0.0, 1.0, 0.0, 1.0, 0.0].as_slice())
+        );
     }
 
     #[test]
     fn calendar_aware_frequency_inference_skips_weekends() {
         // Create timestamps for a week (Mon-Fri, skipping Sat-Sun)
         let timestamps = vec![
-            Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),  // Mon
-            Utc.with_ymd_and_hms(2024, 1, 2, 0, 0, 0).unwrap(),  // Tue
-            Utc.with_ymd_and_hms(2024, 1, 3, 0, 0, 0).unwrap(),  // Wed
-            Utc.with_ymd_and_hms(2024, 1, 4, 0, 0, 0).unwrap(),  // Thu
-            Utc.with_ymd_and_hms(2024, 1, 5, 0, 0, 0).unwrap(),  // Fri
-            Utc.with_ymd_and_hms(2024, 1, 8, 0, 0, 0).unwrap(),  // Mon (skip weekend)
-            Utc.with_ymd_and_hms(2024, 1, 9, 0, 0, 0).unwrap(),  // Tue
+            Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(), // Mon
+            Utc.with_ymd_and_hms(2024, 1, 2, 0, 0, 0).unwrap(), // Tue
+            Utc.with_ymd_and_hms(2024, 1, 3, 0, 0, 0).unwrap(), // Wed
+            Utc.with_ymd_and_hms(2024, 1, 4, 0, 0, 0).unwrap(), // Thu
+            Utc.with_ymd_and_hms(2024, 1, 5, 0, 0, 0).unwrap(), // Fri
+            Utc.with_ymd_and_hms(2024, 1, 8, 0, 0, 0).unwrap(), // Mon (skip weekend)
+            Utc.with_ymd_and_hms(2024, 1, 9, 0, 0, 0).unwrap(), // Tue
         ];
         let values: Vec<f64> = (0..7).map(|i| i as f64).collect();
 
@@ -1149,10 +1164,10 @@ mod tests {
         // Irregular timestamps with no clear pattern
         let timestamps = vec![
             Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
-            Utc.with_ymd_and_hms(2024, 1, 1, 1, 0, 0).unwrap(),   // 1 hour
-            Utc.with_ymd_and_hms(2024, 1, 1, 3, 0, 0).unwrap(),   // 2 hours
-            Utc.with_ymd_and_hms(2024, 1, 1, 6, 0, 0).unwrap(),   // 3 hours
-            Utc.with_ymd_and_hms(2024, 1, 1, 10, 0, 0).unwrap(),  // 4 hours
+            Utc.with_ymd_and_hms(2024, 1, 1, 1, 0, 0).unwrap(), // 1 hour
+            Utc.with_ymd_and_hms(2024, 1, 1, 3, 0, 0).unwrap(), // 2 hours
+            Utc.with_ymd_and_hms(2024, 1, 1, 6, 0, 0).unwrap(), // 3 hours
+            Utc.with_ymd_and_hms(2024, 1, 1, 10, 0, 0).unwrap(), // 4 hours
         ];
         let values = vec![1.0, 2.0, 3.0, 4.0, 5.0];
 
@@ -1166,9 +1181,8 @@ mod tests {
     fn time_series_detects_partial_day_holiday_occurrences() {
         // Create timestamps within a single day
         let base_date = Utc.with_ymd_and_hms(2024, 12, 25, 0, 0, 0).unwrap(); // Christmas
-        let timestamps: Vec<DateTime<Utc>> = (0..24)
-            .map(|h| base_date + Duration::hours(h))
-            .collect();
+        let timestamps: Vec<DateTime<Utc>> =
+            (0..24).map(|h| base_date + Duration::hours(h)).collect();
         let values: Vec<f64> = (0..24).map(|i| i as f64).collect();
 
         let calendar = CalendarAnnotations::new().with_holidays(vec![base_date]);

@@ -267,8 +267,8 @@ impl ARIMA {
         // Calculate residual variance
         let valid_residuals: Vec<f64> = residuals[start..].to_vec();
         if !valid_residuals.is_empty() {
-            let variance = valid_residuals.iter().map(|r| r * r).sum::<f64>()
-                / valid_residuals.len() as f64;
+            let variance =
+                valid_residuals.iter().map(|r| r * r).sum::<f64>() / valid_residuals.len() as f64;
             self.residual_variance = Some(variance);
 
             // Calculate information criteria
@@ -321,7 +321,10 @@ impl Forecaster for ARIMA {
 
     fn predict(&self, horizon: usize) -> Result<Forecast> {
         let original = self.original.as_ref().ok_or(ForecastError::FitRequired)?;
-        let diff_series = self.differenced.as_ref().ok_or(ForecastError::FitRequired)?;
+        let diff_series = self
+            .differenced
+            .as_ref()
+            .ok_or(ForecastError::FitRequired)?;
         let residuals = self.residuals.as_ref().ok_or(ForecastError::FitRequired)?;
 
         if horizon == 0 {
@@ -429,7 +432,9 @@ mod tests {
     #[test]
     fn arima_basic_fit() {
         let timestamps = make_timestamps(50);
-        let values: Vec<f64> = (0..50).map(|i| 10.0 + 0.5 * i as f64 + (i as f64 * 0.3).sin()).collect();
+        let values: Vec<f64> = (0..50)
+            .map(|i| 10.0 + 0.5 * i as f64 + (i as f64 * 0.3).sin())
+            .collect();
         let ts = TimeSeries::univariate(timestamps, values).unwrap();
 
         let mut model = ARIMA::new(1, 1, 1);
@@ -513,7 +518,9 @@ mod tests {
     #[test]
     fn arima_confidence_intervals() {
         let timestamps = make_timestamps(50);
-        let values: Vec<f64> = (0..50).map(|i| 10.0 + i as f64 * 0.5 + (i as f64 * 0.3).sin()).collect();
+        let values: Vec<f64> = (0..50)
+            .map(|i| 10.0 + i as f64 * 0.5 + (i as f64 * 0.3).sin())
+            .collect();
         let ts = TimeSeries::univariate(timestamps, values).unwrap();
 
         let mut model = ARIMA::new(1, 1, 1);

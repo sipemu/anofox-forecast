@@ -80,7 +80,7 @@ pub fn median(values: &[f64]) -> f64 {
     let mut sorted = values.to_vec();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let n = sorted.len();
-    if n % 2 == 0 {
+    if n.is_multiple_of(2) {
         (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
     } else {
         sorted[n / 2]
@@ -148,7 +148,11 @@ mod tests {
 
     #[test]
     fn std_dev_calculates_correctly() {
-        assert_relative_eq!(std_dev(&[1.0, 2.0, 3.0, 4.0, 5.0]), 2.5_f64.sqrt(), epsilon = 1e-10);
+        assert_relative_eq!(
+            std_dev(&[1.0, 2.0, 3.0, 4.0, 5.0]),
+            2.5_f64.sqrt(),
+            epsilon = 1e-10
+        );
     }
 
     #[test]

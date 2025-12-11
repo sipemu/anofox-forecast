@@ -33,4 +33,6 @@ pub use residual_tests::{
 };
 
 // Re-export from stationarity
-pub use stationarity::{adf_test, kpss_test, test_stationarity, CriticalValues, StationarityResult};
+pub use stationarity::{
+    adf_test, kpss_test, test_stationarity, CriticalValues, StationarityResult,
+};

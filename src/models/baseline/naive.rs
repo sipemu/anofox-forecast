@@ -99,7 +99,11 @@ impl Forecaster for Naive {
             upper.push(last + z * se);
         }
 
-        Ok(Forecast::from_values_with_intervals(predictions, lower, upper))
+        Ok(Forecast::from_values_with_intervals(
+            predictions,
+            lower,
+            upper,
+        ))
     }
 
     fn fitted_values(&self) -> Option<&[f64]> {
@@ -203,7 +207,9 @@ mod tests {
     #[test]
     fn naive_confidence_intervals_widen_with_horizon() {
         let timestamps = make_timestamps(10);
-        let values: Vec<f64> = (0..10).map(|i| (i as f64) + 0.1 * (i as f64).sin()).collect();
+        let values: Vec<f64> = (0..10)
+            .map(|i| (i as f64) + 0.1 * (i as f64).sin())
+            .collect();
         let ts = TimeSeries::univariate(timestamps, values).unwrap();
 
         let mut model = Naive::new();

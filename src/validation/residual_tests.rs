@@ -139,10 +139,7 @@ pub fn durbin_watson(residuals: &[f64]) -> DurbinWatsonResult {
     }
 
     // Sum of squared differences
-    let sum_diff_sq: f64 = residuals
-        .windows(2)
-        .map(|w| (w[1] - w[0]).powi(2))
-        .sum();
+    let sum_diff_sq: f64 = residuals.windows(2).map(|w| (w[1] - w[0]).powi(2)).sum();
 
     // Sum of squared residuals
     let sum_sq: f64 = residuals.iter().map(|&r| r * r).sum();
@@ -365,7 +362,7 @@ fn erfc(x: f64) -> f64 {
                             + t * (0.27886807
                                 + t * (-1.13520398
                                     + t * (1.48851587 + t * (-0.82215223 + t * 0.17087277)))))))))
-        .exp();
+            .exp();
 
     if x >= 0.0 {
         tau
@@ -500,7 +497,9 @@ mod tests {
     #[test]
     fn durbin_watson_negative_autocorrelation() {
         // Perfect alternating pattern
-        let residuals: Vec<f64> = (0..100).map(|i| if i % 2 == 0 { 1.0 } else { -1.0 }).collect();
+        let residuals: Vec<f64> = (0..100)
+            .map(|i| if i % 2 == 0 { 1.0 } else { -1.0 })
+            .collect();
 
         let result = durbin_watson(&residuals);
 

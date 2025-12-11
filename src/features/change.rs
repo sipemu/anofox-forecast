@@ -66,7 +66,7 @@ pub fn energy_ratio_by_chunks(series: &[f64], n_chunks: usize, chunk_index: usiz
         return 0.0;
     }
 
-    let chunk_size = (series.len() + n_chunks - 1) / n_chunks;
+    let chunk_size = series.len().div_ceil(n_chunks);
     let start = chunk_index * chunk_size;
     let end = ((chunk_index + 1) * chunk_size).min(series.len());
 
@@ -93,7 +93,7 @@ pub fn percentage_of_reoccurring_datapoints_to_all_datapoints(series: &[f64]) ->
         *counts.entry(key).or_insert(0) += 1;
     }
 
-    let reoccurring_count: usize = counts.values().filter(|&&c| c > 1).map(|&c| c).sum();
+    let reoccurring_count: usize = counts.values().filter(|&&c| c > 1).copied().sum();
 
     reoccurring_count as f64 / series.len() as f64
 }
@@ -231,7 +231,7 @@ fn aggregate(values: &[f64], func: &str) -> f64 {
             let mut sorted = values.to_vec();
             sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             let n = sorted.len();
-            if n % 2 == 0 {
+            if n.is_multiple_of(2) {
                 (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
             } else {
                 sorted[n / 2]

@@ -130,11 +130,7 @@ pub fn detect_outliers_auto(series: &[f64]) -> OutlierResult {
 
 /// Compute IQR-based outlier scores.
 fn compute_iqr_scores(series: &[f64], multiplier: f64) -> (Vec<f64>, f64) {
-    let mut sorted: Vec<f64> = series
-        .iter()
-        .filter(|x| x.is_finite())
-        .copied()
-        .collect();
+    let mut sorted: Vec<f64> = series.iter().filter(|x| x.is_finite()).copied().collect();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
     let n = sorted.len();
@@ -181,7 +177,10 @@ fn compute_z_scores(series: &[f64], threshold: f64) -> (Vec<f64>, f64) {
         return (vec![0.0; n], threshold);
     }
 
-    let scores: Vec<f64> = series.iter().map(|x| ((x - mean) / std_dev).abs()).collect();
+    let scores: Vec<f64> = series
+        .iter()
+        .map(|x| ((x - mean) / std_dev).abs())
+        .collect();
 
     (scores, threshold)
 }
@@ -193,14 +192,10 @@ fn compute_modified_z_scores(series: &[f64], threshold: f64) -> (Vec<f64>, f64) 
         return (vec![0.0; n], threshold);
     }
 
-    let mut sorted: Vec<f64> = series
-        .iter()
-        .filter(|x| x.is_finite())
-        .copied()
-        .collect();
+    let mut sorted: Vec<f64> = series.iter().filter(|x| x.is_finite()).copied().collect();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
-    let median = if sorted.len() % 2 == 0 {
+    let median = if sorted.len().is_multiple_of(2) {
         (sorted[sorted.len() / 2 - 1] + sorted[sorted.len() / 2]) / 2.0
     } else {
         sorted[sorted.len() / 2]
@@ -210,7 +205,7 @@ fn compute_modified_z_scores(series: &[f64], threshold: f64) -> (Vec<f64>, f64) 
     let mut abs_deviations: Vec<f64> = series.iter().map(|x| (x - median).abs()).collect();
     abs_deviations.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
-    let mad = if abs_deviations.len() % 2 == 0 {
+    let mad = if abs_deviations.len().is_multiple_of(2) {
         (abs_deviations[abs_deviations.len() / 2 - 1] + abs_deviations[abs_deviations.len() / 2])
             / 2.0
     } else {

@@ -16,8 +16,6 @@ pub fn sample_entropy(series: &[f64], m: usize, r: f64) -> f64 {
         return f64::NAN;
     }
 
-    let n = series.len();
-
     // Count template matches for dimension m and m+1
     let count_m = count_matches(series, m, r);
     let count_m1 = count_matches(series, m + 1, r);
@@ -154,7 +152,11 @@ fn get_ordinal_pattern(series: &[f64], start: usize, order: usize, delay: usize)
 
     // Get ranks
     let mut indices: Vec<usize> = (0..order).collect();
-    indices.sort_by(|&a, &b| values[a].partial_cmp(&values[b]).unwrap_or(std::cmp::Ordering::Equal));
+    indices.sort_by(|&a, &b| {
+        values[a]
+            .partial_cmp(&values[b])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let mut ranks = vec![0; order];
     for (rank, &idx) in indices.iter().enumerate() {
@@ -347,7 +349,9 @@ mod tests {
     #[test]
     fn permutation_entropy_alternating() {
         // Alternating: two patterns
-        let series: Vec<f64> = (0..20).map(|i| if i % 2 == 0 { 0.0 } else { 1.0 }).collect();
+        let series: Vec<f64> = (0..20)
+            .map(|i| if i % 2 == 0 { 0.0 } else { 1.0 })
+            .collect();
         let pe = permutation_entropy(&series, 3, 1);
         assert!(!pe.is_nan());
     }

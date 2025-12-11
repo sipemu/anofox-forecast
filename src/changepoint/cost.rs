@@ -4,22 +4,17 @@
 //! Lower cost indicates a better fit.
 
 /// Cost function type.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum CostFunction {
     /// L1 cost: sum of absolute deviations from median
     L1,
     /// L2 cost: sum of squared deviations from mean (normal likelihood)
+    #[default]
     L2,
     /// Normal likelihood cost (equivalent to L2 with variance estimation)
     Normal,
     /// Poisson cost for count data
     Poisson,
-}
-
-impl Default for CostFunction {
-    fn default() -> Self {
-        CostFunction::L2
-    }
 }
 
 /// Compute the cost of a segment using the specified cost function.
@@ -137,7 +132,7 @@ fn compute_median(values: &[f64]) -> f64 {
     let mut sorted = values.to_vec();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let n = sorted.len();
-    if n % 2 == 0 {
+    if n.is_multiple_of(2) {
         (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
     } else {
         sorted[n / 2]
@@ -254,13 +249,21 @@ mod tests {
     #[test]
     fn segment_cost_l1() {
         let segment = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-        assert_relative_eq!(segment_cost(&segment, CostFunction::L1), 6.0, epsilon = 1e-10);
+        assert_relative_eq!(
+            segment_cost(&segment, CostFunction::L1),
+            6.0,
+            epsilon = 1e-10
+        );
     }
 
     #[test]
     fn segment_cost_l2() {
         let segment = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-        assert_relative_eq!(segment_cost(&segment, CostFunction::L2), 10.0, epsilon = 1e-10);
+        assert_relative_eq!(
+            segment_cost(&segment, CostFunction::L2),
+            10.0,
+            epsilon = 1e-10
+        );
     }
 
     // ==================== total_cost ====================

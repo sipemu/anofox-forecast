@@ -60,7 +60,10 @@ pub fn lempel_ziv_complexity(series: &[f64]) -> f64 {
 
     // Binarize using median as threshold
     let median = compute_median(series);
-    let binary: Vec<u8> = series.iter().map(|&x| if x >= median { 1 } else { 0 }).collect();
+    let binary: Vec<u8> = series
+        .iter()
+        .map(|&x| if x >= median { 1 } else { 0 })
+        .collect();
 
     // Compute LZ complexity
     let n = binary.len();
@@ -105,7 +108,7 @@ fn compute_median(series: &[f64]) -> f64 {
     let mut sorted = series.to_vec();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let n = sorted.len();
-    if n % 2 == 0 {
+    if n.is_multiple_of(2) {
         (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
     } else {
         sorted[n / 2]
@@ -139,7 +142,9 @@ mod tests {
     fn cid_ce_complex() {
         // More complex series should have higher CID
         let simple: Vec<f64> = (0..20).map(|i| i as f64).collect();
-        let complex: Vec<f64> = (0..20).map(|i| if i % 2 == 0 { 0.0 } else { 10.0 }).collect();
+        let complex: Vec<f64> = (0..20)
+            .map(|i| if i % 2 == 0 { 0.0 } else { 10.0 })
+            .collect();
 
         assert!(cid_ce(&complex, false) > cid_ce(&simple, false));
     }
@@ -168,7 +173,9 @@ mod tests {
 
     #[test]
     fn c3_alternating() {
-        let series: Vec<f64> = (0..20).map(|i| if i % 2 == 0 { 1.0 } else { -1.0 }).collect();
+        let series: Vec<f64> = (0..20)
+            .map(|i| if i % 2 == 0 { 1.0 } else { -1.0 })
+            .collect();
         let result = c3(&series, 1);
         // For alternating +-1: x[i] * x[i+1] * x[i+2] alternates between -1 and 1
         assert!(!result.is_nan());
@@ -206,7 +213,9 @@ mod tests {
     #[test]
     fn lempel_ziv_alternating() {
         // Simple alternating pattern: low complexity
-        let series: Vec<f64> = (0..20).map(|i| if i % 2 == 0 { 0.0 } else { 1.0 }).collect();
+        let series: Vec<f64> = (0..20)
+            .map(|i| if i % 2 == 0 { 0.0 } else { 1.0 })
+            .collect();
         let lz = lempel_ziv_complexity(&series);
         assert!(!lz.is_nan());
     }
@@ -230,6 +239,10 @@ mod tests {
         // LZ complexity should be between 0 and 1 (approximately)
         let series: Vec<f64> = (0..100).map(|i| ((i * 7 + 3) % 17) as f64).collect();
         let lz = lempel_ziv_complexity(&series);
-        assert!(lz >= 0.0 && lz <= 2.0, "LZ should be reasonable, got {}", lz);
+        assert!(
+            lz >= 0.0 && lz <= 2.0,
+            "LZ should be reasonable, got {}",
+            lz
+        );
     }
 }

@@ -184,8 +184,8 @@ mod tests {
     fn seasonal_difference_basic() {
         // Quarterly data: Q1 values increase by 10 each year
         let series = vec![
-            100.0, 120.0, 80.0, 90.0,   // Year 1
-            110.0, 130.0, 90.0, 100.0,  // Year 2
+            100.0, 120.0, 80.0, 90.0, // Year 1
+            110.0, 130.0, 90.0, 100.0, // Year 2
         ];
         let result = seasonal_difference(&series, 1, 4);
         // Each value minus same quarter previous year

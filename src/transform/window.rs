@@ -2,6 +2,9 @@
 //!
 //! Provides windowed statistics and transformations.
 
+// Allow needless_range_loop for windowed operations where i is used for window bounds calculation
+#![allow(clippy::needless_range_loop)]
+
 /// Compute rolling mean (moving average).
 ///
 /// # Arguments
@@ -15,7 +18,6 @@ pub fn rolling_mean(series: &[f64], window: usize, center: bool) -> Vec<f64> {
 
     let n = series.len();
     let mut result = vec![f64::NAN; n];
-    let offset = if center { window / 2 } else { window - 1 };
 
     for i in 0..n {
         let (start, end) = if center {
@@ -373,8 +375,8 @@ mod tests {
 
         assert!(result[0].is_nan());
         assert!(result[1].is_nan());
-        assert_relative_eq!(result[2], 6.0, epsilon = 1e-10);  // 1+2+3
-        assert_relative_eq!(result[3], 9.0, epsilon = 1e-10);  // 2+3+4
+        assert_relative_eq!(result[2], 6.0, epsilon = 1e-10); // 1+2+3
+        assert_relative_eq!(result[3], 9.0, epsilon = 1e-10); // 2+3+4
         assert_relative_eq!(result[4], 12.0, epsilon = 1e-10); // 3+4+5
     }
 

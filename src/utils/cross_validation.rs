@@ -6,18 +6,13 @@ use crate::models::Forecaster;
 use crate::utils::metrics::{calculate_metrics, AccuracyMetrics};
 
 /// Cross-validation strategy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CVStrategy {
     /// Rolling window: fixed training window size, slides forward.
     Rolling,
     /// Expanding window: training window grows, starts from initial_window.
+    #[default]
     Expanding,
-}
-
-impl Default for CVStrategy {
-    fn default() -> Self {
-        Self::Expanding
-    }
 }
 
 /// Configuration for time series cross-validation.
@@ -163,13 +158,7 @@ where
     while origin + config.horizon <= n {
         // Determine training window
         let train_start = match config.strategy {
-            CVStrategy::Rolling => {
-                if origin > config.initial_window {
-                    origin - config.initial_window
-                } else {
-                    0
-                }
-            }
+            CVStrategy::Rolling => origin.saturating_sub(config.initial_window),
             CVStrategy::Expanding => 0,
         };
         let train_end = origin;
@@ -261,7 +250,8 @@ fn std_dev(values: &[f64]) -> f64 {
         return 0.0;
     }
     let mean = values.iter().sum::<f64>() / values.len() as f64;
-    let variance = values.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (values.len() - 1) as f64;
+    let variance =
+        values.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (values.len() - 1) as f64;
     variance.sqrt()
 }
 
@@ -275,9 +265,7 @@ mod tests {
     fn make_timestamps(n: usize) -> Vec<chrono::DateTime<Utc>> {
         use chrono::Duration;
         let base = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
-        (0..n)
-            .map(|i| base + Duration::hours(i as i64))
-            .collect()
+        (0..n).map(|i| base + Duration::hours(i as i64)).collect()
     }
 
     #[test]
@@ -403,8 +391,8 @@ mod tests {
         let results = cross_validate(&config, &ts, Naive::new).unwrap();
 
         // Aggregated MAE should be mean of fold MAEs
-        let manual_mae_mean: f64 = results.fold_metrics.iter().map(|m| m.mae).sum::<f64>()
-            / results.n_folds as f64;
+        let manual_mae_mean: f64 =
+            results.fold_metrics.iter().map(|m| m.mae).sum::<f64>() / results.n_folds as f64;
         assert_relative_eq!(results.aggregated.mae, manual_mae_mean, epsilon = 1e-10);
     }
 
@@ -418,11 +406,17 @@ mod tests {
         let ts = TimeSeries::univariate(timestamps, values).unwrap();
 
         // Use horizon >= seasonal_period for MASE to be computable
-        let config = CVConfig::expanding(12, 5).with_seasonal_period(4).with_step_size(3);
+        let config = CVConfig::expanding(12, 5)
+            .with_seasonal_period(4)
+            .with_step_size(3);
         let results = cross_validate(&config, &ts, Naive::new).unwrap();
 
         // MASE should be computed for folds where horizon > period
-        let mase_count = results.fold_metrics.iter().filter(|m| m.mase.is_some()).count();
+        let mase_count = results
+            .fold_metrics
+            .iter()
+            .filter(|m| m.mase.is_some())
+            .count();
         assert!(mase_count > 0);
     }
 

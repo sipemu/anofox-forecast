@@ -83,7 +83,7 @@ pub fn calculate_metrics(
     let rmse = mse.sqrt();
 
     // MAPE (only if no zeros in actual)
-    let mape = if actual.iter().any(|a| *a == 0.0) {
+    let mape = if actual.contains(&0.0) {
         None
     } else {
         let sum: f64 = actual
@@ -142,7 +142,11 @@ pub fn calculate_metrics(
 ///
 /// MASE = MAE / MAE_naive
 /// where MAE_naive is the MAE of the naive (or seasonal naive) forecast.
-fn calculate_mase(actual: &[f64], predicted: &[f64], seasonal_period: Option<usize>) -> Option<f64> {
+fn calculate_mase(
+    actual: &[f64],
+    predicted: &[f64],
+    seasonal_period: Option<usize>,
+) -> Option<f64> {
     let n = actual.len();
     let period = seasonal_period.unwrap_or(1);
 
@@ -276,7 +280,10 @@ mod tests {
         let predicted = vec![1.0, 2.0];
 
         let result = calculate_metrics(&actual, &predicted, None);
-        assert!(matches!(result, Err(ForecastError::DimensionMismatch { .. })));
+        assert!(matches!(
+            result,
+            Err(ForecastError::DimensionMismatch { .. })
+        ));
     }
 
     #[test]

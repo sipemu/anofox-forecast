@@ -147,7 +147,9 @@ impl Forecaster for SeasonalNaive {
         }
 
         Ok(Forecast::from_values_with_intervals(
-            predictions, lower, upper,
+            predictions,
+            lower,
+            upper,
         ))
     }
 
@@ -203,7 +205,10 @@ mod tests {
 
     fn make_timestamps(n: usize) -> Vec<chrono::DateTime<Utc>> {
         (0..n)
-            .map(|i| Utc.with_ymd_and_hms(2024, 1, 1, i as u32 % 24, 0, 0).unwrap())
+            .map(|i| {
+                Utc.with_ymd_and_hms(2024, 1, 1, i as u32 % 24, 0, 0)
+                    .unwrap()
+            })
             .collect()
     }
 

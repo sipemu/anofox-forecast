@@ -102,7 +102,7 @@ impl Ensemble {
                     let mut vals: Vec<f64> = values.iter().map(|v| v[h]).collect();
                     vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                     let n = vals.len();
-                    combined[h] = if n % 2 == 0 {
+                    combined[h] = if n.is_multiple_of(2) {
                         (vals[n / 2 - 1] + vals[n / 2]) / 2.0
                     } else {
                         vals[n / 2]
@@ -315,7 +315,9 @@ mod tests {
 
     fn make_series() -> TimeSeries {
         let timestamps = make_timestamps(50);
-        let values: Vec<f64> = (0..50).map(|i| 10.0 + 0.5 * i as f64 + (i as f64 * 0.3).sin()).collect();
+        let values: Vec<f64> = (0..50)
+            .map(|i| 10.0 + 0.5 * i as f64 + (i as f64 * 0.3).sin())
+            .collect();
         TimeSeries::univariate(timestamps, values).unwrap()
     }
 
@@ -400,7 +402,10 @@ mod tests {
     fn ensemble_requires_fit() {
         let models: Vec<Box<dyn Forecaster>> = vec![Box::new(Naive::new())];
         let ensemble = Ensemble::new(models);
-        assert!(matches!(ensemble.predict(5), Err(ForecastError::FitRequired)));
+        assert!(matches!(
+            ensemble.predict(5),
+            Err(ForecastError::FitRequired)
+        ));
     }
 
     #[test]
@@ -451,10 +456,12 @@ mod tests {
         let mean = Ensemble::new(vec![Box::new(Naive::new())]);
         assert_eq!(mean.name(), "Ensemble (Mean)");
 
-        let median = Ensemble::new(vec![Box::new(Naive::new())]).with_method(CombinationMethod::Median);
+        let median =
+            Ensemble::new(vec![Box::new(Naive::new())]).with_method(CombinationMethod::Median);
         assert_eq!(median.name(), "Ensemble (Median)");
 
-        let weighted = Ensemble::new(vec![Box::new(Naive::new())]).with_method(CombinationMethod::WeightedMSE);
+        let weighted =
+            Ensemble::new(vec![Box::new(Naive::new())]).with_method(CombinationMethod::WeightedMSE);
         assert_eq!(weighted.name(), "Ensemble (Weighted MSE)");
     }
 

@@ -163,7 +163,10 @@ pub fn ratio_beyond_r_sigma(series: &[f64], r: f64) -> f64 {
     }
 
     let threshold = r * s;
-    let count = series.iter().filter(|&&x| (x - m).abs() > threshold).count();
+    let count = series
+        .iter()
+        .filter(|&&x| (x - m).abs() > threshold)
+        .count();
 
     count as f64 / series.len() as f64
 }
@@ -218,7 +221,11 @@ mod tests {
         // Uniform distribution has negative excess kurtosis
         let series: Vec<f64> = (1..=20).map(|x| x as f64).collect();
         let k = kurtosis(&series);
-        assert!(k < 0.0, "Uniform-like should have negative kurtosis, got {}", k);
+        assert!(
+            k < 0.0,
+            "Uniform-like should have negative kurtosis, got {}",
+            k
+        );
     }
 
     #[test]
@@ -228,7 +235,11 @@ mod tests {
         series[0] = -10.0;
         series[99] = 10.0;
         let k = kurtosis(&series);
-        assert!(k > 0.0, "Heavy tails should have positive kurtosis, got {}", k);
+        assert!(
+            k > 0.0,
+            "Heavy tails should have positive kurtosis, got {}",
+            k
+        );
     }
 
     #[test]

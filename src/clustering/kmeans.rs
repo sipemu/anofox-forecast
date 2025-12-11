@@ -5,18 +5,13 @@
 use super::dtw::{dtw_distance, euclidean_distance};
 
 /// Distance metric for clustering.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum DistanceMetric {
     /// Euclidean distance (requires same-length series)
+    #[default]
     Euclidean,
     /// Dynamic Time Warping distance
     DTW,
-}
-
-impl Default for DistanceMetric {
-    fn default() -> Self {
-        DistanceMetric::Euclidean
-    }
 }
 
 /// K-means configuration.
@@ -303,13 +298,7 @@ fn compute_mean_series(series: &[&Vec<f64>]) -> Vec<f64> {
     let len = series[0].len();
 
     (0..len)
-        .map(|i| {
-            series
-                .iter()
-                .filter_map(|s| s.get(i).copied())
-                .sum::<f64>()
-                / n as f64
-        })
+        .map(|i| series.iter().filter_map(|s| s.get(i).copied()).sum::<f64>() / n as f64)
         .collect()
 }
 
@@ -412,7 +401,11 @@ mod tests {
 
     #[test]
     fn kmeans_single_cluster() {
-        let data = vec![vec![1.0, 2.0, 3.0], vec![1.1, 2.1, 3.1], vec![0.9, 1.9, 2.9]];
+        let data = vec![
+            vec![1.0, 2.0, 3.0],
+            vec![1.1, 2.1, 3.1],
+            vec![0.9, 1.9, 2.9],
+        ];
         let config = KMeansConfig::default().k(1);
         let result = kmeans(&data, &config);
 
@@ -446,7 +439,10 @@ mod tests {
     #[test]
     fn kmeans_with_dtw() {
         let data = generate_cluster_data();
-        let config = KMeansConfig::default().k(2).metric(DistanceMetric::DTW).seed(42);
+        let config = KMeansConfig::default()
+            .k(2)
+            .metric(DistanceMetric::DTW)
+            .seed(42);
         let result = kmeans(&data, &config);
 
         assert_eq!(result.labels.len(), 6);

@@ -2,8 +2,8 @@
 
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
-use crate::models::arima::arima::ARIMA;
 use crate::models::arima::diff::suggest_differencing;
+use crate::models::arima::model::ARIMA;
 use crate::models::Forecaster;
 
 /// Configuration for AutoARIMA.
@@ -206,7 +206,8 @@ impl Forecaster for AutoARIMA {
         }
 
         // Sort model scores
-        self.model_scores.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        self.model_scores
+            .sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
         self.selected_model = best_model;
         self.selected_order = best_order;
@@ -221,12 +222,18 @@ impl Forecaster for AutoARIMA {
     }
 
     fn predict(&self, horizon: usize) -> Result<Forecast> {
-        let model = self.selected_model.as_ref().ok_or(ForecastError::FitRequired)?;
+        let model = self
+            .selected_model
+            .as_ref()
+            .ok_or(ForecastError::FitRequired)?;
         model.predict(horizon)
     }
 
     fn predict_with_intervals(&self, horizon: usize, level: f64) -> Result<Forecast> {
-        let model = self.selected_model.as_ref().ok_or(ForecastError::FitRequired)?;
+        let model = self
+            .selected_model
+            .as_ref()
+            .ok_or(ForecastError::FitRequired)?;
         model.predict_with_intervals(horizon, level)
     }
 
@@ -273,7 +280,9 @@ mod tests {
     fn auto_arima_with_trend() {
         let timestamps = make_timestamps(100);
         // Add some noise to make fitting easier
-        let values: Vec<f64> = (0..100).map(|i| 10.0 + 1.5 * i as f64 + (i as f64 * 0.2).sin()).collect();
+        let values: Vec<f64> = (0..100)
+            .map(|i| 10.0 + 1.5 * i as f64 + (i as f64 * 0.2).sin())
+            .collect();
         let ts = TimeSeries::univariate(timestamps, values).unwrap();
 
         let mut model = AutoARIMA::new();
@@ -303,7 +312,9 @@ mod tests {
     #[test]
     fn auto_arima_exhaustive() {
         let timestamps = make_timestamps(100);
-        let values: Vec<f64> = (0..100).map(|i| 10.0 + i as f64 * 0.5 + (i as f64 * 0.3).sin()).collect();
+        let values: Vec<f64> = (0..100)
+            .map(|i| 10.0 + i as f64 * 0.5 + (i as f64 * 0.3).sin())
+            .collect();
         let ts = TimeSeries::univariate(timestamps, values).unwrap();
 
         let config = AutoARIMAConfig::default().exhaustive();
@@ -333,7 +344,9 @@ mod tests {
     #[test]
     fn auto_arima_confidence_intervals() {
         let timestamps = make_timestamps(100);
-        let values: Vec<f64> = (0..100).map(|i| 10.0 + i as f64 * 0.5 + (i as f64 * 0.3).sin()).collect();
+        let values: Vec<f64> = (0..100)
+            .map(|i| 10.0 + i as f64 * 0.5 + (i as f64 * 0.3).sin())
+            .collect();
         let ts = TimeSeries::univariate(timestamps, values).unwrap();
 
         let mut model = AutoARIMA::new();
@@ -366,7 +379,9 @@ mod tests {
     #[test]
     fn auto_arima_fitted_and_residuals() {
         let timestamps = make_timestamps(100);
-        let values: Vec<f64> = (0..100).map(|i| 10.0 + i as f64 + (i as f64 * 0.2).sin()).collect();
+        let values: Vec<f64> = (0..100)
+            .map(|i| 10.0 + i as f64 + (i as f64 * 0.2).sin())
+            .collect();
         let ts = TimeSeries::univariate(timestamps, values).unwrap();
 
         let mut model = AutoARIMA::new();

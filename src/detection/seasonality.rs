@@ -122,7 +122,7 @@ pub fn detect_seasonality(series: &[f64], config: &SeasonalityConfig) -> Seasona
 
     // Determine best period
     let (detected, period, strength) = if let Some(&(best_period, best_acf)) = candidates.first() {
-        (true, Some(best_period), best_acf.min(1.0).max(0.0))
+        (true, Some(best_period), best_acf.clamp(0.0, 1.0))
     } else {
         (false, None, 0.0)
     };
@@ -160,7 +160,7 @@ fn autocorrelation(series: &[f64], lag: usize, mean: f64, variance: f64) -> f64 
 
 /// Estimate the strength of seasonality.
 /// Returns a value between 0 and 1.
-pub fn seasonal_strength(trend: &[f64], seasonal: &[f64], remainder: &[f64]) -> f64 {
+pub fn seasonal_strength(_trend: &[f64], seasonal: &[f64], remainder: &[f64]) -> f64 {
     let var_remainder = variance(remainder);
     let seasonal_plus_remainder: Vec<f64> = seasonal
         .iter()
@@ -173,7 +173,7 @@ pub fn seasonal_strength(trend: &[f64], seasonal: &[f64], remainder: &[f64]) -> 
         return 0.0;
     }
 
-    (1.0 - var_remainder / var_sr).max(0.0).min(1.0)
+    (1.0 - var_remainder / var_sr).clamp(0.0, 1.0)
 }
 
 /// Compute variance.
@@ -192,9 +192,7 @@ mod tests {
 
     fn generate_seasonal_series(n: usize, period: usize) -> Vec<f64> {
         (0..n)
-            .map(|i| {
-                10.0 * ((2.0 * std::f64::consts::PI * i as f64 / period as f64).sin())
-            })
+            .map(|i| 10.0 * ((2.0 * std::f64::consts::PI * i as f64 / period as f64).sin()))
             .collect()
     }
 
@@ -220,7 +218,9 @@ mod tests {
     #[test]
     fn detect_seasonality_no_pattern() {
         // Random-ish data with no clear seasonality
-        let series: Vec<f64> = (0..100).map(|i| (i as f64 * 0.123).sin() * i as f64 % 7.0).collect();
+        let series: Vec<f64> = (0..100)
+            .map(|i| (i as f64 * 0.123).sin() * i as f64 % 7.0)
+            .collect();
 
         let config = SeasonalityConfig::default().with_threshold(0.5);
         let result = detect_seasonality(&series, &config);

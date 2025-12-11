@@ -120,7 +120,8 @@ impl Forecaster for SimpleMovingAverage {
 
         // Calculate the forecast value (mean of last window)
         let actual_window = if self.window == 0 { n } else { self.window };
-        self.last_mean = Some(values[n - actual_window..].iter().sum::<f64>() / actual_window as f64);
+        self.last_mean =
+            Some(values[n - actual_window..].iter().sum::<f64>() / actual_window as f64);
 
         // Calculate fitted values (rolling mean)
         let mut fitted = Vec::with_capacity(n);
@@ -191,7 +192,9 @@ impl Forecaster for SimpleMovingAverage {
         }
 
         Ok(Forecast::from_values_with_intervals(
-            predictions, lower, upper,
+            predictions,
+            lower,
+            upper,
         ))
     }
 
@@ -247,7 +250,10 @@ mod tests {
 
     fn make_timestamps(n: usize) -> Vec<chrono::DateTime<Utc>> {
         (0..n)
-            .map(|i| Utc.with_ymd_and_hms(2024, 1, 1, i as u32 % 24, 0, 0).unwrap())
+            .map(|i| {
+                Utc.with_ymd_and_hms(2024, 1, 1, i as u32 % 24, 0, 0)
+                    .unwrap()
+            })
             .collect()
     }
 

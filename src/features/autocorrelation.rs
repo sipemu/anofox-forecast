@@ -15,7 +15,6 @@ pub fn autocorrelation(series: &[f64], lag: usize) -> f64 {
     }
 
     let m = mean(series);
-    let n = series.len();
 
     let mut numerator = 0.0;
     let mut denominator = 0.0;
@@ -130,7 +129,7 @@ pub fn agg_autocorrelation(series: &[f64], max_lag: usize, agg_func: &str) -> f6
             let mut sorted = acf_values.clone();
             sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             let n = sorted.len();
-            if n % 2 == 0 {
+            if n.is_multiple_of(2) {
                 (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
             } else {
                 sorted[n / 2]
@@ -185,15 +184,25 @@ mod tests {
         // Linear trend should have high lag-1 autocorrelation
         let series: Vec<f64> = (0..20).map(|i| i as f64).collect();
         let acf1 = autocorrelation(&series, 1);
-        assert!(acf1 > 0.8, "Expected high ACF(1) for linear trend, got {}", acf1);
+        assert!(
+            acf1 > 0.8,
+            "Expected high ACF(1) for linear trend, got {}",
+            acf1
+        );
     }
 
     #[test]
     fn autocorrelation_alternating() {
         // Alternating series should have negative lag-1 autocorrelation
-        let series: Vec<f64> = (0..20).map(|i| if i % 2 == 0 { 1.0 } else { -1.0 }).collect();
+        let series: Vec<f64> = (0..20)
+            .map(|i| if i % 2 == 0 { 1.0 } else { -1.0 })
+            .collect();
         let acf1 = autocorrelation(&series, 1);
-        assert!(acf1 < -0.5, "Expected negative ACF(1) for alternating, got {}", acf1);
+        assert!(
+            acf1 < -0.5,
+            "Expected negative ACF(1) for alternating, got {}",
+            acf1
+        );
     }
 
     #[test]
@@ -203,7 +212,11 @@ mod tests {
             .map(|i| ((i % 4) as f64 * std::f64::consts::PI / 2.0).sin())
             .collect();
         let acf4 = autocorrelation(&series, 4);
-        assert!(acf4 > 0.5, "Expected high ACF(4) for seasonal data, got {}", acf4);
+        assert!(
+            acf4 > 0.5,
+            "Expected high ACF(4) for seasonal data, got {}",
+            acf4
+        );
     }
 
     #[test]
@@ -237,7 +250,11 @@ mod tests {
             series[i] = 0.8 * series[i - 1];
         }
         let pacf1 = partial_autocorrelation(&series, 1);
-        assert!(pacf1 > 0.5, "Expected high PACF(1) for AR(1), got {}", pacf1);
+        assert!(
+            pacf1 > 0.5,
+            "Expected high PACF(1) for AR(1), got {}",
+            pacf1
+        );
 
         // PACF at higher lags should be smaller
         let pacf2 = partial_autocorrelation(&series, 2);
@@ -305,9 +322,7 @@ mod tests {
     #[test]
     fn time_reversal_asymmetry_symmetric() {
         // A pure sine wave is time-reversible (after phase shift)
-        let series: Vec<f64> = (0..100)
-            .map(|i| (i as f64 * 0.1).sin())
-            .collect();
+        let series: Vec<f64> = (0..100).map(|i| (i as f64 * 0.1).sin()).collect();
         let tras = time_reversal_asymmetry_statistic(&series, 1);
         assert!(
             tras.abs() < 0.1,

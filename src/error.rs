@@ -59,12 +59,21 @@ mod tests {
         assert_eq!(err.to_string(), "empty input data");
 
         let err = ForecastError::InsufficientData { needed: 10, got: 5 };
-        assert_eq!(err.to_string(), "insufficient data: need at least 10, got 5");
+        assert_eq!(
+            err.to_string(),
+            "insufficient data: need at least 10, got 5"
+        );
 
         let err = ForecastError::InvalidParameter("window must be positive".to_string());
-        assert_eq!(err.to_string(), "invalid parameter: window must be positive");
+        assert_eq!(
+            err.to_string(),
+            "invalid parameter: window must be positive"
+        );
 
-        let err = ForecastError::DimensionMismatch { expected: 3, got: 2 };
+        let err = ForecastError::DimensionMismatch {
+            expected: 3,
+            got: 2,
+        };
         assert_eq!(err.to_string(), "dimension mismatch: expected 3, got 2");
 
         let err = ForecastError::FitRequired;

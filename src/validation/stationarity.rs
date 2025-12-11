@@ -237,7 +237,7 @@ fn compute_adf_statistic(diff: &[f64], level: &[f64], lag: usize) -> (f64, f64) 
 }
 
 /// Approximate p-value for ADF test using MacKinnon regression.
-fn adf_p_value(t_stat: f64, n: usize) -> f64 {
+fn adf_p_value(t_stat: f64, _n: usize) -> f64 {
     // MacKinnon (1994) regression coefficients for constant, no trend
     // tau_c critical values
     // Simplified approximation using normal CDF for extreme values

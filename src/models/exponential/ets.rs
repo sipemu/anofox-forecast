@@ -10,18 +10,20 @@ use crate::utils::optimization::{nelder_mead, NelderMeadConfig};
 use crate::utils::stats::quantile_normal;
 
 /// Error component type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ErrorType {
     /// Additive errors
+    #[default]
     Additive,
     /// Multiplicative errors
     Multiplicative,
 }
 
 /// Trend component type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TrendType {
     /// No trend
+    #[default]
     None,
     /// Additive trend
     Additive,
@@ -30,32 +32,15 @@ pub enum TrendType {
 }
 
 /// Seasonal component type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SeasonalType {
     /// No seasonality
+    #[default]
     None,
     /// Additive seasonality
     Additive,
     /// Multiplicative seasonality
     Multiplicative,
-}
-
-impl Default for ErrorType {
-    fn default() -> Self {
-        Self::Additive
-    }
-}
-
-impl Default for TrendType {
-    fn default() -> Self {
-        Self::None
-    }
-}
-
-impl Default for SeasonalType {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 /// ETS model specification.
@@ -69,7 +54,11 @@ pub struct ETSSpec {
 impl ETSSpec {
     /// Create a new ETS specification.
     pub fn new(error: ErrorType, trend: TrendType, seasonal: SeasonalType) -> Self {
-        Self { error, trend, seasonal }
+        Self {
+            error,
+            trend,
+            seasonal,
+        }
     }
 
     /// ETS(A,N,N) - Simple exponential smoothing with additive errors.
@@ -84,27 +73,47 @@ impl ETSSpec {
 
     /// ETS(A,Ad,N) - Damped trend with additive errors.
     pub fn aadn() -> Self {
-        Self::new(ErrorType::Additive, TrendType::AdditiveDamped, SeasonalType::None)
+        Self::new(
+            ErrorType::Additive,
+            TrendType::AdditiveDamped,
+            SeasonalType::None,
+        )
     }
 
     /// ETS(A,A,A) - Holt-Winters additive.
     pub fn aaa() -> Self {
-        Self::new(ErrorType::Additive, TrendType::Additive, SeasonalType::Additive)
+        Self::new(
+            ErrorType::Additive,
+            TrendType::Additive,
+            SeasonalType::Additive,
+        )
     }
 
     /// ETS(A,A,M) - Holt-Winters multiplicative seasonality.
     pub fn aam() -> Self {
-        Self::new(ErrorType::Additive, TrendType::Additive, SeasonalType::Multiplicative)
+        Self::new(
+            ErrorType::Additive,
+            TrendType::Additive,
+            SeasonalType::Multiplicative,
+        )
     }
 
     /// ETS(M,N,N) - Simple exponential smoothing with multiplicative errors.
     pub fn mnn() -> Self {
-        Self::new(ErrorType::Multiplicative, TrendType::None, SeasonalType::None)
+        Self::new(
+            ErrorType::Multiplicative,
+            TrendType::None,
+            SeasonalType::None,
+        )
     }
 
     /// ETS(M,A,M) - Multiplicative Holt-Winters.
     pub fn mam() -> Self {
-        Self::new(ErrorType::Multiplicative, TrendType::Additive, SeasonalType::Multiplicative)
+        Self::new(
+            ErrorType::Multiplicative,
+            TrendType::Additive,
+            SeasonalType::Multiplicative,
+        )
     }
 
     /// Get a short name for this specification.
@@ -245,16 +254,32 @@ impl ETS {
     }
 
     /// Get the smoothing parameters.
-    pub fn alpha(&self) -> Option<f64> { self.alpha }
-    pub fn beta(&self) -> Option<f64> { self.beta }
-    pub fn gamma(&self) -> Option<f64> { self.gamma }
-    pub fn phi(&self) -> Option<f64> { self.phi }
+    pub fn alpha(&self) -> Option<f64> {
+        self.alpha
+    }
+    pub fn beta(&self) -> Option<f64> {
+        self.beta
+    }
+    pub fn gamma(&self) -> Option<f64> {
+        self.gamma
+    }
+    pub fn phi(&self) -> Option<f64> {
+        self.phi
+    }
 
     /// Get information criteria.
-    pub fn aic(&self) -> Option<f64> { self.aic }
-    pub fn aicc(&self) -> Option<f64> { self.aicc }
-    pub fn bic(&self) -> Option<f64> { self.bic }
-    pub fn log_likelihood(&self) -> Option<f64> { self.log_likelihood }
+    pub fn aic(&self) -> Option<f64> {
+        self.aic
+    }
+    pub fn aicc(&self) -> Option<f64> {
+        self.aicc
+    }
+    pub fn bic(&self) -> Option<f64> {
+        self.bic
+    }
+    pub fn log_likelihood(&self) -> Option<f64> {
+        self.log_likelihood
+    }
 
     /// Initialize state components.
     fn initialize_state(&self, values: &[f64]) -> (f64, f64, Vec<f64>) {
@@ -284,14 +309,12 @@ impl ETS {
         // Initial seasonal indices
         let seasonals = if self.spec.has_seasonal() && values.len() >= period {
             match self.spec.seasonal {
-                SeasonalType::Additive => {
-                    values.iter().take(period).map(|y| y - level).collect()
-                }
-                SeasonalType::Multiplicative => {
-                    values.iter().take(period)
-                        .map(|y| if level.abs() > 1e-10 { y / level } else { 1.0 })
-                        .collect()
-                }
+                SeasonalType::Additive => values.iter().take(period).map(|y| y - level).collect(),
+                SeasonalType::Multiplicative => values
+                    .iter()
+                    .take(period)
+                    .map(|y| if level.abs() > 1e-10 { y / level } else { 1.0 })
+                    .collect(),
                 SeasonalType::None => vec![],
             }
         } else {
@@ -328,8 +351,16 @@ impl ETS {
         let mut count = 0;
 
         for (t, &y) in values.iter().enumerate().skip(start_idx) {
-            let season_idx = if self.spec.has_seasonal() { t % period } else { 0 };
-            let s = if self.spec.has_seasonal() { seasonals[season_idx] } else { 1.0 };
+            let season_idx = if self.spec.has_seasonal() {
+                t % period
+            } else {
+                0
+            };
+            let s = if self.spec.has_seasonal() {
+                seasonals[season_idx]
+            } else {
+                1.0
+            };
 
             // One-step forecast
             let forecast = match (self.spec.trend, self.spec.seasonal) {
@@ -341,17 +372,20 @@ impl ETS {
                 (TrendType::Additive, SeasonalType::Multiplicative) => (level + trend) * s,
                 (TrendType::AdditiveDamped, SeasonalType::None) => level + phi * trend,
                 (TrendType::AdditiveDamped, SeasonalType::Additive) => level + phi * trend + s,
-                (TrendType::AdditiveDamped, SeasonalType::Multiplicative) => (level + phi * trend) * s,
+                (TrendType::AdditiveDamped, SeasonalType::Multiplicative) => {
+                    (level + phi * trend) * s
+                }
             };
 
             let error = y - forecast;
 
             // For multiplicative errors, we'd use relative error
-            let scaled_error = if self.spec.error == ErrorType::Multiplicative && forecast.abs() > 1e-10 {
-                error / forecast
-            } else {
-                error
-            };
+            let scaled_error =
+                if self.spec.error == ErrorType::Multiplicative && forecast.abs() > 1e-10 {
+                    error / forecast
+                } else {
+                    error
+                };
 
             sum_sq_errors += scaled_error * scaled_error;
 
@@ -376,7 +410,9 @@ impl ETS {
                     level = alpha * y_des + (1.0 - alpha) * level;
                     seasonals[season_idx] = if level.abs() > 1e-10 {
                         gamma * (y / level) + (1.0 - gamma) * s
-                    } else { s };
+                    } else {
+                        s
+                    };
                 }
                 (TrendType::Additive, SeasonalType::None) => {
                     level = alpha * y + (1.0 - alpha) * (level_prev + trend);
@@ -393,7 +429,9 @@ impl ETS {
                     trend = beta * (level - level_prev) + (1.0 - beta) * trend;
                     seasonals[season_idx] = if level.abs() > 1e-10 {
                         gamma * (y / level) + (1.0 - gamma) * s
-                    } else { s };
+                    } else {
+                        s
+                    };
                 }
                 (TrendType::AdditiveDamped, SeasonalType::None) => {
                     level = alpha * y + (1.0 - alpha) * (level_prev + phi * trend);
@@ -410,7 +448,9 @@ impl ETS {
                     trend = beta * (level - level_prev) + (1.0 - beta) * phi * trend;
                     seasonals[season_idx] = if level.abs() > 1e-10 {
                         gamma * (y / level) + (1.0 - gamma) * s
-                    } else { s };
+                    } else {
+                        s
+                    };
                 }
             }
         }
@@ -422,7 +462,8 @@ impl ETS {
         // Negative log-likelihood (simplified)
         let sigma2 = sum_sq_errors / count as f64;
         let ll = if self.spec.error == ErrorType::Multiplicative {
-            -0.5 * count as f64 * (1.0 + sigma2.ln() + (2.0 * std::f64::consts::PI).ln()) - sum_log_y
+            -0.5 * count as f64 * (1.0 + sigma2.ln() + (2.0 * std::f64::consts::PI).ln())
+                - sum_log_y
         } else {
             -0.5 * count as f64 * (1.0 + sigma2.ln() + (2.0 * std::f64::consts::PI).ln())
         };
@@ -443,7 +484,8 @@ impl ETS {
         let is_damped = self.spec.is_damped();
 
         // Determine number of parameters
-        let n_params = 1 + (if has_trend { 1 } else { 0 })
+        let n_params = 1
+            + (if has_trend { 1 } else { 0 })
             + (if has_seasonal { 1 } else { 0 })
             + (if is_damped { 1 } else { 0 });
 
@@ -456,7 +498,12 @@ impl ETS {
                     Some(&[(0.0001, 0.9999)]),
                     config,
                 );
-                (result.optimal_point[0].clamp(0.0001, 0.9999), None, None, None)
+                (
+                    result.optimal_point[0].clamp(0.0001, 0.9999),
+                    None,
+                    None,
+                    None,
+                )
             }
             2 if has_trend && !is_damped => {
                 // alpha, beta
@@ -523,7 +570,12 @@ impl ETS {
                 let result = nelder_mead(
                     |p| self.calculate_likelihood(values, p[0], Some(p[1]), Some(p[2]), Some(p[3])),
                     &[0.3, 0.1, 0.1, 0.98],
-                    Some(&[(0.0001, 0.9999), (0.0001, 0.9999), (0.0001, 0.9999), (0.8, 0.98)]),
+                    Some(&[
+                        (0.0001, 0.9999),
+                        (0.0001, 0.9999),
+                        (0.0001, 0.9999),
+                        (0.8, 0.98),
+                    ]),
                     config,
                 );
                 (
@@ -549,13 +601,23 @@ impl ETS {
     /// Count number of parameters.
     fn num_params(&self) -> usize {
         let mut count = 1; // alpha
-        if self.spec.has_trend() { count += 1; } // beta
-        if self.spec.has_seasonal() { count += 1; } // gamma
-        if self.spec.is_damped() { count += 1; } // phi
-        // Add initial states
+        if self.spec.has_trend() {
+            count += 1;
+        } // beta
+        if self.spec.has_seasonal() {
+            count += 1;
+        } // gamma
+        if self.spec.is_damped() {
+            count += 1;
+        } // phi
+          // Add initial states
         count += 1; // initial level
-        if self.spec.has_trend() { count += 1; } // initial trend
-        if self.spec.has_seasonal() { count += self.seasonal_period; } // initial seasonals
+        if self.spec.has_trend() {
+            count += 1;
+        } // initial trend
+        if self.spec.has_seasonal() {
+            count += self.seasonal_period;
+        } // initial seasonals
         count
     }
 }
@@ -569,7 +631,11 @@ impl Default for ETS {
 impl Forecaster for ETS {
     fn fit(&mut self, series: &TimeSeries) -> Result<()> {
         let values = series.primary_values();
-        let min_len = if self.spec.has_seasonal() { 2 * self.seasonal_period } else { 2 };
+        let min_len = if self.spec.has_seasonal() {
+            2 * self.seasonal_period
+        } else {
+            2
+        };
 
         if values.len() < min_len {
             return Err(ForecastError::InsufficientData {
@@ -603,15 +669,23 @@ impl Forecaster for ETS {
         let mut residuals = Vec::with_capacity(self.n);
 
         // Fill initial values
-        for i in 0..start_idx {
-            fitted.push(values[i]);
+        for &val in values.iter().take(start_idx) {
+            fitted.push(val);
             residuals.push(0.0);
         }
 
         // Process remaining data
         for (t, &y) in values.iter().enumerate().skip(start_idx) {
-            let season_idx = if self.spec.has_seasonal() { t % period } else { 0 };
-            let s = if self.spec.has_seasonal() { seasonals[season_idx] } else { 1.0 };
+            let season_idx = if self.spec.has_seasonal() {
+                t % period
+            } else {
+                0
+            };
+            let s = if self.spec.has_seasonal() {
+                seasonals[season_idx]
+            } else {
+                1.0
+            };
 
             // One-step forecast
             let forecast = match (self.spec.trend, self.spec.seasonal) {
@@ -623,7 +697,9 @@ impl Forecaster for ETS {
                 (TrendType::Additive, SeasonalType::Multiplicative) => (level + trend) * s,
                 (TrendType::AdditiveDamped, SeasonalType::None) => level + phi * trend,
                 (TrendType::AdditiveDamped, SeasonalType::Additive) => level + phi * trend + s,
-                (TrendType::AdditiveDamped, SeasonalType::Multiplicative) => (level + phi * trend) * s,
+                (TrendType::AdditiveDamped, SeasonalType::Multiplicative) => {
+                    (level + phi * trend) * s
+                }
             };
 
             fitted.push(forecast);
@@ -645,7 +721,9 @@ impl Forecaster for ETS {
                     level = alpha * y_des + (1.0 - alpha) * level;
                     seasonals[season_idx] = if level.abs() > 1e-10 {
                         gamma * (y / level) + (1.0 - gamma) * s
-                    } else { s };
+                    } else {
+                        s
+                    };
                 }
                 (TrendType::Additive, SeasonalType::None) => {
                     level = alpha * y + (1.0 - alpha) * (level_prev + trend);
@@ -662,7 +740,9 @@ impl Forecaster for ETS {
                     trend = beta * (level - level_prev) + (1.0 - beta) * trend;
                     seasonals[season_idx] = if level.abs() > 1e-10 {
                         gamma * (y / level) + (1.0 - gamma) * s
-                    } else { s };
+                    } else {
+                        s
+                    };
                 }
                 (TrendType::AdditiveDamped, SeasonalType::None) => {
                     level = alpha * y + (1.0 - alpha) * (level_prev + phi * trend);
@@ -679,7 +759,9 @@ impl Forecaster for ETS {
                     trend = beta * (level - level_prev) + (1.0 - beta) * phi * trend;
                     seasonals[season_idx] = if level.abs() > 1e-10 {
                         gamma * (y / level) + (1.0 - gamma) * s
-                    } else { s };
+                    } else {
+                        s
+                    };
                 }
             }
         }
@@ -694,8 +776,8 @@ impl Forecaster for ETS {
         // Calculate residual variance and information criteria
         let valid_residuals: Vec<f64> = residuals[start_idx..].to_vec();
         if !valid_residuals.is_empty() {
-            let variance = valid_residuals.iter().map(|r| r * r).sum::<f64>()
-                / valid_residuals.len() as f64;
+            let variance =
+                valid_residuals.iter().map(|r| r * r).sum::<f64>() / valid_residuals.len() as f64;
             self.residual_variance = Some(variance);
 
             // Calculate information criteria
@@ -807,14 +889,22 @@ impl Forecaster for ETS {
             predictions.push(pred);
 
             // Simplified variance calculation
-            let k = if self.spec.has_seasonal() { ((h - 1) / period) + 1 } else { h };
+            let k = if self.spec.has_seasonal() {
+                ((h - 1) / period) + 1
+            } else {
+                h
+            };
             let se = (variance * k as f64).sqrt();
 
             lower.push(pred - z * se);
             upper.push(pred + z * se);
         }
 
-        Ok(Forecast::from_values_with_intervals(predictions, lower, upper))
+        Ok(Forecast::from_values_with_intervals(
+            predictions,
+            lower,
+            upper,
+        ))
     }
 
     fn fitted_values(&self) -> Option<&[f64]> {
@@ -914,14 +1004,7 @@ mod tests {
         let values: Vec<f64> = (0..20).map(|i| i as f64).collect();
         let ts = TimeSeries::univariate(timestamps, values).unwrap();
 
-        let mut model = ETS::with_params(
-            ETSSpec::aan(),
-            1,
-            0.5,
-            Some(0.1),
-            None,
-            None,
-        );
+        let mut model = ETS::with_params(ETSSpec::aan(), 1, 0.5, Some(0.1), None, None);
         model.fit(&ts).unwrap();
 
         assert_relative_eq!(model.alpha().unwrap(), 0.5, epsilon = 1e-10);

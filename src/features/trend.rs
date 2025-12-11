@@ -117,7 +117,7 @@ pub fn agg_linear_trend(series: &[f64], n_chunks: usize, agg_func: &str, attribu
         return f64::NAN;
     }
 
-    let chunk_size = (series.len() + n_chunks - 1) / n_chunks;
+    let chunk_size = series.len().div_ceil(n_chunks);
     let mut values: Vec<f64> = Vec::new();
 
     for i in 0..n_chunks {
@@ -421,7 +421,11 @@ mod tests {
         }
         let coef = ar_coefficient(&series, 1);
         // Should be close to 0.8
-        assert!(coef > 0.6 && coef < 1.0, "AR(1) coef should be ~0.8, got {}", coef);
+        assert!(
+            coef > 0.6 && coef < 1.0,
+            "AR(1) coef should be ~0.8, got {}",
+            coef
+        );
     }
 
     #[test]

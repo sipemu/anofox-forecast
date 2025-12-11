@@ -118,7 +118,11 @@ where
 
         // Sort vertices by objective value
         let mut indices: Vec<usize> = (0..=n).collect();
-        indices.sort_by(|&a, &b| values[a].partial_cmp(&values[b]).unwrap_or(std::cmp::Ordering::Equal));
+        indices.sort_by(|&a, &b| {
+            values[a]
+                .partial_cmp(&values[b])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         let best_idx = indices[0];
         let worst_idx = indices[n];
@@ -405,7 +409,12 @@ mod tests {
             error_sum
         };
 
-        let result = nelder_mead(sse, &[0.5], Some(&[(0.01, 0.99)]), NelderMeadConfig::default());
+        let result = nelder_mead(
+            sse,
+            &[0.5],
+            Some(&[(0.01, 0.99)]),
+            NelderMeadConfig::default(),
+        );
 
         assert!(result.converged);
         assert!(result.optimal_point[0] > 0.01 && result.optimal_point[0] < 0.99);
@@ -461,12 +470,7 @@ mod tests {
             initial_step: 0.1,
         };
 
-        let result = nelder_mead(
-            |x| (x[0] - 1.0).powi(2),
-            &[0.0],
-            None,
-            config,
-        );
+        let result = nelder_mead(|x| (x[0] - 1.0).powi(2), &[0.0], None, config);
 
         assert_relative_eq!(result.optimal_point[0], 1.0, epsilon = 0.01);
     }

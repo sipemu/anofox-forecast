@@ -81,7 +81,10 @@ pub struct PeltResult {
 impl PeltResult {
     /// Get the segment containing a specific index.
     pub fn segment_for_index(&self, index: usize) -> Option<(usize, usize)> {
-        self.segments.iter().find(|&&(start, end)| index >= start && index < end).copied()
+        self.segments
+            .iter()
+            .find(|&&(start, end)| index >= start && index < end)
+            .copied()
     }
 
     /// Get segment means.
@@ -115,7 +118,11 @@ pub fn pelt_detect(series: &[f64], config: &PeltConfig) -> PeltResult {
         return PeltResult {
             changepoints: Vec::new(),
             segments: vec![(0, n)],
-            cost: if n > 0 { segment_cost(series, config.cost_fn) } else { 0.0 },
+            cost: if n > 0 {
+                segment_cost(series, config.cost_fn)
+            } else {
+                0.0
+            },
             n_changepoints: 0,
         };
     }
@@ -152,13 +159,8 @@ pub fn pelt_detect(series: &[f64], config: &PeltConfig) -> PeltResult {
         // Check all candidates
         for &s in &candidates {
             if t - s >= config.min_segment_length {
-                let seg_cost = compute_segment_cost_fast(
-                    s,
-                    t,
-                    &cum_sum,
-                    &cum_sum_sq,
-                    config.cost_fn,
-                );
+                let seg_cost =
+                    compute_segment_cost_fast(s, t, &cum_sum, &cum_sum_sq, config.cost_fn);
                 let total = f[s] + seg_cost + config.penalty;
 
                 if total < best_cost {

@@ -277,7 +277,11 @@ mod tests {
         let lambda = boxcox_lambda(&series);
 
         // Lambda should be close to 0 for exponential data
-        assert!(lambda.abs() < 0.5, "Expected lambda near 0 for exponential data, got {}", lambda);
+        assert!(
+            lambda.abs() < 0.5,
+            "Expected lambda near 0 for exponential data, got {}",
+            lambda
+        );
     }
 
     // ==================== boxcox_auto ====================

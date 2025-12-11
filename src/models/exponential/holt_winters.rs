@@ -10,18 +10,13 @@ use crate::utils::optimization::{nelder_mead, NelderMeadConfig};
 use crate::utils::stats::quantile_normal;
 
 /// Type of seasonal component.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SeasonalType {
     /// Additive seasonality: y_t = l_t + b_t + s_t + e_t
+    #[default]
     Additive,
     /// Multiplicative seasonality: y_t = (l_t + b_t) * s_t + e_t
     Multiplicative,
-}
-
-impl Default for SeasonalType {
-    fn default() -> Self {
-        Self::Additive
-    }
 }
 
 /// Holt-Winters forecaster.
@@ -189,9 +184,10 @@ impl HoltWinters {
         // Initial seasonal indices
         let seasonals = match seasonal_type {
             SeasonalType::Additive => first_season.iter().map(|y| y - level).collect(),
-            SeasonalType::Multiplicative => {
-                first_season.iter().map(|y| if level.abs() > 1e-10 { y / level } else { 1.0 }).collect()
-            }
+            SeasonalType::Multiplicative => first_season
+                .iter()
+                .map(|y| if level.abs() > 1e-10 { y / level } else { 1.0 })
+                .collect(),
         };
 
         (level, trend, seasonals)
@@ -267,7 +263,14 @@ impl HoltWinters {
 
         let result = nelder_mead(
             |params| {
-                Self::calculate_sse(values, params[0], params[1], params[2], period, seasonal_type)
+                Self::calculate_sse(
+                    values,
+                    params[0],
+                    params[1],
+                    params[2],
+                    period,
+                    seasonal_type,
+                )
             },
             &[0.3, 0.1, 0.1],
             Some(&[(0.0001, 0.9999), (0.0001, 0.9999), (0.0001, 0.9999)]),
@@ -322,8 +325,8 @@ impl Forecaster for HoltWinters {
         let mut residuals = Vec::with_capacity(self.n);
 
         // First season has no fitted values (used for initialization)
-        for i in 0..period {
-            fitted.push(values[i]); // Use actual as "fitted"
+        for &val in values.iter().take(period) {
+            fitted.push(val); // Use actual as "fitted"
             residuals.push(0.0);
         }
 
@@ -443,7 +446,9 @@ impl Forecaster for HoltWinters {
         }
 
         Ok(Forecast::from_values_with_intervals(
-            predictions, lower, upper,
+            predictions,
+            lower,
+            upper,
         ))
     }
 
@@ -590,7 +595,10 @@ mod tests {
         let mut model = HoltWinters::additive(0.3, 0.1, 0.1, 8);
         assert!(matches!(
             model.fit(&ts),
-            Err(ForecastError::InsufficientData { needed: 16, got: 10 })
+            Err(ForecastError::InsufficientData {
+                needed: 16,
+                got: 10
+            })
         ));
     }
 

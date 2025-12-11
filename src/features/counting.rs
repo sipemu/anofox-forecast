@@ -46,9 +46,7 @@ pub fn number_peaks(series: &[f64], support: usize) -> usize {
 
     let mut count = 0;
     for i in support..(series.len() - support) {
-        let is_peak = (1..=support).all(|j| {
-            series[i] > series[i - j] && series[i] > series[i + j]
-        });
+        let is_peak = (1..=support).all(|j| series[i] > series[i - j] && series[i] > series[i + j]);
         if is_peak {
             count += 1;
         }
@@ -165,7 +163,11 @@ pub fn has_duplicate_max(series: &[f64]) -> bool {
         return false;
     }
     let max_val = series.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    series.iter().filter(|&&x| (x - max_val).abs() < 1e-10).count() > 1
+    series
+        .iter()
+        .filter(|&&x| (x - max_val).abs() < 1e-10)
+        .count()
+        > 1
 }
 
 /// Returns whether the minimum value appears more than once.
@@ -174,7 +176,11 @@ pub fn has_duplicate_min(series: &[f64]) -> bool {
         return false;
     }
     let min_val = series.iter().copied().fold(f64::INFINITY, f64::min);
-    series.iter().filter(|&&x| (x - min_val).abs() < 1e-10).count() > 1
+    series
+        .iter()
+        .filter(|&&x| (x - min_val).abs() < 1e-10)
+        .count()
+        > 1
 }
 
 /// Returns the relative index where q% of the total mass is reached.
@@ -214,7 +220,10 @@ pub fn index_mass_quantile(series: &[f64], q: f64) -> f64 {
 ///
 /// Uses approximate equality with epsilon = 1e-10.
 pub fn value_count(series: &[f64], value: f64) -> usize {
-    series.iter().filter(|&&x| (x - value).abs() < 1e-10).count()
+    series
+        .iter()
+        .filter(|&&x| (x - value).abs() < 1e-10)
+        .count()
 }
 
 /// Returns the count of values within the specified range [min, max].
@@ -339,14 +348,14 @@ mod tests {
     #[test]
     fn longest_strike_above_mean_basic() {
         let series = vec![1.0, 5.0, 5.0, 5.0, 1.0, 5.0, 1.0]; // mean ≈ 3.29
-        // Above mean: positions 1, 2, 3 (strike of 3) and position 5 (strike of 1)
+                                                              // Above mean: positions 1, 2, 3 (strike of 3) and position 5 (strike of 1)
         assert_eq!(longest_strike_above_mean(&series), 3);
     }
 
     #[test]
     fn longest_strike_below_mean_basic() {
         let series = vec![5.0, 1.0, 1.0, 5.0, 5.0]; // mean = 3.4
-        // Below mean: positions 1, 2 (strike of 2)
+                                                    // Below mean: positions 1, 2 (strike of 2)
         assert_eq!(longest_strike_below_mean(&series), 2);
     }
 

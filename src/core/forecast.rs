@@ -38,11 +38,7 @@ impl Forecast {
     }
 
     /// Create a univariate forecast with prediction intervals.
-    pub fn from_values_with_intervals(
-        values: Vec<f64>,
-        lower: Vec<f64>,
-        upper: Vec<f64>,
-    ) -> Self {
+    pub fn from_values_with_intervals(values: Vec<f64>, lower: Vec<f64>, upper: Vec<f64>) -> Self {
         Self {
             point: vec![values],
             lower: Some(vec![lower]),
@@ -181,12 +177,12 @@ impl Forecast {
 
     /// Get all lower interval bounds.
     pub fn lower(&self) -> Option<&[Vec<f64>]> {
-        self.lower.as_ref().map(|l| l.as_slice())
+        self.lower.as_deref()
     }
 
     /// Get all upper interval bounds.
     pub fn upper(&self) -> Option<&[Vec<f64>]> {
-        self.upper.as_ref().map(|u| u.as_slice())
+        self.upper.as_deref()
     }
 }
 
@@ -280,11 +276,8 @@ mod tests {
 
     #[test]
     fn forecast_from_values_with_intervals() {
-        let forecast = Forecast::from_values_with_intervals(
-            vec![2.0, 3.0],
-            vec![1.0, 2.0],
-            vec![3.0, 4.0],
-        );
+        let forecast =
+            Forecast::from_values_with_intervals(vec![2.0, 3.0], vec![1.0, 2.0], vec![3.0, 4.0]);
 
         assert_eq!(forecast.primary(), &[2.0, 3.0]);
         assert_eq!(forecast.lower_series(0).unwrap(), &[1.0, 2.0]);

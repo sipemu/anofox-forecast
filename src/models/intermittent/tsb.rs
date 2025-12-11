@@ -99,7 +99,7 @@ impl TSB {
         let mut sse = 0.0;
         let mut count = 0;
 
-        for (i, &y) in values.iter().enumerate().skip(first_idx + 1) {
+        for &y in values.iter().skip(first_idx + 1) {
             // Compute forecast
             let forecast = demand_level * probability;
             let error = y - forecast;
@@ -133,10 +133,17 @@ impl TSB {
             Self::compute_mse(values, alpha_d, alpha_p)
         };
 
-        let mut config = NelderMeadConfig::default();
-        config.tolerance = 1e-4;
+        let config = NelderMeadConfig {
+            tolerance: 1e-4,
+            ..Default::default()
+        };
 
-        let result = nelder_mead(objective, &[0.1, 0.1], Some(&[(0.01, 0.99), (0.01, 0.99)]), config);
+        let result = nelder_mead(
+            objective,
+            &[0.1, 0.1],
+            Some(&[(0.01, 0.99), (0.01, 0.99)]),
+            config,
+        );
         (
             result.optimal_point[0].clamp(0.01, 0.99),
             result.optimal_point[1].clamp(0.01, 0.99),
@@ -163,12 +170,13 @@ impl Forecaster for TSB {
         }
 
         // Find first demand
-        let first_idx = values
-            .iter()
-            .position(|&v| v > 0.0)
-            .ok_or(ForecastError::ComputationError(
-                "No demand occurrences in series".to_string(),
-            ))?;
+        let first_idx =
+            values
+                .iter()
+                .position(|&v| v > 0.0)
+                .ok_or(ForecastError::ComputationError(
+                    "No demand occurrences in series".to_string(),
+                ))?;
 
         // Count demands
         let demand_count = values.iter().filter(|&&v| v > 0.0).count();
@@ -231,7 +239,7 @@ impl Forecaster for TSB {
         for _ in 0..horizon {
             values.push(demand_level * prob);
             // Probability decays assuming no demand
-            prob = (1.0 - self.alpha_p) * prob;
+            prob *= 1.0 - self.alpha_p;
         }
 
         Ok(Forecast::from_values(values))
@@ -248,7 +256,10 @@ impl Forecaster for TSB {
         let residuals = self.residuals.as_ref().ok_or(ForecastError::FitRequired)?;
         let variance = if residuals.len() > 1 {
             let mean_resid: f64 = residuals.iter().sum::<f64>() / residuals.len() as f64;
-            residuals.iter().map(|r| (r - mean_resid).powi(2)).sum::<f64>()
+            residuals
+                .iter()
+                .map(|r| (r - mean_resid).powi(2))
+                .sum::<f64>()
                 / (residuals.len() - 1) as f64
         } else {
             1.0
@@ -257,8 +268,16 @@ impl Forecaster for TSB {
 
         let z = crate::utils::quantile_normal(0.5 + level / 2.0);
 
-        let lower: Vec<f64> = point_forecast.primary().iter().map(|&f| f - z * std_dev).collect();
-        let upper: Vec<f64> = point_forecast.primary().iter().map(|&f| f + z * std_dev).collect();
+        let lower: Vec<f64> = point_forecast
+            .primary()
+            .iter()
+            .map(|&f| f - z * std_dev)
+            .collect();
+        let upper: Vec<f64> = point_forecast
+            .primary()
+            .iter()
+            .map(|&f| f + z * std_dev)
+            .collect();
 
         Ok(Forecast::from_values_with_intervals(
             point_forecast.primary().to_vec(),
