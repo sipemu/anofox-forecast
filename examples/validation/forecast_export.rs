@@ -7,14 +7,19 @@
 //! Run with: cargo run --example forecast_export
 
 use anofox_forecast::core::TimeSeries;
-use anofox_forecast::models::arima::{AutoARIMA, ARIMA};
-use anofox_forecast::models::baseline::{Naive, RandomWalkWithDrift, SeasonalNaive};
+use anofox_forecast::models::arima::{AutoARIMA, AutoARIMAConfig, ARIMA, SARIMA};
+use anofox_forecast::models::baseline::{Naive, RandomWalkWithDrift, SeasonalNaive, HistoricAverage, WindowAverage};
 use anofox_forecast::models::exponential::{
     AutoETS, AutoETSConfig, HoltLinearTrend, HoltWinters, SeasonalType, SimpleExponentialSmoothing,
-    ETS, ETSSpec,
+    SeasonalES, ETS, ETSSpec,
 };
-use anofox_forecast::models::intermittent::{Croston, TSB};
-use anofox_forecast::models::theta::Theta;
+use anofox_forecast::models::intermittent::{Croston, TSB, ADIDA, IMAPA};
+use anofox_forecast::models::baseline::SeasonalWindowAverage;
+use anofox_forecast::models::theta::{Theta, OptimizedTheta, DynamicTheta, DynamicOptimizedTheta, AutoTheta};
+use anofox_forecast::models::mstl_forecaster::{MSTLForecaster, TrendForecastMethod};
+use anofox_forecast::models::mfles::MFLES;
+use anofox_forecast::models::tbats::{TBATS, AutoTBATS};
+use anofox_forecast::models::garch::GARCH;
 use anofox_forecast::models::Forecaster;
 use chrono::{NaiveDateTime, TimeZone, Utc};
 use std::collections::HashMap;
@@ -32,13 +37,18 @@ const DATA_DIR: &str = "validation/data";
 const RESULTS_DIR: &str = "validation/results/rust";
 
 /// Series types to process
-const SERIES_TYPES: [&str; 6] = [
+const SERIES_TYPES: [&str; 11] = [
     "stationary",
     "trend",
     "seasonal",
     "trend_seasonal",
     "seasonal_negative",       // Has negative values - tests fallback to additive
     "multiplicative_seasonal", // True multiplicative seasonality
+    "intermittent",            // Sparse demand data with zeros
+    "high_frequency",          // Multiple seasonalities (MSTL test)
+    "structural_break",        // Level shift (robustness test)
+    "long_memory",             // ARFIMA-like slow decay
+    "noisy_seasonal",          // High noise-to-signal ratio
 ];
 
 /// Read a CSV file and return timestamps and values
@@ -291,12 +301,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        // 8. AutoARIMA - has native intervals
+        // 8. AutoARIMA with SARIMA support - has native intervals
         {
-            let mut model = AutoARIMA::new();
+            let config = AutoARIMAConfig::default()
+                .with_seasonal_period(SEASONAL_PERIOD)
+                .with_seasonal_orders(1, 1, 1);
+            let mut model = AutoARIMA::with_config(config);
             if let Some(result) = run_model(&mut model, &ts, "AutoARIMA", series_type, true) {
                 all_results.push(result);
-                println!("  ✓ AutoARIMA");
+                println!("  ✓ AutoARIMA (with SARIMA)");
+            }
+        }
+
+        // 8b. SARIMA(1,1,1)(1,1,1)[12] - explicit seasonal ARIMA
+        {
+            let mut model = SARIMA::new(1, 1, 1, 1, 1, 1, SEASONAL_PERIOD);
+            if let Some(result) = run_model(&mut model, &ts, "SARIMA_1_1_1_1_1_1_12", series_type, true) {
+                all_results.push(result);
+                println!("  ✓ SARIMA(1,1,1)(1,1,1)[12]");
             }
         }
 
@@ -344,6 +366,152 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(result) = run_model(&mut model, &ts, "TSB", series_type, false) {
                 all_results.push(result);
                 println!("  ✓ TSB (point only)");
+            }
+        }
+
+        // 14. ADIDA - NO native intervals
+        {
+            let mut model = ADIDA::new();
+            if let Some(result) = run_model(&mut model, &ts, "ADIDA", series_type, false) {
+                all_results.push(result);
+                println!("  ✓ ADIDA (point only)");
+            }
+        }
+
+        // 15. SeasonalWindowAverage - NO native intervals in statsforecast
+        {
+            let mut model = SeasonalWindowAverage::new(SEASONAL_PERIOD, 2);
+            if let Some(result) = run_model(&mut model, &ts, "SeasonalWindowAverage", series_type, false) {
+                all_results.push(result);
+                println!("  ✓ SeasonalWindowAverage (point only)");
+            }
+        }
+
+        // 16. IMAPA - Intermittent Multiple Aggregation Prediction Algorithm
+        {
+            let mut model = IMAPA::new();
+            if let Some(result) = run_model(&mut model, &ts, "IMAPA", series_type, false) {
+                all_results.push(result);
+                println!("  ✓ IMAPA (point only)");
+            }
+        }
+
+        // 17. OptimizedTheta - Theta with optimized parameters (seasonal)
+        {
+            let mut model = OptimizedTheta::seasonal(SEASONAL_PERIOD);
+            if let Some(result) = run_model(&mut model, &ts, "OptimizedTheta", series_type, true) {
+                all_results.push(result);
+                println!("  ✓ OptimizedTheta");
+            }
+        }
+
+        // 18. DynamicTheta - Dynamic coefficient updates (with seasonal decomposition)
+        {
+            let mut model = DynamicTheta::seasonal(SEASONAL_PERIOD);
+            if let Some(result) = run_model(&mut model, &ts, "DynamicTheta", series_type, true) {
+                all_results.push(result);
+                println!("  ✓ DynamicTheta");
+            }
+        }
+
+        // 18b. DynamicOptimizedTheta - Dynamic with optimized parameters (with seasonal)
+        {
+            let mut model = DynamicOptimizedTheta::seasonal_optimized(SEASONAL_PERIOD);
+            if let Some(result) = run_model(&mut model, &ts, "DynamicOptimizedTheta", series_type, true) {
+                all_results.push(result);
+                println!("  ✓ DynamicOptimizedTheta");
+            }
+        }
+
+        // 19. AutoTheta - Automatic Theta model selection (seasonal)
+        {
+            let mut model = AutoTheta::seasonal(SEASONAL_PERIOD);
+            if let Some(result) = run_model(&mut model, &ts, "AutoTheta", series_type, true) {
+                all_results.push(result);
+                println!("  ✓ AutoTheta");
+            }
+        }
+
+        // 20. MSTLForecaster - MSTL decomposition based forecaster
+        {
+            let mut model = MSTLForecaster::new(vec![SEASONAL_PERIOD]);
+            if let Some(result) = run_model(&mut model, &ts, "MSTLForecaster", series_type, true) {
+                all_results.push(result);
+                println!("  ✓ MSTLForecaster");
+            }
+        }
+
+        // 21. MFLES - Gradient boosted decomposition
+        {
+            let mut model = MFLES::new(vec![SEASONAL_PERIOD]);
+            if let Some(result) = run_model(&mut model, &ts, "MFLES", series_type, true) {
+                all_results.push(result);
+                // Debug output for noisy_seasonal
+                if series_type == "noisy_seasonal" {
+                    let (trend, penalty, seasonality, is_mult) = model.debug_state();
+                    eprintln!("  DEBUG MFLES noisy_seasonal:");
+                    eprintln!("    is_multiplicative: {}", is_mult);
+                    eprintln!("    trend: {:?}", trend);
+                    eprintln!("    penalty: {:?}", penalty);
+                    if let Some(s) = seasonality {
+                        eprintln!("    seasonality (first 5): {:?}", &s[..5.min(s.len())]);
+                    }
+                }
+                println!("  ✓ MFLES");
+            }
+        }
+
+        // 22. SeasonalES - Multiplicative seasonal exponential smoothing
+        {
+            let mut model = SeasonalES::new(SEASONAL_PERIOD);
+            if let Some(result) = run_model(&mut model, &ts, "SeasonalES", series_type, true) {
+                all_results.push(result);
+                println!("  ✓ SeasonalES");
+            }
+        }
+
+        // 23. TBATS - Complex seasonality model
+        {
+            let mut model = TBATS::new(vec![SEASONAL_PERIOD]);
+            if let Some(result) = run_model(&mut model, &ts, "TBATS", series_type, true) {
+                all_results.push(result);
+                println!("  ✓ TBATS");
+            }
+        }
+
+        // 24. AutoTBATS - Automatic TBATS selection
+        {
+            let mut model = AutoTBATS::new(vec![SEASONAL_PERIOD]);
+            if let Some(result) = run_model(&mut model, &ts, "AutoTBATS", series_type, true) {
+                all_results.push(result);
+                println!("  ✓ AutoTBATS");
+            }
+        }
+
+        // 25. GARCH - Volatility modeling (for stationary/financial series)
+        {
+            let mut model = GARCH::new(1, 1);
+            if let Some(result) = run_model(&mut model, &ts, "GARCH", series_type, true) {
+                all_results.push(result);
+                println!("  ✓ GARCH");
+            }
+        }
+
+        // 26. HistoricAverage - Mean of all historical values
+        {
+            let mut model = HistoricAverage::new();
+            if let Some(result) = run_model(&mut model, &ts, "HistoricAverage", series_type, false) {
+                all_results.push(result);
+                println!("  ✓ HistoricAverage (point only)");
+            }
+        }
+
+        // 27. WindowAverage - Mean of last N observations
+        {
+            let mut model = WindowAverage::new(12);  // Same as statsforecast default window_size=12
+            if let Some(result) = run_model(&mut model, &ts, "WindowAverage", series_type, false) {
+                all_results.push(result);
+                println!("  ✓ WindowAverage (point only)");
             }
         }
 

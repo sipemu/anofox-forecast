@@ -284,23 +284,27 @@ impl ETS {
     /// Initialize state components using heuristics.
     ///
     /// For non-seasonal ETS(A,A,N), uses regression-based initialization
-    /// to match statsforecast behavior.
+    /// on the first `maxn` observations to match statsforecast behavior.
     fn initialize_state(&self, values: &[f64]) -> (f64, f64, Vec<f64>) {
         let period = self.seasonal_period;
 
         // Initial level and trend using regression for non-seasonal trend models
-        // This matches statsforecast's initialization approach
+        // This matches statsforecast's initialization approach:
+        // maxn = min(max(10, 2*m), len(y))
         let (level, trend) = if self.spec.has_trend() && !self.spec.has_seasonal() {
-            // Use linear regression over all data for initial estimates
-            // This provides better starting points for optimization
-            let n = values.len();
-            let x_mean = (n - 1) as f64 / 2.0;
-            let y_mean = values.iter().sum::<f64>() / n as f64;
+            // Use linear regression on first maxn points (statsforecast approach)
+            let maxn = values.len().min(10.max(2 * period));
+            let n = maxn;
+
+            // Linear regression: y = a + b*x where x = 1, 2, ..., n
+            // Using 1-indexed x to match statsforecast
+            let x_mean = (n + 1) as f64 / 2.0;
+            let y_mean = values.iter().take(n).sum::<f64>() / n as f64;
 
             let mut ss_xx = 0.0;
             let mut ss_xy = 0.0;
-            for (i, &y) in values.iter().enumerate() {
-                let x = i as f64;
+            for (i, &y) in values.iter().take(n).enumerate() {
+                let x = (i + 1) as f64; // 1-indexed like statsforecast
                 ss_xx += (x - x_mean).powi(2);
                 ss_xy += (x - x_mean) * (y - y_mean);
             }
@@ -308,7 +312,7 @@ impl ETS {
             let b = if ss_xx > 0.0 { ss_xy / ss_xx } else { 0.0 };
             let a = y_mean - b * x_mean;
 
-            // Initial level at t=0, initial trend is slope
+            // Initial level (intercept at x=0), initial trend is slope
             (a, b)
         } else if self.spec.has_seasonal() && values.len() >= period {
             // Seasonal: use first period mean for level
@@ -519,8 +523,8 @@ impl ETS {
         values: &[f64],
     ) -> (f64, Option<f64>, Option<f64>, Option<f64>, f64, f64) {
         let config = NelderMeadConfig {
-            max_iter: 1000,
-            tolerance: 1e-8,
+            max_iter: 2000,
+            tolerance: 1e-10,
             ..Default::default()
         };
 
@@ -531,38 +535,52 @@ impl ETS {
         // Get initial estimates for states using heuristics
         let (init_level, init_trend, _) = self.initialize_state(values);
 
-        // Determine bounds for initial states
-        let y_mean = values.iter().sum::<f64>() / values.len() as f64;
-        let y_std = (values.iter().map(|y| (y - y_mean).powi(2)).sum::<f64>()
-            / values.len() as f64)
-            .sqrt();
-        let level_bounds = (y_mean - 3.0 * y_std, y_mean + 3.0 * y_std);
-        let trend_bounds = (-y_std / 2.0, y_std / 2.0);
+        // Determine bounds for initial states - wide bounds like statsforecast
+        let y_min = values.iter().cloned().fold(f64::INFINITY, f64::min);
+        let y_max = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let y_range = y_max - y_min;
+        let level_bounds = (y_min - y_range, y_max + y_range);
+        let trend_bounds = (-y_range, y_range);
 
         // For ETS(A,A,N) - non-seasonal trend model
         // Optimize: alpha, beta, l0, b0
+        // Use multiple starting points to find global optimum
         if has_trend && !is_damped && !has_seasonal {
-            let result = nelder_mead(
-                |p| {
-                    self.calculate_likelihood_with_init(
-                        values,
-                        p[0],
-                        Some(p[1]),
-                        None,
-                        None,
-                        Some(p[2]),
-                        Some(p[3]),
-                    )
-                },
-                &[0.1, 0.01, init_level, init_trend],
-                Some(&[
-                    (0.0001, 0.9999),
-                    (0.0001, 0.9999),
-                    level_bounds,
-                    trend_bounds,
-                ]),
-                config,
-            );
+            // Try multiple starting points for alpha to avoid local minima
+            let alpha_starts = [0.1, 0.3, 0.5, 0.8, 0.99];
+            let mut best_result = None;
+            let mut best_value = f64::MAX;
+
+            for &alpha_init in &alpha_starts {
+                let result = nelder_mead(
+                    |p| {
+                        self.calculate_likelihood_with_init(
+                            values,
+                            p[0],
+                            Some(p[1]),
+                            None,
+                            None,
+                            Some(p[2]),
+                            Some(p[3]),
+                        )
+                    },
+                    &[alpha_init, 0.01, init_level, init_trend],
+                    Some(&[
+                        (0.0001, 0.9999),
+                        (0.0001, 0.9999),
+                        level_bounds,
+                        trend_bounds,
+                    ]),
+                    config.clone(),
+                );
+
+                if result.optimal_value < best_value {
+                    best_value = result.optimal_value;
+                    best_result = Some(result);
+                }
+            }
+
+            let result = best_result.unwrap();
             return (
                 result.optimal_point[0].clamp(0.0001, 0.9999),
                 Some(result.optimal_point[1].clamp(0.0001, 0.9999)),
@@ -910,14 +928,16 @@ impl Forecaster for ETS {
         self.fitted = Some(fitted);
 
         // Calculate residual variance and information criteria
+        // Use full sample size for AIC calculation (statsforecast compatible)
         let valid_residuals: Vec<f64> = residuals[start_idx..].to_vec();
         if !valid_residuals.is_empty() {
             let variance =
                 valid_residuals.iter().map(|r| r * r).sum::<f64>() / valid_residuals.len() as f64;
             self.residual_variance = Some(variance);
 
-            // Calculate information criteria
-            let n = valid_residuals.len() as f64;
+            // Calculate information criteria using full sample size
+            // This ensures fair comparison between seasonal and non-seasonal models
+            let n = values.len() as f64;
             let k = self.num_params() as f64;
             let ll = -0.5 * n * (1.0 + variance.ln() + (2.0 * std::f64::consts::PI).ln());
 

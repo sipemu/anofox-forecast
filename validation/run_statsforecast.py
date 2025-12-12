@@ -21,9 +21,25 @@ from statsforecast.models import (
     AutoARIMA,
     AutoETS,
     Theta,
+    OptimizedTheta,
+    DynamicTheta,
+    DynamicOptimizedTheta,
     CrostonClassic,
     CrostonSBA,
     TSB,
+    MSTL,
+    ADIDA,
+    IMAPA,
+    SeasonalWindowAverage,
+    HistoricAverage,
+    WindowAverage,
+    GARCH,
+    AutoTheta,
+    SeasonalExponentialSmoothing,
+    SeasonalExponentialSmoothingOptimized,
+    TBATS,
+    AutoTBATS,
+    MFLES,
 )
 
 # Configuration
@@ -43,6 +59,11 @@ SERIES_TYPES = [
     "trend_seasonal",
     "seasonal_negative",       # Has negative values - tests fallback to additive
     "multiplicative_seasonal", # True multiplicative seasonality
+    "intermittent",            # Sparse demand data with zeros
+    "high_frequency",          # Multiple seasonalities (MSTL test)
+    "structural_break",        # Level shift (robustness test)
+    "long_memory",             # ARFIMA-like slow decay
+    "noisy_seasonal",          # High noise-to-signal ratio
 ]
 
 
@@ -77,18 +98,46 @@ def get_models():
 
         # ARIMA models - have native intervals
         ("ARIMA_1_1_1", ARIMA(order=(1, 1, 1)), True),
+        ("SARIMA_1_1_1_1_1_1_12", ARIMA(order=(1, 1, 1), seasonal_order=(1, 1, 1), season_length=SEASONAL_PERIOD), True),
         ("AutoARIMA", AutoARIMA(season_length=SEASONAL_PERIOD), True),
 
         # ETS - has native intervals
         ("AutoETS", AutoETS(season_length=SEASONAL_PERIOD), True),
 
-        # Theta - has native intervals
+        # Theta variants - have native intervals
         ("Theta", Theta(season_length=SEASONAL_PERIOD), True),
+        ("OptimizedTheta", OptimizedTheta(season_length=SEASONAL_PERIOD), True),
+        ("DynamicTheta", DynamicTheta(season_length=SEASONAL_PERIOD), True),
+        ("DynamicOptimizedTheta", DynamicOptimizedTheta(season_length=SEASONAL_PERIOD), True),
+        ("AutoTheta", AutoTheta(season_length=SEASONAL_PERIOD), True),
 
         # Intermittent demand models - no native intervals
         ("Croston", CrostonClassic(), False),
         ("CrostonSBA", CrostonSBA(), False),
         ("TSB", TSB(alpha_d=0.1, alpha_p=0.1), False),
+        ("ADIDA", ADIDA(), False),
+        ("IMAPA", IMAPA(), False),
+
+        # MSTL - decomposition-based forecasting (compare with MSTLForecaster)
+        ("MSTLForecaster", MSTL(season_length=SEASONAL_PERIOD), True),
+
+        # Seasonal Exponential Smoothing
+        ("SeasonalES", SeasonalExponentialSmoothing(season_length=SEASONAL_PERIOD, alpha=0.1), False),
+
+        # GARCH - volatility modeling (compare point forecasts)
+        ("GARCH", GARCH(p=1, q=1), True),
+
+        # TBATS - complex seasonality
+        ("TBATS", TBATS(season_length=SEASONAL_PERIOD), True),
+        ("AutoTBATS", AutoTBATS(season_length=SEASONAL_PERIOD), True),
+
+        # MFLES - gradient boosted decomposition
+        ("MFLES", MFLES(season_length=SEASONAL_PERIOD), True),
+
+        # Window-based models
+        ("SeasonalWindowAverage", SeasonalWindowAverage(season_length=SEASONAL_PERIOD, window_size=2), False),
+        ("HistoricAverage", HistoricAverage(), False),
+        ("WindowAverage", WindowAverage(window_size=12), False),
     ]
 
 

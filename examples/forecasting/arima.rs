@@ -89,15 +89,25 @@ fn main() {
     }
 
     println!("\nTop 5 model scores (AIC):");
-    for (i, ((p, d, q), score)) in auto_arima.model_scores().iter().take(5).enumerate() {
-        println!(
-            "  {}. ARIMA({}, {}, {}): AIC = {:.2}",
-            i + 1,
-            p,
-            d,
-            q,
-            score
-        );
+    for (i, (order, score)) in auto_arima.model_scores().iter().take(5).enumerate() {
+        if order.is_seasonal() {
+            println!(
+                "  {}. SARIMA({},{},{})({},-,{})[{}]: AIC = {:.2}",
+                i + 1,
+                order.p, order.d, order.q,
+                order.cap_p, order.cap_q, order.s,
+                score
+            );
+        } else {
+            println!(
+                "  {}. ARIMA({}, {}, {}): AIC = {:.2}",
+                i + 1,
+                order.p,
+                order.d,
+                order.q,
+                score
+            );
+        }
     }
 
     let auto_forecast = auto_arima.predict_with_intervals(10, 0.95).unwrap();
@@ -125,8 +135,8 @@ fn main() {
     println!("\n--- AutoARIMA Model Scores ---");
     println!("Models evaluated: {}", auto_arima.model_scores().len());
     println!("\nTop 3 models by AIC:");
-    for (i, ((p, d, q), aic)) in auto_arima.model_scores().iter().take(3).enumerate() {
-        println!("  {}. ARIMA({}, {}, {}): AIC = {:.2}", i + 1, p, d, q, aic);
+    for (i, (order, aic)) in auto_arima.model_scores().iter().take(3).enumerate() {
+        println!("  {}. ARIMA({}, {}, {}): AIC = {:.2}", i + 1, order.p, order.d, order.q, aic);
     }
 
     // 6. Differencing utilities

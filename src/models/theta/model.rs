@@ -9,6 +9,7 @@ use crate::error::{ForecastError, Result};
 use crate::models::Forecaster;
 use crate::utils::optimization::{nelder_mead, NelderMeadConfig};
 use crate::utils::stats::quantile_normal;
+use statrs::distribution::{ContinuousCDF, Normal};
 
 /// Type of seasonal decomposition for Theta model.
 ///
@@ -479,6 +480,67 @@ impl Theta {
 
         result.optimal_point[0].clamp(0.0001, 0.9999)
     }
+
+    /// Calculate autocorrelation function (ACF) for given lags.
+    /// Matches statsmodels acf behavior (no FFT).
+    fn acf(series: &[f64], nlags: usize) -> Vec<f64> {
+        let n = series.len();
+        if n < 2 || nlags == 0 {
+            return vec![1.0];
+        }
+
+        let mean = series.iter().sum::<f64>() / n as f64;
+        let var: f64 = series.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / n as f64;
+
+        if var < 1e-10 {
+            return vec![1.0; nlags + 1];
+        }
+
+        let mut acf_values = Vec::with_capacity(nlags + 1);
+        acf_values.push(1.0); // Lag 0 is always 1
+
+        for lag in 1..=nlags {
+            if lag >= n {
+                acf_values.push(0.0);
+                continue;
+            }
+
+            let mut sum = 0.0;
+            for i in 0..(n - lag) {
+                sum += (series[i] - mean) * (series[i + lag] - mean);
+            }
+            acf_values.push(sum / (n as f64 * var));
+        }
+
+        acf_values
+    }
+
+    /// Perform seasonal test using ACF.
+    /// Matches statsforecast's approach.
+    fn seasonal_test(series: &[f64], period: usize) -> bool {
+        if period < 4 || series.len() < 2 * period {
+            return false;
+        }
+
+        // Calculate ACF from lag 1 to lag m
+        let acf_vals = Self::acf(series, period);
+
+        // r = acf[1:] (skip lag 0)
+        let r: Vec<f64> = acf_vals[1..].to_vec();
+
+        // stat = sqrt((1 + 2 * sum(r[:-1]^2)) / n)
+        let r_sq_sum: f64 = r[..r.len() - 1].iter().map(|&x| x * x).sum();
+        let stat = ((1.0 + 2.0 * r_sq_sum) / series.len() as f64).sqrt();
+
+        // Test: |r[m]| / stat > norm.ppf(0.95)
+        let r_m = r[r.len() - 1]; // Last ACF value (at lag m)
+
+        // norm.ppf(0.95) ≈ 1.6449
+        let normal = Normal::new(0.0, 1.0).unwrap();
+        let z_95 = normal.inverse_cdf(0.95);
+
+        (r_m.abs() / stat) > z_95
+    }
 }
 
 impl Default for Theta {
@@ -500,16 +562,23 @@ impl Forecaster for Theta {
         self.n = values.len();
         self.decomposition_fallback = false;
 
-        // Determine effective decomposition type with fallback rules (if seasonal)
-        let effective_decomposition = if self.seasonal_period > 0 {
+        // Perform seasonal test (matching statsforecast)
+        // Only decompose if the ACF-based test is significant
+        let should_decompose = self.seasonal_period >= 4
+            && values.len() >= 2 * self.seasonal_period
+            && Self::seasonal_test(values, self.seasonal_period);
+
+        // Determine effective decomposition type with fallback rules (if decomposing)
+        let effective_decomposition = if should_decompose {
             self.determine_decomposition(values)
         } else {
+            // Not decomposing - reset seasonal period
             self.decomposition_type
         };
         self.decomposition_type = effective_decomposition;
 
         // Calculate seasonal component if needed using the determined decomposition type
-        let (full_seasonal, seasonal_forecast) = if self.seasonal_period > 0 {
+        let (full_seasonal, seasonal_forecast) = if should_decompose {
             self.calculate_seasonal_component(values, effective_decomposition)
         } else {
             (vec![], vec![])

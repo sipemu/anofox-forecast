@@ -6,15 +6,18 @@
 //! - Holt-Winters (additive and multiplicative seasonality)
 //! - ETS (Error-Trend-Seasonal) state-space framework
 //! - AutoETS (automatic model selection)
+//! - SeasonalES (multiplicative seasonal exponential smoothing)
 
 mod auto_ets;
 mod ets;
 mod holt;
 mod holt_winters;
+mod seasonal_es;
 mod ses;
 
 pub use auto_ets::{AutoETS, AutoETSConfig, SelectionCriterion};
 pub use ets::{ETSSpec, ErrorType, SeasonalType as ETSSeasonalType, TrendType, ETS};
 pub use holt::HoltLinearTrend;
 pub use holt_winters::{HoltWinters, SeasonalType};
+pub use seasonal_es::{SeasonalES, SeasonalESErrorType};
 pub use ses::SimpleExponentialSmoothing;

@@ -10,8 +10,8 @@ use crate::models::Forecaster;
 /// ADIDA method for intermittent demand forecasting.
 #[derive(Debug, Clone)]
 pub struct ADIDA {
-    /// Smoothing parameter for SES.
-    alpha: f64,
+    /// Smoothing parameter for SES (if None, will be optimized).
+    alpha: Option<f64>,
     /// Aggregation level (automatically determined or fixed).
     aggregation_level: Option<usize>,
     /// Whether to automatically determine aggregation level.
@@ -24,25 +24,28 @@ pub struct ADIDA {
     residuals: Option<Vec<f64>>,
     /// Original series length.
     n: usize,
+    /// Optimized alpha value.
+    optimized_alpha: Option<f64>,
 }
 
 impl ADIDA {
     /// Create a new ADIDA model with default settings.
     pub fn new() -> Self {
         Self {
-            alpha: 0.1,
+            alpha: None, // Will be optimized
             aggregation_level: None,
             auto_aggregate: true,
             forecast_level: None,
             fitted: None,
             residuals: None,
             n: 0,
+            optimized_alpha: None,
         }
     }
 
     /// Set the smoothing parameter.
     pub fn with_alpha(mut self, alpha: f64) -> Self {
-        self.alpha = alpha.clamp(0.01, 0.99);
+        self.alpha = Some(alpha.clamp(0.01, 0.99));
         self
     }
 
@@ -55,7 +58,7 @@ impl ADIDA {
 
     /// Get the smoothing parameter.
     pub fn alpha(&self) -> f64 {
-        self.alpha
+        self.optimized_alpha.or(self.alpha).unwrap_or(0.1)
     }
 
     /// Get the aggregation level used.
@@ -68,34 +71,43 @@ impl ADIDA {
         self.forecast_level
     }
 
-    /// Calculate mean inter-demand interval.
-    fn mean_inter_demand_interval(values: &[f64]) -> f64 {
-        let mut intervals = Vec::new();
-        let mut last_demand_idx: Option<usize> = None;
+    /// Calculate inter-demand intervals (statsforecast compatible).
+    /// Returns intervals between non-zero values, with first interval
+    /// being distance from index 0 to first non-zero.
+    fn intervals(values: &[f64]) -> Vec<f64> {
+        let nonzero_idxs: Vec<usize> = values
+            .iter()
+            .enumerate()
+            .filter(|(_, &v)| v != 0.0)
+            .map(|(i, _)| i)
+            .collect();
 
-        for (i, &v) in values.iter().enumerate() {
-            if v > 0.0 {
-                if let Some(last_idx) = last_demand_idx {
-                    intervals.push((i - last_idx) as f64);
-                }
-                last_demand_idx = Some(i);
-            }
+        if nonzero_idxs.is_empty() {
+            return vec![];
         }
 
-        if intervals.is_empty() {
-            1.0
-        } else {
-            intervals.iter().sum::<f64>() / intervals.len() as f64
+        // First interval is index + 1 (1-based)
+        let mut intervals = vec![(nonzero_idxs[0] + 1) as f64];
+
+        // Subsequent intervals are differences
+        for i in 1..nonzero_idxs.len() {
+            intervals.push((nonzero_idxs[i] - nonzero_idxs[i - 1]) as f64);
         }
+
+        intervals
     }
 
     /// Aggregate the series to a lower frequency.
+    /// Drops remainder at the BEGINNING to match statsforecast.
     fn aggregate(values: &[f64], level: usize) -> Vec<f64> {
         if level <= 1 {
             return values.to_vec();
         }
 
-        values
+        let lost_remainder = values.len() % level;
+        let y_cut = &values[lost_remainder..];
+
+        y_cut
             .chunks(level)
             .map(|chunk| chunk.iter().sum())
             .collect()
@@ -106,7 +118,25 @@ impl ADIDA {
         aggregated_forecast / level as f64
     }
 
-    /// Fit SES to aggregated series.
+    /// Compute SES SSE for optimization.
+    fn ses_sse(values: &[f64], alpha: f64) -> f64 {
+        if values.len() < 2 {
+            return f64::MAX;
+        }
+
+        let mut level = values[0];
+        let mut sse = 0.0;
+
+        for &v in values.iter().skip(1) {
+            let error = v - level;
+            sse += error * error;
+            level = alpha * v + (1.0 - alpha) * level;
+        }
+
+        sse
+    }
+
+    /// Fit SES to aggregated series with given alpha.
     fn fit_ses(values: &[f64], alpha: f64) -> f64 {
         if values.is_empty() {
             return 0.0;
@@ -116,6 +146,29 @@ impl ADIDA {
             level = alpha * v + (1.0 - alpha) * level;
         }
         level
+    }
+
+    /// Optimize alpha by grid search in (0.1, 0.3) range.
+    fn optimize_alpha(values: &[f64]) -> f64 {
+        if values.len() < 2 {
+            return 0.1;
+        }
+
+        let mut best_alpha = 0.1;
+        let mut best_sse = f64::MAX;
+
+        // Grid search with fine granularity
+        let steps = 100;
+        for i in 0..=steps {
+            let alpha = 0.1 + (0.3 - 0.1) * (i as f64 / steps as f64);
+            let sse = Self::ses_sse(values, alpha);
+            if sse < best_sse {
+                best_sse = sse;
+                best_alpha = alpha;
+            }
+        }
+
+        best_alpha
     }
 }
 
@@ -137,36 +190,52 @@ impl Forecaster for ADIDA {
             });
         }
 
-        // Count demands
-        let demand_count = values.iter().filter(|&&v| v > 0.0).count();
-        if demand_count < 2 {
+        // Check for all zeros
+        if values.iter().all(|&v| v == 0.0) {
+            self.forecast_level = Some(0.0);
+            self.fitted = Some(vec![0.0; values.len()]);
+            self.residuals = Some(vec![0.0; values.len()]);
+            self.aggregation_level = Some(1);
+            return Ok(());
+        }
+
+        // Calculate intervals and mean interval (statsforecast compatible)
+        let intervals = Self::intervals(values);
+        if intervals.is_empty() {
             return Err(ForecastError::ComputationError(
-                "Insufficient demand occurrences (need at least 2)".to_string(),
+                "No non-zero demand values found".to_string(),
             ));
         }
 
+        let mean_interval: f64 = intervals.iter().sum::<f64>() / intervals.len() as f64;
+
         // Determine aggregation level
         let level = if self.auto_aggregate {
-            let mean_interval = Self::mean_inter_demand_interval(values);
-            (mean_interval.round() as usize)
-                .max(1)
-                .min(values.len() / 2)
+            (mean_interval.round() as usize).max(1)
         } else {
             self.aggregation_level.unwrap_or(1)
         };
         self.aggregation_level = Some(level);
 
-        // Aggregate the series
+        // Aggregate the series (drops remainder at beginning)
         let aggregated = Self::aggregate(values, level);
 
-        if aggregated.len() < 2 {
+        if aggregated.is_empty() {
             return Err(ForecastError::ComputationError(
                 "Aggregated series too short".to_string(),
             ));
         }
 
+        // Optimize or use fixed alpha
+        let alpha = if let Some(a) = self.alpha {
+            a
+        } else {
+            Self::optimize_alpha(&aggregated)
+        };
+        self.optimized_alpha = Some(alpha);
+
         // Fit SES to aggregated series
-        let aggregated_forecast = Self::fit_ses(&aggregated, self.alpha);
+        let aggregated_forecast = Self::fit_ses(&aggregated, alpha);
 
         // Disaggregate the forecast
         let forecast = Self::disaggregate(aggregated_forecast, level);
@@ -350,8 +419,13 @@ mod tests {
         let values = vec![0.0; 10];
         let ts = TimeSeries::univariate(timestamps, values).unwrap();
 
+        // statsforecast returns 0 for all-zero series
         let mut model = ADIDA::new();
-        assert!(model.fit(&ts).is_err());
+        model.fit(&ts).unwrap();
+        let forecast = model.predict(5).unwrap();
+        for &v in forecast.primary() {
+            assert!((v - 0.0).abs() < 1e-10, "All-zero series should forecast zero");
+        }
     }
 
     #[test]
@@ -401,6 +475,7 @@ mod tests {
     #[test]
     fn adida_default() {
         let model = ADIDA::default();
+        // Default model optimizes alpha, so without fitting it defaults to 0.1
         assert!((model.alpha() - 0.1).abs() < 1e-10);
     }
 

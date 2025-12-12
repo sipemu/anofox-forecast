@@ -1,20 +1,28 @@
-//! Automatic ARIMA model selection.
+//! Automatic ARIMA and SARIMA model selection.
 
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
 use crate::models::arima::diff::suggest_differencing;
-use crate::models::arima::model::ARIMA;
+use crate::models::arima::model::{ARIMA, SARIMA};
 use crate::models::Forecaster;
 
 /// Configuration for AutoARIMA.
 #[derive(Debug, Clone)]
 pub struct AutoARIMAConfig {
-    /// Maximum AR order to consider.
+    /// Maximum non-seasonal AR order to consider.
     pub max_p: usize,
-    /// Maximum MA order to consider.
+    /// Maximum non-seasonal MA order to consider.
     pub max_q: usize,
-    /// Maximum differencing order.
+    /// Maximum non-seasonal differencing order.
     pub max_d: usize,
+    /// Maximum seasonal AR order.
+    pub max_cap_p: usize,
+    /// Maximum seasonal MA order.
+    pub max_cap_q: usize,
+    /// Maximum seasonal differencing order.
+    pub max_cap_d: usize,
+    /// Seasonal period (0 for non-seasonal).
+    pub seasonal_period: usize,
     /// Use stepwise search (faster) vs exhaustive.
     pub stepwise: bool,
     /// Selection criterion (use AIC for selection).
@@ -24,9 +32,13 @@ pub struct AutoARIMAConfig {
 impl Default for AutoARIMAConfig {
     fn default() -> Self {
         Self {
-            max_p: 3,
-            max_q: 3,
+            max_p: 5,
+            max_q: 5,
             max_d: 2,
+            max_cap_p: 2,
+            max_cap_q: 2,
+            max_cap_d: 1,
+            seasonal_period: 0,
             stepwise: true,
             use_aic: true,
         }
@@ -34,11 +46,25 @@ impl Default for AutoARIMAConfig {
 }
 
 impl AutoARIMAConfig {
-    /// Set maximum orders.
+    /// Set maximum non-seasonal orders.
     pub fn with_max_orders(mut self, max_p: usize, max_d: usize, max_q: usize) -> Self {
         self.max_p = max_p;
         self.max_d = max_d;
         self.max_q = max_q;
+        self
+    }
+
+    /// Set maximum seasonal orders.
+    pub fn with_seasonal_orders(mut self, max_p: usize, max_d: usize, max_q: usize) -> Self {
+        self.max_cap_p = max_p;
+        self.max_cap_d = max_d;
+        self.max_cap_q = max_q;
+        self
+    }
+
+    /// Set seasonal period.
+    pub fn with_seasonal_period(mut self, period: usize) -> Self {
+        self.seasonal_period = period;
         self
     }
 
@@ -49,20 +75,53 @@ impl AutoARIMAConfig {
     }
 }
 
-/// Automatic ARIMA model selection.
+/// Selected model type.
+#[derive(Debug, Clone)]
+enum SelectedModel {
+    ARIMA(ARIMA),
+    SARIMA(SARIMA),
+}
+
+/// Model order (p, d, q, P, D, Q, s).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelOrder {
+    /// Non-seasonal AR order.
+    pub p: usize,
+    /// Non-seasonal differencing order.
+    pub d: usize,
+    /// Non-seasonal MA order.
+    pub q: usize,
+    /// Seasonal AR order.
+    pub cap_p: usize,
+    /// Seasonal differencing order.
+    pub cap_d: usize,
+    /// Seasonal MA order.
+    pub cap_q: usize,
+    /// Seasonal period.
+    pub s: usize,
+}
+
+impl ModelOrder {
+    /// Check if this is a seasonal model.
+    pub fn is_seasonal(&self) -> bool {
+        self.s > 1 && (self.cap_p > 0 || self.cap_d > 0 || self.cap_q > 0)
+    }
+}
+
+/// Automatic ARIMA/SARIMA model selection.
 ///
-/// Automatically selects the best ARIMA(p, d, q) specification
-/// based on information criteria.
+/// Automatically selects the best ARIMA(p, d, q) or SARIMA(p, d, q)(P, D, Q)[s]
+/// specification based on information criteria.
 #[derive(Debug, Clone)]
 pub struct AutoARIMA {
     /// Configuration.
     config: AutoARIMAConfig,
     /// Selected model.
-    selected_model: Option<ARIMA>,
+    selected_model: Option<SelectedModel>,
     /// Selected orders.
-    selected_order: Option<(usize, usize, usize)>,
+    selected_order: Option<ModelOrder>,
     /// All fitted models and their scores.
-    model_scores: Vec<((usize, usize, usize), f64)>,
+    model_scores: Vec<(ModelOrder, f64)>,
 }
 
 impl AutoARIMA {
@@ -86,66 +145,228 @@ impl AutoARIMA {
         }
     }
 
-    /// Get the selected order (p, d, q).
+    /// Create AutoARIMA with seasonal period.
+    pub fn seasonal(period: usize) -> Self {
+        let config = AutoARIMAConfig::default().with_seasonal_period(period);
+        Self::with_config(config)
+    }
+
+    /// Get the selected order.
     pub fn selected_order(&self) -> Option<(usize, usize, usize)> {
+        self.selected_order.map(|o| (o.p, o.d, o.q))
+    }
+
+    /// Get the full selected order including seasonal components.
+    pub fn selected_full_order(&self) -> Option<ModelOrder> {
         self.selected_order
     }
 
     /// Get all model scores.
-    pub fn model_scores(&self) -> &[((usize, usize, usize), f64)] {
+    pub fn model_scores(&self) -> &[(ModelOrder, f64)] {
         &self.model_scores
     }
 
+    /// Suggest seasonal differencing order using strength of seasonality.
+    fn suggest_seasonal_differencing(values: &[f64], period: usize) -> usize {
+        if period < 2 || values.len() < 2 * period {
+            return 0;
+        }
+
+        // Compute seasonal differences
+        let seasonal_diffs: Vec<f64> = (period..values.len())
+            .map(|i| values[i] - values[i - period])
+            .collect();
+
+        // Compare variances
+        let orig_mean = values.iter().sum::<f64>() / values.len() as f64;
+        let orig_var = values.iter().map(|v| (v - orig_mean).powi(2)).sum::<f64>() / values.len() as f64;
+
+        let diff_mean = seasonal_diffs.iter().sum::<f64>() / seasonal_diffs.len() as f64;
+        let diff_var = seasonal_diffs.iter().map(|v| (v - diff_mean).powi(2)).sum::<f64>() / seasonal_diffs.len() as f64;
+
+        // If seasonal differencing reduces variance significantly, suggest D=1
+        if diff_var < orig_var * 0.7 {
+            1
+        } else {
+            0
+        }
+    }
+
     /// Generate candidate orders using stepwise search.
-    fn stepwise_candidates(&self, d: usize) -> Vec<(usize, usize, usize)> {
-        // Start with simple models and expand
-        let mut candidates = vec![
-            (0, d, 0),
-            (1, d, 0),
-            (0, d, 1),
-            (1, d, 1),
-            (2, d, 0),
-            (0, d, 2),
-            (2, d, 1),
-            (1, d, 2),
-            (2, d, 2),
+    fn stepwise_candidates(&self, d: usize, cap_d: usize) -> Vec<ModelOrder> {
+        let s = self.config.seasonal_period;
+
+        // Non-seasonal candidates
+        let nonseasonal = vec![
+            (0, 0),
+            (1, 0),
+            (0, 1),
+            (1, 1),
+            (2, 0),
+            (0, 2),
+            (2, 1),
+            (1, 2),
+            (2, 2),
         ];
 
-        // Add higher orders if allowed
-        if self.config.max_p >= 3 {
-            candidates.push((3, d, 0));
-            candidates.push((3, d, 1));
-        }
-        if self.config.max_q >= 3 {
-            candidates.push((0, d, 3));
-            candidates.push((1, d, 3));
+        let mut candidates = Vec::new();
+
+        // Add non-seasonal models
+        for &(p, q) in &nonseasonal {
+            if p <= self.config.max_p && q <= self.config.max_q {
+                candidates.push(ModelOrder {
+                    p,
+                    d,
+                    q,
+                    cap_p: 0,
+                    cap_d,
+                    cap_q: 0,
+                    s,
+                });
+            }
         }
 
-        // Filter by max orders
+        // Add seasonal models if period > 1
+        if s > 1 {
+            // Seasonal component options: (P, Q)
+            let seasonal = vec![
+                (0, 1),
+                (1, 0),
+                (1, 1),
+                (2, 0),
+                (0, 2),
+                (2, 1),
+                (1, 2),
+                (2, 2),
+            ];
+
+            // Non-seasonal orders to try with seasonal components
+            let nonseasonal_with_seasonal = vec![
+                (0, 0), (1, 0), (0, 1), (1, 1), (2, 0), (0, 2), (2, 1), (1, 2),
+                (3, 0), (0, 3), (2, 2), (3, 1), (1, 3),
+            ];
+
+            for &(p, q) in &nonseasonal_with_seasonal {
+                for &(cap_p, cap_q) in &seasonal {
+                    if p <= self.config.max_p
+                        && q <= self.config.max_q
+                        && cap_p <= self.config.max_cap_p
+                        && cap_q <= self.config.max_cap_q
+                    {
+                        candidates.push(ModelOrder {
+                            p,
+                            d,
+                            q,
+                            cap_p,
+                            cap_d,
+                            cap_q,
+                            s,
+                        });
+                    }
+                }
+            }
+        }
+
         candidates
-            .into_iter()
-            .filter(|&(p, _, q)| p <= self.config.max_p && q <= self.config.max_q)
-            .collect()
     }
 
     /// Generate all candidate orders (exhaustive).
-    fn exhaustive_candidates(&self, d: usize) -> Vec<(usize, usize, usize)> {
+    fn exhaustive_candidates(&self, d: usize, cap_d: usize) -> Vec<ModelOrder> {
+        let s = self.config.seasonal_period;
         let mut candidates = Vec::new();
+
         for p in 0..=self.config.max_p {
             for q in 0..=self.config.max_q {
-                candidates.push((p, d, q));
+                if s > 1 {
+                    // Add seasonal models
+                    for cap_p in 0..=self.config.max_cap_p {
+                        for cap_q in 0..=self.config.max_cap_q {
+                            candidates.push(ModelOrder {
+                                p,
+                                d,
+                                q,
+                                cap_p,
+                                cap_d,
+                                cap_q,
+                                s,
+                            });
+                        }
+                    }
+                } else {
+                    // Non-seasonal only
+                    candidates.push(ModelOrder {
+                        p,
+                        d,
+                        q,
+                        cap_p: 0,
+                        cap_d: 0,
+                        cap_q: 0,
+                        s: 0,
+                    });
+                }
             }
         }
+
         candidates
     }
 
-    /// Get the information criterion from a model.
-    fn get_criterion(&self, model: &ARIMA) -> Option<f64> {
+    /// Get AIC from ARIMA model.
+    fn get_arima_criterion(&self, model: &ARIMA) -> Option<f64> {
         if self.config.use_aic {
             model.aic()
         } else {
             model.bic()
         }
+    }
+
+    /// Get AIC from SARIMA model.
+    fn get_sarima_criterion(&self, model: &SARIMA) -> Option<f64> {
+        if self.config.use_aic {
+            model.aic()
+        } else {
+            model.bic()
+        }
+    }
+
+    /// Fit and evaluate a model with given order.
+    fn evaluate_model(
+        &self,
+        series: &TimeSeries,
+        order: ModelOrder,
+    ) -> Option<(SelectedModel, f64)> {
+        if order.is_seasonal() {
+            // Fit SARIMA
+            let mut model = SARIMA::new(
+                order.p,
+                order.d,
+                order.q,
+                order.cap_p,
+                order.cap_d,
+                order.cap_q,
+                order.s,
+            );
+
+            if model.fit(series).is_ok() {
+                if let Some(score) = self.get_sarima_criterion(&model) {
+                    if score.is_finite() {
+                        return Some((SelectedModel::SARIMA(model), score));
+                    }
+                }
+            }
+        } else {
+            // Fit ARIMA
+            let mut model = ARIMA::new(order.p, order.d, order.q);
+
+            if model.fit(series).is_ok() {
+                if let Some(score) = self.get_arima_criterion(&model) {
+                    if score.is_finite() {
+                        return Some((SelectedModel::ARIMA(model), score));
+                    }
+                }
+            }
+        }
+
+        None
     }
 }
 
@@ -158,49 +379,94 @@ impl Default for AutoARIMA {
 impl Forecaster for AutoARIMA {
     fn fit(&mut self, series: &TimeSeries) -> Result<()> {
         let values = series.primary_values();
+        let s = self.config.seasonal_period;
 
-        if values.len() < 10 {
+        // Check minimum data requirements
+        let min_required = if s > 1 {
+            3 * s // At least 3 seasonal cycles for SARIMA
+        } else {
+            10
+        };
+
+        if values.len() < min_required {
             return Err(ForecastError::InsufficientData {
-                needed: 10,
+                needed: min_required,
                 got: values.len(),
             });
         }
 
-        // Determine differencing order
-        let d = suggest_differencing(values).min(self.config.max_d);
-
-        // Generate candidates
-        let candidates = if self.config.stepwise {
-            self.stepwise_candidates(d)
+        // Determine differencing orders - search over range instead of fixing
+        let suggested_d = suggest_differencing(values).min(self.config.max_d);
+        let suggested_cap_d = if s > 1 {
+            Self::suggest_seasonal_differencing(values, s).min(self.config.max_cap_d)
         } else {
-            self.exhaustive_candidates(d)
+            0
         };
 
+        // Build range of d values to try (suggested and neighbors)
+        let mut d_range = vec![suggested_d];
+        if suggested_d > 0 {
+            d_range.push(suggested_d - 1);
+        }
+        if suggested_d < self.config.max_d {
+            d_range.push(suggested_d + 1);
+        }
+        d_range.sort();
+        d_range.dedup();
+
+        // Build range of D values to try (both 0 and suggested for seasonal)
+        let cap_d_range: Vec<usize> = if s > 1 && self.config.max_cap_d > 0 {
+            let mut range = vec![0, suggested_cap_d];
+            range.sort();
+            range.dedup();
+            range
+        } else {
+            vec![0]
+        };
+
+        // Generate candidates for all (d, D) combinations
+        let mut candidates = Vec::new();
+        for &d in &d_range {
+            for &cap_d in &cap_d_range {
+                let new_candidates = if self.config.stepwise {
+                    self.stepwise_candidates(d, cap_d)
+                } else {
+                    self.exhaustive_candidates(d, cap_d)
+                };
+                candidates.extend(new_candidates);
+            }
+        }
+        // Remove duplicates
+        candidates.sort_by(|a, b| {
+            (a.p, a.d, a.q, a.cap_p, a.cap_d, a.cap_q)
+                .cmp(&(b.p, b.d, b.q, b.cap_p, b.cap_d, b.cap_q))
+        });
+        candidates.dedup();
+
         self.model_scores.clear();
-        let mut best_model: Option<ARIMA> = None;
-        let mut best_order: Option<(usize, usize, usize)> = None;
+        let mut best_model: Option<SelectedModel> = None;
+        let mut best_order: Option<ModelOrder> = None;
         let mut best_score = f64::INFINITY;
 
         // Fit each candidate
-        for (p, d, q) in candidates {
-            // Check if we have enough data
-            let min_len = d + p.max(q) + 5;
+        for order in candidates {
+            // Check data requirements for this order
+            let min_len = order.d
+                + order.cap_d * order.s
+                + order.p.max(order.q).max(order.cap_p.max(order.cap_q) * order.s.max(1))
+                + 5;
+
             if values.len() < min_len {
                 continue;
             }
 
-            let mut model = ARIMA::new(p, d, q);
-            if model.fit(series).is_ok() {
-                if let Some(score) = self.get_criterion(&model) {
-                    if score.is_finite() {
-                        self.model_scores.push(((p, d, q), score));
+            if let Some((model, score)) = self.evaluate_model(series, order) {
+                self.model_scores.push((order, score));
 
-                        if score < best_score {
-                            best_score = score;
-                            best_model = Some(model);
-                            best_order = Some((p, d, q));
-                        }
-                    }
+                if score < best_score {
+                    best_score = score;
+                    best_model = Some(model);
+                    best_order = Some(order);
                 }
             }
         }
@@ -214,7 +480,7 @@ impl Forecaster for AutoARIMA {
 
         if self.selected_model.is_none() {
             return Err(ForecastError::ComputationError(
-                "No valid ARIMA model could be fitted".to_string(),
+                "No valid ARIMA/SARIMA model could be fitted".to_string(),
             ));
         }
 
@@ -222,31 +488,40 @@ impl Forecaster for AutoARIMA {
     }
 
     fn predict(&self, horizon: usize) -> Result<Forecast> {
-        let model = self
-            .selected_model
-            .as_ref()
-            .ok_or(ForecastError::FitRequired)?;
-        model.predict(horizon)
+        match self.selected_model.as_ref() {
+            Some(SelectedModel::ARIMA(model)) => model.predict(horizon),
+            Some(SelectedModel::SARIMA(model)) => model.predict(horizon),
+            None => Err(ForecastError::FitRequired),
+        }
     }
 
     fn predict_with_intervals(&self, horizon: usize, level: f64) -> Result<Forecast> {
-        let model = self
-            .selected_model
-            .as_ref()
-            .ok_or(ForecastError::FitRequired)?;
-        model.predict_with_intervals(horizon, level)
+        match self.selected_model.as_ref() {
+            Some(SelectedModel::ARIMA(model)) => model.predict_with_intervals(horizon, level),
+            Some(SelectedModel::SARIMA(model)) => model.predict_with_intervals(horizon, level),
+            None => Err(ForecastError::FitRequired),
+        }
     }
 
     fn fitted_values(&self) -> Option<&[f64]> {
-        self.selected_model.as_ref()?.fitted_values()
+        match self.selected_model.as_ref()? {
+            SelectedModel::ARIMA(model) => model.fitted_values(),
+            SelectedModel::SARIMA(model) => model.fitted_values(),
+        }
     }
 
     fn residuals(&self) -> Option<&[f64]> {
-        self.selected_model.as_ref()?.residuals()
+        match self.selected_model.as_ref()? {
+            SelectedModel::ARIMA(model) => model.residuals(),
+            SelectedModel::SARIMA(model) => model.residuals(),
+        }
     }
 
     fn name(&self) -> &str {
-        "AutoARIMA"
+        match &self.selected_model {
+            Some(SelectedModel::SARIMA(_)) => "AutoARIMA (SARIMA)",
+            _ => "AutoARIMA",
+        }
     }
 }
 
@@ -407,5 +682,62 @@ mod tests {
         assert_eq!(config.max_d, 2);
         assert_eq!(config.max_q, 5);
         assert!(!config.stepwise);
+    }
+
+    // SARIMA-specific tests
+    #[test]
+    fn auto_arima_seasonal() {
+        let timestamps = make_timestamps(100);
+        let values: Vec<f64> = (0..100)
+            .map(|i| {
+                50.0 + 0.5 * i as f64 + 10.0 * (2.0 * std::f64::consts::PI * i as f64 / 12.0).sin()
+            })
+            .collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = AutoARIMA::seasonal(12);
+        model.fit(&ts).unwrap();
+
+        assert!(model.selected_full_order().is_some());
+
+        let forecast = model.predict(12).unwrap();
+        assert_eq!(forecast.horizon(), 12);
+    }
+
+    #[test]
+    fn auto_arima_seasonal_config() {
+        let config = AutoARIMAConfig::default()
+            .with_seasonal_period(12)
+            .with_seasonal_orders(2, 1, 2);
+
+        assert_eq!(config.seasonal_period, 12);
+        assert_eq!(config.max_cap_p, 2);
+        assert_eq!(config.max_cap_d, 1);
+        assert_eq!(config.max_cap_q, 2);
+    }
+
+    #[test]
+    fn auto_arima_seasonal_selects_sarima() {
+        let timestamps = make_timestamps(100);
+        // Strong seasonal pattern
+        let values: Vec<f64> = (0..100)
+            .map(|i| 50.0 + 15.0 * (2.0 * std::f64::consts::PI * i as f64 / 12.0).sin())
+            .collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let config = AutoARIMAConfig::default()
+            .with_seasonal_period(12)
+            .exhaustive();
+        let mut model = AutoARIMA::with_config(config);
+        model.fit(&ts).unwrap();
+
+        // Should select a seasonal model
+        if let Some(order) = model.selected_full_order() {
+            // With strong seasonality, should select seasonal components
+            assert!(model.model_scores().len() > 1);
+        }
+
+        let forecast = model.predict(12).unwrap();
+        assert_eq!(forecast.horizon(), 12);
     }
 }

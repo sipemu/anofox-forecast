@@ -12,4 +12,4 @@ pub use naive::Naive;
 pub use random_walk::RandomWalkWithDrift;
 pub use seasonal_naive::SeasonalNaive;
 pub use seasonal_window::SeasonalWindowAverage;
-pub use sma::SimpleMovingAverage;
+pub use sma::{HistoricAverage, SimpleMovingAverage, WindowAverage};

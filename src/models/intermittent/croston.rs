@@ -101,19 +101,27 @@ impl Croston {
         self.variant
     }
 
-    /// Extract demand sizes and intervals from the series.
+    /// Extract demand sizes and intervals from the series (statsforecast compatible).
+    ///
+    /// Demands: positive values only (x[x > 0])
+    /// Intervals: for each non-zero value, count of zeros since last non-zero + 1
+    ///
+    /// This matches statsforecast's _demand(x) and _intervals(x) functions.
     fn extract_demands(values: &[f64]) -> (Vec<f64>, Vec<usize>) {
-        let mut demands = Vec::new();
-        let mut intervals = Vec::new();
-        let mut last_demand_idx: Option<usize> = None;
+        // Extract positive demands (statsforecast: x[x > 0])
+        let demands: Vec<f64> = values.iter().filter(|&&v| v > 0.0).copied().collect();
 
-        for (i, &v) in values.iter().enumerate() {
-            if v > 0.0 {
-                demands.push(v);
-                if let Some(last_idx) = last_demand_idx {
-                    intervals.push(i - last_idx);
-                }
-                last_demand_idx = Some(i);
+        // Compute intervals (statsforecast: count zeros since last non-zero + 1)
+        let mut intervals = Vec::new();
+        let mut zero_count = 0usize;
+
+        for &v in values {
+            if v == 0.0 {
+                zero_count += 1;
+            } else {
+                // Non-zero value: interval = zeros since last non-zero + 1
+                intervals.push(zero_count + 1);
+                zero_count = 0;
             }
         }
 

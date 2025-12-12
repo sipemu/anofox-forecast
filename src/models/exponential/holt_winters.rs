@@ -182,7 +182,7 @@ impl HoltWinters {
         };
 
         // Initial seasonal indices
-        let seasonals = match seasonal_type {
+        let mut seasonals: Vec<f64> = match seasonal_type {
             SeasonalType::Additive => first_season.iter().map(|y| y - level).collect(),
             SeasonalType::Multiplicative => first_season
                 .iter()
@@ -190,7 +190,40 @@ impl HoltWinters {
                 .collect(),
         };
 
+        // Normalize seasonal components
+        Self::normalize_seasonals(&mut seasonals, seasonal_type);
+
         (level, trend, seasonals)
+    }
+
+    /// Normalize seasonal components to maintain constraints.
+    /// Additive: seasonals sum to 0
+    /// Multiplicative: seasonals average to 1
+    fn normalize_seasonals(seasonals: &mut [f64], seasonal_type: SeasonalType) {
+        let period = seasonals.len();
+        if period == 0 {
+            return;
+        }
+
+        match seasonal_type {
+            SeasonalType::Additive => {
+                // Ensure seasonals sum to 0
+                let sum: f64 = seasonals.iter().sum();
+                let adjustment = sum / period as f64;
+                for s in seasonals.iter_mut() {
+                    *s -= adjustment;
+                }
+            }
+            SeasonalType::Multiplicative => {
+                // Ensure seasonals average to 1
+                let mean: f64 = seasonals.iter().sum::<f64>() / period as f64;
+                if mean.abs() > 1e-10 {
+                    for s in seasonals.iter_mut() {
+                        *s /= mean;
+                    }
+                }
+            }
+        }
     }
 
     /// Calculate SSE for given parameters.
