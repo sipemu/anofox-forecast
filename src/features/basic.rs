@@ -133,8 +133,21 @@ pub fn sum_values(series: &[f64]) -> f64 {
     series.iter().sum()
 }
 
-/// Returns the sample variance (with n-1 denominator).
+/// Returns the population variance (with n denominator).
+///
+/// Note: This uses the population formula (n denominator) to match tsfresh.
+/// For sample variance, use `variance_sample`.
 pub fn variance(series: &[f64]) -> f64 {
+    if series.is_empty() {
+        return f64::NAN;
+    }
+    let m = mean(series);
+    let sum_sq: f64 = series.iter().map(|x| (x - m).powi(2)).sum();
+    sum_sq / series.len() as f64
+}
+
+/// Returns the sample variance (with n-1 denominator).
+pub fn variance_sample(series: &[f64]) -> f64 {
     if series.len() < 2 {
         return f64::NAN;
     }
@@ -424,14 +437,14 @@ mod tests {
         assert!(root_mean_square(&[]).is_nan());
     }
 
-    // ==================== standard_deviation ====================
+    // ==================== standard_deviation (population) ====================
 
     #[test]
     fn standard_deviation_known() {
-        // For sample std dev with known values
+        // For population std dev with known values
         let series = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-        // mean = 3, sample variance = 2.5, sample std = sqrt(2.5)
-        assert_relative_eq!(standard_deviation(&series), 2.5_f64.sqrt(), epsilon = 1e-10);
+        // mean = 3, population variance = 2.0, population std = sqrt(2.0)
+        assert_relative_eq!(standard_deviation(&series), 2.0_f64.sqrt(), epsilon = 1e-10);
     }
 
     #[test]
@@ -443,7 +456,12 @@ mod tests {
     #[test]
     fn standard_deviation_short() {
         assert!(standard_deviation(&[]).is_nan());
-        assert!(standard_deviation(&[1.0]).is_nan());
+    }
+
+    #[test]
+    fn standard_deviation_single() {
+        // Single value should have 0 std
+        assert_relative_eq!(standard_deviation(&[5.0]), 0.0, epsilon = 1e-10);
     }
 
     // ==================== sum_values ====================
@@ -465,14 +483,14 @@ mod tests {
         assert_relative_eq!(sum_values(&series), 0.0, epsilon = 1e-10);
     }
 
-    // ==================== variance ====================
+    // ==================== variance (population) ====================
 
     #[test]
     fn variance_known() {
-        // Sample variance with known values
+        // Population variance with known values
         let series = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-        // mean = 3, sum_sq = (4+1+0+1+4) = 10, sample var = 10/4 = 2.5
-        assert_relative_eq!(variance(&series), 2.5, epsilon = 1e-10);
+        // mean = 3, sum_sq = (4+1+0+1+4) = 10, population var = 10/5 = 2.0
+        assert_relative_eq!(variance(&series), 2.0, epsilon = 1e-10);
     }
 
     #[test]
@@ -484,13 +502,33 @@ mod tests {
     #[test]
     fn variance_two_values() {
         let series = vec![0.0, 2.0];
-        // mean = 1, sum_sq = 1 + 1 = 2, var = 2/1 = 2
-        assert_relative_eq!(variance(&series), 2.0, epsilon = 1e-10);
+        // mean = 1, sum_sq = 1 + 1 = 2, population var = 2/2 = 1.0
+        assert_relative_eq!(variance(&series), 1.0, epsilon = 1e-10);
     }
 
     #[test]
     fn variance_short() {
         assert!(variance(&[]).is_nan());
-        assert!(variance(&[1.0]).is_nan());
+    }
+
+    #[test]
+    fn variance_single() {
+        // Single value should have 0 variance
+        assert_relative_eq!(variance(&[5.0]), 0.0, epsilon = 1e-10);
+    }
+
+    // ==================== variance_sample ====================
+
+    #[test]
+    fn variance_sample_known() {
+        let series = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        // mean = 3, sum_sq = 10, sample var = 10/4 = 2.5
+        assert_relative_eq!(variance_sample(&series), 2.5, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn variance_sample_short() {
+        assert!(variance_sample(&[]).is_nan());
+        assert!(variance_sample(&[1.0]).is_nan());
     }
 }

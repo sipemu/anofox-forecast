@@ -110,6 +110,7 @@ fn templates_match(series: &[f64], i: usize, j: usize, m: usize, r: f64) -> bool
 /// Returns the permutation entropy of the time series.
 ///
 /// Based on the frequency distribution of ordinal patterns.
+/// Returns the raw entropy value (not normalized), matching tsfresh.
 ///
 /// # Arguments
 /// * `series` - Input time series
@@ -128,7 +129,7 @@ pub fn permutation_entropy(series: &[f64], order: usize, delay: usize) -> f64 {
         *pattern_counts.entry(pattern).or_insert(0) += 1;
     }
 
-    // Compute entropy
+    // Compute entropy (no normalization - matches tsfresh)
     let mut entropy = 0.0;
     for &count in pattern_counts.values() {
         let p = count as f64 / n_patterns as f64;
@@ -137,7 +138,23 @@ pub fn permutation_entropy(series: &[f64], order: usize, delay: usize) -> f64 {
         }
     }
 
-    // Normalize by maximum possible entropy
+    entropy
+}
+
+/// Returns the normalized permutation entropy of the time series.
+///
+/// Normalized by maximum possible entropy (ln(order!)).
+///
+/// # Arguments
+/// * `series` - Input time series
+/// * `order` - Order of permutation patterns (typically 3-7)
+/// * `delay` - Time delay between elements (typically 1)
+pub fn permutation_entropy_normalized(series: &[f64], order: usize, delay: usize) -> f64 {
+    let entropy = permutation_entropy(series, order, delay);
+    if entropy.is_nan() {
+        return f64::NAN;
+    }
+
     let max_entropy = (factorial(order) as f64).ln();
     if max_entropy > 0.0 {
         entropy / max_entropy
@@ -335,15 +352,16 @@ mod tests {
         assert!(approximate_entropy(&[1.0, 2.0], 2, 0.2).is_nan());
     }
 
-    // ==================== permutation_entropy ====================
+    // ==================== permutation_entropy (raw, not normalized) ====================
 
     #[test]
     fn permutation_entropy_monotonic() {
-        // Monotonically increasing: only one pattern
+        // Monotonically increasing: only one pattern -> entropy = 0
         let series: Vec<f64> = (0..20).map(|i| i as f64).collect();
         let pe = permutation_entropy(&series, 3, 1);
         assert!(!pe.is_nan());
-        assert!(pe < 0.1, "Monotonic should have low PE, got {}", pe);
+        // Raw entropy for single pattern: -1*ln(1) = 0
+        assert!(pe.abs() < 1e-10, "Monotonic should have 0 PE, got {}", pe);
     }
 
     #[test]
@@ -354,15 +372,23 @@ mod tests {
             .collect();
         let pe = permutation_entropy(&series, 3, 1);
         assert!(!pe.is_nan());
+        // Two equally likely patterns: -2*(0.5*ln(0.5)) = ln(2) ≈ 0.693
+        assert!(
+            pe > 0.6 && pe < 0.8,
+            "Expected ~ln(2)=0.693 for alternating, got {}",
+            pe
+        );
     }
 
     #[test]
     fn permutation_entropy_random_like() {
-        // More diverse patterns should have higher entropy
+        // More diverse patterns should have higher raw entropy
         let series: Vec<f64> = (0..50).map(|i| ((i * 7 + 3) % 13) as f64).collect();
         let pe = permutation_entropy(&series, 3, 1);
         assert!(!pe.is_nan());
-        assert!(pe > 0.5, "Random-like should have higher PE, got {}", pe);
+        // Max raw entropy for order=3 is ln(6) ≈ 1.79
+        // Should be reasonably high but depends on actual pattern distribution
+        assert!(pe > 0.5, "Random-like should have moderate PE, got {}", pe);
     }
 
     #[test]
@@ -375,6 +401,25 @@ mod tests {
     fn permutation_entropy_invalid_order() {
         let series = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         assert!(permutation_entropy(&series, 1, 1).is_nan()); // Order must be >= 2
+    }
+
+    // ==================== permutation_entropy_normalized ====================
+
+    #[test]
+    fn permutation_entropy_normalized_monotonic() {
+        let series: Vec<f64> = (0..20).map(|i| i as f64).collect();
+        let pe = permutation_entropy_normalized(&series, 3, 1);
+        assert!(!pe.is_nan());
+        assert!(pe.abs() < 1e-10, "Monotonic should have 0 normalized PE");
+    }
+
+    #[test]
+    fn permutation_entropy_normalized_random() {
+        let series: Vec<f64> = (0..50).map(|i| ((i * 7 + 3) % 13) as f64).collect();
+        let pe = permutation_entropy_normalized(&series, 3, 1);
+        assert!(!pe.is_nan());
+        // Normalized entropy should be between 0 and 1
+        assert!(pe > 0.5 && pe <= 1.0, "Normalized PE should be in (0.5, 1], got {}", pe);
     }
 
     // ==================== binned_entropy ====================

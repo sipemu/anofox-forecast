@@ -6,6 +6,8 @@ use super::basic::mean;
 
 /// Returns the autocorrelation at a specific lag.
 ///
+/// Uses tsfresh-compatible normalization: `sum_product / ((n - lag) * variance)`
+///
 /// # Arguments
 /// * `series` - Input time series
 /// * `lag` - Lag value
@@ -14,23 +16,25 @@ pub fn autocorrelation(series: &[f64], lag: usize) -> f64 {
         return f64::NAN;
     }
 
+    let n = series.len();
     let m = mean(series);
 
-    let mut numerator = 0.0;
-    let mut denominator = 0.0;
+    // Compute population variance
+    let var: f64 = series.iter().map(|x| (x - m).powi(2)).sum::<f64>() / n as f64;
 
-    for (i, &x) in series.iter().enumerate() {
-        denominator += (x - m).powi(2);
-        if i >= lag {
-            numerator += (x - m) * (series[i - lag] - m);
-        }
-    }
-
-    if denominator < 1e-10 {
+    if var < 1e-10 {
         return 0.0;
     }
 
-    numerator / denominator
+    // Compute sum of lagged products
+    let mut sum_product = 0.0;
+    for i in lag..n {
+        sum_product += (series[i] - m) * (series[i - lag] - m);
+    }
+
+    // tsfresh normalization: divide by (n - lag) * variance
+    let n_effective = (n - lag) as f64;
+    sum_product / (n_effective * var)
 }
 
 /// Returns the partial autocorrelation at a specific lag.
@@ -144,26 +148,31 @@ pub fn agg_autocorrelation(series: &[f64], max_lag: usize, agg_func: &str) -> f6
 /// Measures whether the time series looks the same when reversed.
 /// A value close to zero indicates time-reversible dynamics.
 ///
+/// Uses tsfresh formula: `x[i+2*lag]^2 * x[i+lag] - x[i+lag] * x[i]^2`
+/// summed for i from 0 to n-2*lag-1, then divided by (n - 2*lag).
+///
 /// # Arguments
 /// * `series` - Input time series
 /// * `lag` - Lag value
 pub fn time_reversal_asymmetry_statistic(series: &[f64], lag: usize) -> f64 {
-    if series.len() <= 2 * lag {
+    let n = series.len();
+    if n <= 2 * lag {
         return f64::NAN;
     }
 
-    let n = series.len();
     let mut sum = 0.0;
+    let n_terms = n - 2 * lag;
 
-    for i in (2 * lag)..n {
+    for i in 0..n_terms {
         let x_i = series[i];
-        let x_i_lag = series[i - lag];
-        let x_i_2lag = series[i - 2 * lag];
+        let x_i_lag = series[i + lag];
+        let x_i_2lag = series[i + 2 * lag];
 
-        sum += x_i_lag.powi(2) * x_i - x_i_lag * x_i_2lag.powi(2);
+        // tsfresh: x[i+2*lag]^2 * x[i+lag] - x[i+lag] * x[i]^2
+        sum += x_i_2lag.powi(2) * x_i_lag - x_i_lag * x_i.powi(2);
     }
 
-    sum / (n - 2 * lag) as f64
+    sum / n_terms as f64
 }
 
 #[cfg(test)]

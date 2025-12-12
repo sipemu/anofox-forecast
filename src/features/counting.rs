@@ -128,23 +128,29 @@ pub fn first_location_of_minimum(series: &[f64]) -> f64 {
 }
 
 /// Returns the relative position of the last occurrence of the maximum.
+///
+/// Uses tsfresh formula: `1.0 - argmax(reversed) / n`
 pub fn last_location_of_maximum(series: &[f64]) -> f64 {
     if series.is_empty() {
         return f64::NAN;
     }
     let max_val = series.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    let pos = series.iter().rposition(|&x| x == max_val).unwrap_or(0);
-    pos as f64 / series.len() as f64
+    // Find position in reversed array (first occurrence when iterating from end)
+    let reversed_pos = series.iter().rev().position(|&x| x == max_val).unwrap_or(0);
+    1.0 - reversed_pos as f64 / series.len() as f64
 }
 
 /// Returns the relative position of the last occurrence of the minimum.
+///
+/// Uses tsfresh formula: `1.0 - argmin(reversed) / n`
 pub fn last_location_of_minimum(series: &[f64]) -> f64 {
     if series.is_empty() {
         return f64::NAN;
     }
     let min_val = series.iter().copied().fold(f64::INFINITY, f64::min);
-    let pos = series.iter().rposition(|&x| x == min_val).unwrap_or(0);
-    pos as f64 / series.len() as f64
+    // Find position in reversed array (first occurrence when iterating from end)
+    let reversed_pos = series.iter().rev().position(|&x| x == min_val).unwrap_or(0);
+    1.0 - reversed_pos as f64 / series.len() as f64
 }
 
 /// Returns whether the series has any duplicate values.
@@ -383,7 +389,8 @@ mod tests {
     #[test]
     fn last_location_of_maximum_basic() {
         let series = vec![1.0, 5.0, 3.0, 5.0, 2.0]; // last max at position 3
-        assert_relative_eq!(last_location_of_maximum(&series), 0.6, epsilon = 1e-10);
+        // tsfresh: 1.0 - argmax(reversed)/n = 1.0 - 1/5 = 0.8
+        assert_relative_eq!(last_location_of_maximum(&series), 0.8, epsilon = 1e-10);
     }
 
     #[test]
@@ -395,7 +402,8 @@ mod tests {
     #[test]
     fn last_location_of_minimum_basic() {
         let series = vec![5.0, 1.0, 3.0, 1.0, 4.0]; // last min at position 3
-        assert_relative_eq!(last_location_of_minimum(&series), 0.6, epsilon = 1e-10);
+        // tsfresh: 1.0 - argmin(reversed)/n = 1.0 - 1/5 = 0.8
+        assert_relative_eq!(last_location_of_minimum(&series), 0.8, epsilon = 1e-10);
     }
 
     #[test]
@@ -409,7 +417,8 @@ mod tests {
     #[test]
     fn location_single() {
         assert_relative_eq!(first_location_of_maximum(&[5.0]), 0.0, epsilon = 1e-10);
-        assert_relative_eq!(last_location_of_maximum(&[5.0]), 0.0, epsilon = 1e-10);
+        // For single element: tsfresh returns 1.0 - 0/1 = 1.0
+        assert_relative_eq!(last_location_of_maximum(&[5.0]), 1.0, epsilon = 1e-10);
     }
 
     // ==================== has_duplicate ====================
