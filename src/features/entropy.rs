@@ -419,7 +419,11 @@ mod tests {
         let pe = permutation_entropy_normalized(&series, 3, 1);
         assert!(!pe.is_nan());
         // Normalized entropy should be between 0 and 1
-        assert!(pe > 0.5 && pe <= 1.0, "Normalized PE should be in (0.5, 1], got {}", pe);
+        assert!(
+            pe > 0.5 && pe <= 1.0,
+            "Normalized PE should be in (0.5, 1], got {}",
+            pe
+        );
     }
 
     // ==================== binned_entropy ====================

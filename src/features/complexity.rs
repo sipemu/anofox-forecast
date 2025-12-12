@@ -206,7 +206,11 @@ mod tests {
         // Each normalized diff = 1/std ≈ 0.348, sum of 9 squared diffs ≈ 9 * (1/std)^2
         // CID-CE = sqrt(9 / var) = sqrt(9 / 8.25) ≈ 1.044
         let result = cid_ce(&series, true);
-        assert!(result > 1.0 && result < 1.1, "Expected ~1.044, got {}", result);
+        assert!(
+            result > 1.0 && result < 1.1,
+            "Expected ~1.044, got {}",
+            result
+        );
     }
 
     #[test]

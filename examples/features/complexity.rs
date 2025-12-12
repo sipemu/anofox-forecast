@@ -99,7 +99,7 @@ fn main() {
     println!("{:-<35}", "");
 
     for (name, series) in &series_list {
-        let lz = complexity::lempel_ziv_complexity(series);
+        let lz = complexity::lempel_ziv_complexity(series, 10);
         println!("{:<18} {:>15.4}", name, lz);
     }
 
@@ -118,20 +118,20 @@ fn main() {
     println!(
         "{:<15} {:>10.4} {:>12.4}",
         "50 points",
-        complexity::lempel_ziv_complexity(&short),
-        complexity::lempel_ziv_complexity(&short) / 50.0
+        complexity::lempel_ziv_complexity(&short, 10),
+        complexity::lempel_ziv_complexity(&short, 10) / 50.0
     );
     println!(
         "{:<15} {:>10.4} {:>12.4}",
         "100 points",
-        complexity::lempel_ziv_complexity(&medium),
-        complexity::lempel_ziv_complexity(&medium) / 100.0
+        complexity::lempel_ziv_complexity(&medium, 10),
+        complexity::lempel_ziv_complexity(&medium, 10) / 100.0
     );
     println!(
         "{:<15} {:>10.4} {:>12.4}",
         "200 points",
-        complexity::lempel_ziv_complexity(&long),
-        complexity::lempel_ziv_complexity(&long) / 200.0
+        complexity::lempel_ziv_complexity(&long, 10),
+        complexity::lempel_ziv_complexity(&long, 10) / 200.0
     );
 
     // 5. Complexity Comparison
@@ -148,7 +148,7 @@ fn main() {
     for (name, series) in &series_list {
         let c3 = complexity::c3(series, 1);
         let cid = complexity::cid_ce(series, true);
-        let lz = complexity::lempel_ziv_complexity(series);
+        let lz = complexity::lempel_ziv_complexity(series, 10);
         println!("{:<18} {:>12.4} {:>12.4} {:>12.4}", name, c3, cid, lz);
     }
 

@@ -499,31 +499,6 @@ pub fn augmented_dickey_fuller(series: &[f64]) -> f64 {
     beta / se_beta
 }
 
-/// Helper: aggregate values
-fn aggregate(values: &[f64], func: &str) -> f64 {
-    if values.is_empty() {
-        return f64::NAN;
-    }
-
-    match func {
-        "mean" => values.iter().sum::<f64>() / values.len() as f64,
-        "var" => {
-            if values.len() < 2 {
-                return f64::NAN;
-            }
-            let m = values.iter().sum::<f64>() / values.len() as f64;
-            values.iter().map(|x| (x - m).powi(2)).sum::<f64>() / (values.len() - 1) as f64
-        }
-        "std" => {
-            let var = aggregate(values, "var");
-            var.sqrt()
-        }
-        "min" => values.iter().copied().fold(f64::INFINITY, f64::min),
-        "max" => values.iter().copied().fold(f64::NEG_INFINITY, f64::max),
-        _ => f64::NAN,
-    }
-}
-
 /// Helper: approximate normal CDF using error function approximation
 fn normal_cdf(x: f64) -> f64 {
     0.5 * (1.0 + erf(x / std::f64::consts::SQRT_2))

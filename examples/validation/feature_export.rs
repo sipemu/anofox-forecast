@@ -75,7 +75,10 @@ fn extract_features(series: &[f64], series_type: &str) -> Vec<FeatureResult> {
     // ================= Basic features (basic.rs) =================
     add("value__mean", basic::mean(series));
     add("value__variance", basic::variance(series));
-    add("value__standard_deviation", basic::standard_deviation(series));
+    add(
+        "value__standard_deviation",
+        basic::standard_deviation(series),
+    );
     add("value__median", basic::median(series));
     add("value__minimum", basic::minimum(series));
     add("value__maximum", basic::maximum(series));
@@ -279,7 +282,10 @@ fn extract_features(series: &[f64], series_type: &str) -> Vec<FeatureResult> {
     let std = basic::standard_deviation(series);
     let r = if std > 1e-10 { 0.2 * std } else { 0.2 };
 
-    add("value__sample_entropy", entropy::sample_entropy(series, 2, r));
+    add(
+        "value__sample_entropy",
+        entropy::sample_entropy(series, 2, r),
+    );
     add(
         "value__approximate_entropy__m_2__r_0.2",
         entropy::approximate_entropy(series, 2, r),
@@ -304,7 +310,10 @@ fn extract_features(series: &[f64], series_type: &str) -> Vec<FeatureResult> {
     );
 
     for lag in [1, 2, 3] {
-        add(&format!("value__c3__lag_{}", lag), complexity::c3(series, lag));
+        add(
+            &format!("value__c3__lag_{}", lag),
+            complexity::c3(series, lag),
+        );
     }
 
     add(

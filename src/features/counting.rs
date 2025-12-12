@@ -389,7 +389,7 @@ mod tests {
     #[test]
     fn last_location_of_maximum_basic() {
         let series = vec![1.0, 5.0, 3.0, 5.0, 2.0]; // last max at position 3
-        // tsfresh: 1.0 - argmax(reversed)/n = 1.0 - 1/5 = 0.8
+                                                    // tsfresh: 1.0 - argmax(reversed)/n = 1.0 - 1/5 = 0.8
         assert_relative_eq!(last_location_of_maximum(&series), 0.8, epsilon = 1e-10);
     }
 
@@ -402,7 +402,7 @@ mod tests {
     #[test]
     fn last_location_of_minimum_basic() {
         let series = vec![5.0, 1.0, 3.0, 1.0, 4.0]; // last min at position 3
-        // tsfresh: 1.0 - argmin(reversed)/n = 1.0 - 1/5 = 0.8
+                                                    // tsfresh: 1.0 - argmin(reversed)/n = 1.0 - 1/5 = 0.8
         assert_relative_eq!(last_location_of_minimum(&series), 0.8, epsilon = 1e-10);
     }
 
