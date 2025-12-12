@@ -101,12 +101,7 @@ impl AutoTBATS {
     }
 
     /// Try a single configuration and update best if improved.
-    fn try_config(
-        &mut self,
-        series: &TimeSeries,
-        model: TBATS,
-        config_name: &str,
-    ) -> bool {
+    fn try_config(&mut self, series: &TimeSeries, model: TBATS, config_name: &str) -> bool {
         let mut model = model;
         if model.fit(series).is_err() {
             return false;
@@ -282,8 +277,7 @@ mod tests {
         let values: Vec<f64> = (0..n)
             .map(|i| {
                 let trend = 50.0 + 0.1 * i as f64;
-                let daily =
-                    10.0 * (2.0 * std::f64::consts::PI * (i % 24) as f64 / 24.0).sin();
+                let daily = 10.0 * (2.0 * std::f64::consts::PI * (i % 24) as f64 / 24.0).sin();
                 let noise = ((i * 17) % 7) as f64 * 0.3 - 1.0;
                 (trend + daily + noise).max(1.0)
             })

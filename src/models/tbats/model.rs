@@ -97,8 +97,8 @@ impl TBATS {
             phi: 1.0,
             arma_p: 0,
             arma_q: 0,
-            alpha: 0.09, // statsforecast default
-            beta: 0.05,  // statsforecast default
+            alpha: 0.09,                     // statsforecast default
+            beta: 0.05,                      // statsforecast default
             gamma_one: vec![0.0; n_periods], // statsforecast initializes to 0
             gamma_two: vec![0.0; n_periods], // statsforecast initializes to 0
             ar_coeffs: Vec::new(),
@@ -153,7 +153,11 @@ impl TBATS {
         }
 
         // Detrend
-        let z: Vec<f64> = values.iter().zip(trend.iter()).map(|(y, t)| y - t).collect();
+        let z: Vec<f64> = values
+            .iter()
+            .zip(trend.iter())
+            .map(|(y, t)| y - t)
+            .collect();
 
         let max_k = Self::max_harmonics(period).min(n);
         if max_k == 0 {
@@ -358,8 +362,8 @@ impl TBATS {
 
             // Minimize coefficient of variation
             let mean = transformed.iter().sum::<f64>() / transformed.len() as f64;
-            let variance =
-                transformed.iter().map(|&t| (t - mean).powi(2)).sum::<f64>() / transformed.len() as f64;
+            let variance = transformed.iter().map(|&t| (t - mean).powi(2)).sum::<f64>()
+                / transformed.len() as f64;
 
             if mean.abs() < 1e-10 {
                 f64::MAX
@@ -408,7 +412,7 @@ impl TBATS {
         for &k in &self.fourier_k {
             for j in 0..k {
                 w[pos + 2 * j] = 1.0; // cos coefficient
-                                       // w[pos + 2*j + 1] = 0.0; // sin coefficient (already 0)
+                                      // w[pos + 2*j + 1] = 0.0; // sin coefficient (already 0)
             }
             pos += 2 * k;
         }
@@ -436,7 +440,7 @@ impl TBATS {
             let g1 = self.gamma_one.get(period_idx).copied().unwrap_or(0.0);
             let g2 = self.gamma_two.get(period_idx).copied().unwrap_or(0.0);
             for j in 0..k {
-                g[pos + 2 * j] = g1;     // cos gain
+                g[pos + 2 * j] = g1; // cos gain
                 g[pos + 2 * j + 1] = g2; // sin gain
             }
             pos += 2 * k;
@@ -848,7 +852,8 @@ impl Forecaster for TBATS {
             .collect();
 
         // Compute AIC
-        let log_likelihood = -0.5 * n as f64 * (1.0 + (2.0 * std::f64::consts::PI * self.sigma2).ln());
+        let log_likelihood =
+            -0.5 * n as f64 * (1.0 + (2.0 * std::f64::consts::PI * self.sigma2).ln());
         let k = self.n_parameters();
         self.aic = Some(-2.0 * log_likelihood + 2.0 * k as f64);
 
@@ -987,10 +992,8 @@ mod tests {
         let values: Vec<f64> = (0..n)
             .map(|i| {
                 let trend = 50.0 + 0.1 * i as f64;
-                let daily =
-                    10.0 * (2.0 * std::f64::consts::PI * (i % 24) as f64 / 24.0).sin();
-                let weekly =
-                    5.0 * (2.0 * std::f64::consts::PI * (i % 168) as f64 / 168.0).sin();
+                let daily = 10.0 * (2.0 * std::f64::consts::PI * (i % 24) as f64 / 24.0).sin();
+                let weekly = 5.0 * (2.0 * std::f64::consts::PI * (i % 168) as f64 / 168.0).sin();
                 let noise = ((i * 17) % 7) as f64 * 0.3 - 1.0;
                 (trend + daily + weekly + noise).max(1.0) // Ensure positive for Box-Cox
             })
@@ -1262,7 +1265,9 @@ mod tests {
         // Test that Box-Cox lambda is automatically estimated for positive data
         let timestamps = make_timestamps(100);
         // All positive values
-        let values: Vec<f64> = (0..100).map(|i| 50.0 + 10.0 * (i as f64 / 10.0).sin()).collect();
+        let values: Vec<f64> = (0..100)
+            .map(|i| 50.0 + 10.0 * (i as f64 / 10.0).sin())
+            .collect();
         let ts = TimeSeries::univariate(timestamps, values).unwrap();
 
         let mut model = TBATS::new(vec![12]);

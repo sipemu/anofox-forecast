@@ -5,7 +5,7 @@
 //! - I(d): Differencing for stationarity
 //! - MA(q): Moving average component
 //!
-//! SARIMA(p, d, q)(P, D, Q)[s] extends ARIMA with seasonal components:
+//! SARIMA(p, d, q)(P, D, Q)\[s\] extends ARIMA with seasonal components:
 //! - SAR(P): Seasonal autoregressive component
 //! - SI(D): Seasonal differencing
 //! - SMA(Q): Seasonal moving average component
@@ -68,8 +68,24 @@ pub struct SARIMASpec {
 
 impl SARIMASpec {
     /// Create a new SARIMA specification.
-    pub fn new(p: usize, d: usize, q: usize, cap_p: usize, cap_d: usize, cap_q: usize, s: usize) -> Self {
-        Self { p, d, q, cap_p, cap_d, cap_q, s }
+    pub fn new(
+        p: usize,
+        d: usize,
+        q: usize,
+        cap_p: usize,
+        cap_d: usize,
+        cap_q: usize,
+        s: usize,
+    ) -> Self {
+        Self {
+            p,
+            d,
+            q,
+            cap_p,
+            cap_d,
+            cap_q,
+            s,
+        }
     }
 
     /// Total number of parameters.
@@ -477,7 +493,7 @@ impl Forecaster for ARIMA {
 
 /// SARIMA (Seasonal ARIMA) forecasting model.
 ///
-/// SARIMA(p, d, q)(P, D, Q)[s] extends ARIMA with seasonal components:
+/// SARIMA(p, d, q)(P, D, Q)\[s\] extends ARIMA with seasonal components:
 /// - p, d, q: Non-seasonal orders
 /// - P, D, Q: Seasonal orders
 /// - s: Seasonal period
@@ -548,7 +564,15 @@ impl SARIMA {
     /// * `cap_d` - Seasonal differencing order (D)
     /// * `cap_q` - Seasonal MA order (Q)
     /// * `s` - Seasonal period
-    pub fn new(p: usize, d: usize, q: usize, cap_p: usize, cap_d: usize, cap_q: usize, s: usize) -> Self {
+    pub fn new(
+        p: usize,
+        d: usize,
+        q: usize,
+        cap_p: usize,
+        cap_d: usize,
+        cap_q: usize,
+        s: usize,
+    ) -> Self {
         Self {
             spec: SARIMASpec::new(p, d, q, cap_p, cap_d, cap_q, s),
             ar_coefficients: vec![],
@@ -572,7 +596,9 @@ impl SARIMA {
 
     /// Create a SARIMA model from specification.
     pub fn from_spec(spec: SARIMASpec) -> Self {
-        Self::new(spec.p, spec.d, spec.q, spec.cap_p, spec.cap_d, spec.cap_q, spec.s)
+        Self::new(
+            spec.p, spec.d, spec.q, spec.cap_p, spec.cap_d, spec.cap_q, spec.s,
+        )
     }
 
     /// Get the model specification.
@@ -636,7 +662,12 @@ impl SARIMA {
     }
 
     /// Apply seasonal integration (reverse of seasonal differencing).
-    fn seasonal_integrate(forecast: &[f64], last_values: &[f64], cap_d: usize, s: usize) -> Vec<f64> {
+    fn seasonal_integrate(
+        forecast: &[f64],
+        last_values: &[f64],
+        cap_d: usize,
+        s: usize,
+    ) -> Vec<f64> {
         if cap_d == 0 || s <= 1 {
             return forecast.to_vec();
         }
@@ -682,8 +713,16 @@ impl SARIMA {
     ) -> f64 {
         let n = diff_series.len();
         // Account for interaction terms: max lag is (p) + (P)*s for AR, (q) + (Q)*s for MA
-        let max_ar_lag = if cap_p > 0 && s > 1 { p + cap_p * s } else { p.max(cap_p * s) };
-        let max_ma_lag = if cap_q > 0 && s > 1 { q + cap_q * s } else { q.max(cap_q * s) };
+        let max_ar_lag = if cap_p > 0 && s > 1 {
+            p + cap_p * s
+        } else {
+            p.max(cap_p * s)
+        };
+        let max_ma_lag = if cap_q > 0 && s > 1 {
+            q + cap_q * s
+        } else {
+            q.max(cap_q * s)
+        };
         let start = max_ar_lag.max(max_ma_lag);
 
         if n <= start {
@@ -821,7 +860,19 @@ impl SARIMA {
                 idx += cap_p;
                 let sma: Vec<f64> = params[idx..idx + cap_q].to_vec();
 
-                Self::calculate_css(diff_series, p, q, cap_p, cap_q, s, &ar, &ma, &sar, &sma, intercept)
+                Self::calculate_css(
+                    diff_series,
+                    p,
+                    q,
+                    cap_p,
+                    cap_q,
+                    s,
+                    &ar,
+                    &ma,
+                    &sar,
+                    &sma,
+                    intercept,
+                )
             },
             &initial,
             Some(&bounds),
@@ -850,8 +901,16 @@ impl SARIMA {
         let s = self.spec.s;
 
         // Account for interaction terms
-        let max_ar_lag = if cap_p > 0 && s > 1 { p + cap_p * s } else { p.max(cap_p * s) };
-        let max_ma_lag = if cap_q > 0 && s > 1 { q + cap_q * s } else { q.max(cap_q * s) };
+        let max_ar_lag = if cap_p > 0 && s > 1 {
+            p + cap_p * s
+        } else {
+            p.max(cap_p * s)
+        };
+        let max_ma_lag = if cap_q > 0 && s > 1 {
+            q + cap_q * s
+        } else {
+            q.max(cap_q * s)
+        };
         let start = max_ar_lag.max(max_ma_lag);
 
         let mut fitted = vec![f64::NAN; n];
@@ -922,7 +981,11 @@ impl SARIMA {
 
         // Store last residuals for forecasting (need enough for interaction terms)
         // For MA interaction, max lag is q + Q*s
-        let max_ma_history = if cap_q > 0 && s > 1 { q + cap_q * s } else { q.max(cap_q * s) };
+        let max_ma_history = if cap_q > 0 && s > 1 {
+            q + cap_q * s
+        } else {
+            q.max(cap_q * s)
+        };
         if max_ma_history > 0 {
             let retain = max_ma_history.min(residuals.len());
             self.last_residuals = residuals[residuals.len() - retain..].to_vec();
@@ -1056,8 +1119,11 @@ impl Forecaster for SARIMA {
         if let Some(residuals) = &self.residuals {
             if extended_residuals.len() < cap_q * s {
                 let need = (cap_q * s).saturating_sub(extended_residuals.len());
-                let start = residuals.len().saturating_sub(need + extended_residuals.len());
-                let mut prefix = residuals[start..residuals.len() - extended_residuals.len()].to_vec();
+                let start = residuals
+                    .len()
+                    .saturating_sub(need + extended_residuals.len());
+                let mut prefix =
+                    residuals[start..residuals.len() - extended_residuals.len()].to_vec();
                 prefix.append(&mut extended_residuals);
                 extended_residuals = prefix;
             }

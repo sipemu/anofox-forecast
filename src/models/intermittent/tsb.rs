@@ -173,7 +173,13 @@ impl Forecaster for TSB {
         let fitted: Vec<f64> = demand_fitted_expanded
             .iter()
             .zip(prob_fitted.iter())
-            .map(|(&d, &p)| if d.is_nan() || p.is_nan() { f64::NAN } else { d * p })
+            .map(|(&d, &p)| {
+                if d.is_nan() || p.is_nan() {
+                    f64::NAN
+                } else {
+                    d * p
+                }
+            })
             .collect();
 
         // Compute residuals
@@ -219,7 +225,8 @@ impl Forecaster for TSB {
         let valid_residuals: Vec<f64> = residuals.iter().copied().filter(|r| !r.is_nan()).collect();
 
         let std_dev = if valid_residuals.len() > 1 {
-            let mean_resid: f64 = valid_residuals.iter().sum::<f64>() / valid_residuals.len() as f64;
+            let mean_resid: f64 =
+                valid_residuals.iter().sum::<f64>() / valid_residuals.len() as f64;
             let variance = valid_residuals
                 .iter()
                 .map(|r| (r - mean_resid).powi(2))

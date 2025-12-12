@@ -446,7 +446,10 @@ mod tests {
         model.fit(&ts).unwrap();
         let forecast = model.predict(5).unwrap();
         for &v in forecast.primary() {
-            assert!((v - 0.0).abs() < 1e-10, "All-zero series should forecast zero");
+            assert!(
+                (v - 0.0).abs() < 1e-10,
+                "All-zero series should forecast zero"
+            );
         }
     }
 

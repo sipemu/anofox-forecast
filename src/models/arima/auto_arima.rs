@@ -110,7 +110,7 @@ impl ModelOrder {
 
 /// Automatic ARIMA/SARIMA model selection.
 ///
-/// Automatically selects the best ARIMA(p, d, q) or SARIMA(p, d, q)(P, D, Q)[s]
+/// Automatically selects the best ARIMA(p, d, q) or SARIMA(p, d, q)(P, D, Q)\[s\]
 /// specification based on information criteria.
 #[derive(Debug, Clone)]
 pub struct AutoARIMA {
@@ -179,10 +179,15 @@ impl AutoARIMA {
 
         // Compare variances
         let orig_mean = values.iter().sum::<f64>() / values.len() as f64;
-        let orig_var = values.iter().map(|v| (v - orig_mean).powi(2)).sum::<f64>() / values.len() as f64;
+        let orig_var =
+            values.iter().map(|v| (v - orig_mean).powi(2)).sum::<f64>() / values.len() as f64;
 
         let diff_mean = seasonal_diffs.iter().sum::<f64>() / seasonal_diffs.len() as f64;
-        let diff_var = seasonal_diffs.iter().map(|v| (v - diff_mean).powi(2)).sum::<f64>() / seasonal_diffs.len() as f64;
+        let diff_var = seasonal_diffs
+            .iter()
+            .map(|v| (v - diff_mean).powi(2))
+            .sum::<f64>()
+            / seasonal_diffs.len() as f64;
 
         // If seasonal differencing reduces variance significantly, suggest D=1
         if diff_var < orig_var * 0.7 {
@@ -242,8 +247,19 @@ impl AutoARIMA {
 
             // Non-seasonal orders to try with seasonal components
             let nonseasonal_with_seasonal = vec![
-                (0, 0), (1, 0), (0, 1), (1, 1), (2, 0), (0, 2), (2, 1), (1, 2),
-                (3, 0), (0, 3), (2, 2), (3, 1), (1, 3),
+                (0, 0),
+                (1, 0),
+                (0, 1),
+                (1, 1),
+                (2, 0),
+                (0, 2),
+                (2, 1),
+                (1, 2),
+                (3, 0),
+                (0, 3),
+                (2, 2),
+                (3, 1),
+                (1, 3),
             ];
 
             for &(p, q) in &nonseasonal_with_seasonal {
@@ -453,7 +469,10 @@ impl Forecaster for AutoARIMA {
             // Check data requirements for this order
             let min_len = order.d
                 + order.cap_d * order.s
-                + order.p.max(order.q).max(order.cap_p.max(order.cap_q) * order.s.max(1))
+                + order
+                    .p
+                    .max(order.q)
+                    .max(order.cap_p.max(order.cap_q) * order.s.max(1))
                 + 5;
 
             if values.len() < min_len {

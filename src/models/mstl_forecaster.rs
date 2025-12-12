@@ -310,7 +310,8 @@ impl Forecaster for MSTLForecaster {
         }
 
         // Create MSTL decomposer
-        let mut mstl = MSTL::new(self.seasonal_periods.clone()).with_iterations(self.mstl_iterations);
+        let mut mstl =
+            MSTL::new(self.seasonal_periods.clone()).with_iterations(self.mstl_iterations);
         if self.robust {
             mstl = mstl.robust();
         }
@@ -329,7 +330,8 @@ impl Forecaster for MSTLForecaster {
             .collect();
 
         // Create a temporary time series for the deseasonalized component
-        let deseas_ts = TimeSeries::univariate(series.timestamps().to_vec(), deseasonalized.clone())?;
+        let deseas_ts =
+            TimeSeries::univariate(series.timestamps().to_vec(), deseasonalized.clone())?;
 
         // Fit trend forecaster based on method
         let trend_forecaster: Box<dyn TrendForecasterTrait> = match self.trend_method {
@@ -391,8 +393,14 @@ impl Forecaster for MSTLForecaster {
     }
 
     fn predict(&self, horizon: usize) -> Result<Forecast> {
-        let decomposition = self.decomposition.as_ref().ok_or(ForecastError::FitRequired)?;
-        let trend_forecaster = self.trend_forecaster.as_ref().ok_or(ForecastError::FitRequired)?;
+        let decomposition = self
+            .decomposition
+            .as_ref()
+            .ok_or(ForecastError::FitRequired)?;
+        let trend_forecaster = self
+            .trend_forecaster
+            .as_ref()
+            .ok_or(ForecastError::FitRequired)?;
 
         if horizon == 0 {
             return Ok(Forecast::new());
@@ -481,7 +489,8 @@ mod tests {
                 let mut seasonal = 0.0;
                 for (idx, &period) in periods.iter().enumerate() {
                     let amplitude = 5.0 / (idx + 1) as f64;
-                    seasonal += amplitude * (2.0 * std::f64::consts::PI * i as f64 / period as f64).sin();
+                    seasonal +=
+                        amplitude * (2.0 * std::f64::consts::PI * i as f64 / period as f64).sin();
                 }
                 trend + seasonal
             })
@@ -526,7 +535,8 @@ mod tests {
     #[test]
     fn mstl_forecaster_with_linear() {
         let ts = make_multi_seasonal_series(100, &[12]);
-        let mut model = MSTLForecaster::new(vec![12]).with_trend_method(TrendForecastMethod::Linear);
+        let mut model =
+            MSTLForecaster::new(vec![12]).with_trend_method(TrendForecastMethod::Linear);
         model.fit(&ts).unwrap();
 
         let forecast = model.predict(12).unwrap();
@@ -653,8 +663,8 @@ mod tests {
     #[test]
     fn mstl_forecaster_seasonal_average_method() {
         let ts = make_multi_seasonal_series(100, &[12]);
-        let mut model = MSTLForecaster::new(vec![12])
-            .with_seasonal_method(SeasonalForecastMethod::Average);
+        let mut model =
+            MSTLForecaster::new(vec![12]).with_seasonal_method(SeasonalForecastMethod::Average);
         model.fit(&ts).unwrap();
 
         let forecast = model.predict(12).unwrap();

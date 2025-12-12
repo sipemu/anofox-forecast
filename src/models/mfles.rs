@@ -479,7 +479,13 @@ impl MFLES {
     /// SES ensemble or rolling mean (statsforecast compatible).
     /// When smooth=true: uses EWM ensemble with multiple alpha values.
     /// When smooth=false: uses rolling mean (default behavior).
-    fn ses_ensemble(values: &[f64], min_alpha: f64, max_alpha: f64, smooth: bool, order: usize) -> Vec<f64> {
+    fn ses_ensemble(
+        values: &[f64],
+        min_alpha: f64,
+        max_alpha: f64,
+        smooth: bool,
+        order: usize,
+    ) -> Vec<f64> {
         let n = values.len();
         if n == 0 {
             return Vec::new();
@@ -598,12 +604,9 @@ impl Forecaster for MFLES {
         self.is_multiplicative = use_multiplicative;
 
         // Transform data
-        let mut y: Vec<f64>;
+        let y: Vec<f64>;
         if use_multiplicative {
-            let min_val = values
-                .iter()
-                .copied()
-                .fold(f64::INFINITY, |a, b| a.min(b));
+            let min_val = values.iter().copied().fold(f64::INFINITY, |a, b| a.min(b));
             self.const_val = Some(min_val);
             y = values.iter().map(|&v| v.ln()).collect();
         } else {
@@ -642,7 +645,7 @@ impl Forecaster for MFLES {
             return Ok(());
         }
 
-        let og_y = y.clone();
+        let _og_y = y.clone();
 
         // Fourier order for seasonal fitting
         let fourier_order = self
@@ -728,7 +731,8 @@ impl Forecaster for MFLES {
             if self.season_length > 0 && !fourier_series.is_empty() {
                 let (seas, coeffs) = Self::ols_with_coeffs(&fourier_series, &resids);
                 let seas_scaled: Vec<f64> = seas.iter().map(|&s| s * self.seasonal_lr).collect();
-                let coeffs_scaled: Vec<f64> = coeffs.iter().map(|&c| c * self.seasonal_lr).collect();
+                let coeffs_scaled: Vec<f64> =
+                    coeffs.iter().map(|&c| c * self.seasonal_lr).collect();
 
                 let component_mse = Self::calc_mse(
                     &y,

@@ -170,7 +170,14 @@ impl GARCH {
     /// Compute sigma² series from parameters and original series values.
     /// This matches statsforecast's garch_sigma2 function exactly.
     /// Note: statsforecast uses np.flip(alpha) and np.flip(beta) which reverses the coefficient order.
-    fn compute_sigma2(x: &[f64], omega: f64, alpha: &[f64], beta: &[f64], p: usize, q: usize) -> Vec<f64> {
+    fn compute_sigma2(
+        x: &[f64],
+        omega: f64,
+        alpha: &[f64],
+        beta: &[f64],
+        p: usize,
+        q: usize,
+    ) -> Vec<f64> {
         let n = x.len();
         // statsforecast initializes sigma2[0] = np.var(x) which is the sample variance
         let mean = x.iter().sum::<f64>() / n as f64;
@@ -278,13 +285,13 @@ impl GARCH {
 
         // Try multiple starting points to find global minimum
         let starting_points = vec![
-            vec![0.1; p + q + 1],                                    // statsforecast default
-            vec![0.01, 0.05, 0.9],                                   // small omega, small alpha, large beta
-            vec![0.0, 0.01, 0.95],                                   // near-zero omega, very high persistence
-            vec![0.001, 0.001, 0.99],                                // minimal omega/alpha, max beta
-            vec![0.02, 0.02, 0.02],                                  // low persistence (good for stationary data)
-            vec![0.1, 0.1, 0.1],                                     // medium persistence
-            vec![0.5, 0.1, 0.8],                                     // moderate omega, high persistence
+            vec![0.1; p + q + 1],     // statsforecast default
+            vec![0.01, 0.05, 0.9],    // small omega, small alpha, large beta
+            vec![0.0, 0.01, 0.95],    // near-zero omega, very high persistence
+            vec![0.001, 0.001, 0.99], // minimal omega/alpha, max beta
+            vec![0.02, 0.02, 0.02],   // low persistence (good for stationary data)
+            vec![0.1, 0.1, 0.1],      // medium persistence
+            vec![0.5, 0.1, 0.8],      // moderate omega, high persistence
         ];
 
         let mut best_value = f64::MAX;
@@ -309,10 +316,7 @@ impl GARCH {
             .iter()
             .map(|&a| a.max(0.0))
             .collect();
-        let opt_beta: Vec<f64> = best_params[(p + 1)..]
-            .iter()
-            .map(|&b| b.max(0.0))
-            .collect();
+        let opt_beta: Vec<f64> = best_params[(p + 1)..].iter().map(|&b| b.max(0.0)).collect();
 
         // Ensure stationarity
         let sum: f64 = opt_alpha.iter().sum::<f64>() + opt_beta.iter().sum::<f64>();
@@ -421,14 +425,8 @@ impl Forecaster for GARCH {
         self.optimize_parameters(values, &residuals);
 
         // Compute conditional variance using original values (like statsforecast)
-        let conditional_variance = Self::compute_sigma2(
-            values,
-            self.omega,
-            &self.alpha,
-            &self.beta,
-            self.p,
-            self.q,
-        );
+        let conditional_variance =
+            Self::compute_sigma2(values, self.omega, &self.alpha, &self.beta, self.p, self.q);
 
         // Store last p values of ORIGINAL SERIES as y_vals (matching statsforecast)
         // statsforecast: y_vals = x[-p:]
@@ -468,12 +466,30 @@ impl Forecaster for GARCH {
         // Standard normal random draws matching np.random.seed(1) + np.random.normal()
         // These are pre-computed to exactly match statsforecast's deterministic simulation
         const NUMPY_SEED1_RANDN: [f64; 24] = [
-            1.6243453637, -0.6117564137, -0.5281717523, -1.0729686222,
-            0.8654076293, -2.3015386969, 1.7448117642, -0.7612069009,
-            0.3190390961, -0.2493703755, 1.4621079370, -2.0601407095,
-            -0.3224172040, -0.3840544394, 1.1337694423, -1.0998912673,
-            -0.1724282259, -0.8778584420, 0.0422137467, 0.5828152137,
-            -1.1006191850, 1.1447236947, 0.9015907205, 0.5024943390,
+            1.6243453637,
+            -0.6117564137,
+            -0.5281717523,
+            -1.0729686222,
+            0.8654076293,
+            -2.3015386969,
+            1.7448117642,
+            -0.7612069009,
+            0.3190390961,
+            -0.2493703755,
+            1.4621079370,
+            -2.0601407095,
+            -0.3224172040,
+            -0.3840544394,
+            1.1337694423,
+            -1.0998912673,
+            -0.1724282259,
+            -0.8778584420,
+            0.0422137467,
+            0.5828152137,
+            -1.1006191850,
+            1.1447236947,
+            0.9015907205,
+            0.5024943390,
         ];
 
         // Use the pre-computed sequence
@@ -687,15 +703,11 @@ mod tests {
     #[test]
     fn garch_stationarity() {
         // Stationary GARCH
-        let model = GARCH::new(1, 1)
-            .with_alpha(vec![0.1])
-            .with_beta(vec![0.85]);
+        let model = GARCH::new(1, 1).with_alpha(vec![0.1]).with_beta(vec![0.85]);
         assert!(model.is_stationary());
 
         // Non-stationary GARCH
-        let model = GARCH::new(1, 1)
-            .with_alpha(vec![0.5])
-            .with_beta(vec![0.6]);
+        let model = GARCH::new(1, 1).with_alpha(vec![0.5]).with_beta(vec![0.6]);
         assert!(!model.is_stationary());
     }
 
@@ -914,7 +926,11 @@ mod tests {
 
         // Point forecasts should have reasonable magnitude relative to sqrt(variance)
         // (they are error * sqrt(sigma²) where error ~ N(0,1))
-        for (i, (&pf, &vf)) in point_forecast.primary().iter().zip(var_forecast.iter()).enumerate()
+        for (i, (&pf, &vf)) in point_forecast
+            .primary()
+            .iter()
+            .zip(var_forecast.iter())
+            .enumerate()
         {
             let std_dev = vf.sqrt();
             // Point forecast should be within ~4 std devs (very loose bound)

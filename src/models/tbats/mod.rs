@@ -9,8 +9,8 @@
 //! Reference: De Livera, Hyndman & Snyder (2011) "Forecasting time series with
 //! complex seasonal patterns using exponential smoothing"
 
-mod model;
 mod auto;
+mod model;
 
-pub use model::TBATS;
 pub use auto::AutoTBATS;
+pub use model::TBATS;

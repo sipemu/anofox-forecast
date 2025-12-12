@@ -2,7 +2,7 @@
 //!
 //! This module provides:
 //! - ARIMA models with various (p, d, q) specifications
-//! - SARIMA models with seasonal components (P, D, Q)[s]
+//! - SARIMA models with seasonal components (P, D, Q)\[s\]
 //! - AutoARIMA for automatic order selection
 
 mod auto_arima;
@@ -11,4 +11,4 @@ mod model;
 
 pub use auto_arima::{AutoARIMA, AutoARIMAConfig, ModelOrder};
 pub use diff::{difference, integrate, seasonal_difference};
-pub use model::{ARIMA, ARIMASpec, SARIMA, SARIMASpec};
+pub use model::{ARIMASpec, SARIMASpec, ARIMA, SARIMA};

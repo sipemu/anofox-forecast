@@ -94,8 +94,12 @@ fn main() {
             println!(
                 "  {}. SARIMA({},{},{})({},-,{})[{}]: AIC = {:.2}",
                 i + 1,
-                order.p, order.d, order.q,
-                order.cap_p, order.cap_q, order.s,
+                order.p,
+                order.d,
+                order.q,
+                order.cap_p,
+                order.cap_q,
+                order.s,
                 score
             );
         } else {
@@ -136,7 +140,14 @@ fn main() {
     println!("Models evaluated: {}", auto_arima.model_scores().len());
     println!("\nTop 3 models by AIC:");
     for (i, (order, aic)) in auto_arima.model_scores().iter().take(3).enumerate() {
-        println!("  {}. ARIMA({}, {}, {}): AIC = {:.2}", i + 1, order.p, order.d, order.q, aic);
+        println!(
+            "  {}. ARIMA({}, {}, {}): AIC = {:.2}",
+            i + 1,
+            order.p,
+            order.d,
+            order.q,
+            aic
+        );
     }
 
     // 6. Differencing utilities

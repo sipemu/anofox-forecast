@@ -299,7 +299,11 @@ impl Forecaster for SeasonalES {
             .collect();
 
         // Calculate residual variance (from valid residuals)
-        let valid_residuals: Vec<f64> = residuals.iter().filter(|r| r.is_finite()).copied().collect();
+        let valid_residuals: Vec<f64> = residuals
+            .iter()
+            .filter(|r| r.is_finite())
+            .copied()
+            .collect();
         if !valid_residuals.is_empty() {
             let variance =
                 valid_residuals.iter().map(|r| r * r).sum::<f64>() / valid_residuals.len() as f64;
@@ -314,7 +318,10 @@ impl Forecaster for SeasonalES {
     }
 
     fn predict(&self, horizon: usize) -> Result<Forecast> {
-        let seasonal_values = self.seasonal_values.as_ref().ok_or(ForecastError::FitRequired)?;
+        let seasonal_values = self
+            .seasonal_values
+            .as_ref()
+            .ok_or(ForecastError::FitRequired)?;
 
         if horizon == 0 {
             return Ok(Forecast::new());
@@ -392,9 +399,7 @@ mod tests {
     fn make_seasonal_series(n: usize, period: usize) -> TimeSeries {
         let timestamps = make_timestamps(n);
         let values: Vec<f64> = (0..n)
-            .map(|i| {
-                50.0 + 10.0 * (2.0 * std::f64::consts::PI * i as f64 / period as f64).sin()
-            })
+            .map(|i| 50.0 + 10.0 * (2.0 * std::f64::consts::PI * i as f64 / period as f64).sin())
             .collect();
         TimeSeries::univariate(timestamps, values).unwrap()
     }
@@ -523,7 +528,9 @@ mod tests {
         let timestamps = make_timestamps(100);
         // Trend + seasonal + noise data
         let values: Vec<f64> = (0..100)
-            .map(|i| 50.0 + 0.5 * i as f64 + 10.0 * (2.0 * std::f64::consts::PI * i as f64 / 12.0).sin())
+            .map(|i| {
+                50.0 + 0.5 * i as f64 + 10.0 * (2.0 * std::f64::consts::PI * i as f64 / 12.0).sin()
+            })
             .collect();
         let ts = TimeSeries::univariate(timestamps, values).unwrap();
 

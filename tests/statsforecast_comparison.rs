@@ -5,7 +5,7 @@
 
 use anofox_forecast::core::TimeSeries;
 use anofox_forecast::models::baseline::{Naive, RandomWalkWithDrift, SeasonalNaive};
-use anofox_forecast::models::exponential::{ETS, ETSSpec};
+use anofox_forecast::models::exponential::{ETSSpec, ETS};
 use anofox_forecast::models::intermittent::Croston;
 use anofox_forecast::models::Forecaster;
 use chrono::{TimeZone, Utc};
@@ -774,11 +774,7 @@ mod holt {
             .map(|(a, e)| (a - e).abs())
             .sum::<f64>()
             / 12.0;
-        assert!(
-            mad < 0.25,
-            "Holt seasonal MAD {} exceeds 0.25",
-            mad
-        );
+        assert!(mad < 0.25, "Holt seasonal MAD {} exceeds 0.25", mad);
         // Verify correlation is perfect (same trend direction)
         let mean_a: f64 = preds.iter().sum::<f64>() / 12.0;
         let mean_e: f64 = SEASONAL.iter().sum::<f64>() / 12.0;

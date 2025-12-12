@@ -8,18 +8,22 @@
 
 use anofox_forecast::core::TimeSeries;
 use anofox_forecast::models::arima::{AutoARIMA, AutoARIMAConfig, ARIMA, SARIMA};
-use anofox_forecast::models::baseline::{Naive, RandomWalkWithDrift, SeasonalNaive, HistoricAverage, WindowAverage};
-use anofox_forecast::models::exponential::{
-    AutoETS, AutoETSConfig, HoltLinearTrend, HoltWinters, SeasonalType, SimpleExponentialSmoothing,
-    SeasonalES, ETS, ETSSpec,
-};
-use anofox_forecast::models::intermittent::{Croston, TSB, ADIDA, IMAPA};
 use anofox_forecast::models::baseline::SeasonalWindowAverage;
-use anofox_forecast::models::theta::{Theta, OptimizedTheta, DynamicTheta, DynamicOptimizedTheta, AutoTheta};
-use anofox_forecast::models::mstl_forecaster::{MSTLForecaster, TrendForecastMethod};
-use anofox_forecast::models::mfles::MFLES;
-use anofox_forecast::models::tbats::{TBATS, AutoTBATS};
+use anofox_forecast::models::baseline::{
+    HistoricAverage, Naive, RandomWalkWithDrift, SeasonalNaive, WindowAverage,
+};
+use anofox_forecast::models::exponential::{
+    AutoETS, AutoETSConfig, ETSSpec, HoltLinearTrend, HoltWinters, SeasonalES, SeasonalType,
+    SimpleExponentialSmoothing, ETS,
+};
 use anofox_forecast::models::garch::GARCH;
+use anofox_forecast::models::intermittent::{Croston, ADIDA, IMAPA, TSB};
+use anofox_forecast::models::mfles::MFLES;
+use anofox_forecast::models::mstl_forecaster::{MSTLForecaster, TrendForecastMethod};
+use anofox_forecast::models::tbats::{AutoTBATS, TBATS};
+use anofox_forecast::models::theta::{
+    AutoTheta, DynamicOptimizedTheta, DynamicTheta, OptimizedTheta, Theta,
+};
 use anofox_forecast::models::Forecaster;
 use chrono::{NaiveDateTime, TimeZone, Utc};
 use std::collections::HashMap;
@@ -316,7 +320,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // 8b. SARIMA(1,1,1)(1,1,1)[12] - explicit seasonal ARIMA
         {
             let mut model = SARIMA::new(1, 1, 1, 1, 1, 1, SEASONAL_PERIOD);
-            if let Some(result) = run_model(&mut model, &ts, "SARIMA_1_1_1_1_1_1_12", series_type, true) {
+            if let Some(result) =
+                run_model(&mut model, &ts, "SARIMA_1_1_1_1_1_1_12", series_type, true)
+            {
                 all_results.push(result);
                 println!("  ✓ SARIMA(1,1,1)(1,1,1)[12]");
             }
@@ -381,7 +387,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // 15. SeasonalWindowAverage - NO native intervals in statsforecast
         {
             let mut model = SeasonalWindowAverage::new(SEASONAL_PERIOD, 2);
-            if let Some(result) = run_model(&mut model, &ts, "SeasonalWindowAverage", series_type, false) {
+            if let Some(result) =
+                run_model(&mut model, &ts, "SeasonalWindowAverage", series_type, false)
+            {
                 all_results.push(result);
                 println!("  ✓ SeasonalWindowAverage (point only)");
             }
@@ -417,7 +425,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // 18b. DynamicOptimizedTheta - Dynamic with optimized parameters (with seasonal)
         {
             let mut model = DynamicOptimizedTheta::seasonal_optimized(SEASONAL_PERIOD);
-            if let Some(result) = run_model(&mut model, &ts, "DynamicOptimizedTheta", series_type, true) {
+            if let Some(result) =
+                run_model(&mut model, &ts, "DynamicOptimizedTheta", series_type, true)
+            {
                 all_results.push(result);
                 println!("  ✓ DynamicOptimizedTheta");
             }
@@ -500,7 +510,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // 26. HistoricAverage - Mean of all historical values
         {
             let mut model = HistoricAverage::new();
-            if let Some(result) = run_model(&mut model, &ts, "HistoricAverage", series_type, false) {
+            if let Some(result) = run_model(&mut model, &ts, "HistoricAverage", series_type, false)
+            {
                 all_results.push(result);
                 println!("  ✓ HistoricAverage (point only)");
             }
@@ -508,7 +519,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // 27. WindowAverage - Mean of last N observations
         {
-            let mut model = WindowAverage::new(12);  // Same as statsforecast default window_size=12
+            let mut model = WindowAverage::new(12); // Same as statsforecast default window_size=12
             if let Some(result) = run_model(&mut model, &ts, "WindowAverage", series_type, false) {
                 all_results.push(result);
                 println!("  ✓ WindowAverage (point only)");

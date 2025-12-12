@@ -1,6 +1,6 @@
 use anofox_forecast::core::TimeSeries;
 use anofox_forecast::models::exponential::{
-    AutoETS, AutoETSConfig, ETSSpec, ErrorType, ETSSeasonalType, TrendType, ETS
+    AutoETS, AutoETSConfig, ETSSeasonalType, ETSSpec, ErrorType, TrendType, ETS,
 };
 use anofox_forecast::models::Forecaster;
 use chrono::{Duration, TimeZone, Utc};
@@ -14,7 +14,9 @@ fn main() {
 
     let mut values = Vec::new();
     for (i, line) in reader.lines().enumerate() {
-        if i == 0 { continue; } // Skip header
+        if i == 0 {
+            continue;
+        } // Skip header
         let line = line.expect("Failed to read line");
         let parts: Vec<&str> = line.split(',').collect();
         if parts.len() >= 2 {
@@ -45,7 +47,15 @@ fn main() {
     let models_to_test = vec![
         ("A,N,N (SES)", ETSSpec::ann(), 1),
         ("A,A,N (Holt)", ETSSpec::aan(), 1),
-        ("A,N,A (Seasonal)", ETSSpec::new(ErrorType::Additive, TrendType::None, ETSSeasonalType::Additive), 12),
+        (
+            "A,N,A (Seasonal)",
+            ETSSpec::new(
+                ErrorType::Additive,
+                TrendType::None,
+                ETSSeasonalType::Additive,
+            ),
+            12,
+        ),
         ("A,A,A (HW Add)", ETSSpec::aaa(), 12),
     ];
 
@@ -57,8 +67,10 @@ fn main() {
             let bic = model.bic().unwrap_or(f64::MAX);
             let alpha = model.alpha().unwrap_or(0.0);
 
-            println!("{:15} AIC={:8.2}, AICc={:8.2}, BIC={:8.2}, alpha={:.6}",
-                name, aic, aicc, bic, alpha);
+            println!(
+                "{:15} AIC={:8.2}, AICc={:8.2}, BIC={:8.2}, alpha={:.6}",
+                name, aic, aicc, bic, alpha
+            );
         } else {
             println!("{:15} FAILED TO FIT", name);
         }
@@ -79,7 +91,7 @@ fn main() {
         let scores = auto_model.model_scores();
         println!("\nTop 5 models by AICc:");
         for (i, (spec, score)) in scores.iter().take(5).enumerate() {
-            println!("  {}. {} - AICc={:.4}", i+1, spec.short_name(), score);
+            println!("  {}. {} - AICc={:.4}", i + 1, spec.short_name(), score);
         }
 
         // Get forecasts
@@ -87,7 +99,7 @@ fn main() {
         let forecasts = forecast.primary();
         println!("\nForecasts:");
         for (i, f) in forecasts.iter().enumerate() {
-            println!("  Step {}: {:.4}", i+1, f);
+            println!("  Step {}: {:.4}", i + 1, f);
         }
 
         // Check if constant

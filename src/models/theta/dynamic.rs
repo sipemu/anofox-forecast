@@ -461,8 +461,9 @@ impl DynamicTheta {
         // mu = level + (1 - 1/theta) * (An * (1-alpha)^i + Bn * (1 - (1-alpha)^(i+1)) / alpha)
         let beta = 1.0 - self.alpha;
         let mu = new_level
-            + (1.0 - 1.0 / self.theta) * (new_an * beta.powi(i as i32 + 1)
-                + new_bn * (1.0 - beta.powi(i as i32 + 2)) / self.alpha);
+            + (1.0 - 1.0 / self.theta)
+                * (new_an * beta.powi(i as i32 + 1)
+                    + new_bn * (1.0 - beta.powi(i as i32 + 2)) / self.alpha);
 
         (new_level, new_meany, new_an, new_bn, mu)
     }
@@ -532,12 +533,7 @@ impl DynamicTheta {
             Self::calculate_mse(values, alpha, theta)
         };
 
-        let starts = [
-            [0.1, 2.0],
-            [0.3, 2.0],
-            [0.5, 2.0],
-            [0.1, 3.0],
-        ];
+        let starts = [[0.1, 2.0], [0.3, 2.0], [0.5, 2.0], [0.1, 3.0]];
 
         let mut best_params = [0.1, 2.0];
         let mut best_value = f64::MAX;
@@ -649,7 +645,8 @@ impl Forecaster for DynamicTheta {
             let beta = 1.0 - self.alpha;
             let forecast_deseas = level
                 + (1.0 - 1.0 / self.theta)
-                    * (an * beta.powi(i as i32) + bn * (1.0 - beta.powi(i as i32 + 1)) / self.alpha);
+                    * (an * beta.powi(i as i32)
+                        + bn * (1.0 - beta.powi(i as i32 + 1)) / self.alpha);
 
             // Reseasonalize fitted value
             let forecast = if full_seasonal.is_empty() {
@@ -710,7 +707,8 @@ impl Forecaster for DynamicTheta {
             let i = n + h - 1;
             let forecast = level
                 + (1.0 - 1.0 / self.theta)
-                    * (an * beta.powi(i as i32) + bn * (1.0 - beta.powi(i as i32 + 1)) / self.alpha);
+                    * (an * beta.powi(i as i32)
+                        + bn * (1.0 - beta.powi(i as i32 + 1)) / self.alpha);
             predictions.push(forecast);
         }
 
@@ -852,9 +850,7 @@ mod tests {
     #[test]
     fn dynamic_theta_confidence_intervals() {
         let timestamps = make_timestamps(50);
-        let values: Vec<f64> = (0..50)
-            .map(|i| 10.0 + i as f64 * 0.5)
-            .collect();
+        let values: Vec<f64> = (0..50).map(|i| 10.0 + i as f64 * 0.5).collect();
         let ts = TimeSeries::univariate(timestamps, values).unwrap();
 
         let mut model = DynamicTheta::new(0.1);
@@ -919,9 +915,7 @@ mod tests {
     #[test]
     fn dynamic_theta_dotm() {
         let timestamps = make_timestamps(50);
-        let values: Vec<f64> = (0..50)
-            .map(|i| 10.0 + 0.5 * i as f64)
-            .collect();
+        let values: Vec<f64> = (0..50).map(|i| 10.0 + 0.5 * i as f64).collect();
         let ts = TimeSeries::univariate(timestamps, values).unwrap();
 
         let mut model = DynamicOptimizedTheta::dotm();

@@ -5,7 +5,7 @@
 
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
-use crate::models::theta::{DynamicTheta, OptimizedTheta, Theta, DecompositionType};
+use crate::models::theta::{DecompositionType, DynamicTheta, OptimizedTheta, Theta};
 use crate::models::Forecaster;
 
 /// Type of Theta model selected by AutoTheta.
@@ -182,7 +182,10 @@ impl Forecaster for AutoTheta {
         // Try OTM (Optimized Theta Model)
         {
             let mut model = if self.seasonal_period > 0 {
-                OptimizedTheta::seasonal_with_decomposition(self.seasonal_period, self.decomposition_type)
+                OptimizedTheta::seasonal_with_decomposition(
+                    self.seasonal_period,
+                    self.decomposition_type,
+                )
             } else {
                 OptimizedTheta::new()
             };
@@ -230,8 +233,8 @@ impl Forecaster for AutoTheta {
         // Store scores for diagnostics
         let score_summary: Vec<(ThetaModelType, f64)> =
             std::iter::once((best_type, scores.first().map(|s| s.1).unwrap_or(0.0)))
-            .chain(scores.iter().map(|(t, s, _)| (*t, *s)))
-            .collect();
+                .chain(scores.iter().map(|(t, s, _)| (*t, *s)))
+                .collect();
 
         self.selected_type = Some(best_type);
         self.fitted_model = Some(best_model);
@@ -241,7 +244,10 @@ impl Forecaster for AutoTheta {
     }
 
     fn predict(&self, horizon: usize) -> Result<Forecast> {
-        let model = self.fitted_model.as_ref().ok_or(ForecastError::FitRequired)?;
+        let model = self
+            .fitted_model
+            .as_ref()
+            .ok_or(ForecastError::FitRequired)?;
 
         match model {
             FittedModel::STM(m) => m.predict(horizon),
@@ -252,7 +258,10 @@ impl Forecaster for AutoTheta {
     }
 
     fn predict_with_intervals(&self, horizon: usize, confidence: f64) -> Result<Forecast> {
-        let model = self.fitted_model.as_ref().ok_or(ForecastError::FitRequired)?;
+        let model = self
+            .fitted_model
+            .as_ref()
+            .ok_or(ForecastError::FitRequired)?;
 
         match model {
             FittedModel::STM(m) => m.predict_with_intervals(horizon, confidence),
@@ -334,9 +343,7 @@ mod tests {
     #[test]
     fn auto_theta_model_scores() {
         let timestamps = make_timestamps(50);
-        let values: Vec<f64> = (0..50)
-            .map(|i| 10.0 + 0.5 * i as f64)
-            .collect();
+        let values: Vec<f64> = (0..50).map(|i| 10.0 + 0.5 * i as f64).collect();
         let ts = TimeSeries::univariate(timestamps, values).unwrap();
 
         let mut model = AutoTheta::new();
@@ -370,9 +377,7 @@ mod tests {
     #[test]
     fn auto_theta_confidence_intervals() {
         let timestamps = make_timestamps(50);
-        let values: Vec<f64> = (0..50)
-            .map(|i| 10.0 + i as f64 * 0.5)
-            .collect();
+        let values: Vec<f64> = (0..50).map(|i| 10.0 + i as f64 * 0.5).collect();
         let ts = TimeSeries::univariate(timestamps, values).unwrap();
 
         let mut model = AutoTheta::new();

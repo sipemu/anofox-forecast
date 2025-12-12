@@ -346,8 +346,8 @@ mod tests {
         let config = PeltConfig::default().penalty(0.01);
         let result = pelt_detect(&series, &config);
 
-        // Should detect some changepoints
-        assert!(result.n_changepoints >= 0);
+        // Result should be valid (n_changepoints is usize, always >= 0)
+        let _ = result.n_changepoints;
     }
 
     #[test]

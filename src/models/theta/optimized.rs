@@ -420,13 +420,7 @@ impl OptimizedTheta {
         };
 
         // Try multiple starting points to avoid local minima
-        let starts = [
-            [0.1, 2.0],
-            [0.3, 2.0],
-            [0.5, 2.0],
-            [0.1, 3.0],
-            [0.3, 1.5],
-        ];
+        let starts = [[0.1, 2.0], [0.3, 2.0], [0.5, 2.0], [0.1, 3.0], [0.3, 1.5]];
 
         let mut best_params = [0.3, 2.0];
         let mut best_value = f64::MAX;
