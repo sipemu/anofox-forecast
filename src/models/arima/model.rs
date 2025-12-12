@@ -1049,7 +1049,7 @@ impl Forecaster for SARIMA {
             let mut current = values.to_vec();
             self.last_values.push(*current.last().unwrap_or(&0.0));
 
-            for diff_level in 1..d {
+            for _diff_level in 1..d {
                 current = difference(&current, 1);
                 if !current.is_empty() {
                     self.last_values.push(*current.last().unwrap_or(&0.0));

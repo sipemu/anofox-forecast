@@ -13,13 +13,13 @@ use anofox_forecast::models::baseline::{
     HistoricAverage, Naive, RandomWalkWithDrift, SeasonalNaive, WindowAverage,
 };
 use anofox_forecast::models::exponential::{
-    AutoETS, AutoETSConfig, ETSSpec, HoltLinearTrend, HoltWinters, SeasonalES, SeasonalType,
+    AutoETS, AutoETSConfig, ETSSpec, HoltWinters, SeasonalES, SeasonalType,
     SimpleExponentialSmoothing, ETS,
 };
 use anofox_forecast::models::garch::GARCH;
 use anofox_forecast::models::intermittent::{Croston, ADIDA, IMAPA, TSB};
 use anofox_forecast::models::mfles::MFLES;
-use anofox_forecast::models::mstl_forecaster::{MSTLForecaster, TrendForecastMethod};
+use anofox_forecast::models::mstl_forecaster::MSTLForecaster;
 use anofox_forecast::models::tbats::{AutoTBATS, TBATS};
 use anofox_forecast::models::theta::{
     AutoTheta, DynamicOptimizedTheta, DynamicTheta, OptimizedTheta, Theta,
@@ -56,6 +56,7 @@ const SERIES_TYPES: [&str; 11] = [
 ];
 
 /// Read a CSV file and return timestamps and values
+#[allow(clippy::type_complexity)]
 fn read_csv(
     path: &Path,
 ) -> Result<(Vec<chrono::DateTime<Utc>>, Vec<f64>), Box<dyn std::error::Error>> {

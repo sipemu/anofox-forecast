@@ -392,7 +392,7 @@ mod tests {
     fn nelder_mead_exponential_smoothing_alpha() {
         // Simulate finding optimal alpha for exponential smoothing
         // Given data with known optimal alpha around 0.3
-        let data = vec![10.0, 12.0, 11.0, 13.0, 14.0, 13.0, 15.0, 16.0];
+        let data = [10.0, 12.0, 11.0, 13.0, 14.0, 13.0, 15.0, 16.0];
 
         let sse = |params: &[f64]| {
             let alpha = params[0];

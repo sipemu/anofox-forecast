@@ -209,7 +209,7 @@ mod tests {
     #[test]
     fn integrate_reverses_difference() {
         let original = vec![10.0, 12.0, 15.0, 19.0, 24.0];
-        let differenced = difference(&original, 1);
+        let _differenced = difference(&original, 1);
         let forecast_diff = vec![6.0, 7.0]; // Forecasted differences
         let integrated = integrate(&forecast_diff, &original, 1);
 
@@ -221,7 +221,7 @@ mod tests {
     #[test]
     fn integrate_order_2() {
         let original = vec![1.0, 3.0, 6.0, 10.0, 15.0];
-        let differenced = difference(&original, 2);
+        let _differenced = difference(&original, 2);
         // differenced = [1, 1, 1]
 
         let forecast_diff2 = vec![1.0, 1.0]; // Continue the pattern

@@ -162,7 +162,7 @@ impl MFLES {
         }
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let mid = sorted.len() / 2;
-        if sorted.len() % 2 == 0 {
+        if sorted.len().is_multiple_of(2) {
             (sorted[mid - 1] + sorted[mid]) / 2.0
         } else {
             sorted[mid]
@@ -196,14 +196,14 @@ impl MFLES {
                     let start = p * period;
                     let end = start + period;
                     let period_median = Self::median_scalar(&values[start..end]);
-                    result.extend(std::iter::repeat(period_median).take(period));
+                    result.extend(std::iter::repeat_n(period_median, period));
                 }
 
                 // Handle remainder
                 if resid > 0 {
                     // Use median of last seasonal_period values
                     let remainder_median = Self::median_scalar(&values[n - period..]);
-                    result.extend(std::iter::repeat(remainder_median).take(resid));
+                    result.extend(std::iter::repeat_n(remainder_median, resid));
                 }
 
                 result
@@ -331,6 +331,7 @@ impl MFLES {
     }
 
     /// OLS fit: X @ (X'X)^-1 @ X' @ y (fitted values only)
+    #[allow(dead_code)]
     fn ols(x: &[Vec<f64>], y: &[f64]) -> Vec<f64> {
         Self::ols_with_coeffs(x, y).0
     }
@@ -569,6 +570,7 @@ impl MFLES {
     }
 
     /// Resize/tile a vector to target length.
+    #[allow(dead_code)]
     fn resize_vec(v: &[f64], target_len: usize) -> Vec<f64> {
         if v.is_empty() {
             return vec![0.0; target_len];
@@ -743,7 +745,7 @@ impl Forecaster for MFLES {
                         .collect::<Vec<_>>(),
                 );
 
-                if mse.map_or(true, |m| m > component_mse) {
+                if mse.is_none_or(|m| m > component_mse) {
                     mse = Some(component_mse);
                     for i in 0..n {
                         fitted[i] += seas_scaled[i];
@@ -781,7 +783,7 @@ impl Forecaster for MFLES {
                         .collect::<Vec<_>>(),
                 );
 
-                if mse.map_or(true, |m| m > component_mse) {
+                if mse.is_none_or(|m| m > component_mse) {
                     mse = Some(component_mse);
                     for i in 0..n {
                         fitted[i] += tren_scaled[i];
@@ -822,7 +824,7 @@ impl Forecaster for MFLES {
 
                 // Add round penalty to avoid overfitting
                 let round_penalty = 0.0001;
-                if mse.map_or(true, |m| m > component_mse + round_penalty * m) {
+                if mse.is_none_or(|m| m > component_mse + round_penalty * m) {
                     mse = Some(component_mse);
                     for i in 0..n {
                         fitted[i] += ses_scaled[i];

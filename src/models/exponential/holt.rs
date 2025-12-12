@@ -590,6 +590,6 @@ mod tests {
 
         assert!(model.phi().is_some());
         let phi = model.phi().unwrap();
-        assert!(phi >= 0.8 && phi <= 1.0);
+        assert!((0.8..=1.0).contains(&phi));
     }
 }

@@ -315,7 +315,6 @@ mod tests {
     fn large_standard_deviation_false() {
         // Series where most values are clustered but range is large
         // range = 100, most values around 50, so std << 0.25 * 100 = 25
-        let series = vec![0.0, 50.0, 50.0, 50.0, 50.0, 50.0, 50.0, 50.0, 50.0, 100.0];
         // std ≈ 26, which is > 0.25 * 100, so use r = 0.5
         // Actually let's use simpler data
         let series2 = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];

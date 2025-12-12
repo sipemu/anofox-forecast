@@ -257,7 +257,7 @@ impl OptimizedTheta {
         let mut trend = vec![f64::NAN; series.len()];
 
         for i in half..(series.len() - half) {
-            let sum: f64 = if period % 2 == 0 {
+            let sum: f64 = if period.is_multiple_of(2) {
                 let mut s = 0.5 * series[i - half] + 0.5 * series[i + half];
                 for &val in series.iter().take(i + half).skip(i - half + 1) {
                     s += val;
@@ -412,7 +412,7 @@ impl OptimizedTheta {
             let theta = params[1];
 
             // Bounds check
-            if alpha <= 0.01 || alpha >= 0.99 || theta < 1.0 || theta > 10.0 {
+            if alpha <= 0.01 || alpha >= 0.99 || !(1.0..=10.0).contains(&theta) {
                 return f64::MAX;
             }
 
@@ -667,7 +667,7 @@ mod tests {
         let theta = model.theta().unwrap();
 
         assert!(alpha > 0.0 && alpha < 1.0);
-        assert!(theta >= 1.0 && theta <= 10.0);
+        assert!((1.0..=10.0).contains(&theta));
 
         let forecast = model.predict(5).unwrap();
         assert_eq!(forecast.horizon(), 5);

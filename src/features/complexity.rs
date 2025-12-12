@@ -240,7 +240,7 @@ mod tests {
         let series: Vec<f64> = (0..100).map(|i| ((i * 7 + 3) % 17) as f64).collect();
         let lz = lempel_ziv_complexity(&series);
         assert!(
-            lz >= 0.0 && lz <= 2.0,
+            (0.0..=2.0).contains(&lz),
             "LZ should be reasonable, got {}",
             lz
         );

@@ -267,7 +267,7 @@ mod tests {
         let lambda = boxcox_lambda(&series);
 
         // Should find a lambda in reasonable range
-        assert!(lambda >= -2.0 && lambda <= 2.0);
+        assert!((-2.0..=2.0).contains(&lambda));
     }
 
     #[test]

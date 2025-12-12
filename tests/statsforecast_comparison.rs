@@ -23,7 +23,7 @@ fn load_validation_series(series_type: &str) -> TimeSeries {
         .join("data")
         .join(format!("{}.csv", series_type));
 
-    let file = File::open(&path).expect(&format!("Failed to open {:?}", path));
+    let file = File::open(&path).unwrap_or_else(|_| panic!("Failed to open {:?}", path));
     let reader = BufReader::new(file);
 
     let mut timestamps = Vec::new();

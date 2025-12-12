@@ -35,6 +35,7 @@ pub use super::model::DecompositionType;
 /// - Bn: Slope of dynamic linear fit
 /// - mu: Current forecast
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct DynamicTheta {
     /// Smoothing parameter.
     alpha: f64,
@@ -256,7 +257,7 @@ impl DynamicTheta {
         let mut trend = vec![f64::NAN; series.len()];
 
         for i in half..(series.len() - half) {
-            let sum: f64 = if period % 2 == 0 {
+            let sum: f64 = if period.is_multiple_of(2) {
                 let mut s = 0.5 * series[i - half] + 0.5 * series[i + half];
                 for &val in series.iter().take(i + half).skip(i - half + 1) {
                     s += val;
@@ -526,7 +527,7 @@ impl DynamicTheta {
             let alpha = params[0];
             let theta = params[1];
 
-            if alpha <= 0.01 || alpha >= 0.99 || theta < 1.0 || theta > 10.0 {
+            if alpha <= 0.01 || alpha >= 0.99 || !(1.0..=10.0).contains(&theta) {
                 return f64::MAX;
             }
 

@@ -37,7 +37,7 @@ fn main() {
     println!("Parameters:");
     println!("  theta: {:.2}", theta.theta());
     println!("  alpha (SES): {:.4}", theta.alpha().unwrap());
-    println!("  drift (trend slope): {:.4}", theta.drift().unwrap());
+    println!("  slope (trend): {:.4}", theta.slope().unwrap());
 
     let forecast = theta.predict(10).unwrap();
     println!("\nForecasts:");
@@ -110,7 +110,7 @@ fn main() {
 
     println!("Seasonal period: 12");
     println!("Optimized alpha: {:.4}", theta_seasonal.alpha().unwrap());
-    println!("Drift: {:.4}", theta_seasonal.drift().unwrap());
+    println!("Slope: {:.4}", theta_seasonal.slope().unwrap());
 
     let seasonal_forecast = theta_seasonal.predict(12).unwrap();
     println!("\nForecast (1 full season):");
@@ -202,13 +202,13 @@ The Theta method works by:
 
     println!("\nTrending data (slope=2):");
     println!("  Last value: {:.2}", trend_data.last().unwrap());
-    println!("  Drift: {:.4}", theta_trend.drift().unwrap());
+    println!("  Slope: {:.4}", theta_trend.slope().unwrap());
     let trend_fc = theta_trend.predict(5).unwrap();
     println!("  h=5 forecast: {:.4}", trend_fc.primary()[4]);
 
     println!("\nFlat data:");
     println!("  Last value: {:.2}", flat_data.last().unwrap());
-    println!("  Drift: {:.6}", theta_flat.drift().unwrap());
+    println!("  Slope: {:.6}", theta_flat.slope().unwrap());
     let flat_fc = theta_flat.predict(5).unwrap();
     println!("  h=5 forecast: {:.4}", flat_fc.primary()[4]);
 

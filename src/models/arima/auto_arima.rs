@@ -751,7 +751,7 @@ mod tests {
         model.fit(&ts).unwrap();
 
         // Should select a seasonal model
-        if let Some(order) = model.selected_full_order() {
+        if model.selected_full_order().is_some() {
             // With strong seasonality, should select seasonal components
             assert!(model.model_scores().len() > 1);
         }

@@ -408,7 +408,7 @@ mod tests {
         assert!(!level_forecasts.is_empty());
 
         // Should have multiple levels
-        assert!(level_forecasts.len() >= 1);
+        assert!(!level_forecasts.is_empty());
     }
 
     #[test]

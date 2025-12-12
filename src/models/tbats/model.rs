@@ -37,6 +37,7 @@ use crate::utils::optimization::{nelder_mead, NelderMeadConfig};
 /// let forecast = model.predict(24).unwrap();
 /// ```
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct TBATS {
     /// Seasonal periods.
     seasonal_periods: Vec<usize>,
@@ -114,7 +115,7 @@ impl TBATS {
 
     /// Maximum number of harmonics for a given period.
     fn max_harmonics(period: usize) -> usize {
-        if period % 2 == 0 {
+        if period.is_multiple_of(2) {
             period / 2
         } else {
             (period - 1) / 2
@@ -394,6 +395,7 @@ impl TBATS {
     }
 
     /// Build observation vector w (only level, trend if damped, and cosine components).
+    #[allow(dead_code)]
     fn build_w(&self) -> Vec<f64> {
         let dim = self.state_dim();
         let mut w = vec![0.0; dim];
@@ -421,6 +423,7 @@ impl TBATS {
     }
 
     /// Build g vector (smoothing gains).
+    #[allow(dead_code)]
     fn build_g(&self) -> Vec<f64> {
         let dim = self.state_dim();
         let mut g = vec![0.0; dim];
@@ -450,6 +453,7 @@ impl TBATS {
     }
 
     /// Build F matrix (state transition).
+    #[allow(dead_code)]
     fn build_f(&self) -> Vec<Vec<f64>> {
         let dim = self.state_dim();
         let mut f = vec![vec![0.0; dim]; dim];
@@ -523,7 +527,7 @@ impl TBATS {
         gamma_two: &[f64],
     ) -> (f64, Vec<f64>, Vec<f64>, Vec<f64>) {
         let n = values.len();
-        let dim = self.state_dim();
+        let _dim = self.state_dim();
         let base = if self.use_trend { 2 } else { 1 };
 
         let mut state = initial_state.to_vec();
@@ -655,7 +659,7 @@ impl TBATS {
 
             // Run filter
             let base = if use_trend { 2 } else { 1 };
-            let dim = base + fourier_k.iter().map(|&k| 2 * k).sum::<usize>();
+            let _dim = base + fourier_k.iter().map(|&k| 2 * k).sum::<usize>();
             let mut state = initial_state.clone();
             let mut sse = 0.0;
 
@@ -824,7 +828,7 @@ impl Forecaster for TBATS {
 
         // Run final filter with optimized parameters
         let phi = if self.use_trend { self.phi } else { 0.0 };
-        let (sse, final_state, fitted, residuals) = self.run_filter(
+        let (sse, final_state, fitted, _residuals) = self.run_filter(
             &transformed,
             &self.initialize_state(&transformed),
             self.alpha,
@@ -1276,7 +1280,7 @@ mod tests {
         // Lambda should be estimated
         assert!(model.lambda().is_some());
         let lambda = model.lambda().unwrap();
-        assert!(lambda >= 0.0 && lambda <= 1.0);
+        assert!((0.0..=1.0).contains(&lambda));
     }
 
     #[test]

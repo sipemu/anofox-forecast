@@ -6,6 +6,13 @@
 //! and baseline methods, along with seasonality analysis, changepoint
 //! detection, outlier detection, and clustering capabilities.
 
+// Allow some clippy warnings for cleaner code in specific cases
+#![allow(clippy::upper_case_acronyms)]
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::type_complexity)]
+#![allow(clippy::needless_range_loop)]
+#![allow(clippy::manual_memcpy)]
+
 pub mod changepoint;
 pub mod clustering;
 pub mod core;
