@@ -1,131 +1,239 @@
-# Forecast Validation Suite
+# Forecast Validation Framework
 
-This validation suite compares forecasts between the Rust `anofox-forecast` crate and the Python `statsforecast` (NIXTLA) package.
+Comparison of **anofox-forecast** (Rust) vs **NIXTLA statsforecast** (Python)
 
 ## Overview
 
-The validation generates synthetic time series with different characteristics and runs equivalent forecasting models from both implementations, comparing:
-
-- Point forecasts
-- Confidence intervals (80%, 90%, 95%)
-
-## Requirements
-
-- **Rust**: For running anofox-forecast
-- **Python 3.10+**: For running statsforecast
-- **uv**: Python package manager (recommended)
+This validation framework provides a systematic comparison between the Rust forecasting library and NIXTLA's widely-used statsforecast Python package. The goal is to ensure implementation correctness and identify any differences in forecasting behavior.
 
 ## Quick Start
 
 ```bash
-cd validation
-
-# Install Python dependencies
-uv sync
-
 # Run the complete validation pipeline
+cd validation
 uv run python run_all.py
 ```
 
-## Step-by-Step Execution
+This will:
+1. Generate synthetic time series data
+2. Run Rust forecasts via cargo
+3. Run statsforecast models
+4. Compare results and generate reports
 
-You can also run each step individually:
+## Output Files
 
-```bash
-# 1. Generate synthetic time series data
-uv run python generate_data.py
-
-# 2. Run Rust forecasts (via cargo)
-uv run python run_rust_forecasts.py
-
-# 3. Run statsforecast models
-uv run python run_statsforecast.py
-
-# 4. Compare results and generate reports
-uv run python compare_results.py
-```
-
-## Synthetic Time Series
-
-Four types of time series are generated (100 observations each):
-
-| Type | Description |
-|------|-------------|
-| `stationary` | White noise around a mean (μ=50, σ=5) |
-| `trend` | Linear trend with noise (intercept=10, slope=0.5) |
-| `seasonal` | Seasonal pattern (period=12, amplitude=10) |
-| `trend_seasonal` | Combined trend and seasonality |
-
-## Models Compared
-
-| Category | Model | Rust | statsforecast |
-|----------|-------|------|---------------|
-| Baseline | Naive | `Naive` | `Naive` |
-| Baseline | Seasonal Naive | `SeasonalNaive` | `SeasonalNaive` |
-| Baseline | Random Walk w/ Drift | `RandomWalkWithDrift` | `RandomWalkWithDrift` |
-| Smoothing | Simple Exp. Smoothing | `SimpleExponentialSmoothing` | `SimpleExponentialSmoothing` |
-| Smoothing | Holt's Linear | `HoltLinearTrend` | `Holt` |
-| Smoothing | Holt-Winters | `HoltWinters` | `HoltWinters` |
-| ARIMA | ARIMA(1,1,1) | `ARIMA::new(1,1,1)` | `ARIMA(order=(1,1,1))` |
-| ARIMA | Auto ARIMA | `AutoARIMA` | `AutoARIMA` |
-| ETS | Auto ETS | `AutoETS` | `AutoETS` |
-| Theta | Theta | `Theta` | `Theta` |
-| Intermittent | Croston | `Croston` | `CrostonClassic` |
-| Intermittent | Croston SBA | `Croston::sba()` | `CrostonSBA` |
-| Intermittent | TSB | `TSB` | `TSB` |
-
-## Output
-
-Results are saved to `output/`:
+After running validation, reports are generated in `validation/output/`:
 
 | File | Description |
 |------|-------------|
-| `report.md` | Human-readable markdown report |
+| `report.md` | Human-readable comparison report |
 | `point_forecasts.csv` | Detailed point forecast comparison |
-| `confidence_intervals.csv` | CI bounds comparison |
+| `confidence_intervals.csv` | Confidence interval comparison |
 | `summary_metrics.csv` | Summary metrics by model/series |
 
-### Metrics Computed
+---
 
-- **MAD**: Mean Absolute Difference between forecasts
-- **Max Diff**: Maximum absolute difference
-- **Correlation**: Pearson correlation between forecasts
-- **CI Width Diff**: Mean difference in confidence interval width
+## Test Series Types
 
-## Directory Structure
+### Standard Series (11 types)
+
+| Series | Description | Period | Purpose |
+|--------|-------------|--------|---------|
+| `stationary` | White noise around mean=50 | - | Baseline, no pattern |
+| `trend` | Linear trend (slope=0.5) with noise | - | Trend detection |
+| `seasonal` | Sinusoidal seasonal pattern | 12 | Seasonal detection (additive) |
+| `trend_seasonal` | Combined trend + seasonal | 12 | Multiple components |
+| `seasonal_negative` | Seasonal with negative values | 12 | Multiplicative fallback test |
+| `multiplicative_seasonal` | True multiplicative seasonality | 12 | Multiplicative handling |
+| `intermittent` | Sparse demand (~30% non-zero) | - | Intermittent demand models |
+| `high_frequency` | Daily + weekly seasonality | 24, 168 | MSTL, multiple seasonalities |
+| `structural_break` | Level shift at midpoint | - | Robustness, changepoints |
+| `long_memory` | ARFIMA-like slow decay | - | Long memory processes |
+| `noisy_seasonal` | High noise-to-signal seasonal | 12 | Model selection robustness |
+
+### Series Parameters
+
+- **Default observations**: 100 (500 for high_frequency)
+- **Random seed**: 42 (reproducible)
+- **Seasonal period**: 12 (monthly data)
+
+---
+
+## Current Validation Results (29 Models)
+
+### Status Summary
+
+| Status | Models | Percentage |
+|--------|--------|------------|
+| EXCELLENT (MAD < 0.01) | 13 | 44.8% |
+| VERY GOOD (MAD < 0.1) | 1 | 3.4% |
+| GOOD (MAD < 1.0) | 8 | 27.6% |
+| ACCEPTABLE (MAD < 2.0) | 7 | 24.1% |
+| NEEDS WORK (MAD ≥ 2.0) | 0 | 0.0% |
+
+### Perfect Match (MAD ≈ 0) - 11 Models
+
+| Model | Rust | statsforecast | MAD |
+|-------|------|---------------|-----|
+| Naive | `Naive` | `Naive` | 0.0000 |
+| SeasonalNaive | `SeasonalNaive` | `SeasonalNaive` | 0.0000 |
+| RandomWalkWithDrift | `RandomWalkWithDrift` | `RandomWalkWithDrift` | 0.0000 |
+| SES | `SES` | `SimpleExponentialSmoothing` | 0.0000 |
+| Croston | `Croston` | `CrostonClassic` | 0.0000 |
+| CrostonSBA | `Croston::sba()` | `CrostonSBA` | 0.0000 |
+| TSB | `TSB` | `TSB` | 0.0000 |
+| SeasonalWindowAverage | `SeasonalWindowAverage` | `SeasonalWindowAverage` | 0.0000 |
+| HistoricAverage | `HistoricAverage` | `HistoricAverage` | 0.0000 |
+| WindowAverage | `WindowAverage` | `WindowAverage` | 0.0000 |
+| SeasonalES | `SeasonalES` | `SeasonalExponentialSmoothing` | 0.0000 |
+
+### Excellent Agreement (MAD < 0.01) - 2 Models
+
+| Model | Rust | statsforecast | MAD |
+|-------|------|---------------|-----|
+| ADIDA | `ADIDA` | `ADIDA` | 0.0004 |
+| IMAPA | `IMAPA` | `IMAPA` | 0.0004 |
+
+### Very Good Agreement (MAD < 0.1) - 1 Model
+
+| Model | Rust | statsforecast | MAD |
+|-------|------|---------------|-----|
+| MFLES | `MFLES` | `MFLES` | 0.0296 |
+
+### Good Agreement (MAD < 1.0) - 8 Models
+
+| Model | Rust | statsforecast | MAD | Notes |
+|-------|------|---------------|-----|-------|
+| Holt | `Holt` | `Holt` | 0.1658 | Minor optimization differences |
+| GARCH | `GARCH` | `GARCH` | 0.4311 | Different optimizer convergence |
+| OptimizedTheta | `OptimizedTheta` | `OptimizedTheta` | 0.4744 | |
+| AutoTheta | `AutoTheta` | `AutoTheta` | 0.5202 | Model selection differences |
+| AutoETS | `AutoETS` | `AutoETS` | 0.5384 | Model selection differences |
+| Theta | `Theta` | `Theta` | 0.7894 | |
+| MSTLForecaster | `MSTLForecaster` | `MSTL` | 0.8173 | Decomposition differences |
+| DynamicTheta | `DynamicTheta` | `DynamicTheta` | 0.9442 | |
+
+### Acceptable Agreement (MAD < 2.0) - 7 Models
+
+| Model | Rust | statsforecast | MAD | Notes |
+|-------|------|---------------|-----|-------|
+| SARIMA | `SARIMA` | `ARIMA` | 1.0743 | Different optimization |
+| ARIMA | `ARIMA` | `ARIMA` | 1.1438 | Parameter estimation |
+| DynamicOptimizedTheta | `DynamicOptimizedTheta` | `DynamicOptimizedTheta` | 1.1494 | |
+| HoltWinters | `HoltWinters` | `HoltWinters` | 1.3949 | Seasonal init differences |
+| AutoARIMA | `AutoARIMA` | `AutoARIMA` | 1.6782 | Model selection algorithms |
+| AutoTBATS | `AutoTBATS` | `AutoTBATS` | 1.8830 | Complex seasonality handling |
+| TBATS | `TBATS` | `TBATS` | 1.9439 | Trigonometric terms |
+
+---
+
+## Model Implementation Status
+
+### Fully Implemented (29 models)
+
+**Basic Methods:**
+- Naive, SeasonalNaive, RandomWalkWithDrift
+- HistoricAverage, WindowAverage, SeasonalWindowAverage
+
+**Exponential Smoothing:**
+- SES, Holt, HoltWinters
+- ETS (30 variants), AutoETS
+- SeasonalES
+
+**ARIMA Family:**
+- ARIMA, SARIMA, AutoARIMA
+
+**Theta Methods:**
+- Theta, OptimizedTheta, DynamicTheta
+- DynamicOptimizedTheta, AutoTheta
+
+**Intermittent Demand:**
+- Croston, CrostonSBA, TSB, ADIDA, IMAPA
+
+**Advanced:**
+- MFLES (gradient boosted decomposition)
+- MSTLForecaster (multiple seasonal decomposition)
+- TBATS, AutoTBATS (trigonometric seasonality)
+- GARCH (volatility modeling)
+
+### Not Yet Implemented
+
+| Model | Priority | Notes |
+|-------|----------|-------|
+| AutoMFLES | Medium | Auto-tuned MFLES |
+| CrostonOptimized | Low | Optimized Croston |
+| ThetaPegels | Low | Pegels variation |
+
+---
+
+## Running Validation
+
+### Prerequisites
+
+```bash
+# Install Python dependencies
+cd validation
+uv sync  # or pip install -r requirements.txt
+```
+
+### Individual Steps
+
+```bash
+# Generate data only
+uv run python generate_data.py
+
+# Run Rust forecasts
+cargo run --example forecast_export --release
+
+# Run statsforecast
+uv run python run_statsforecast.py
+
+# Compare results
+uv run python compare_results.py
+```
+
+### Full Pipeline
+
+```bash
+uv run python run_all.py
+```
+
+---
+
+## Metrics Used
+
+| Metric | Description |
+|--------|-------------|
+| **MAD** | Mean Absolute Difference between forecasts |
+| **Correlation** | Pearson correlation coefficient |
+| **Max Diff** | Maximum absolute difference |
+| **CI Width Diff** | Difference in confidence interval width |
+
+### Interpretation
+
+- **MAD = 0**: Perfect match
+- **MAD < 0.01**: Excellent (essentially identical)
+- **MAD < 0.1**: Very good (minor floating point differences)
+- **MAD < 1.0**: Good (minor optimization differences)
+- **MAD < 2.0**: Acceptable (algorithm differences)
+- **MAD ≥ 2.0**: Needs investigation
+
+---
+
+## File Structure
 
 ```
 validation/
-├── pyproject.toml          # Python dependencies
-├── README.md               # This file
-├── generate_data.py        # Synthetic data generation
-├── run_statsforecast.py    # statsforecast runner
-├── run_rust_forecasts.py   # Rust example runner
-├── compare_results.py      # Comparison and reporting
-├── run_all.py              # Main orchestration script
-├── data/                   # Generated synthetic data
+├── README.md              # This documentation
+├── generate_data.py       # Synthetic data generation
+├── run_statsforecast.py   # statsforecast model runner
+├── run_rust_forecasts.py  # Rust model runner (via cargo)
+├── compare_results.py     # Result comparison and reporting
+├── run_all.py             # Complete pipeline orchestration
+├── pyproject.toml         # Python dependencies
+├── data/                  # Generated CSV data files
 ├── results/
-│   ├── rust/               # Rust forecast results
-│   └── statsforecast/      # statsforecast results
-└── output/                 # Final comparison reports
+│   ├── rust/              # Rust forecast results
+│   └── statsforecast/     # statsforecast results
+└── output/                # Comparison reports
 ```
-
-## Notes
-
-- Differences between implementations are expected and documented
-- This validation does NOT fix any differences - it only reports them
-- Random seed is fixed (42) for reproducibility
-- Some models may fail on certain series types (e.g., intermittent models on continuous data)
-
-## Interpreting Results
-
-### Good Agreement
-- Correlation close to 1.0
-- Small MAD relative to forecast magnitude
-- Similar CI widths
-
-### Expected Differences
-- Parameter optimization may converge to different values
-- Different numerical precision
-- Different default parameters
-- Confidence interval calculation methods may vary
