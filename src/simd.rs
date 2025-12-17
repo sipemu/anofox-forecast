@@ -95,7 +95,7 @@ pub fn sum_of_squares(data: &[f64]) -> f64 {
 
 /// Dot product of two vectors.
 ///
-/// Returns the sum of element-wise products: Σ(a[i] * b[i]).
+/// Returns the sum of element-wise products: Σ(a\[i\] * b\[i\]).
 ///
 /// # Panics
 ///
@@ -235,7 +235,7 @@ pub fn min(data: &[f64]) -> f64 {
 // Distance Operations
 // ============================================================================
 
-/// Squared Euclidean distance: Σ(a[i] - b[i])².
+/// Squared Euclidean distance: Σ(a\[i\] - b\[i\])².
 ///
 /// Use `.sqrt()` on the result for actual Euclidean distance.
 ///
@@ -265,7 +265,7 @@ pub fn squared_distance(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum()
 }
 
-/// Manhattan (L1) distance: Σ|a[i] - b[i]|.
+/// Manhattan (L1) distance: Σ|a\[i\] - b\[i\]|.
 ///
 /// Note: This uses scalar f64 implementation because the overhead of converting
 /// two vectors from f64→f32 exceeds the SIMD performance gains.
@@ -296,7 +296,7 @@ pub fn l1_distance(a: &[f64], b: &[f64]) -> f64 {
 // Element-wise Operations
 // ============================================================================
 
-/// Element-wise subtraction: a[i] - b[i].
+/// Element-wise subtraction: a\[i\] - b\[i\].
 ///
 /// # Panics
 ///
@@ -326,7 +326,7 @@ pub fn sub(a: &[f64], b: &[f64]) -> Vec<f64> {
         .unwrap_or_else(|_| a.iter().zip(b.iter()).map(|(x, y)| x - y).collect())
 }
 
-/// Element-wise multiplication: a[i] * b[i].
+/// Element-wise multiplication: a\[i\] * b\[i\].
 ///
 /// # Panics
 ///
@@ -356,7 +356,7 @@ pub fn mul(a: &[f64], b: &[f64]) -> Vec<f64> {
         .unwrap_or_else(|_| a.iter().zip(b.iter()).map(|(x, y)| x * y).collect())
 }
 
-/// Element-wise division: a[i] / b[i].
+/// Element-wise division: a\[i\] / b\[i\].
 ///
 /// # Panics
 ///
@@ -386,7 +386,7 @@ pub fn div(a: &[f64], b: &[f64]) -> Vec<f64> {
         .unwrap_or_else(|_| a.iter().zip(b.iter()).map(|(x, y)| x / y).collect())
 }
 
-/// Element-wise addition: a[i] + b[i].
+/// Element-wise addition: a\[i\] + b\[i\].
 ///
 /// # Panics
 ///
@@ -416,7 +416,7 @@ pub fn add(a: &[f64], b: &[f64]) -> Vec<f64> {
         .unwrap_or_else(|_| a.iter().zip(b.iter()).map(|(x, y)| x + y).collect())
 }
 
-/// Scale all elements by a constant: data[i] * scalar.
+/// Scale all elements by a constant: data\[i\] * scalar.
 ///
 /// # Example
 ///
