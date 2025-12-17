@@ -49,6 +49,14 @@ This document provides a comprehensive reference for all public APIs in the `ano
 - [Decomposition](#decomposition)
   - [STL](#stl)
   - [MSTL](#mstl)
+- [Periodicity Detection](#periodicity-detection)
+  - [PeriodicityDetector Trait](#periodicitydetector-trait)
+  - [ACFPeriodicityDetector](#acfperiodicitydetector)
+  - [FFTPeriodicityDetector](#fftperiodicitydetector)
+  - [Autoperiod](#autoperiod)
+  - [CFDAutoperiod](#cfdautoperiod)
+  - [SAZED](#sazed)
+  - [FFT Utilities](#fft-utilities)
 - [Feature Extraction](#feature-extraction)
 - [Transformations](#transformations)
 - [Validation](#validation)
@@ -1005,6 +1013,309 @@ pub struct MSTLResult {
     pub seasonal_components: Vec<Vec<f64>>,
     pub trend: Vec<f64>,
     pub remainder: Vec<f64>,
+}
+```
+
+[Back to top](#api-reference)
+
+---
+
+## Periodicity Detection
+
+Automatic detection of periodic patterns in time series data using multiple algorithms.
+
+### PeriodicityDetector Trait
+
+Common interface for all periodicity detection algorithms.
+
+```rust
+pub trait PeriodicityDetector {
+    fn detect(&self, series: &[f64]) -> PeriodicityResult;
+    fn name(&self) -> &'static str;
+}
+```
+
+| Method | Parameters | Returns | Description |
+|--------|------------|---------|-------------|
+| `detect` | `series: &[f64]` | `PeriodicityResult` | Detect periods in the series |
+| `name` | - | `&'static str` | Algorithm name |
+
+### Result Types
+
+```rust
+pub struct PeriodicityResult {
+    pub primary_period: Option<usize>,
+    pub periods: Vec<DetectedPeriod>,
+    pub method: String,
+}
+
+pub struct DetectedPeriod {
+    pub period: usize,
+    pub score: f64,
+    pub source: PeriodSource,
+}
+
+pub enum PeriodSource {
+    Frequency,  // FFT/periodogram
+    Time,       // ACF
+    Hybrid,     // Validated by both domains
+    Ensemble,   // Consensus from multiple methods
+}
+```
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `confidence()` | `f64` | Confidence score (0.0-1.0) for primary period |
+
+### Convenience Functions
+
+```rust
+/// Detect period using Autoperiod (recommended default)
+pub fn detect_period(series: &[f64]) -> PeriodicityResult;
+
+/// Detect period with custom range
+pub fn detect_period_range(series: &[f64], min_period: usize, max_period: usize) -> PeriodicityResult;
+
+/// Detect period using SAZED ensemble
+pub fn detect_period_ensemble(series: &[f64]) -> PeriodicityResult;
+```
+
+[Back to top](#api-reference)
+
+---
+
+### ACFPeriodicityDetector
+
+Time-domain detector using autocorrelation function peaks.
+
+```rust
+pub struct ACFPeriodicityDetector {
+    min_period: usize,
+    max_period: usize,
+    correlation_threshold: f64,
+}
+
+impl ACFPeriodicityDetector {
+    pub fn new(min_period: usize, max_period: usize, correlation_threshold: f64) -> Self;
+}
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `min_period` | `usize` | Minimum period to consider |
+| `max_period` | `usize` | Maximum period to consider |
+| `correlation_threshold` | `f64` | Minimum ACF value for peaks (e.g., 0.3) |
+
+**Example:**
+```rust
+let detector = ACFPeriodicityDetector::new(2, 365, 0.3);
+let result = detector.detect(&values);
+```
+
+[Back to top](#api-reference)
+
+---
+
+### FFTPeriodicityDetector
+
+Frequency-domain detector using periodogram peaks.
+
+```rust
+pub struct FFTPeriodicityDetector {
+    min_period: usize,
+    max_period: usize,
+    power_threshold: f64,
+}
+
+impl FFTPeriodicityDetector {
+    pub fn new(min_period: usize, max_period: usize, power_threshold: f64) -> Self;
+}
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `min_period` | `usize` | Minimum period to consider |
+| `max_period` | `usize` | Maximum period to consider |
+| `power_threshold` | `f64` | Multiplier for noise floor threshold (e.g., 3.0) |
+
+**Example:**
+```rust
+let detector = FFTPeriodicityDetector::new(2, 365, 3.0);
+let result = detector.detect(&values);
+```
+
+[Back to top](#api-reference)
+
+---
+
+### Autoperiod
+
+Hybrid FFT+ACF detector (Vlachos et al. 2005). Recommended default method.
+
+```rust
+pub struct Autoperiod {
+    min_period: usize,
+    max_period: usize,
+    power_threshold: f64,
+    acf_threshold: f64,
+}
+
+impl Autoperiod {
+    pub fn new(min_period: usize, max_period: usize,
+               power_threshold: f64, acf_threshold: f64) -> Self;
+}
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `min_period` | `usize` | Minimum period to consider |
+| `max_period` | `usize` | Maximum period to consider |
+| `power_threshold` | `f64` | FFT power threshold (e.g., 3.0) |
+| `acf_threshold` | `f64` | ACF validation threshold (e.g., 0.2) |
+
+**Algorithm:**
+1. **GetPeriodHints**: Find peaks in periodogram above threshold
+2. **ACFFiltering**: Validate hints lie on ACF local maxima
+3. **Gradient ascent**: Refine period using ACF slope
+
+**Example:**
+```rust
+let detector = Autoperiod::new(2, 365, 3.0, 0.2);
+let result = detector.detect(&values);
+```
+
+[Back to top](#api-reference)
+
+---
+
+### CFDAutoperiod
+
+Cluster-Filter-Detect Autoperiod (Puech et al. 2020). Noise-resistant with detrending and clustering.
+
+```rust
+pub struct CFDAutoperiod {
+    min_period: usize,
+    max_period: usize,
+    cluster_tolerance: f64,
+}
+
+impl CFDAutoperiod {
+    pub fn new(min_period: usize, max_period: usize, cluster_tolerance: f64) -> Self;
+}
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `min_period` | `usize` | Minimum period to consider |
+| `max_period` | `usize` | Maximum period to consider |
+| `cluster_tolerance` | `f64` | Clustering tolerance for period grouping (e.g., 2.0) |
+
+**Algorithm:**
+1. **Detrend**: Remove trend using differencing
+2. **FFT hints**: Get period candidates from periodogram
+3. **Cluster**: Group similar periods using density-based clustering
+4. **ACF validation**: Filter with autocorrelation
+
+**Example:**
+```rust
+let detector = CFDAutoperiod::new(2, 365, 2.0);
+let result = detector.detect(&values);
+```
+
+[Back to top](#api-reference)
+
+---
+
+### SAZED
+
+Spectral + Autocorrelation + Zero-crossing + Ensemble + Density detector (Toller et al. 2019). Parameter-free ensemble method.
+
+```rust
+pub struct SAZED {
+    min_period: usize,
+    max_period: usize,
+    vote_tolerance: usize,
+}
+
+impl SAZED {
+    pub fn new(min_period: usize, max_period: usize) -> Self;
+    pub fn with_tolerance(min_period: usize, max_period: usize, tolerance: usize) -> Self;
+}
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `min_period` | `usize` | Minimum period to consider |
+| `max_period` | `usize` | Maximum period to consider |
+| `vote_tolerance` | `usize` | Period tolerance for voting (default: 1) |
+
+**Components:**
+1. **Spectral**: FFT-based period from periodogram
+2. **ACF peaks**: Strongest autocorrelation peak
+3. **ACF average**: Mean of all significant ACF peaks
+4. **Zero-distance**: Period from ACF zero-crossing patterns
+5. **Voting**: Consensus from all methods
+
+**Example:**
+```rust
+let detector = SAZED::new(2, 365);
+let result = detector.detect(&values);
+
+// Results include periods from multiple sources
+for p in &result.periods {
+    println!("{}: period={}, score={:.3}", p.source, p.period, p.score);
+}
+```
+
+[Back to top](#api-reference)
+
+---
+
+### FFT Utilities
+
+Low-level FFT functions for custom periodicity analysis.
+
+```rust
+/// Compute FFT of real-valued signal (returns positive frequencies only)
+pub fn fft_real(signal: &[f64]) -> Vec<Complex64>;
+
+/// Compute periodogram (power spectral density)
+/// Returns (period, power) pairs sorted by period
+pub fn periodogram(signal: &[f64]) -> Vec<(usize, f64)>;
+
+/// Find significant peaks in periodogram
+pub fn periodogram_peaks(
+    signal: &[f64],
+    threshold: f64,      // Multiplier for noise floor
+    min_period: usize,
+    max_period: usize,
+) -> Vec<(usize, f64)>;
+
+/// Welch's periodogram for reduced variance
+pub fn welch_periodogram(
+    signal: &[f64],
+    window_size: usize,  // Segment size (power of 2 recommended)
+    overlap: f64,        // Overlap ratio (0.0-0.9, typically 0.5)
+) -> Vec<(usize, f64)>;
+
+/// Convert period to frequency index
+pub fn period_to_frequency_index(period: usize, n: usize) -> usize;
+
+/// Convert frequency index to period
+pub fn frequency_index_to_period(freq_index: usize, n: usize) -> usize;
+```
+
+**Example:**
+```rust
+use anofox_forecast::detection::fft::{periodogram, periodogram_peaks};
+
+// Get full periodogram
+let psd = periodogram(&values);
+
+// Find significant peaks (3x above noise floor)
+let peaks = periodogram_peaks(&values, 3.0, 2, 100);
+for (period, power) in peaks {
+    println!("Period: {}, Power: {:.4}", period, power);
 }
 ```
 

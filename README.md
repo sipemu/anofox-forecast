@@ -33,6 +33,13 @@ Provides 35+ forecasting models, 76+ statistical features, seasonality decomposi
   - STL (Seasonal-Trend decomposition using LOESS)
   - MSTL (Multiple Seasonal-Trend decomposition) for complex seasonality
 
+- **Periodicity Detection**
+  - ACF-based period detection
+  - FFT-based spectral analysis
+  - Autoperiod (hybrid FFT+ACF, Vlachos et al. 2005)
+  - CFD-Autoperiod (noise-resistant with clustering)
+  - SAZED ensemble (parameter-free, combines multiple methods)
+
 - **Changepoint Detection**
   - PELT algorithm with O(n) average complexity
   - Multiple cost functions: L1, L2, Normal, Poisson
@@ -160,6 +167,29 @@ let changepoints = pelt.detect(&ts)?;
 println!("Changepoints at indices: {:?}", changepoints);
 ```
 
+### Periodicity Detection
+
+```rust
+use anofox_forecast::detection::{
+    detect_period, detect_period_ensemble, Autoperiod, PeriodicityDetector,
+};
+
+// Quick detection with default settings
+let result = detect_period(&values);
+println!("Detected period: {:?}", result.primary_period);
+
+// Ensemble method (combines ACF, FFT, and other detectors)
+let result = detect_period_ensemble(&values);
+println!("Period: {:?}, Confidence: {:.2}", result.primary_period, result.confidence());
+
+// Custom detector with specific parameters
+let detector = Autoperiod::new(2, 365, 3.0, 0.2);
+let result = detector.detect(&values);
+for p in &result.periods {
+    println!("Period: {}, Score: {:.4}, Source: {:?}", p.period, p.score, p.source);
+}
+```
+
 ## API Reference
 
 ### Core Types
@@ -205,6 +235,7 @@ println!("Changepoints at indices: {:?}", changepoints);
 - [statrs](https://crates.io/crates/statrs) - Statistical distributions and functions
 - [thiserror](https://crates.io/crates/thiserror) - Error handling
 - [rand](https://crates.io/crates/rand) - Random number generation
+- [rustfft](https://crates.io/crates/rustfft) - Fast Fourier Transform for periodicity detection
 
 ## License
 

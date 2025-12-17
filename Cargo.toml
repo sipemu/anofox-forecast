@@ -11,13 +11,23 @@ categories = ["science", "mathematics"]
 
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
-faer = { version = "0.23", default-features = false, features = ["std", "linalg"] }
+trueno = "0.8"
 statrs = "0.18"
 thiserror = "2.0"
 rand = "0.8"
+rustfft = "6.2"
 
 [dev-dependencies]
 approx = "0.5"
+criterion = "0.5"
+
+[[bench]]
+name = "simd_benchmark"
+harness = false
+
+[[bench]]
+name = "periodicity"
+harness = false
 
 # Examples
 [[example]]
@@ -119,3 +129,7 @@ path = "examples/validation/forecast_export.rs"
 [[example]]
 name = "feature_export"
 path = "examples/validation/feature_export.rs"
+
+[[example]]
+name = "detect_period"
+path = "examples/analysis/detect_period.rs"
