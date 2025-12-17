@@ -87,6 +87,10 @@ name = "changepoint"
 path = "examples/analysis/changepoint.rs"
 
 [[example]]
+name = "changepoint_types"
+path = "examples/analysis/changepoint_types.rs"
+
+[[example]]
 name = "outlier_detection"
 path = "examples/analysis/outlier_detection.rs"
 

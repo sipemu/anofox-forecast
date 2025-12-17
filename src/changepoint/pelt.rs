@@ -152,6 +152,14 @@ pub fn pelt_detect(series: &[f64], config: &PeltConfig) -> PeltResult {
         }))
         .collect();
 
+    // Precompute cum_ixy for LinearTrend: cumulative sum of i * x[i]
+    let cum_ixy: Vec<f64> = std::iter::once(0.0)
+        .chain(series.iter().enumerate().scan(0.0, |acc, (i, &x)| {
+            *acc += i as f64 * x;
+            Some(*acc)
+        }))
+        .collect();
+
     for t in config.min_segment_length..=n {
         let mut best_cost = f64::INFINITY;
         let mut best_cp = 0;
@@ -159,8 +167,15 @@ pub fn pelt_detect(series: &[f64], config: &PeltConfig) -> PeltResult {
         // Check all candidates
         for &s in &candidates {
             if t - s >= config.min_segment_length {
-                let seg_cost =
-                    compute_segment_cost_fast(s, t, &cum_sum, &cum_sum_sq, config.cost_fn);
+                let seg_cost = compute_segment_cost_fast(
+                    s,
+                    t,
+                    &cum_sum,
+                    &cum_sum_sq,
+                    &cum_ixy,
+                    config.cost_fn,
+                    series,
+                );
                 let total = f[s] + seg_cost + config.penalty;
 
                 if total < best_cost {
@@ -178,7 +193,15 @@ pub fn pelt_detect(series: &[f64], config: &PeltConfig) -> PeltResult {
             if t - s < config.min_segment_length {
                 return true;
             }
-            let seg_cost = compute_segment_cost_fast(s, t, &cum_sum, &cum_sum_sq, config.cost_fn);
+            let seg_cost = compute_segment_cost_fast(
+                s,
+                t,
+                &cum_sum,
+                &cum_sum_sq,
+                &cum_ixy,
+                config.cost_fn,
+                series,
+            );
             f[s] + seg_cost <= f[t]
         });
 
@@ -221,42 +244,87 @@ pub fn pelt_detect(series: &[f64], config: &PeltConfig) -> PeltResult {
 }
 
 /// Fast segment cost computation using precomputed cumulative sums.
+///
+/// For L2, Normal, MeanVariance, and LinearTrend cost functions, uses O(1) computation.
+/// For other cost functions, falls back to direct computation.
 fn compute_segment_cost_fast(
     start: usize,
     end: usize,
     cum_sum: &[f64],
     cum_sum_sq: &[f64],
+    cum_ixy: &[f64],
     cost_fn: CostFunction,
+    series: &[f64],
 ) -> f64 {
     let n = end - start;
     if n == 0 {
         return 0.0;
     }
+    let n_f64 = n as f64;
 
     match cost_fn {
-        CostFunction::L2 | CostFunction::Normal => {
+        CostFunction::L2 | CostFunction::Normal | CostFunction::MeanVariance => {
             // L2 cost = sum((x - mean)^2) = sum(x^2) - n*mean^2
-            let sum = cum_sum[end] - cum_sum[start];
-            let sum_sq = cum_sum_sq[end] - cum_sum_sq[start];
-            let mean = sum / n as f64;
-            let l2 = sum_sq - n as f64 * mean * mean;
+            let sum_y = cum_sum[end] - cum_sum[start];
+            let sum_y2 = cum_sum_sq[end] - cum_sum_sq[start];
+            let mean = sum_y / n_f64;
+            let l2 = sum_y2 - n_f64 * mean * mean;
 
-            if cost_fn == CostFunction::Normal && n >= 2 {
-                let var = l2 / n as f64;
-                if var > 1e-10 {
-                    n as f64 * var.ln()
-                } else {
-                    0.0
+            match cost_fn {
+                CostFunction::Normal if n >= 2 => {
+                    let var = l2 / n_f64;
+                    if var > 1e-10 {
+                        n_f64 * var.ln()
+                    } else {
+                        0.0
+                    }
                 }
-            } else {
-                l2.max(0.0)
+                CostFunction::MeanVariance if n >= 2 => {
+                    let var = l2 / n_f64;
+                    if var > 1e-10 {
+                        n_f64 * (1.0 + var.ln())
+                    } else {
+                        n_f64
+                    }
+                }
+                _ => l2.max(0.0),
             }
         }
-        _ => {
-            // For L1 and Poisson, fall back to direct computation
-            // (would need different precomputation for efficiency)
-            0.0 // Placeholder - should not reach here in typical usage
+        CostFunction::LinearTrend => {
+            // Fast linear regression using cumulative sums
+            // For segment [start, end), we fit y = a + bx where x = 0, 1, ..., n-1
+            if n < 2 {
+                return 0.0;
+            }
+
+            // sum_x = 0 + 1 + ... + (n-1) = n*(n-1)/2
+            let sum_x = n_f64 * (n_f64 - 1.0) / 2.0;
+            // sum_x2 = 0^2 + 1^2 + ... + (n-1)^2 = n*(n-1)*(2n-1)/6
+            let sum_x2 = n_f64 * (n_f64 - 1.0) * (2.0 * n_f64 - 1.0) / 6.0;
+
+            let sum_y = cum_sum[end] - cum_sum[start];
+            let sum_y2 = cum_sum_sq[end] - cum_sum_sq[start];
+
+            // sum_xy where x_i = i (relative to segment start)
+            // = sum((j - start) * series[j]) for j in [start, end)
+            // = sum(j * series[j]) - start * sum(series[j])
+            let sum_xy =
+                (cum_ixy[end] - cum_ixy[start]) - (start as f64) * (cum_sum[end] - cum_sum[start]);
+
+            // Compute SS_xx, SS_yy, SS_xy
+            let ss_xx = sum_x2 - sum_x * sum_x / n_f64;
+            let ss_yy = sum_y2 - sum_y * sum_y / n_f64;
+            let ss_xy = sum_xy - sum_x * sum_y / n_f64;
+
+            // RSS = SS_yy - SS_xy^2 / SS_xx (if SS_xx > 0)
+            if ss_xx.abs() < 1e-10 {
+                ss_yy.max(0.0)
+            } else {
+                (ss_yy - ss_xy * ss_xy / ss_xx).max(0.0)
+            }
         }
+        // For L1, Poisson, Cusum, Periodicity: fall back to direct computation
+        _ => segment_cost(&series[start..end], cost_fn),
     }
 }
 
@@ -417,5 +485,171 @@ mod tests {
         for cp in &result.changepoints {
             assert!(*cp >= 5);
         }
+    }
+
+    // ==================== Integration tests for new cost functions ====================
+
+    #[test]
+    fn pelt_linear_trend_detects_slope_change() {
+        // First segment: slope +1 (y = x)
+        // Second segment: slope -1 (y = 100 - x)
+        let mut series: Vec<f64> = (0..50).map(|i| i as f64).collect();
+        series.extend((0..50).map(|i| 100.0 - i as f64));
+
+        let config = PeltConfig::default()
+            .cost_function(CostFunction::LinearTrend)
+            .penalty(100.0);
+        let result = pelt_detect(&series, &config);
+
+        // Should detect the slope change around index 50
+        assert!(result.n_changepoints >= 1);
+        let cp = result.changepoints[0];
+        assert!(
+            cp >= 45 && cp <= 55,
+            "Expected changepoint near 50, got {}",
+            cp
+        );
+    }
+
+    #[test]
+    fn pelt_linear_trend_no_change_for_constant_slope() {
+        // Constant slope across entire series
+        let series: Vec<f64> = (0..100).map(|i| 2.0 * i as f64 + 5.0).collect();
+
+        let config = PeltConfig::default()
+            .cost_function(CostFunction::LinearTrend)
+            .penalty(50.0);
+        let result = pelt_detect(&series, &config);
+
+        // No changepoints in a perfectly linear series
+        assert_eq!(result.n_changepoints, 0);
+    }
+
+    #[test]
+    fn pelt_mean_variance_detects_variance_shift() {
+        use rand::{rngs::StdRng, Rng, SeedableRng};
+        let mut rng = StdRng::seed_from_u64(42);
+
+        // First segment: low variance (std = 1)
+        // Second segment: high variance (std = 10)
+        let mut series: Vec<f64> = (0..50).map(|_| 10.0 + rng.gen_range(-1.0..1.0)).collect();
+        series.extend((0..50).map(|_| 10.0 + rng.gen_range(-10.0..10.0)));
+
+        let config = PeltConfig::default()
+            .cost_function(CostFunction::MeanVariance)
+            .penalty(50.0);
+        let result = pelt_detect(&series, &config);
+
+        // Should detect variance change
+        assert!(result.n_changepoints >= 1);
+    }
+
+    #[test]
+    fn pelt_mean_variance_detects_joint_change() {
+        // First segment: mean=0, variance=1
+        // Second segment: mean=10, variance=4
+        let mut series: Vec<f64> = vec![
+            -0.5, 0.3, -0.2, 0.8, -0.1, 0.4, -0.6, 0.2, -0.3, 0.5, // std ~0.5
+            -0.4, 0.1, -0.7, 0.6, -0.2, 0.3, -0.5, 0.4, -0.1, 0.2,
+        ];
+        series.extend(vec![
+            8.0, 12.0, 7.0, 13.0, 9.0, 11.0, 6.0, 14.0, 8.0, 12.0, // mean 10, larger spread
+            7.0, 13.0, 8.0, 12.0, 9.0, 11.0, 6.0, 14.0, 7.0, 13.0,
+        ]);
+
+        let config = PeltConfig::default()
+            .cost_function(CostFunction::MeanVariance)
+            .penalty(5.0);
+        let result = pelt_detect(&series, &config);
+
+        // Should detect change
+        assert!(result.n_changepoints >= 1);
+        let cp = result.changepoints[0];
+        assert!(
+            cp >= 15 && cp <= 25,
+            "Expected changepoint near 20, got {}",
+            cp
+        );
+    }
+
+    #[test]
+    fn pelt_cusum_detects_sustained_shift() {
+        // First segment: centered around 0
+        // Second segment: sustained positive shift to 5
+        let mut series: Vec<f64> = vec![
+            0.1, -0.2, 0.3, -0.1, 0.2, -0.3, 0.1, -0.2, 0.3, -0.1, 0.0, 0.1, -0.1, 0.2, -0.2, 0.1,
+            -0.3, 0.2, -0.1, 0.0,
+        ];
+        series.extend(vec![
+            5.1, 4.9, 5.2, 4.8, 5.0, 5.1, 4.9, 5.2, 4.8, 5.0, 5.1, 4.9, 5.2, 4.8, 5.0, 5.1, 4.9,
+            5.2, 4.8, 5.0,
+        ]);
+
+        let config = PeltConfig::default()
+            .cost_function(CostFunction::Cusum)
+            .penalty(2.0);
+        let result = pelt_detect(&series, &config);
+
+        // Should detect the sustained shift
+        assert!(result.n_changepoints >= 1);
+        let cp = result.changepoints[0];
+        assert!(
+            cp >= 15 && cp <= 25,
+            "Expected changepoint near 20, got {}",
+            cp
+        );
+    }
+
+    #[test]
+    fn pelt_cusum_no_change_for_balanced() {
+        // Series that oscillates evenly around mean - no sustained shift
+        let series: Vec<f64> = (0..40)
+            .map(|i| if i % 2 == 0 { 1.0 } else { -1.0 })
+            .collect();
+
+        let config = PeltConfig::default()
+            .cost_function(CostFunction::Cusum)
+            .penalty(5.0);
+        let result = pelt_detect(&series, &config);
+
+        // Balanced oscillations shouldn't trigger CUSUM changepoints
+        // (might still detect some due to segment boundaries)
+        assert!(result.n_changepoints <= 2);
+    }
+
+    #[test]
+    fn pelt_periodicity_detects_period_change() {
+        use std::f64::consts::PI;
+
+        // First segment: period 8
+        let mut series: Vec<f64> = (0..64).map(|i| (2.0 * PI * i as f64 / 8.0).sin()).collect();
+        // Second segment: period 16
+        series.extend((0..64).map(|i| (2.0 * PI * i as f64 / 16.0).sin()));
+
+        let config = PeltConfig::default()
+            .cost_function(CostFunction::Periodicity)
+            .penalty(5.0);
+        let result = pelt_detect(&series, &config);
+
+        // Should detect the period change
+        assert!(result.n_changepoints >= 1);
+    }
+
+    #[test]
+    fn pelt_periodicity_consistent_period() {
+        use std::f64::consts::PI;
+
+        // Consistent period throughout
+        let series: Vec<f64> = (0..128)
+            .map(|i| (2.0 * PI * i as f64 / 12.0).sin())
+            .collect();
+
+        let config = PeltConfig::default()
+            .cost_function(CostFunction::Periodicity)
+            .penalty(20.0);
+        let result = pelt_detect(&series, &config);
+
+        // Consistent period should have few or no changepoints
+        assert!(result.n_changepoints <= 1);
     }
 }
