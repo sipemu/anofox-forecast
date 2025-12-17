@@ -134,8 +134,7 @@ fn variance(series: &[f64]) -> f64 {
     if series.len() < 2 {
         return 0.0;
     }
-    let mean = series.iter().sum::<f64>() / series.len() as f64;
-    series.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (series.len() - 1) as f64
+    crate::simd::variance_sample(series)
 }
 
 #[cfg(test)]

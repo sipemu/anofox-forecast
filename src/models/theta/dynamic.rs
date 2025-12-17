@@ -197,8 +197,8 @@ impl DynamicTheta {
             return vec![1.0];
         }
 
-        let mean = series.iter().sum::<f64>() / n as f64;
-        let var: f64 = series.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / n as f64;
+        let mean = crate::simd::mean(series);
+        let var = crate::simd::variance(series);
 
         if var < 1e-10 {
             return vec![1.0; nlags + 1];
@@ -231,7 +231,7 @@ impl DynamicTheta {
 
         let acf_vals = Self::acf(series, period);
         let r: Vec<f64> = acf_vals[1..].to_vec();
-        let r_sq_sum: f64 = r[..r.len() - 1].iter().map(|&x| x * x).sum();
+        let r_sq_sum = crate::simd::sum_of_squares(&r[..r.len() - 1]);
         let stat = ((1.0 + 2.0 * r_sq_sum) / series.len() as f64).sqrt();
         let r_m = r[r.len() - 1];
 
@@ -681,7 +681,7 @@ impl Forecaster for DynamicTheta {
         let valid_residuals: Vec<f64> = residuals[1..].to_vec();
         if !valid_residuals.is_empty() {
             let variance =
-                valid_residuals.iter().map(|r| r * r).sum::<f64>() / valid_residuals.len() as f64;
+                crate::simd::sum_of_squares(&valid_residuals) / valid_residuals.len() as f64;
             self.residual_variance = Some(variance);
         }
 

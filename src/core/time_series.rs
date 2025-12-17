@@ -14,6 +14,84 @@ pub enum ValueLayout {
     Row,
 }
 
+/// Frequency specification for gap filling.
+///
+/// Supports Polars-style frequency strings like "30m", "1h", "1d", "1w", "1mo", "1q", "1y".
+#[derive(Debug, Clone, PartialEq)]
+pub enum Frequency {
+    /// Duration-based frequency (seconds, minutes, hours, days, weeks).
+    Duration(Duration),
+    /// Month-based frequency (1mo, 2mo, etc.).
+    Months(i32),
+    /// Year-based frequency (1y, 2y, etc.).
+    Years(i32),
+}
+
+impl Frequency {
+    /// Parse a Polars-style frequency string.
+    ///
+    /// Supported formats:
+    /// - "30s" or "30sec" - 30 seconds
+    /// - "30m" or "30min" - 30 minutes
+    /// - "1h" - 1 hour
+    /// - "1d" - 1 day
+    /// - "1w" - 1 week
+    /// - "1mo" - 1 month
+    /// - "1q" - 1 quarter (3 months)
+    /// - "1y" - 1 year
+    pub fn parse(s: &str) -> Result<Self> {
+        let s = s.trim().to_lowercase();
+
+        // Find where the number ends and the unit begins
+        let num_end = s
+            .chars()
+            .position(|c| !c.is_ascii_digit())
+            .unwrap_or(s.len());
+
+        if num_end == 0 {
+            return Err(ForecastError::InvalidParameter(format!(
+                "invalid frequency string: '{}' (no number found)",
+                s
+            )));
+        }
+
+        let num: i64 = s[..num_end].parse().map_err(|_| {
+            ForecastError::InvalidParameter(format!(
+                "invalid frequency string: '{}' (invalid number)",
+                s
+            ))
+        })?;
+
+        let unit = &s[num_end..];
+
+        match unit {
+            "s" | "sec" | "second" | "seconds" => Ok(Frequency::Duration(Duration::seconds(num))),
+            "m" | "min" | "minute" | "minutes" => Ok(Frequency::Duration(Duration::minutes(num))),
+            "h" | "hr" | "hour" | "hours" => Ok(Frequency::Duration(Duration::hours(num))),
+            "d" | "day" | "days" => Ok(Frequency::Duration(Duration::days(num))),
+            "w" | "week" | "weeks" => Ok(Frequency::Duration(Duration::weeks(num))),
+            "mo" | "month" | "months" => Ok(Frequency::Months(num as i32)),
+            "q" | "quarter" | "quarters" => Ok(Frequency::Months(num as i32 * 3)),
+            "y" | "year" | "years" => Ok(Frequency::Years(num as i32)),
+            _ => Err(ForecastError::InvalidParameter(format!(
+                "unknown frequency unit: '{}' (expected s, m, h, d, w, mo, q, or y)",
+                unit
+            ))),
+        }
+    }
+
+    /// Create a frequency from a chrono::Duration.
+    pub fn from_duration(duration: Duration) -> Self {
+        Frequency::Duration(duration)
+    }
+
+    /// Create a frequency from an integer step size.
+    /// This is useful for integer-indexed time series.
+    pub fn from_step(step: i64) -> Self {
+        Frequency::Duration(Duration::seconds(step))
+    }
+}
+
 /// Policy for handling missing values (NaN/Inf).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MissingValuePolicy {
@@ -743,6 +821,234 @@ impl TimeSeries {
         self.frequency = Some(freq);
         Ok(())
     }
+
+    /// Fill missing timestamps in the time series with NULL (NaN) values.
+    ///
+    /// This method generates a complete sequence of timestamps based on the specified
+    /// frequency, and fills in missing timestamps with NaN values. This is useful for
+    /// ensuring a time series has regular intervals before analysis or forecasting.
+    ///
+    /// # Arguments
+    ///
+    /// * `frequency` - The frequency to use for gap filling. Can be:
+    ///   - Polars-style string: "30m", "1h", "1d", "1w", "1mo", "1q", "1y"
+    ///   - Duration: `Frequency::Duration(Duration::hours(1))`
+    ///   - Months: `Frequency::Months(1)` for monthly
+    ///   - Years: `Frequency::Years(1)` for yearly
+    ///
+    /// # Returns
+    ///
+    /// A new `TimeSeries` with all gaps filled with NaN values.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use anofox_forecast::core::{TimeSeries, Frequency};
+    /// use chrono::{TimeZone, Utc};
+    ///
+    /// // Create a time series with gaps
+    /// let timestamps = vec![
+    ///     Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
+    ///     Utc.with_ymd_and_hms(2024, 1, 1, 1, 0, 0).unwrap(),
+    ///     // Gap at 2:00
+    ///     Utc.with_ymd_and_hms(2024, 1, 1, 3, 0, 0).unwrap(),
+    /// ];
+    /// let values = vec![1.0, 2.0, 4.0];
+    ///
+    /// let ts = TimeSeries::univariate(timestamps, values).unwrap();
+    /// let filled = ts.fill_gaps(Frequency::parse("1h").unwrap()).unwrap();
+    ///
+    /// assert_eq!(filled.len(), 4); // Now includes 2:00
+    /// ```
+    pub fn fill_gaps(&self, frequency: Frequency) -> Result<TimeSeries> {
+        if self.is_empty() {
+            return Ok(self.clone());
+        }
+
+        if self.len() == 1 {
+            return Ok(self.clone());
+        }
+
+        let start = self.timestamps[0];
+        let end = *self.timestamps.last().unwrap();
+
+        // Generate the expected timestamps based on frequency
+        let expected_timestamps = generate_timestamps(start, end, &frequency)?;
+
+        if expected_timestamps.is_empty() {
+            return Ok(self.clone());
+        }
+
+        // Build a map from existing timestamps to their indices
+        let existing: HashMap<DateTime<Utc>, usize> = self
+            .timestamps
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (*t, i))
+            .collect();
+
+        // Create new timestamps and values
+        let mut new_timestamps = Vec::with_capacity(expected_timestamps.len());
+        let mut new_values: Vec<Vec<f64>> = (0..self.dimensions())
+            .map(|_| Vec::with_capacity(expected_timestamps.len()))
+            .collect();
+
+        for ts in expected_timestamps {
+            new_timestamps.push(ts);
+            if let Some(&idx) = existing.get(&ts) {
+                // Use existing value
+                for (dim, dim_values) in new_values.iter_mut().enumerate() {
+                    dim_values.push(self.values[dim][idx]);
+                }
+            } else {
+                // Fill with NaN
+                for dim_values in &mut new_values {
+                    dim_values.push(f64::NAN);
+                }
+            }
+        }
+
+        Ok(TimeSeries {
+            timestamps: new_timestamps,
+            values: new_values,
+            labels: self.labels.clone(),
+            metadata: self.metadata.clone(),
+            dimension_metadata: self.dimension_metadata.clone(),
+            timezone: self.timezone.clone(),
+            frequency: match &frequency {
+                Frequency::Duration(d) => Some(*d),
+                _ => self.frequency,
+            },
+            calendar: self.calendar.clone(),
+        })
+    }
+
+    /// Fill gaps using a Polars-style frequency string.
+    ///
+    /// This is a convenience method that parses the frequency string and calls `fill_gaps`.
+    ///
+    /// # Arguments
+    ///
+    /// * `frequency` - A Polars-style frequency string like "30m", "1h", "1d", etc.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use anofox_forecast::core::TimeSeries;
+    /// use chrono::{TimeZone, Utc};
+    ///
+    /// let timestamps = vec![
+    ///     Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
+    ///     Utc.with_ymd_and_hms(2024, 1, 1, 2, 0, 0).unwrap(), // Gap at 1:00
+    /// ];
+    /// let values = vec![1.0, 3.0];
+    ///
+    /// let ts = TimeSeries::univariate(timestamps, values).unwrap();
+    /// let filled = ts.fill_gaps_str("1h").unwrap();
+    ///
+    /// assert_eq!(filled.len(), 3);
+    /// ```
+    pub fn fill_gaps_str(&self, frequency: &str) -> Result<TimeSeries> {
+        let freq = Frequency::parse(frequency)?;
+        self.fill_gaps(freq)
+    }
+}
+
+/// Generate a sequence of timestamps from start to end (inclusive) with the given frequency.
+fn generate_timestamps(
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+    frequency: &Frequency,
+) -> Result<Vec<DateTime<Utc>>> {
+    let mut timestamps = Vec::new();
+    let mut current = start;
+
+    match frequency {
+        Frequency::Duration(duration) => {
+            if duration.num_seconds() <= 0 {
+                return Err(ForecastError::InvalidParameter(
+                    "frequency duration must be positive".to_string(),
+                ));
+            }
+            while current <= end {
+                timestamps.push(current);
+                current += *duration;
+            }
+        }
+        Frequency::Months(months) => {
+            if *months <= 0 {
+                return Err(ForecastError::InvalidParameter(
+                    "frequency months must be positive".to_string(),
+                ));
+            }
+            while current <= end {
+                timestamps.push(current);
+                current = add_months(current, *months);
+            }
+        }
+        Frequency::Years(years) => {
+            if *years <= 0 {
+                return Err(ForecastError::InvalidParameter(
+                    "frequency years must be positive".to_string(),
+                ));
+            }
+            while current <= end {
+                timestamps.push(current);
+                current = add_months(current, *years * 12);
+            }
+        }
+    }
+
+    Ok(timestamps)
+}
+
+/// Add months to a DateTime, handling month-end edge cases.
+fn add_months(dt: DateTime<Utc>, months: i32) -> DateTime<Utc> {
+    use chrono::{NaiveDate, Timelike};
+
+    let year = dt.year();
+    let month = dt.month() as i32;
+    let day = dt.day();
+
+    let total_months = year * 12 + (month - 1) + months;
+    let new_year = total_months / 12;
+    let new_month = (total_months % 12 + 1) as u32;
+
+    // Handle month-end edge cases (e.g., Jan 31 + 1 month = Feb 28/29)
+    let max_day = days_in_month(new_year, new_month);
+    let new_day = day.min(max_day);
+
+    // Build the new date directly using NaiveDate to avoid issues with chrono's with_* methods
+    if let Some(naive_date) = NaiveDate::from_ymd_opt(new_year, new_month, new_day) {
+        naive_date
+            .and_hms_opt(dt.hour(), dt.minute(), dt.second())
+            .map(|naive_dt| DateTime::from_naive_utc_and_offset(naive_dt, Utc))
+            .unwrap_or(dt)
+    } else {
+        // Fallback: just add 30 days per month as approximation
+        dt + Duration::days(30 * months as i64)
+    }
+}
+
+/// Get the number of days in a given month.
+fn days_in_month(year: i32, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if is_leap_year(year) {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 30, // Should never happen
+    }
+}
+
+/// Check if a year is a leap year.
+fn is_leap_year(year: i32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
 }
 
 /// Linear interpolation for a series with NaN values.
@@ -1227,5 +1533,379 @@ mod tests {
             ts.values(1),
             Err(ForecastError::IndexOutOfBounds { index: 1, size: 1 })
         ));
+    }
+
+    // Gap filling tests
+
+    #[test]
+    fn frequency_parses_duration_based_strings() {
+        // Seconds
+        assert_eq!(
+            Frequency::parse("30s").unwrap(),
+            Frequency::Duration(Duration::seconds(30))
+        );
+        assert_eq!(
+            Frequency::parse("1sec").unwrap(),
+            Frequency::Duration(Duration::seconds(1))
+        );
+
+        // Minutes
+        assert_eq!(
+            Frequency::parse("30m").unwrap(),
+            Frequency::Duration(Duration::minutes(30))
+        );
+        assert_eq!(
+            Frequency::parse("30min").unwrap(),
+            Frequency::Duration(Duration::minutes(30))
+        );
+
+        // Hours
+        assert_eq!(
+            Frequency::parse("1h").unwrap(),
+            Frequency::Duration(Duration::hours(1))
+        );
+        assert_eq!(
+            Frequency::parse("24h").unwrap(),
+            Frequency::Duration(Duration::hours(24))
+        );
+
+        // Days
+        assert_eq!(
+            Frequency::parse("1d").unwrap(),
+            Frequency::Duration(Duration::days(1))
+        );
+        assert_eq!(
+            Frequency::parse("7d").unwrap(),
+            Frequency::Duration(Duration::days(7))
+        );
+
+        // Weeks
+        assert_eq!(
+            Frequency::parse("1w").unwrap(),
+            Frequency::Duration(Duration::weeks(1))
+        );
+        assert_eq!(
+            Frequency::parse("2w").unwrap(),
+            Frequency::Duration(Duration::weeks(2))
+        );
+    }
+
+    #[test]
+    fn frequency_parses_calendar_based_strings() {
+        // Months
+        assert_eq!(Frequency::parse("1mo").unwrap(), Frequency::Months(1));
+        assert_eq!(Frequency::parse("3mo").unwrap(), Frequency::Months(3));
+
+        // Quarters
+        assert_eq!(Frequency::parse("1q").unwrap(), Frequency::Months(3));
+        assert_eq!(Frequency::parse("2q").unwrap(), Frequency::Months(6));
+
+        // Years
+        assert_eq!(Frequency::parse("1y").unwrap(), Frequency::Years(1));
+        assert_eq!(Frequency::parse("2y").unwrap(), Frequency::Years(2));
+    }
+
+    #[test]
+    fn frequency_parse_handles_invalid_input() {
+        // No number
+        assert!(Frequency::parse("h").is_err());
+        assert!(Frequency::parse("mo").is_err());
+
+        // Unknown unit
+        assert!(Frequency::parse("1x").is_err());
+        assert!(Frequency::parse("5foo").is_err());
+
+        // Empty string
+        assert!(Frequency::parse("").is_err());
+    }
+
+    #[test]
+    fn fill_gaps_with_hourly_frequency() {
+        // Create timestamps with a gap at hour 2
+        let timestamps = vec![
+            Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
+            Utc.with_ymd_and_hms(2024, 1, 1, 1, 0, 0).unwrap(),
+            // Gap at 2:00
+            Utc.with_ymd_and_hms(2024, 1, 1, 3, 0, 0).unwrap(),
+            Utc.with_ymd_and_hms(2024, 1, 1, 4, 0, 0).unwrap(),
+        ];
+        let values = vec![0.0, 1.0, 3.0, 4.0];
+
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+        let filled = ts.fill_gaps_str("1h").unwrap();
+
+        assert_eq!(filled.len(), 5);
+        assert_eq!(
+            filled.timestamps()[2],
+            Utc.with_ymd_and_hms(2024, 1, 1, 2, 0, 0).unwrap()
+        );
+
+        let vals = filled.primary_values();
+        assert_relative_eq!(vals[0], 0.0);
+        assert_relative_eq!(vals[1], 1.0);
+        assert!(vals[2].is_nan()); // Gap filled with NaN
+        assert_relative_eq!(vals[3], 3.0);
+        assert_relative_eq!(vals[4], 4.0);
+    }
+
+    #[test]
+    fn fill_gaps_with_daily_frequency() {
+        // Create timestamps with gaps
+        let timestamps = vec![
+            Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
+            // Gap at Jan 2
+            Utc.with_ymd_and_hms(2024, 1, 3, 0, 0, 0).unwrap(),
+            // Gap at Jan 4
+            Utc.with_ymd_and_hms(2024, 1, 5, 0, 0, 0).unwrap(),
+        ];
+        let values = vec![1.0, 3.0, 5.0];
+
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+        let filled = ts.fill_gaps_str("1d").unwrap();
+
+        assert_eq!(filled.len(), 5);
+
+        let vals = filled.primary_values();
+        assert_relative_eq!(vals[0], 1.0);
+        assert!(vals[1].is_nan()); // Jan 2 - gap
+        assert_relative_eq!(vals[2], 3.0);
+        assert!(vals[3].is_nan()); // Jan 4 - gap
+        assert_relative_eq!(vals[4], 5.0);
+    }
+
+    #[test]
+    fn fill_gaps_with_weekly_frequency() {
+        let timestamps = vec![
+            Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(), // Week 1
+            Utc.with_ymd_and_hms(2024, 1, 8, 0, 0, 0).unwrap(), // Week 2
+            // Gap at Week 3 (Jan 15)
+            Utc.with_ymd_and_hms(2024, 1, 22, 0, 0, 0).unwrap(), // Week 4
+        ];
+        let values = vec![1.0, 2.0, 4.0];
+
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+        let filled = ts.fill_gaps_str("1w").unwrap();
+
+        assert_eq!(filled.len(), 4);
+        assert!(filled.primary_values()[2].is_nan()); // Gap at week 3
+    }
+
+    #[test]
+    fn fill_gaps_with_monthly_frequency() {
+        let timestamps = vec![
+            Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
+            // Gap at Feb
+            Utc.with_ymd_and_hms(2024, 3, 1, 0, 0, 0).unwrap(),
+            Utc.with_ymd_and_hms(2024, 4, 1, 0, 0, 0).unwrap(),
+        ];
+        let values = vec![1.0, 3.0, 4.0];
+
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+        let filled = ts.fill_gaps(Frequency::Months(1)).unwrap();
+
+        assert_eq!(filled.len(), 4);
+        assert_eq!(
+            filled.timestamps()[1],
+            Utc.with_ymd_and_hms(2024, 2, 1, 0, 0, 0).unwrap()
+        );
+        assert!(filled.primary_values()[1].is_nan()); // Feb is filled with NaN
+    }
+
+    #[test]
+    fn fill_gaps_with_quarterly_frequency() {
+        let timestamps = vec![
+            Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(), // Q1
+            // Gap at Q2 (Apr)
+            Utc.with_ymd_and_hms(2024, 7, 1, 0, 0, 0).unwrap(), // Q3
+        ];
+        let values = vec![1.0, 3.0];
+
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+        let filled = ts.fill_gaps_str("1q").unwrap();
+
+        assert_eq!(filled.len(), 3);
+        assert_eq!(
+            filled.timestamps()[1],
+            Utc.with_ymd_and_hms(2024, 4, 1, 0, 0, 0).unwrap()
+        );
+        assert!(filled.primary_values()[1].is_nan());
+    }
+
+    #[test]
+    fn fill_gaps_with_yearly_frequency() {
+        let timestamps = vec![
+            Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0).unwrap(),
+            // Gap at 2021
+            Utc.with_ymd_and_hms(2022, 1, 1, 0, 0, 0).unwrap(),
+            Utc.with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap(),
+        ];
+        let values = vec![1.0, 3.0, 4.0];
+
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+        let filled = ts.fill_gaps(Frequency::Years(1)).unwrap();
+
+        assert_eq!(filled.len(), 4);
+        assert_eq!(
+            filled.timestamps()[1],
+            Utc.with_ymd_and_hms(2021, 1, 1, 0, 0, 0).unwrap()
+        );
+        assert!(filled.primary_values()[1].is_nan());
+    }
+
+    #[test]
+    fn fill_gaps_with_30_minute_frequency() {
+        let timestamps = vec![
+            Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
+            Utc.with_ymd_and_hms(2024, 1, 1, 0, 30, 0).unwrap(),
+            // Gap at 1:00
+            Utc.with_ymd_and_hms(2024, 1, 1, 1, 30, 0).unwrap(),
+        ];
+        let values = vec![1.0, 2.0, 4.0];
+
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+        let filled = ts.fill_gaps_str("30m").unwrap();
+
+        assert_eq!(filled.len(), 4);
+        assert_eq!(
+            filled.timestamps()[2],
+            Utc.with_ymd_and_hms(2024, 1, 1, 1, 0, 0).unwrap()
+        );
+        assert!(filled.primary_values()[2].is_nan());
+    }
+
+    #[test]
+    fn fill_gaps_preserves_multivariate_data() {
+        let timestamps = vec![
+            Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
+            // Gap at 1:00
+            Utc.with_ymd_and_hms(2024, 1, 1, 2, 0, 0).unwrap(),
+        ];
+        let values = vec![
+            vec![1.0, 3.0],   // dimension 0
+            vec![10.0, 30.0], // dimension 1
+        ];
+
+        let ts = TimeSeriesBuilder::new()
+            .timestamps(timestamps)
+            .multivariate_values(values, ValueLayout::Column)
+            .build()
+            .unwrap();
+
+        let filled = ts.fill_gaps_str("1h").unwrap();
+
+        assert_eq!(filled.len(), 3);
+        assert_eq!(filled.dimensions(), 2);
+
+        // Check dimension 0
+        let dim0 = filled.values(0).unwrap();
+        assert_relative_eq!(dim0[0], 1.0);
+        assert!(dim0[1].is_nan());
+        assert_relative_eq!(dim0[2], 3.0);
+
+        // Check dimension 1
+        let dim1 = filled.values(1).unwrap();
+        assert_relative_eq!(dim1[0], 10.0);
+        assert!(dim1[1].is_nan());
+        assert_relative_eq!(dim1[2], 30.0);
+    }
+
+    #[test]
+    fn fill_gaps_preserves_metadata() {
+        let timestamps = vec![
+            Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
+            Utc.with_ymd_and_hms(2024, 1, 1, 2, 0, 0).unwrap(),
+        ];
+        let values = vec![1.0, 2.0];
+
+        let mut ts = TimeSeries::univariate(timestamps, values).unwrap();
+        ts.set_labels(vec!["temperature".to_string()]).unwrap();
+        ts.set_metadata("source".to_string(), "sensor".to_string());
+        ts.set_timezone("Europe/London".to_string());
+
+        let filled = ts.fill_gaps_str("1h").unwrap();
+
+        assert_eq!(filled.labels(), &["temperature"]);
+        assert_eq!(filled.metadata().get("source"), Some(&"sensor".to_string()));
+        assert_eq!(filled.timezone(), Some("Europe/London"));
+        assert_eq!(filled.frequency(), Some(Duration::hours(1)));
+    }
+
+    #[test]
+    fn fill_gaps_handles_empty_series() {
+        let ts = TimeSeries::univariate(vec![], vec![]).unwrap();
+        let filled = ts.fill_gaps_str("1h").unwrap();
+        assert!(filled.is_empty());
+    }
+
+    #[test]
+    fn fill_gaps_handles_single_element() {
+        let timestamps = vec![Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap()];
+        let values = vec![1.0];
+
+        let ts = TimeSeries::univariate(timestamps.clone(), values.clone()).unwrap();
+        let filled = ts.fill_gaps_str("1h").unwrap();
+
+        assert_eq!(filled.len(), 1);
+        assert_eq!(filled.timestamps(), &timestamps);
+        assert_eq!(filled.primary_values(), &values);
+    }
+
+    #[test]
+    fn fill_gaps_handles_no_gaps() {
+        let timestamps = vec![
+            Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
+            Utc.with_ymd_and_hms(2024, 1, 1, 1, 0, 0).unwrap(),
+            Utc.with_ymd_and_hms(2024, 1, 1, 2, 0, 0).unwrap(),
+        ];
+        let values = vec![1.0, 2.0, 3.0];
+
+        let ts = TimeSeries::univariate(timestamps.clone(), values.clone()).unwrap();
+        let filled = ts.fill_gaps_str("1h").unwrap();
+
+        assert_eq!(filled.len(), 3);
+        assert_eq!(filled.timestamps(), &timestamps);
+        assert_eq!(filled.primary_values(), &values);
+        assert!(!filled.has_missing_values());
+    }
+
+    #[test]
+    fn fill_gaps_month_end_handling() {
+        // Test that month-end dates are handled correctly
+        // Using first-of-month dates to avoid month-end complications
+        let timestamps = vec![
+            Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
+            // Gap at Feb 1
+            Utc.with_ymd_and_hms(2024, 3, 1, 0, 0, 0).unwrap(),
+        ];
+        let values = vec![1.0, 3.0];
+
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+        let filled = ts.fill_gaps(Frequency::Months(1)).unwrap();
+
+        assert_eq!(filled.len(), 3);
+        // Feb 1 should be generated
+        assert_eq!(
+            filled.timestamps()[1],
+            Utc.with_ymd_and_hms(2024, 2, 1, 0, 0, 0).unwrap()
+        );
+        assert!(filled.primary_values()[1].is_nan());
+    }
+
+    #[test]
+    fn fill_gaps_handles_end_of_month_dates() {
+        // When using month-end dates, ensure they still align correctly
+        // Jan 31 -> Feb 29 (leap year) -> Mar 29 (not 31!)
+        let timestamps = vec![
+            Utc.with_ymd_and_hms(2024, 1, 31, 0, 0, 0).unwrap(),
+            Utc.with_ymd_and_hms(2024, 2, 29, 0, 0, 0).unwrap(), // Feb 29 exists in original
+        ];
+        let values = vec![1.0, 2.0];
+
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+        let filled = ts.fill_gaps(Frequency::Months(1)).unwrap();
+
+        // Jan 31 + 1mo = Feb 29 (clamped), which matches existing timestamp
+        assert_eq!(filled.len(), 2);
+        assert!(!filled.has_missing_values());
     }
 }

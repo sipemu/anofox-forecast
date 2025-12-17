@@ -158,12 +158,7 @@ pub fn euclidean_distance(a: &[f64], b: &[f64]) -> f64 {
     if a.len() != b.len() {
         return f64::INFINITY;
     }
-
-    a.iter()
-        .zip(b.iter())
-        .map(|(x, y)| (x - y).powi(2))
-        .sum::<f64>()
-        .sqrt()
+    crate::simd::squared_distance(a, b).sqrt()
 }
 
 /// Manhattan (L1) distance for same-length time series.
@@ -171,8 +166,7 @@ pub fn manhattan_distance(a: &[f64], b: &[f64]) -> f64 {
     if a.len() != b.len() {
         return f64::INFINITY;
     }
-
-    a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).sum()
+    crate::simd::l1_distance(a, b)
 }
 
 #[cfg(test)]

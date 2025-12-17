@@ -5,5 +5,5 @@ mod time_series;
 
 pub use forecast::Forecast;
 pub use time_series::{
-    CalendarAnnotations, MissingValuePolicy, TimeSeries, TimeSeriesBuilder, ValueLayout,
+    CalendarAnnotations, Frequency, MissingValuePolicy, TimeSeries, TimeSeriesBuilder, ValueLayout,
 };

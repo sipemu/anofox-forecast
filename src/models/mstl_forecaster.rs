@@ -380,7 +380,7 @@ impl Forecaster for MSTLForecaster {
 
         // Compute residual variance
         if residuals.len() > 1 {
-            let variance = residuals.iter().map(|r| r * r).sum::<f64>() / residuals.len() as f64;
+            let variance = crate::simd::sum_of_squares(&residuals) / residuals.len() as f64;
             self.residual_variance = Some(variance);
         }
 

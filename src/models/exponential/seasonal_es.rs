@@ -306,7 +306,7 @@ impl Forecaster for SeasonalES {
             .collect();
         if !valid_residuals.is_empty() {
             let variance =
-                valid_residuals.iter().map(|r| r * r).sum::<f64>() / valid_residuals.len() as f64;
+                crate::simd::sum_of_squares(&valid_residuals) / valid_residuals.len() as f64;
             self.residual_variance = Some(variance);
         }
 

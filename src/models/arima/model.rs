@@ -337,7 +337,7 @@ impl ARIMA {
         let valid_residuals: Vec<f64> = residuals[start..].to_vec();
         if !valid_residuals.is_empty() {
             let variance =
-                valid_residuals.iter().map(|r| r * r).sum::<f64>() / valid_residuals.len() as f64;
+                crate::simd::sum_of_squares(&valid_residuals) / valid_residuals.len() as f64;
             self.residual_variance = Some(variance);
 
             // Calculate information criteria
@@ -996,7 +996,7 @@ impl SARIMA {
         let valid_residuals: Vec<f64> = residuals[start..].to_vec();
         if !valid_residuals.is_empty() {
             let variance =
-                valid_residuals.iter().map(|r| r * r).sum::<f64>() / valid_residuals.len() as f64;
+                crate::simd::sum_of_squares(&valid_residuals) / valid_residuals.len() as f64;
             self.residual_variance = Some(variance);
 
             // Calculate information criteria

@@ -183,12 +183,7 @@ pub fn mae(actual: &[f64], predicted: &[f64]) -> f64 {
     if actual.len() != predicted.len() || actual.is_empty() {
         return f64::NAN;
     }
-    actual
-        .iter()
-        .zip(predicted.iter())
-        .map(|(a, p)| (a - p).abs())
-        .sum::<f64>()
-        / actual.len() as f64
+    crate::simd::l1_distance(actual, predicted) / actual.len() as f64
 }
 
 /// Calculate MSE between two slices.
@@ -196,12 +191,7 @@ pub fn mse(actual: &[f64], predicted: &[f64]) -> f64 {
     if actual.len() != predicted.len() || actual.is_empty() {
         return f64::NAN;
     }
-    actual
-        .iter()
-        .zip(predicted.iter())
-        .map(|(a, p)| (a - p).powi(2))
-        .sum::<f64>()
-        / actual.len() as f64
+    crate::simd::squared_distance(actual, predicted) / actual.len() as f64
 }
 
 /// Calculate RMSE between two slices.

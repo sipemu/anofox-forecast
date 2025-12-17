@@ -362,9 +362,8 @@ impl TBATS {
                 .collect();
 
             // Minimize coefficient of variation
-            let mean = transformed.iter().sum::<f64>() / transformed.len() as f64;
-            let variance = transformed.iter().map(|&t| (t - mean).powi(2)).sum::<f64>()
-                / transformed.len() as f64;
+            let mean = crate::simd::mean(&transformed);
+            let variance = crate::simd::variance(&transformed);
 
             if mean.abs() < 1e-10 {
                 f64::MAX

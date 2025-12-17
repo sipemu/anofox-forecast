@@ -10,7 +10,7 @@
 /// # Returns
 /// Sum of x\[i\]^2 for all i
 pub fn abs_energy(series: &[f64]) -> f64 {
-    series.iter().map(|x| x * x).sum()
+    crate::simd::sum_of_squares(series)
 }
 
 /// Returns the highest absolute value of the time series.
@@ -46,7 +46,7 @@ pub fn mean(series: &[f64]) -> f64 {
     if series.is_empty() {
         return f64::NAN;
     }
-    series.iter().sum::<f64>() / series.len() as f64
+    crate::simd::mean(series)
 }
 
 /// Returns the mean of absolute differences between consecutive values.
@@ -130,7 +130,7 @@ pub fn standard_deviation(series: &[f64]) -> f64 {
 
 /// Returns the sum of all values.
 pub fn sum_values(series: &[f64]) -> f64 {
-    series.iter().sum()
+    crate::simd::sum(series)
 }
 
 /// Returns the population variance (with n denominator).
@@ -141,9 +141,10 @@ pub fn variance(series: &[f64]) -> f64 {
     if series.is_empty() {
         return f64::NAN;
     }
-    let m = mean(series);
-    let sum_sq: f64 = series.iter().map(|x| (x - m).powi(2)).sum();
-    sum_sq / series.len() as f64
+    if series.len() == 1 {
+        return 0.0;
+    }
+    crate::simd::variance(series)
 }
 
 /// Returns the sample variance (with n-1 denominator).
@@ -151,9 +152,7 @@ pub fn variance_sample(series: &[f64]) -> f64 {
     if series.len() < 2 {
         return f64::NAN;
     }
-    let m = mean(series);
-    let sum_sq: f64 = series.iter().map(|x| (x - m).powi(2)).sum();
-    sum_sq / (series.len() - 1) as f64
+    crate::simd::variance_sample(series)
 }
 
 #[cfg(test)]

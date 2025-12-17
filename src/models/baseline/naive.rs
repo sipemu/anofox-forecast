@@ -81,7 +81,7 @@ impl Forecaster for Naive {
         }
 
         let n = valid_residuals.len() as f64;
-        let variance = valid_residuals.iter().map(|r| r * r).sum::<f64>() / n;
+        let variance = crate::simd::sum_of_squares(&valid_residuals) / n;
         let sigma = variance.sqrt();
 
         // Z-score for the confidence level

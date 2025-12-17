@@ -54,7 +54,7 @@ pub fn mean(values: &[f64]) -> f64 {
     if values.is_empty() {
         return f64::NAN;
     }
-    values.iter().sum::<f64>() / values.len() as f64
+    crate::simd::mean(values)
 }
 
 /// Calculate the variance of a slice (sample variance with n-1 denominator).
@@ -62,9 +62,7 @@ pub fn variance(values: &[f64]) -> f64 {
     if values.len() < 2 {
         return f64::NAN;
     }
-    let m = mean(values);
-    let sum_sq: f64 = values.iter().map(|x| (x - m).powi(2)).sum();
-    sum_sq / (values.len() - 1) as f64
+    crate::simd::variance_sample(values)
 }
 
 /// Calculate the standard deviation of a slice.

@@ -140,7 +140,7 @@ impl AutoTheta {
         if valid.is_empty() {
             return f64::MAX;
         }
-        valid.iter().map(|r| r * r).sum::<f64>() / valid.len() as f64
+        crate::simd::sum_of_squares(&valid) / valid.len() as f64
     }
 }
 
