@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2025-12-17
+
+### Added
+
+- **Periodicity Detection Module**
+  - `ACFPeriodicityDetector` - time-domain detection using ACF peaks
+  - `FFTPeriodicityDetector` - frequency-domain detection using periodogram
+  - `Autoperiod` - hybrid FFT+ACF detector (Vlachos et al. 2005)
+  - `CFDAutoperiod` - noise-resistant detector with clustering (Puech et al. 2020)
+  - `SAZED` - parameter-free ensemble method (Toller et al. 2019)
+  - Convenience functions: `detect_period()`, `detect_period_ensemble()`, `detect_period_range()`
+  - `PeriodicityDetector` trait for unified API
+- **FFT Utilities**
+  - `fft_real()` - FFT for real-valued signals
+  - `periodogram()` - power spectral density computation
+  - `periodogram_peaks()` - significant peak detection
+  - `welch_periodogram()` - Welch's method for reduced variance
+- **SIMD-Accelerated Operations**
+  - Vector sum, mean, variance, standard deviation
+  - Dot product and sum of squares
+  - Squared Euclidean and Manhattan distances
+  - Element-wise operations (add, subtract, multiply, divide, scale)
+  - Uses Trueno for AVX2/SSE2/NEON acceleration
+- **Validation Tools**
+  - CLI tool for periodicity detection (`examples/analysis/detect_period.rs`)
+  - Python cross-validation script against pyriodicity
+  - Criterion benchmarks for periodicity detection
+
+### Changed
+
+- Updated documentation with periodicity detection examples
+- Added `rustfft` dependency for FFT operations
+
 ## [0.1.0] - 2025-12-11
 
 ### Added
