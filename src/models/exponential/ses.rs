@@ -242,6 +242,27 @@ impl Forecaster for SimpleExponentialSmoothing {
         self.fitted.as_deref()
     }
 
+    fn fitted_values_with_intervals(&self, level: f64) -> Option<Forecast> {
+        let fitted = self.fitted.as_ref()?;
+        let variance = self.residual_variance?;
+
+        if variance <= 0.0 {
+            return Some(Forecast::from_values(fitted.clone()));
+        }
+
+        let z = quantile_normal((1.0 + level) / 2.0);
+        let sigma = variance.sqrt();
+
+        let lower: Vec<f64> = fitted.iter().map(|&f| f - z * sigma).collect();
+        let upper: Vec<f64> = fitted.iter().map(|&f| f + z * sigma).collect();
+
+        Some(Forecast::from_values_with_intervals(
+            fitted.clone(),
+            lower,
+            upper,
+        ))
+    }
+
     fn residuals(&self) -> Option<&[f64]> {
         self.residuals.as_deref()
     }
@@ -719,5 +740,36 @@ mod tests {
         for &pred in preds.iter() {
             assert_relative_eq!(pred, expected, epsilon = 1e-6);
         }
+    }
+
+    #[test]
+    fn ses_fitted_values_with_intervals() {
+        let n = 20;
+        let timestamps = make_timestamps(n);
+        let values: Vec<f64> = (0..n).map(|i| 10.0 + (i as f64) * 0.1).collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = SimpleExponentialSmoothing::new(0.3);
+        model.fit(&ts).unwrap();
+
+        let fitted = model.fitted_values_with_intervals(0.95).unwrap();
+        assert!(fitted.has_lower());
+        assert!(fitted.has_upper());
+        assert_eq!(fitted.horizon(), n);
+
+        let lower = fitted.lower_series(0).unwrap();
+        let upper = fitted.upper_series(0).unwrap();
+        let primary = fitted.primary();
+
+        // Intervals should contain the point forecast
+        for i in 0..n {
+            assert!(lower[i] <= primary[i]);
+            assert!(upper[i] >= primary[i]);
+        }
+
+        // Intervals should have constant width (in-sample variance is constant)
+        let width_first = upper[1] - lower[1]; // Skip first which may be NaN
+        let width_last = upper[n - 1] - lower[n - 1];
+        assert_relative_eq!(width_first, width_last, epsilon = 1e-10);
     }
 }

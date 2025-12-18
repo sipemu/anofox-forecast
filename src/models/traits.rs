@@ -23,6 +23,16 @@ pub trait Forecaster {
     /// Get the fitted values (in-sample predictions).
     fn fitted_values(&self) -> Option<&[f64]>;
 
+    /// Get the fitted values with confidence intervals.
+    ///
+    /// Returns in-sample predictions with lower and upper bounds.
+    /// The `level` parameter specifies the confidence level (e.g., 0.95 for 95%).
+    fn fitted_values_with_intervals(&self, level: f64) -> Option<Forecast> {
+        // Default implementation returns None (no intervals available)
+        let _ = level;
+        None
+    }
+
     /// Get the residuals (actual - fitted).
     fn residuals(&self) -> Option<&[f64]>;
 

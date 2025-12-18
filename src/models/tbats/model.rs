@@ -971,6 +971,37 @@ impl Forecaster for TBATS {
         self.fitted.as_deref()
     }
 
+    fn fitted_values_with_intervals(&self, level: f64) -> Option<Forecast> {
+        let fitted = self.fitted.as_ref()?;
+        let residuals = self.residuals.as_ref()?;
+
+        // Compute variance from residuals
+        let valid_residuals: Vec<f64> = residuals.iter().copied().filter(|r| !r.is_nan()).collect();
+
+        if valid_residuals.is_empty() {
+            return Some(Forecast::from_values(fitted.clone()));
+        }
+
+        let n = valid_residuals.len() as f64;
+        let variance = crate::simd::sum_of_squares(&valid_residuals) / n;
+
+        if variance <= 0.0 {
+            return Some(Forecast::from_values(fitted.clone()));
+        }
+
+        let z = crate::utils::quantile_normal(0.5 + level / 2.0);
+        let sigma = variance.sqrt();
+
+        let lower: Vec<f64> = fitted.iter().map(|&f| f - z * sigma).collect();
+        let upper: Vec<f64> = fitted.iter().map(|&f| f + z * sigma).collect();
+
+        Some(Forecast::from_values_with_intervals(
+            fitted.clone(),
+            lower,
+            upper,
+        ))
+    }
+
     fn residuals(&self) -> Option<&[f64]> {
         self.residuals.as_deref()
     }

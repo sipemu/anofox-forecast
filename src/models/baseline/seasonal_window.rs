@@ -198,6 +198,27 @@ impl Forecaster for SeasonalWindowAverage {
         self.fitted.as_deref()
     }
 
+    fn fitted_values_with_intervals(&self, level: f64) -> Option<Forecast> {
+        let fitted = self.fitted.as_ref()?;
+        let variance = self.residual_variance?;
+
+        if variance <= 0.0 {
+            return Some(Forecast::from_values(fitted.clone()));
+        }
+
+        let z = quantile_normal((1.0 + level) / 2.0);
+        let sigma = variance.sqrt();
+
+        let lower: Vec<f64> = fitted.iter().map(|&f| f - z * sigma).collect();
+        let upper: Vec<f64> = fitted.iter().map(|&f| f + z * sigma).collect();
+
+        Some(Forecast::from_values_with_intervals(
+            fitted.clone(),
+            lower,
+            upper,
+        ))
+    }
+
     fn residuals(&self) -> Option<&[f64]> {
         self.residuals.as_deref()
     }

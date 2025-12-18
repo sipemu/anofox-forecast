@@ -253,6 +253,10 @@ impl Forecaster for AutoTBATS {
         self.best_model.as_ref()?.fitted_values()
     }
 
+    fn fitted_values_with_intervals(&self, level: f64) -> Option<Forecast> {
+        self.best_model.as_ref()?.fitted_values_with_intervals(level)
+    }
+
     fn residuals(&self) -> Option<&[f64]> {
         self.best_model.as_ref()?.residuals()
     }

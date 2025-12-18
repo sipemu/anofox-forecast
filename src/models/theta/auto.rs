@@ -280,6 +280,15 @@ impl Forecaster for AutoTheta {
         }
     }
 
+    fn fitted_values_with_intervals(&self, level: f64) -> Option<Forecast> {
+        match self.fitted_model.as_ref()? {
+            FittedModel::STM(m) => m.fitted_values_with_intervals(level),
+            FittedModel::OTM(m) => m.fitted_values_with_intervals(level),
+            FittedModel::DSTM(m) => m.fitted_values_with_intervals(level),
+            FittedModel::DOTM(m) => m.fitted_values_with_intervals(level),
+        }
+    }
+
     fn residuals(&self) -> Option<&[f64]> {
         match self.fitted_model.as_ref()? {
             FittedModel::STM(m) => m.residuals(),

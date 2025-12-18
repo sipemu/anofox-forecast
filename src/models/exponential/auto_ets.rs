@@ -292,6 +292,12 @@ impl Forecaster for AutoETS {
         self.selected_model.as_ref()?.fitted_values()
     }
 
+    fn fitted_values_with_intervals(&self, level: f64) -> Option<Forecast> {
+        self.selected_model
+            .as_ref()?
+            .fitted_values_with_intervals(level)
+    }
+
     fn residuals(&self) -> Option<&[f64]> {
         self.selected_model.as_ref()?.residuals()
     }

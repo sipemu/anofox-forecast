@@ -529,6 +529,13 @@ impl Forecaster for AutoARIMA {
         }
     }
 
+    fn fitted_values_with_intervals(&self, level: f64) -> Option<Forecast> {
+        match self.selected_model.as_ref()? {
+            SelectedModel::ARIMA(model) => model.fitted_values_with_intervals(level),
+            SelectedModel::SARIMA(model) => model.fitted_values_with_intervals(level),
+        }
+    }
+
     fn residuals(&self) -> Option<&[f64]> {
         match self.selected_model.as_ref()? {
             SelectedModel::ARIMA(model) => model.residuals(),
