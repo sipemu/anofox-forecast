@@ -1179,4 +1179,514 @@ mod tests {
         let model = MFLES::default();
         assert_eq!(model.season_length, 12);
     }
+
+    #[test]
+    fn mfles_with_max_rounds() {
+        let ts = make_seasonal_series(100, 12);
+        let mut model = MFLES::new(vec![12]).with_max_rounds(5);
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(12).unwrap();
+        assert_eq!(forecast.horizon(), 12);
+    }
+
+    #[test]
+    fn mfles_with_learning_rates() {
+        let ts = make_seasonal_series(100, 12);
+        let mut model = MFLES::new(vec![12])
+            .with_seasonal_lr(0.5)
+            .with_trend_lr(0.5);
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(12).unwrap();
+        assert_eq!(forecast.horizon(), 12);
+    }
+
+    #[test]
+    fn mfles_learning_rate_clamping() {
+        let ts = make_seasonal_series(100, 12);
+        // Test clamping of extreme values
+        let mut model = MFLES::new(vec![12])
+            .with_seasonal_lr(5.0) // Should clamp to 1.0
+            .with_trend_lr(-1.0); // Should clamp to 0.01
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(12).unwrap();
+        assert_eq!(forecast.horizon(), 12);
+    }
+
+    #[test]
+    fn mfles_max_rounds_clamping() {
+        let ts = make_seasonal_series(100, 12);
+        // with_max_rounds(0) should be clamped to 1
+        let mut model = MFLES::new(vec![12]).with_max_rounds(0);
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(6).unwrap();
+        assert_eq!(forecast.horizon(), 6);
+    }
+
+    #[test]
+    fn mfles_multiplicative_auto_detect() {
+        // Create positive-only series for multiplicative auto-detection
+        let timestamps = make_timestamps(100);
+        let values: Vec<f64> = (0..100)
+            .map(|i| {
+                let trend = 100.0 + 0.5 * i as f64;
+                let seasonal =
+                    10.0 * (2.0 * std::f64::consts::PI * (i % 12) as f64 / 12.0).sin() + 15.0;
+                trend + seasonal
+            })
+            .collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = MFLES::new(vec![12]);
+        model.fit(&ts).unwrap();
+
+        // Should auto-detect multiplicative mode for positive series
+        let (_, _, _, is_mult) = model.debug_state();
+        assert!(
+            is_mult,
+            "Should auto-detect multiplicative mode for positive series"
+        );
+    }
+
+    #[test]
+    fn mfles_constant_series() {
+        let timestamps = make_timestamps(50);
+        let values = vec![42.0; 50];
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = MFLES::new(vec![12]);
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(12).unwrap();
+        // Constant series should predict constant values
+        for &pred in forecast.primary() {
+            assert!((pred - 42.0).abs() < 1.0, "Expected ~42, got {}", pred);
+        }
+    }
+
+    #[test]
+    fn mfles_with_negative_values() {
+        // Series with negative values forces additive mode
+        let timestamps = make_timestamps(100);
+        let values: Vec<f64> = (0..100)
+            .map(|i| {
+                let trend = 0.5 * i as f64;
+                let seasonal = 10.0 * (2.0 * std::f64::consts::PI * (i % 12) as f64 / 12.0).sin();
+                trend + seasonal - 30.0 // Ensure some negatives
+            })
+            .collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = MFLES::new(vec![12]);
+        model.fit(&ts).unwrap();
+
+        let (_, _, _, is_mult) = model.debug_state();
+        assert!(
+            !is_mult,
+            "Should use additive mode for series with negatives"
+        );
+
+        let forecast = model.predict(12).unwrap();
+        assert_eq!(forecast.horizon(), 12);
+    }
+
+    #[test]
+    fn mfles_force_multiplicative() {
+        let ts = make_seasonal_series(100, 12);
+        let mut model = MFLES::new(vec![12]).multiplicative(true);
+        model.fit(&ts).unwrap();
+
+        let (_, _, _, is_mult) = model.debug_state();
+        assert!(is_mult, "Should use multiplicative mode when forced");
+    }
+
+    #[test]
+    fn mfles_debug_functions() {
+        let ts = make_seasonal_series(100, 12);
+        let mut model = MFLES::new(vec![12]);
+        model.fit(&ts).unwrap();
+
+        // Test debug_state
+        let (trend, penalty, seasonality, is_mult) = model.debug_state();
+        assert!(trend.is_some(), "Trend should be set after fit");
+        assert!(penalty.is_some(), "Penalty should be set after fit");
+        assert!(seasonality.is_some(), "Seasonality should be set after fit");
+        assert!(is_mult);
+
+        // Test debug_rounds
+        let rounds = model.debug_rounds();
+        assert!(rounds > 0, "Should have processed data");
+
+        // Test debug_components
+        let components = model.debug_components();
+        assert!(
+            components.is_none(),
+            "debug_components returns None currently"
+        );
+    }
+
+    #[test]
+    fn mfles_fitted_values_with_intervals() {
+        let ts = make_seasonal_series(100, 12);
+        let mut model = MFLES::new(vec![12]);
+        model.fit(&ts).unwrap();
+
+        let forecast = model.fitted_values_with_intervals(0.95).unwrap();
+        assert_eq!(forecast.horizon(), 100);
+        assert!(forecast.has_lower());
+        assert!(forecast.has_upper());
+
+        let fitted = forecast.primary();
+        let lower = forecast.lower_series(0).unwrap();
+        let upper = forecast.upper_series(0).unwrap();
+
+        for i in 0..100 {
+            assert!(lower[i] <= fitted[i], "Lower should be <= fitted");
+            assert!(upper[i] >= fitted[i], "Upper should be >= fitted");
+        }
+    }
+
+    #[test]
+    fn mfles_short_series_less_than_period() {
+        // Series shorter than seasonal period
+        let timestamps = make_timestamps(8);
+        let values: Vec<f64> = (0..8).map(|i| 10.0 + i as f64).collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = MFLES::new(vec![12]); // period=12 but series is 8
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.horizon(), 5);
+    }
+
+    #[test]
+    fn mfles_long_horizon_forecast() {
+        let ts = make_seasonal_series(100, 12);
+        let mut model = MFLES::new(vec![12]);
+        model.fit(&ts).unwrap();
+
+        // Test very long horizon
+        let forecast = model.predict(120).unwrap();
+        assert_eq!(forecast.horizon(), 120);
+
+        // Values should be finite
+        for &val in forecast.primary() {
+            assert!(val.is_finite(), "Forecast value should be finite");
+        }
+    }
+
+    #[test]
+    fn mfles_different_seasonal_periods() {
+        // Test with different seasonal periods to trigger different fourier orders
+        for period in [4, 7, 12, 24, 52, 100] {
+            let timestamps = make_timestamps(period * 4);
+            let values: Vec<f64> = (0..period * 4)
+                .map(|i| {
+                    let trend = 50.0 + 0.1 * i as f64;
+                    let seasonal = 5.0
+                        * (2.0 * std::f64::consts::PI * (i % period) as f64 / period as f64).sin();
+                    trend + seasonal
+                })
+                .collect();
+            let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+            let mut model = MFLES::new(vec![period]);
+            model.fit(&ts).unwrap();
+
+            let forecast = model.predict(period).unwrap();
+            assert_eq!(forecast.horizon(), period);
+        }
+    }
+
+    #[test]
+    fn mfles_median_scalar_edge_cases() {
+        // Empty
+        assert_eq!(MFLES::median_scalar(&[]), 0.0);
+
+        // Single element
+        assert_eq!(MFLES::median_scalar(&[5.0]), 5.0);
+
+        // Two elements (even)
+        assert_eq!(MFLES::median_scalar(&[2.0, 4.0]), 3.0);
+
+        // Three elements (odd)
+        assert_eq!(MFLES::median_scalar(&[1.0, 2.0, 3.0]), 2.0);
+
+        // With NaN (should be filtered)
+        assert_eq!(MFLES::median_scalar(&[1.0, f64::NAN, 3.0]), 2.0);
+
+        // All NaN
+        assert_eq!(MFLES::median_scalar(&[f64::NAN, f64::NAN]), 0.0);
+    }
+
+    #[test]
+    fn mfles_median_with_seasonal_period() {
+        // Test median with seasonal period
+        let values: Vec<f64> = (0..24).map(|i| i as f64).collect();
+
+        // Without period
+        let med_no_period = MFLES::median(&values, None);
+        assert_eq!(med_no_period.len(), 24);
+        // Should be constant (global median)
+        assert!((med_no_period[0] - med_no_period[12]).abs() < 0.01);
+
+        // With period
+        let med_with_period = MFLES::median(&values, Some(12));
+        assert_eq!(med_with_period.len(), 24);
+
+        // Invalid period (0)
+        let med_zero_period = MFLES::median(&values, Some(0));
+        assert_eq!(med_zero_period.len(), 24);
+
+        // Empty values
+        let med_empty = MFLES::median(&[], Some(12));
+        assert!(med_empty.is_empty());
+    }
+
+    #[test]
+    fn mfles_set_fourier_orders() {
+        // Test auto fourier order determination
+        assert_eq!(MFLES::set_fourier(4), 5); // period < 10
+        assert_eq!(MFLES::set_fourier(9), 5); // period < 10
+        assert_eq!(MFLES::set_fourier(10), 10); // period >= 10 and < 70
+        assert_eq!(MFLES::set_fourier(69), 10); // period >= 10 and < 70
+        assert_eq!(MFLES::set_fourier(70), 15); // period >= 70
+        assert_eq!(MFLES::set_fourier(365), 15); // period >= 70
+    }
+
+    #[test]
+    fn mfles_calc_cov() {
+        let data: Vec<f64> = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+
+        // Additive mode CoV
+        let cov_add = MFLES::calc_cov(&data, false);
+        assert!(cov_add > 0.0);
+
+        // Multiplicative mode CoV
+        let cov_mult = MFLES::calc_cov(&data, true);
+        assert!(cov_mult >= 0.0);
+
+        // Empty data
+        assert_eq!(MFLES::calc_cov(&[], false), 0.0);
+
+        // Data with mean near zero (additive)
+        let zero_mean: Vec<f64> = vec![-2.0, -1.0, 0.0, 1.0, 2.0];
+        let cov_zero_mean = MFLES::calc_cov(&zero_mean, false);
+        assert!(cov_zero_mean.is_finite());
+    }
+
+    #[test]
+    fn mfles_fast_ols_edge_cases() {
+        // Single element
+        let single = MFLES::fast_ols(&[5.0]);
+        assert_eq!(single.len(), 1);
+        assert_eq!(single[0], 5.0);
+
+        // Two elements
+        let two = MFLES::fast_ols(&[1.0, 3.0]);
+        assert_eq!(two.len(), 2);
+        // Should fit line y = 1 + 2x (at x=0: 1, at x=1: 3)
+        assert!((two[0] - 1.0).abs() < 0.01);
+        assert!((two[1] - 3.0).abs() < 0.01);
+
+        // Constant data
+        let constant = MFLES::fast_ols(&[5.0, 5.0, 5.0, 5.0]);
+        for &v in &constant {
+            assert!((v - 5.0).abs() < 0.01);
+        }
+    }
+
+    #[test]
+    fn mfles_siegel_repeated_medians() {
+        // Single element
+        let single = MFLES::siegel_repeated_medians(&[5.0]);
+        assert_eq!(single.len(), 1);
+        assert_eq!(single[0], 5.0);
+
+        // Linear data
+        let linear: Vec<f64> = (0..20).map(|i| 2.0 * i as f64 + 1.0).collect();
+        let fitted = MFLES::siegel_repeated_medians(&linear);
+        assert_eq!(fitted.len(), 20);
+        // Should closely fit the line
+        for (i, &v) in fitted.iter().enumerate() {
+            let expected = 2.0 * i as f64 + 1.0;
+            assert!(
+                (v - expected).abs() < 1.0,
+                "i={}: expected {}, got {}",
+                i,
+                expected,
+                v
+            );
+        }
+    }
+
+    #[test]
+    fn mfles_rolling_mean_edge_cases() {
+        // Empty
+        let empty = MFLES::rolling_mean(&[], 3);
+        assert!(empty.is_empty());
+
+        // Window = 0
+        let zero_window = MFLES::rolling_mean(&[1.0, 2.0, 3.0], 0);
+        assert_eq!(zero_window, vec![1.0, 2.0, 3.0]);
+
+        // Normal case
+        let data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let rolled = MFLES::rolling_mean(&data, 3);
+        assert_eq!(rolled.len(), 5);
+        // First 3 values unchanged
+        assert_eq!(rolled[0], 1.0);
+        assert_eq!(rolled[1], 2.0);
+        assert_eq!(rolled[2], 3.0);
+        // Rolling mean starts at index 3
+        assert!((rolled[3] - 3.0).abs() < 0.01); // (2+3+4)/3 = 3
+        assert!((rolled[4] - 4.0).abs() < 0.01); // (3+4+5)/3 = 4
+    }
+
+    #[test]
+    fn mfles_ses_ensemble_modes() {
+        let data: Vec<f64> = (0..20).map(|i| i as f64).collect();
+
+        // Rolling mean mode (smooth=false)
+        let rolling = MFLES::ses_ensemble(&data, 0.05, 1.0, false, 1);
+        assert_eq!(rolling.len(), 20);
+
+        // EWM ensemble mode (smooth=true)
+        let ewm = MFLES::ses_ensemble(&data, 0.05, 1.0, true, 1);
+        assert_eq!(ewm.len(), 20);
+
+        // Empty data
+        let empty = MFLES::ses_ensemble(&[], 0.05, 1.0, false, 1);
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn mfles_ols_edge_cases() {
+        // Empty x matrix
+        let (fitted, coeffs) = MFLES::ols_with_coeffs(&[], &[1.0, 2.0, 3.0]);
+        assert_eq!(fitted.len(), 3);
+        assert!(coeffs.is_empty());
+
+        // Empty y
+        let x = vec![vec![1.0, 2.0, 3.0]];
+        let (fitted, coeffs) = MFLES::ols_with_coeffs(&x, &[]);
+        assert!(fitted.is_empty());
+        assert!(coeffs.is_empty());
+    }
+
+    #[test]
+    fn mfles_solve_symmetric_edge_cases() {
+        // Empty
+        assert!(MFLES::solve_symmetric(&[], &[]).is_none());
+
+        // Mismatched dimensions
+        let a = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
+        assert!(MFLES::solve_symmetric(&a, &[1.0]).is_none());
+    }
+
+    #[test]
+    fn mfles_robust_auto_detect_high_cov() {
+        // Create a series with high coefficient of variation to trigger robust mode
+        let timestamps = make_timestamps(100);
+        // Use data that creates high residual variance
+        let values: Vec<f64> = (0..100)
+            .map(|i| {
+                let base = 100.0 + i as f64 * 0.1;
+                // Add large spikes to create high CoV
+                if i % 10 == 0 {
+                    base * 3.0
+                } else {
+                    base
+                }
+            })
+            .collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = MFLES::new(vec![12]);
+        // Should auto-detect robust mode if CoV > 0.7
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(12).unwrap();
+        assert_eq!(forecast.horizon(), 12);
+    }
+
+    #[test]
+    fn mfles_resize_vec() {
+        // Empty
+        let resized = MFLES::resize_vec(&[], 5);
+        assert_eq!(resized, vec![0.0; 5]);
+
+        // Resize smaller to larger (tile)
+        let resized = MFLES::resize_vec(&[1.0, 2.0, 3.0], 7);
+        assert_eq!(resized, vec![1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0]);
+
+        // Resize to exact multiple
+        let resized = MFLES::resize_vec(&[1.0, 2.0], 4);
+        assert_eq!(resized, vec![1.0, 2.0, 1.0, 2.0]);
+    }
+
+    #[test]
+    fn mfles_empty_seasonal_periods() {
+        let ts = make_seasonal_series(100, 12);
+        // Empty seasonal periods should default to 12
+        let mut model = MFLES::new(vec![]);
+        // season_length would be 0 from unwrap_or(12) on first().copied()
+        // Actually looking at the code: .first().copied().unwrap_or(12)
+        // empty vec means first() returns None, so unwrap_or(12) gives 12
+        model.fit(&ts).unwrap();
+        let forecast = model.predict(6).unwrap();
+        assert_eq!(forecast.horizon(), 6);
+    }
+
+    #[test]
+    fn mfles_get_fourier_series() {
+        // Test Fourier series generation
+        let series = MFLES::get_fourier_series(10, 4, 2);
+        // Should have 2 * min(2, 4/2) = 2 * 2 = 4 columns
+        assert_eq!(series.len(), 4);
+        // Each column should have 10 rows
+        for col in &series {
+            assert_eq!(col.len(), 10);
+        }
+
+        // Values should be bounded [-1, 1] for sin/cos
+        for col in &series {
+            for &val in col {
+                assert!(val >= -1.0 && val <= 1.0);
+            }
+        }
+    }
+
+    #[test]
+    fn mfles_calc_mse() {
+        // Perfect fit
+        assert_eq!(MFLES::calc_mse(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0]), 0.0);
+
+        // Known MSE
+        let mse = MFLES::calc_mse(&[1.0, 2.0, 3.0], &[2.0, 3.0, 4.0]);
+        assert!((mse - 1.0).abs() < 0.01); // Each error is 1, MSE = 3/3 = 1
+
+        // Empty
+        assert_eq!(MFLES::calc_mse(&[], &[]), 0.0);
+    }
+
+    #[test]
+    fn mfles_calc_rsq() {
+        // Perfect fit (R² = 1)
+        let rsq = MFLES::calc_rsq(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0]);
+        assert!((rsq - 1.0).abs() < 0.01);
+
+        // No fit (R² = 0 when trend is constant at mean)
+        let rsq = MFLES::calc_rsq(&[1.0, 2.0, 3.0], &[2.0, 2.0, 2.0]);
+        assert!((rsq - 0.0).abs() < 0.01);
+
+        // Constant residuals (ss_tot near 0)
+        let rsq = MFLES::calc_rsq(&[5.0, 5.0, 5.0], &[5.0, 5.0, 5.0]);
+        // When ss_tot < 1e-10, returns 0.0
+        assert_eq!(rsq, 0.0);
+    }
 }

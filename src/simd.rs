@@ -641,4 +641,228 @@ mod tests {
         assert_close(max(&[1.0, 5.0, 3.0, 2.0]), 5.0, "max");
         assert_close(min(&[1.0, 5.0, 3.0, 2.0]), 1.0, "min");
     }
+
+    #[test]
+    fn test_variance_sample() {
+        let data = vec![2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0];
+        let pop_var = variance(&data);
+        let sample_var = variance_sample(&data);
+        // Sample variance = pop_variance * n / (n-1)
+        let expected = pop_var * 8.0 / 7.0;
+        assert_close(sample_var, expected, "variance_sample");
+
+        // Edge cases
+        assert!(variance_sample(&[]).is_nan(), "empty variance_sample");
+        assert!(
+            variance_sample(&[1.0]).is_nan(),
+            "single element variance_sample"
+        );
+    }
+
+    #[test]
+    fn test_stddev() {
+        let data = vec![2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0];
+        let expected = variance(&data).sqrt();
+        assert_close(stddev(&data), expected, "stddev");
+        assert_close(stddev(&data), 2.0, "stddev value");
+
+        // Edge cases
+        assert!(stddev(&[]).is_nan(), "empty stddev");
+        assert!(stddev(&[1.0]).is_nan(), "single element stddev");
+    }
+
+    #[test]
+    fn test_add() {
+        let result = add(&[1.0, 2.0, 3.0], &[4.0, 5.0, 6.0]);
+        assert_eq!(result.len(), 3);
+        assert_close(result[0], 5.0, "add[0]");
+        assert_close(result[1], 7.0, "add[1]");
+        assert_close(result[2], 9.0, "add[2]");
+
+        // Empty case
+        let empty_result = add(&[], &[]);
+        assert!(empty_result.is_empty(), "empty add");
+    }
+
+    #[test]
+    fn test_sub_empty() {
+        let result = sub(&[], &[]);
+        assert!(result.is_empty(), "empty sub");
+    }
+
+    #[test]
+    fn test_mul_empty() {
+        let result = mul(&[], &[]);
+        assert!(result.is_empty(), "empty mul");
+    }
+
+    #[test]
+    fn test_div_empty() {
+        let result = div(&[], &[]);
+        assert!(result.is_empty(), "empty div");
+    }
+
+    #[test]
+    fn test_scale_empty() {
+        let result = scale(&[], 2.0);
+        assert!(result.is_empty(), "empty scale");
+    }
+
+    #[test]
+    fn test_zscore_edge_cases() {
+        // Single element returns unchanged
+        let single = zscore(&[5.0]);
+        assert_eq!(single.len(), 1);
+        assert_close(single[0], 5.0, "zscore single");
+
+        // Empty returns empty
+        let empty = zscore(&[]);
+        assert!(empty.is_empty(), "zscore empty");
+
+        // Constant data (stddev = 0) returns unchanged
+        let constant = zscore(&[3.0, 3.0, 3.0, 3.0]);
+        assert_eq!(constant.len(), 4);
+        // Should return original data when stddev is 0
+        for &v in &constant {
+            assert_close(v, 3.0, "zscore constant");
+        }
+    }
+
+    #[test]
+    fn test_minmax_normalize_edge_cases() {
+        // Empty returns empty
+        let empty = minmax_normalize(&[]);
+        assert!(empty.is_empty(), "minmax empty");
+
+        // Constant data returns zeros
+        let constant = minmax_normalize(&[5.0, 5.0, 5.0]);
+        assert_eq!(constant.len(), 3);
+        for &v in &constant {
+            assert_close(v, 0.0, "minmax constant");
+        }
+
+        // Single element
+        let single = minmax_normalize(&[5.0]);
+        assert_eq!(single.len(), 1);
+        assert_close(single[0], 0.0, "minmax single");
+    }
+
+    #[test]
+    fn test_max_empty() {
+        assert_eq!(max(&[]), f64::NEG_INFINITY);
+    }
+
+    #[test]
+    fn test_min_empty() {
+        assert_eq!(min(&[]), f64::INFINITY);
+    }
+
+    #[test]
+    fn test_single_element_sum_of_squares() {
+        assert_close(sum_of_squares(&[3.0]), 9.0, "single sum_of_squares");
+    }
+
+    #[test]
+    fn test_single_element_dot() {
+        assert_close(dot(&[3.0], &[4.0]), 12.0, "single dot");
+    }
+
+    #[test]
+    fn test_single_element_mean() {
+        assert_close(mean(&[5.0]), 5.0, "single mean");
+    }
+
+    #[test]
+    fn test_single_element_max_min() {
+        assert_close(max(&[5.0]), 5.0, "single max");
+        assert_close(min(&[5.0]), 5.0, "single min");
+    }
+
+    #[test]
+    fn test_single_element_distances() {
+        assert_close(
+            squared_distance(&[3.0], &[5.0]),
+            4.0,
+            "single squared_distance",
+        );
+        assert_close(l1_distance(&[3.0], &[5.0]), 2.0, "single l1_distance");
+    }
+
+    #[test]
+    fn test_single_element_elementwise_ops() {
+        let sub_result = sub(&[5.0], &[3.0]);
+        assert_close(sub_result[0], 2.0, "single sub");
+
+        let mul_result = mul(&[5.0], &[3.0]);
+        assert_close(mul_result[0], 15.0, "single mul");
+
+        let div_result = div(&[6.0], &[3.0]);
+        assert_close(div_result[0], 2.0, "single div");
+
+        let add_result = add(&[5.0], &[3.0]);
+        assert_close(add_result[0], 8.0, "single add");
+
+        let scale_result = scale(&[5.0], 3.0);
+        assert_close(scale_result[0], 15.0, "single scale");
+    }
+
+    #[test]
+    fn test_large_vectors() {
+        // Test with vectors larger than typical SIMD width
+        let large_a: Vec<f64> = (0..1000).map(|x| x as f64).collect();
+        let large_b: Vec<f64> = (0..1000).map(|x| (x * 2) as f64).collect();
+
+        // Sum: 0 + 1 + 2 + ... + 999 = 999 * 1000 / 2 = 499500
+        assert_close(sum(&large_a), 499500.0, "large sum");
+
+        // Mean
+        assert_close(mean(&large_a), 499.5, "large mean");
+
+        // Max/Min
+        assert_close(max(&large_a), 999.0, "large max");
+        assert_close(min(&large_a), 0.0, "large min");
+
+        // Element-wise operations
+        let add_result = add(&large_a, &large_b);
+        assert_eq!(add_result.len(), 1000);
+        assert_close(add_result[500], 1500.0, "large add");
+
+        let sub_result = sub(&large_b, &large_a);
+        assert_eq!(sub_result.len(), 1000);
+        assert_close(sub_result[500], 500.0, "large sub");
+    }
+
+    #[test]
+    fn test_non_multiple_of_four_lengths() {
+        // Test with lengths that are not multiples of 4 (typical SIMD width)
+        let v3: Vec<f64> = vec![1.0, 2.0, 3.0];
+        let v5: Vec<f64> = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let v7: Vec<f64> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0];
+
+        assert_close(sum(&v3), 6.0, "sum v3");
+        assert_close(sum(&v5), 15.0, "sum v5");
+        assert_close(sum(&v7), 28.0, "sum v7");
+
+        assert_close(mean(&v3), 2.0, "mean v3");
+        assert_close(mean(&v5), 3.0, "mean v5");
+        assert_close(mean(&v7), 4.0, "mean v7");
+    }
+
+    #[test]
+    fn test_negative_values() {
+        let data = vec![-5.0, -3.0, -1.0, 0.0, 1.0, 3.0, 5.0];
+
+        assert_close(sum(&data), 0.0, "negative sum");
+        assert_close(mean(&data), 0.0, "negative mean");
+        assert_close(max(&data), 5.0, "negative max");
+        assert_close(min(&data), -5.0, "negative min");
+
+        let squared = sum_of_squares(&data);
+        assert_close(squared, 70.0, "negative sum_of_squares"); // 25+9+1+0+1+9+25
+
+        let a = vec![-1.0, -2.0];
+        let b = vec![3.0, 4.0];
+        assert_close(l1_distance(&a, &b), 10.0, "negative l1"); // |(-1)-3| + |(-2)-4| = 4 + 6
+        assert_close(squared_distance(&a, &b), 52.0, "negative squared"); // 16 + 36
+    }
 }

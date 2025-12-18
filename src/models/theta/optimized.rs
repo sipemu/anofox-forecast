@@ -786,4 +786,346 @@ mod tests {
 
         assert!(model.slope().unwrap() > 0.0);
     }
+
+    #[test]
+    fn optimized_theta_default() {
+        let model = OptimizedTheta::default();
+        assert!(model.alpha().is_none());
+        assert!(model.theta().is_none());
+        assert_eq!(
+            model.decomposition_type(),
+            DecompositionType::Multiplicative
+        );
+        assert!(!model.used_fallback());
+    }
+
+    #[test]
+    fn optimized_theta_seasonal() {
+        let timestamps = make_timestamps(100);
+        // Create seasonal data with period 12
+        let values: Vec<f64> = (0..100)
+            .map(|i| {
+                let trend = 100.0 + 0.5 * i as f64;
+                let seasonal =
+                    10.0 * (2.0 * std::f64::consts::PI * (i % 12) as f64 / 12.0).sin() + 15.0;
+                trend + seasonal
+            })
+            .collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = OptimizedTheta::seasonal(12);
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(12).unwrap();
+        assert_eq!(forecast.horizon(), 12);
+    }
+
+    #[test]
+    fn optimized_theta_seasonal_with_additive_decomposition() {
+        let timestamps = make_timestamps(100);
+        let values: Vec<f64> = (0..100)
+            .map(|i| {
+                let trend = 50.0 + 0.5 * i as f64;
+                let seasonal = 10.0 * (2.0 * std::f64::consts::PI * (i % 12) as f64 / 12.0).sin();
+                trend + seasonal
+            })
+            .collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model =
+            OptimizedTheta::seasonal_with_decomposition(12, DecompositionType::Additive);
+        model.fit(&ts).unwrap();
+
+        assert_eq!(model.decomposition_type(), DecompositionType::Additive);
+        let forecast = model.predict(12).unwrap();
+        assert_eq!(forecast.horizon(), 12);
+    }
+
+    #[test]
+    fn optimized_theta_multiplicative_fallback_for_negative() {
+        let timestamps = make_timestamps(100);
+        // Series with negative values should trigger fallback
+        let values: Vec<f64> = (0..100)
+            .map(|i| {
+                let trend = i as f64 * 0.5;
+                let seasonal = 10.0 * (2.0 * std::f64::consts::PI * (i % 12) as f64 / 12.0).sin();
+                trend + seasonal - 30.0 // Some values will be negative
+            })
+            .collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = OptimizedTheta::seasonal(12); // Default multiplicative
+        model.fit(&ts).unwrap();
+
+        // Should fallback to additive
+        assert_eq!(model.decomposition_type(), DecompositionType::Additive);
+        assert!(model.used_fallback());
+    }
+
+    #[test]
+    fn optimized_theta_zero_horizon() {
+        let timestamps = make_timestamps(50);
+        let values: Vec<f64> = (0..50).map(|i| 10.0 + i as f64).collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = OptimizedTheta::new();
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(0).unwrap();
+        assert_eq!(forecast.horizon(), 0);
+
+        let forecast_with_intervals = model.predict_with_intervals(0, 0.95).unwrap();
+        assert_eq!(forecast_with_intervals.horizon(), 0);
+    }
+
+    #[test]
+    fn optimized_theta_fitted_values_with_intervals() {
+        let timestamps = make_timestamps(50);
+        let values: Vec<f64> = (0..50).map(|i| 10.0 + i as f64).collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = OptimizedTheta::new();
+        model.fit(&ts).unwrap();
+
+        let fitted_forecast = model.fitted_values_with_intervals(0.95).unwrap();
+        assert_eq!(fitted_forecast.horizon(), 50);
+        assert!(fitted_forecast.has_lower());
+        assert!(fitted_forecast.has_upper());
+
+        let fitted = fitted_forecast.primary();
+        let lower = fitted_forecast.lower_series(0).unwrap();
+        let upper = fitted_forecast.upper_series(0).unwrap();
+
+        for i in 0..50 {
+            assert!(lower[i] <= fitted[i], "Lower should be <= fitted at {}", i);
+            assert!(upper[i] >= fitted[i], "Upper should be >= fitted at {}", i);
+        }
+    }
+
+    #[test]
+    fn optimized_theta_acf_edge_cases() {
+        // Empty series
+        let acf_empty = OptimizedTheta::acf(&[], 5);
+        assert_eq!(acf_empty, vec![1.0]);
+
+        // Single element
+        let acf_single = OptimizedTheta::acf(&[5.0], 5);
+        assert_eq!(acf_single, vec![1.0]);
+
+        // nlags = 0
+        let acf_zero_lags = OptimizedTheta::acf(&[1.0, 2.0, 3.0], 0);
+        assert_eq!(acf_zero_lags, vec![1.0]);
+
+        // Constant series (variance = 0)
+        let acf_constant = OptimizedTheta::acf(&[5.0, 5.0, 5.0, 5.0, 5.0], 3);
+        assert_eq!(acf_constant, vec![1.0; 4]);
+
+        // Normal series
+        let series: Vec<f64> = (0..20).map(|i| i as f64 + (i as f64 * 0.5).sin()).collect();
+        let acf_normal = OptimizedTheta::acf(&series, 5);
+        assert_eq!(acf_normal.len(), 6);
+        assert_eq!(acf_normal[0], 1.0); // Lag 0 is always 1
+
+        // Lag larger than series length
+        let acf_large_lag = OptimizedTheta::acf(&[1.0, 2.0, 3.0], 10);
+        assert_eq!(acf_large_lag.len(), 11);
+        // Lags >= n should be 0
+        assert_eq!(acf_large_lag[3], 0.0);
+        assert_eq!(acf_large_lag[4], 0.0);
+    }
+
+    #[test]
+    fn optimized_theta_seasonal_test() {
+        // Non-seasonal random-like data
+        let non_seasonal: Vec<f64> = (0..50)
+            .map(|i| 10.0 + i as f64 + ((i * 17) % 11) as f64)
+            .collect();
+        assert!(!OptimizedTheta::seasonal_test(&non_seasonal, 12));
+
+        // Very short series
+        assert!(!OptimizedTheta::seasonal_test(&[1.0, 2.0, 3.0], 12));
+
+        // Period too small
+        assert!(!OptimizedTheta::seasonal_test(&[1.0; 50], 3));
+
+        // Series too short for period
+        assert!(!OptimizedTheta::seasonal_test(&[1.0; 15], 12));
+    }
+
+    #[test]
+    fn optimized_theta_calculate_slope() {
+        // Positive slope
+        let increasing: Vec<f64> = (0..10).map(|i| i as f64).collect();
+        let slope = OptimizedTheta::calculate_slope(&increasing);
+        assert!(
+            (slope - 1.0).abs() < 0.01,
+            "Expected slope ~1.0, got {}",
+            slope
+        );
+
+        // Negative slope
+        let decreasing: Vec<f64> = (0..10).map(|i| 10.0 - i as f64).collect();
+        let slope = OptimizedTheta::calculate_slope(&decreasing);
+        assert!(
+            (slope - (-1.0)).abs() < 0.01,
+            "Expected slope ~-1.0, got {}",
+            slope
+        );
+
+        // Constant (zero slope)
+        let constant = vec![5.0; 10];
+        let slope = OptimizedTheta::calculate_slope(&constant);
+        assert!(slope.abs() < 0.01, "Expected slope ~0, got {}", slope);
+
+        // Single element
+        let single = OptimizedTheta::calculate_slope(&[5.0]);
+        assert_eq!(single, 0.0);
+
+        // Empty
+        let empty = OptimizedTheta::calculate_slope(&[]);
+        assert_eq!(empty, 0.0);
+    }
+
+    #[test]
+    fn optimized_theta_calculate_mse() {
+        let values: Vec<f64> = (0..20).map(|i| 10.0 + i as f64).collect();
+
+        // Test with valid parameters
+        let mse = OptimizedTheta::calculate_mse(&values, 0.3, 2.0, 1.0, 3);
+        assert!(mse < f64::MAX);
+        assert!(mse >= 0.0);
+
+        // Test with insufficient data
+        let mse_short = OptimizedTheta::calculate_mse(&[1.0, 2.0], 0.3, 2.0, 1.0, 3);
+        assert_eq!(mse_short, f64::MAX);
+    }
+
+    #[test]
+    fn optimized_theta_long_horizon() {
+        let timestamps = make_timestamps(50);
+        let values: Vec<f64> = (0..50).map(|i| 10.0 + i as f64).collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = OptimizedTheta::new();
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(100).unwrap();
+        assert_eq!(forecast.horizon(), 100);
+
+        // All predictions should be finite
+        for &val in forecast.primary() {
+            assert!(val.is_finite());
+        }
+    }
+
+    #[test]
+    fn optimized_theta_seasonal_short_series() {
+        // Series just barely long enough (2 * period = 24)
+        let timestamps = make_timestamps(25);
+        let values: Vec<f64> = (0..25)
+            .map(|i| {
+                let trend = 50.0 + 0.5 * i as f64;
+                let seasonal =
+                    10.0 * (2.0 * std::f64::consts::PI * (i % 12) as f64 / 12.0).sin() + 15.0;
+                trend + seasonal
+            })
+            .collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = OptimizedTheta::seasonal(12);
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.horizon(), 5);
+    }
+
+    #[test]
+    fn optimized_theta_predict_with_intervals_multi_step() {
+        let timestamps = make_timestamps(50);
+        let values: Vec<f64> = (0..50).map(|i| 10.0 + i as f64).collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = OptimizedTheta::new();
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict_with_intervals(10, 0.95).unwrap();
+        let lower = forecast.lower_series(0).unwrap();
+        let upper = forecast.upper_series(0).unwrap();
+
+        // Intervals should widen with horizon
+        let width_1 = upper[0] - lower[0];
+        let width_10 = upper[9] - lower[9];
+        assert!(
+            width_10 > width_1,
+            "Interval width should increase with horizon"
+        );
+    }
+
+    #[test]
+    fn optimized_theta_noisy_data() {
+        let timestamps = make_timestamps(100);
+        // Create noisy data
+        let values: Vec<f64> = (0..100)
+            .map(|i| {
+                let trend = 50.0 + 0.5 * i as f64;
+                let noise = ((i * 17) % 10) as f64 - 5.0;
+                trend + noise
+            })
+            .collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = OptimizedTheta::new();
+        model.fit(&ts).unwrap();
+
+        // Model should still produce reasonable forecasts
+        let forecast = model.predict(10).unwrap();
+        assert_eq!(forecast.horizon(), 10);
+
+        // All values should be finite
+        for &val in forecast.primary() {
+            assert!(val.is_finite());
+        }
+    }
+
+    #[test]
+    fn optimized_theta_small_seasonal_period() {
+        // Test with small seasonal period (4 is minimum for seasonal)
+        let timestamps = make_timestamps(40);
+        let values: Vec<f64> = (0..40)
+            .map(|i| {
+                let trend = 50.0 + 0.5 * i as f64;
+                let seasonal =
+                    5.0 * (2.0 * std::f64::consts::PI * (i % 4) as f64 / 4.0).sin() + 10.0;
+                trend + seasonal
+            })
+            .collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = OptimizedTheta::seasonal(4);
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(8).unwrap();
+        assert_eq!(forecast.horizon(), 8);
+    }
+
+    #[test]
+    fn optimized_theta_odd_seasonal_period() {
+        // Test with odd seasonal period
+        let timestamps = make_timestamps(70);
+        let values: Vec<f64> = (0..70)
+            .map(|i| {
+                let trend = 50.0 + 0.3 * i as f64;
+                let seasonal =
+                    5.0 * (2.0 * std::f64::consts::PI * (i % 7) as f64 / 7.0).sin() + 10.0;
+                trend + seasonal
+            })
+            .collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = OptimizedTheta::seasonal(7);
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(7).unwrap();
+        assert_eq!(forecast.horizon(), 7);
+    }
 }

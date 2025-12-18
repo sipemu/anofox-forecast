@@ -959,4 +959,203 @@ mod tests {
         assert!(model.slope().is_some());
         assert!(model.slope().unwrap() > 0.0);
     }
+
+    #[test]
+    fn dynamic_theta_seasonal() {
+        let n = 96;
+        let period = 12;
+        let timestamps = make_timestamps(n);
+        let values: Vec<f64> = (0..n)
+            .map(|i| {
+                10.0 + 0.2 * i as f64
+                    + 5.0 * (2.0 * std::f64::consts::PI * i as f64 / period as f64).sin()
+            })
+            .collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = DynamicTheta::seasonal(period);
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(period).unwrap();
+        assert_eq!(forecast.horizon(), period);
+    }
+
+    #[test]
+    fn dynamic_theta_seasonal_optimized() {
+        let n = 96;
+        let period = 12;
+        let timestamps = make_timestamps(n);
+        let values: Vec<f64> = (0..n)
+            .map(|i| {
+                20.0 + 0.3 * i as f64
+                    + 8.0 * (2.0 * std::f64::consts::PI * i as f64 / period as f64).sin()
+            })
+            .collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = DynamicTheta::seasonal_optimized(period);
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(period).unwrap();
+        assert_eq!(forecast.horizon(), period);
+    }
+
+    #[test]
+    fn dynamic_theta_additive_decomposition() {
+        let n = 96;
+        let period = 12;
+        let timestamps = make_timestamps(n);
+        let values: Vec<f64> = (0..n)
+            .map(|i| {
+                10.0 + 0.2 * i as f64
+                    + 5.0 * (2.0 * std::f64::consts::PI * i as f64 / period as f64).sin()
+            })
+            .collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model =
+            DynamicTheta::seasonal_with_decomposition(period, DecompositionType::Additive);
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(6).unwrap();
+        assert_eq!(forecast.horizon(), 6);
+    }
+
+    #[test]
+    fn dynamic_theta_multiplicative_decomposition() {
+        let n = 96;
+        let period = 12;
+        let timestamps = make_timestamps(n);
+        let values: Vec<f64> = (0..n)
+            .map(|i| {
+                50.0 + 0.5 * i as f64
+                    + 10.0 * (2.0 * std::f64::consts::PI * i as f64 / period as f64).sin()
+            })
+            .collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model =
+            DynamicTheta::seasonal_with_decomposition(period, DecompositionType::Multiplicative);
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(6).unwrap();
+        assert_eq!(forecast.horizon(), 6);
+    }
+
+    #[test]
+    fn dynamic_theta_multiplicative_fallback_negative_values() {
+        let n = 50;
+        let timestamps = make_timestamps(n);
+        // Include negative values to trigger fallback to additive
+        let values: Vec<f64> = (0..n).map(|i| -5.0 + i as f64 * 0.5).collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model =
+            DynamicTheta::seasonal_with_decomposition(12, DecompositionType::Multiplicative);
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.horizon(), 5);
+    }
+
+    #[test]
+    fn dynamic_theta_seasonal_optimized_with_decomposition() {
+        let n = 96;
+        let period = 12;
+        let timestamps = make_timestamps(n);
+        let values: Vec<f64> = (0..n)
+            .map(|i| {
+                30.0 + 0.4 * i as f64
+                    + 6.0 * (2.0 * std::f64::consts::PI * i as f64 / period as f64).sin()
+            })
+            .collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = DynamicTheta::seasonal_optimized_with_decomposition(
+            period,
+            DecompositionType::Additive,
+        );
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(period).unwrap();
+        assert_eq!(forecast.horizon(), period);
+    }
+
+    #[test]
+    fn dynamic_theta_zero_horizon() {
+        let timestamps = make_timestamps(30);
+        let values: Vec<f64> = (0..30).map(|i| 10.0 + i as f64).collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = DynamicTheta::new(0.1);
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(0).unwrap();
+        assert_eq!(forecast.horizon(), 0);
+    }
+
+    #[test]
+    fn dynamic_theta_constant_series() {
+        let timestamps = make_timestamps(30);
+        let values = vec![5.0; 30];
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = DynamicTheta::new(0.1);
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(5).unwrap();
+        let preds = forecast.primary();
+        for &pred in preds {
+            assert!((pred - 5.0).abs() < 1.0);
+        }
+    }
+
+    #[test]
+    fn dynamic_theta_fitted_values_with_intervals() {
+        let timestamps = make_timestamps(30);
+        let values: Vec<f64> = (0..30).map(|i| 10.0 + i as f64 * 0.5).collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = DynamicTheta::new(0.1);
+        model.fit(&ts).unwrap();
+
+        let fitted = model.fitted_values_with_intervals(0.95).unwrap();
+        assert!(fitted.has_lower());
+        assert!(fitted.has_upper());
+    }
+
+    #[test]
+    fn dynamic_theta_odd_period_seasonal() {
+        let n = 77;
+        let period = 7;
+        let timestamps = make_timestamps(n);
+        let values: Vec<f64> = (0..n)
+            .map(|i| {
+                20.0 + 0.3 * i as f64
+                    + 4.0 * (2.0 * std::f64::consts::PI * i as f64 / period as f64).sin()
+            })
+            .collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = DynamicTheta::seasonal(period);
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(period).unwrap();
+        assert_eq!(forecast.horizon(), period);
+    }
+
+    #[test]
+    fn dynamic_theta_no_seasonality_detected() {
+        // Short period or non-seasonal data
+        let timestamps = make_timestamps(30);
+        let values: Vec<f64> = (0..30).map(|i| 10.0 + 0.5 * i as f64).collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        // Period too short for seasonal test
+        let mut model = DynamicTheta::seasonal(3);
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.horizon(), 5);
+    }
 }
