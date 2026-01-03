@@ -8,6 +8,8 @@
 [![Technical Depth](https://img.shields.io/badge/technical%20depth-A-brightgreen.svg)](docs/API_REFERENCE.md)
 [![Code Quality](https://img.shields.io/badge/code%20quality-production--ready-brightgreen.svg)](docs/API_REFERENCE.md)
 
+> *Technical depth grading and code quality analysis powered by [pmat](https://github.com/paiml/paiml-mcp-agent-toolkit)*
+
 Time series forecasting library for Rust.
 
 Provides 35+ forecasting models, 76+ statistical features, seasonality decomposition, changepoint detection, anomaly detection, and bootstrap confidence intervals. Rust port of [anofox-time](https://github.com/DataZooDE/anofox-time) (C++).
