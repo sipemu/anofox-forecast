@@ -10,9 +10,11 @@
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
 use crate::models::Forecaster;
+use crate::utils::ols::{ols_fit, ols_residuals, OLSResult};
 use crate::utils::optimization::{nelder_mead, NelderMeadConfig};
 use crate::utils::stats::quantile_normal;
 use statrs::distribution::{ContinuousCDF, Normal};
+use std::collections::HashMap;
 
 /// Type of seasonal decomposition for Dynamic Theta model.
 ///
@@ -71,6 +73,8 @@ pub struct DynamicTheta {
     residual_variance: Option<f64>,
     /// Number of observations.
     n: usize,
+    /// OLS result for exogenous regressors (if any).
+    exog_ols: Option<OLSResult>,
 }
 
 impl DynamicTheta {
@@ -94,6 +98,7 @@ impl DynamicTheta {
             residuals: None,
             residual_variance: None,
             n: 0,
+            exog_ols: None,
         }
     }
 
@@ -117,6 +122,7 @@ impl DynamicTheta {
             residuals: None,
             residual_variance: None,
             n: 0,
+            exog_ols: None,
         }
     }
 
@@ -493,6 +499,7 @@ impl DynamicTheta {
             residuals: None,
             residual_variance: None,
             n: 0,
+            exog_ols: None,
         };
 
         let (mut level, mut meany, mut an, mut bn) = Self::init_state(values);
@@ -564,6 +571,83 @@ impl DynamicTheta {
 
         (best_params[0], best_params[1])
     }
+
+    /// Internal prediction method that handles both with and without exogenous cases.
+    fn predict_internal(
+        &self,
+        horizon: usize,
+        future_regressors: Option<&HashMap<String, Vec<f64>>>,
+    ) -> Result<Forecast> {
+        let level = self.level.ok_or(ForecastError::FitRequired)?;
+        let an = self.an.ok_or(ForecastError::FitRequired)?;
+        let bn = self.bn.ok_or(ForecastError::FitRequired)?;
+
+        if horizon == 0 {
+            return Ok(Forecast::new());
+        }
+
+        // Calculate exogenous contribution if applicable
+        let exog_contribution = if let Some(ols) = &self.exog_ols {
+            let future = future_regressors.ok_or_else(|| {
+                ForecastError::InvalidParameter(
+                    "Model was fit with exogenous regressors. Future regressor values required."
+                        .into(),
+                )
+            })?;
+
+            // Validate future regressors have correct length
+            for name in &ols.regressor_names {
+                let values = future.get(name).ok_or_else(|| {
+                    ForecastError::InvalidParameter(format!(
+                        "Missing future values for regressor '{}'",
+                        name
+                    ))
+                })?;
+                if values.len() != horizon {
+                    return Err(ForecastError::DimensionMismatch {
+                        expected: horizon,
+                        got: values.len(),
+                    });
+                }
+            }
+
+            Some(ols.predict(future)?)
+        } else {
+            if future_regressors.is_some_and(|r| !r.is_empty()) {
+                return Err(ForecastError::InvalidParameter(
+                    "Model was not fit with exogenous regressors".into(),
+                ));
+            }
+            None
+        };
+
+        // Use dynamic coefficients for forecasting
+        let n = self.series_len.ok_or(ForecastError::FitRequired)?;
+        let beta = 1.0 - self.alpha;
+
+        let mut predictions = Vec::with_capacity(horizon);
+        // Forecast from the end of the series (on deseasonalized scale)
+        for h in 1..=horizon {
+            let i = n + h - 1;
+            let mut forecast = level
+                + (1.0 - 1.0 / self.theta)
+                    * (an * beta.powi(i as i32)
+                        + bn * (1.0 - beta.powi(i as i32 + 1)) / self.alpha);
+            if let Some(ref exog) = exog_contribution {
+                forecast += exog[h - 1];
+            }
+            predictions.push(forecast);
+        }
+
+        // Reseasonalize if needed
+        let predictions = if let Some(ref seasonal_forecast) = self.seasonal_forecast {
+            self.reseasonalize(&predictions, 0, seasonal_forecast)
+        } else {
+            predictions
+        };
+
+        Ok(Forecast::from_values(predictions))
+    }
 }
 
 impl Default for DynamicTheta {
@@ -574,13 +658,25 @@ impl Default for DynamicTheta {
 
 impl Forecaster for DynamicTheta {
     fn fit(&mut self, series: &TimeSeries) -> Result<()> {
-        let values = series.primary_values();
-        if values.len() < 4 {
+        let raw_values = series.primary_values();
+        if raw_values.len() < 4 {
             return Err(ForecastError::InsufficientData {
                 needed: 4,
-                got: values.len(),
+                got: raw_values.len(),
             });
         }
+
+        // Handle exogenous regressors
+        let values: Vec<f64> = if series.has_regressors() {
+            let regressors = series.all_regressors();
+            let ols_result = ols_fit(raw_values, &regressors)?;
+            let adjusted = ols_residuals(raw_values, &ols_result, &regressors)?;
+            self.exog_ols = Some(ols_result);
+            adjusted
+        } else {
+            self.exog_ols = None;
+            raw_values.to_vec()
+        };
 
         self.n = values.len();
         self.decomposition_fallback = false;
@@ -588,11 +684,11 @@ impl Forecaster for DynamicTheta {
         // Perform seasonal test (matching statsforecast)
         let should_decompose = self.seasonal_period >= 4
             && values.len() >= 2 * self.seasonal_period
-            && Self::seasonal_test(values, self.seasonal_period);
+            && Self::seasonal_test(&values, self.seasonal_period);
 
         // Determine effective decomposition type with fallback rules
         let effective_decomposition = if should_decompose {
-            self.determine_decomposition(values)
+            self.determine_decomposition(&values)
         } else {
             self.decomposition_type
         };
@@ -600,7 +696,7 @@ impl Forecaster for DynamicTheta {
 
         // Calculate seasonal component if needed
         let (full_seasonal, seasonal_forecast) = if should_decompose {
-            self.calculate_seasonal_component(values, effective_decomposition)
+            self.calculate_seasonal_component(&values, effective_decomposition)
         } else {
             (vec![], vec![])
         };
@@ -613,7 +709,7 @@ impl Forecaster for DynamicTheta {
         };
 
         // Deseasonalize using full seasonal component
-        let deseasonalized = self.deseasonalize(values, &full_seasonal);
+        let deseasonalized = self.deseasonalize(&values, &full_seasonal);
 
         // Optimize if requested (on deseasonalized data)
         if self.optimize {
@@ -691,36 +787,75 @@ impl Forecaster for DynamicTheta {
     }
 
     fn predict(&self, horizon: usize) -> Result<Forecast> {
-        let level = self.level.ok_or(ForecastError::FitRequired)?;
-        let an = self.an.ok_or(ForecastError::FitRequired)?;
-        let bn = self.bn.ok_or(ForecastError::FitRequired)?;
-        let n = self.series_len.ok_or(ForecastError::FitRequired)?;
+        // If model was fit with exogenous regressors, require predict_with_exog
+        if self.exog_ols.is_some() {
+            return Err(ForecastError::InvalidParameter(
+                "Model was fit with exogenous regressors. Use predict_with_exog() and provide future regressor values.".into()
+            ));
+        }
+
+        self.predict_internal(horizon, None)
+    }
+
+    fn supports_exog(&self) -> bool {
+        true
+    }
+
+    fn has_exog(&self) -> bool {
+        self.exog_ols.is_some()
+    }
+
+    fn exog_names(&self) -> Option<&[String]> {
+        self.exog_ols
+            .as_ref()
+            .map(|ols| ols.regressor_names.as_slice())
+    }
+
+    fn predict_with_exog(
+        &self,
+        horizon: usize,
+        future_regressors: &HashMap<String, Vec<f64>>,
+    ) -> Result<Forecast> {
+        self.predict_internal(horizon, Some(future_regressors))
+    }
+
+    fn predict_with_exog_intervals(
+        &self,
+        horizon: usize,
+        future_regressors: &HashMap<String, Vec<f64>>,
+        level: f64,
+    ) -> Result<Forecast> {
+        let forecast = self.predict_internal(horizon, Some(future_regressors))?;
+        let variance = self.residual_variance.unwrap_or(0.0);
 
         if horizon == 0 {
-            return Ok(Forecast::new());
+            return Ok(forecast);
         }
 
-        let mut predictions = Vec::with_capacity(horizon);
-        let beta = 1.0 - self.alpha;
+        let z = quantile_normal((1.0 + level) / 2.0);
+        let preds = forecast.primary();
 
-        // Forecast from the end of the series (on deseasonalized scale)
+        let mut lower = Vec::with_capacity(horizon);
+        let mut upper = Vec::with_capacity(horizon);
+
         for h in 1..=horizon {
-            let i = n + h - 1;
-            let forecast = level
-                + (1.0 - 1.0 / self.theta)
-                    * (an * beta.powi(i as i32)
-                        + bn * (1.0 - beta.powi(i as i32 + 1)) / self.alpha);
-            predictions.push(forecast);
+            let factor = if h == 1 {
+                1.0
+            } else {
+                let beta = 1.0 - self.alpha;
+                1.0 + beta.powi(2) * (1.0 - beta.powi(2 * (h as i32 - 1))) / (1.0 - beta.powi(2))
+            };
+            let se = (variance * factor).sqrt();
+
+            lower.push(preds[h - 1] - z * se);
+            upper.push(preds[h - 1] + z * se);
         }
 
-        // Reseasonalize if needed using seasonal_forecast (last cycle) with start_idx=0
-        let predictions = if let Some(ref seasonal_forecast) = self.seasonal_forecast {
-            self.reseasonalize(&predictions, 0, seasonal_forecast)
-        } else {
-            predictions
-        };
-
-        Ok(Forecast::from_values(predictions))
+        Ok(Forecast::from_values_with_intervals(
+            preds.to_vec(),
+            lower,
+            upper,
+        ))
     }
 
     fn predict_with_intervals(&self, horizon: usize, confidence: f64) -> Result<Forecast> {

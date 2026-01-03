@@ -7,6 +7,7 @@ use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
 use crate::models::theta::{DecompositionType, DynamicTheta, OptimizedTheta, Theta};
 use crate::models::Forecaster;
+use std::collections::HashMap;
 
 /// Type of Theta model selected by AutoTheta.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -300,6 +301,70 @@ impl Forecaster for AutoTheta {
 
     fn name(&self) -> &str {
         "AutoTheta"
+    }
+
+    fn supports_exog(&self) -> bool {
+        true
+    }
+
+    fn has_exog(&self) -> bool {
+        match &self.fitted_model {
+            Some(FittedModel::STM(m)) => m.has_exog(),
+            Some(FittedModel::OTM(m)) => m.has_exog(),
+            Some(FittedModel::DSTM(m)) => m.has_exog(),
+            Some(FittedModel::DOTM(m)) => m.has_exog(),
+            None => false,
+        }
+    }
+
+    fn exog_names(&self) -> Option<&[String]> {
+        match self.fitted_model.as_ref()? {
+            FittedModel::STM(m) => m.exog_names(),
+            FittedModel::OTM(m) => m.exog_names(),
+            FittedModel::DSTM(m) => m.exog_names(),
+            FittedModel::DOTM(m) => m.exog_names(),
+        }
+    }
+
+    fn predict_with_exog(
+        &self,
+        horizon: usize,
+        future_regressors: &HashMap<String, Vec<f64>>,
+    ) -> Result<Forecast> {
+        let model = self
+            .fitted_model
+            .as_ref()
+            .ok_or(ForecastError::FitRequired)?;
+
+        match model {
+            FittedModel::STM(m) => m.predict_with_exog(horizon, future_regressors),
+            FittedModel::OTM(m) => m.predict_with_exog(horizon, future_regressors),
+            FittedModel::DSTM(m) => m.predict_with_exog(horizon, future_regressors),
+            FittedModel::DOTM(m) => m.predict_with_exog(horizon, future_regressors),
+        }
+    }
+
+    fn predict_with_exog_intervals(
+        &self,
+        horizon: usize,
+        future_regressors: &HashMap<String, Vec<f64>>,
+        level: f64,
+    ) -> Result<Forecast> {
+        let model = self
+            .fitted_model
+            .as_ref()
+            .ok_or(ForecastError::FitRequired)?;
+
+        match model {
+            FittedModel::STM(m) => m.predict_with_exog_intervals(horizon, future_regressors, level),
+            FittedModel::OTM(m) => m.predict_with_exog_intervals(horizon, future_regressors, level),
+            FittedModel::DSTM(m) => {
+                m.predict_with_exog_intervals(horizon, future_regressors, level)
+            }
+            FittedModel::DOTM(m) => {
+                m.predict_with_exog_intervals(horizon, future_regressors, level)
+            }
+        }
     }
 }
 

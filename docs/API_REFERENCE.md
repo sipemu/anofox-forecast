@@ -1,6 +1,6 @@
 # API Reference
 
-This document provides a comprehensive reference for all public APIs in the `anofox-forecast` crate. The crate provides 29+ forecasting models, 76+ time series features, and extensive utilities for time series analysis.
+This document provides a comprehensive reference for all public APIs in the `anofox-forecast` crate. The crate provides 35+ forecasting models, 76+ time series features, and extensive utilities for time series analysis.
 
 ## Table of Contents
 
@@ -61,7 +61,6 @@ This document provides a comprehensive reference for all public APIs in the `ano
 - [Transformations](#transformations)
 - [Validation](#validation)
 - [Changepoint Detection](#changepoint-detection)
-- [Clustering](#clustering)
 - [Utilities](#utilities)
 
 ---
@@ -623,7 +622,26 @@ pub struct AutoARIMAConfig {
     pub seasonal_period: Option<usize>,
     pub criterion: SelectionCriterion,
     pub stepwise: bool,
+    pub true_stepwise: bool,  // Neighbor-based hill climbing
 }
+
+impl AutoARIMAConfig {
+    pub fn with_true_stepwise(self, enabled: bool) -> Self;
+    pub fn exhaustive(self) -> Self;
+}
+```
+
+| Parameter | Description |
+|-----------|-------------|
+| `stepwise` | Use stepwise search (faster, fewer models) |
+| `true_stepwise` | Use neighbor-based hill climbing (60-70% fewer evaluations) |
+
+**Parallel Execution:**
+
+Enable with `--features parallel` for 4-8x speedup on multi-core systems:
+```toml
+[dependencies]
+anofox-forecast = { version = "0.3", features = ["parallel"] }
 ```
 
 [Back to top](#api-reference)
@@ -1502,46 +1520,6 @@ pub struct PeltResult {
 
 ---
 
-## Clustering
-
-### Dynamic Time Warping
-
-```rust
-pub fn dtw_distance(series_a: &[f64], series_b: &[f64]) -> f64;
-pub fn dtw_distance_windowed(series_a: &[f64], series_b: &[f64], window: usize) -> f64;
-pub fn dtw_path(series_a: &[f64], series_b: &[f64]) -> Vec<(usize, usize)>;
-pub fn dtw_pairwise(series_list: &[Vec<f64>]) -> Vec<Vec<f64>>;
-```
-
-### K-Means
-
-```rust
-pub fn kmeans(series_list: &[Vec<f64>], config: &KMeansConfig) -> Result<KMeansResult>;
-
-pub struct KMeansConfig {
-    pub k: usize,
-    pub max_iter: usize,
-    pub tolerance: f64,
-    pub distance_metric: DistanceMetric,
-}
-
-pub enum DistanceMetric {
-    Euclidean,
-    Manhattan,
-    DTW,
-}
-
-pub struct KMeansResult {
-    pub centroids: Vec<Vec<f64>>,
-    pub labels: Vec<usize>,
-    pub inertia: f64,
-}
-```
-
-[Back to top](#api-reference)
-
----
-
 ## Utilities
 
 ### Accuracy Metrics
@@ -1602,6 +1580,66 @@ pub struct NelderMeadResult {
     pub value: f64,
     pub iterations: usize,
 }
+```
+
+[Back to top](#api-reference)
+
+---
+
+### Bootstrap Intervals
+
+Bootstrap methods for empirical confidence intervals.
+
+```rust
+pub struct BootstrapConfig {
+    pub n_samples: usize,      // Number of bootstrap samples (default: 1000)
+    pub block_size: Option<usize>,  // Block size for block bootstrap
+    pub seed: Option<u64>,     // Random seed for reproducibility
+}
+
+impl BootstrapConfig {
+    pub fn new(n_samples: usize) -> Self;
+    pub fn with_block_size(self, block_size: usize) -> Self;
+    pub fn with_seed(self, seed: u64) -> Self;
+}
+
+pub struct BootstrapResult {
+    pub lower: Vec<f64>,       // Lower bounds per horizon step
+    pub upper: Vec<f64>,       // Upper bounds per horizon step
+    pub level: f64,            // Confidence level used
+    pub n_samples: usize,      // Number of samples used
+}
+
+/// Generate bootstrap confidence intervals
+pub fn bootstrap_intervals<M: Forecaster + Clone>(
+    model: &M,
+    series: &TimeSeries,
+    horizon: usize,
+    level: f64,
+    config: &BootstrapConfig,
+) -> Result<BootstrapResult>;
+
+/// Generate forecast with bootstrap intervals
+pub fn bootstrap_forecast<M: Forecaster + Clone>(
+    model: &M,
+    series: &TimeSeries,
+    horizon: usize,
+    level: f64,
+    config: &BootstrapConfig,
+) -> Result<Forecast>;
+```
+
+| Method | Description |
+|--------|-------------|
+| Residual Bootstrap | Resamples fitted residuals with replacement |
+| Block Bootstrap | Preserves autocorrelation structure |
+
+**Example:**
+```rust
+use anofox_forecast::utils::bootstrap::{bootstrap_forecast, BootstrapConfig};
+
+let config = BootstrapConfig::new(500).with_seed(42);
+let forecast = bootstrap_forecast(&model, &ts, 12, 0.95, &config)?;
 ```
 
 [Back to top](#api-reference)

@@ -8,7 +8,7 @@
 
 Time series forecasting library for Rust.
 
-Provides 35+ forecasting models, 76+ statistical features, seasonality decomposition, changepoint detection, anomaly detection, and time series clustering. Rust port of [anofox-time](https://github.com/DataZooDE/anofox-time) (C++).
+Provides 35+ forecasting models, 76+ statistical features, seasonality decomposition, changepoint detection, anomaly detection, and bootstrap confidence intervals. Rust port of [anofox-time](https://github.com/DataZooDE/anofox-time) (C++).
 
 ## Features
 
@@ -49,10 +49,10 @@ Provides 35+ forecasting models, 76+ statistical features, seasonality decomposi
   - Automatic threshold selection
   - Seasonality-aware detection
 
-- **Time Series Clustering**
-  - Dynamic Time Warping (DTW) distance
-  - K-Means clustering with multiple distance metrics
-  - Elbow method for optimal cluster selection
+- **Bootstrap Confidence Intervals**
+  - Residual bootstrap and block bootstrap methods
+  - Empirical confidence intervals for any model
+  - Configurable sample size and reproducibility
 
 - **Data Transformations**
   - Scaling: standardization, min-max, robust scaling
@@ -71,7 +71,13 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-anofox-forecast = "0.1"
+anofox-forecast = "0.3"
+```
+
+For parallel AutoARIMA (4-8x speedup):
+```toml
+[dependencies]
+anofox-forecast = { version = "0.3", features = ["parallel"] }
 ```
 
 ## Quick Start

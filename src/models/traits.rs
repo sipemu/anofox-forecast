@@ -1,16 +1,24 @@
 //! Forecaster trait defining the common interface for all models.
 
 use crate::core::{Forecast, TimeSeries};
-use crate::error::Result;
+use crate::error::{ForecastError, Result};
+use std::collections::HashMap;
 
 /// Common interface for all forecasting models.
 ///
 /// This trait is object-safe and can be used with `Box<dyn Forecaster>`.
 pub trait Forecaster {
     /// Fit the model to the time series data.
+    ///
+    /// If the TimeSeries contains regressors (via CalendarAnnotations), models that
+    /// support exogenous variables will automatically use them. Use `supports_exog()`
+    /// to check if a model supports exogenous regressors.
     fn fit(&mut self, series: &TimeSeries) -> Result<()>;
 
     /// Generate predictions for the specified horizon.
+    ///
+    /// If the model was fit with exogenous regressors, this will return an error.
+    /// Use `predict_with_exog()` instead to provide future regressor values.
     fn predict(&self, horizon: usize) -> Result<Forecast>;
 
     /// Generate predictions with confidence intervals.
@@ -42,6 +50,90 @@ pub trait Forecaster {
     /// Check if the model has been fitted.
     fn is_fitted(&self) -> bool {
         self.fitted_values().is_some()
+    }
+
+    // =========================================================================
+    // Exogenous variable support
+    // =========================================================================
+
+    /// Check if the model supports exogenous regressors.
+    ///
+    /// Models that return `true` will use regressors from TimeSeries.calendar()
+    /// during fitting and require future regressor values for prediction.
+    fn supports_exog(&self) -> bool {
+        false
+    }
+
+    /// Check if the model was fit with exogenous regressors.
+    ///
+    /// If true, `predict_with_exog()` must be used instead of `predict()`.
+    fn has_exog(&self) -> bool {
+        false
+    }
+
+    /// Get the names of regressors used during fitting.
+    ///
+    /// Returns None if model doesn't support or wasn't fit with exogenous variables.
+    fn exog_names(&self) -> Option<&[String]> {
+        None
+    }
+
+    /// Generate predictions with future exogenous regressor values.
+    ///
+    /// # Arguments
+    /// * `horizon` - Number of periods to forecast
+    /// * `future_regressors` - HashMap of regressor name -> future values (length = horizon)
+    ///
+    /// # Returns
+    /// Forecast with predictions that include exogenous effects.
+    ///
+    /// # Errors
+    /// - If model doesn't support exogenous variables
+    /// - If regressor names don't match those used during fitting
+    /// - If regressor values have wrong length (must equal horizon)
+    fn predict_with_exog(
+        &self,
+        horizon: usize,
+        future_regressors: &HashMap<String, Vec<f64>>,
+    ) -> Result<Forecast> {
+        if !self.supports_exog() {
+            return Err(ForecastError::InvalidParameter(format!(
+                "{} does not support exogenous variables",
+                self.name()
+            )));
+        }
+
+        // Default: if no exog was used in fitting, just call predict
+        if !self.has_exog() {
+            if !future_regressors.is_empty() {
+                return Err(ForecastError::InvalidParameter(
+                    "Model was not fit with exogenous regressors".into(),
+                ));
+            }
+            return self.predict(horizon);
+        }
+
+        // Models that support exog should override this
+        Err(ForecastError::InvalidParameter(
+            "Model was fit with exogenous regressors but predict_with_exog not implemented".into(),
+        ))
+    }
+
+    /// Generate predictions with future exogenous values and confidence intervals.
+    ///
+    /// # Arguments
+    /// * `horizon` - Number of periods to forecast
+    /// * `future_regressors` - HashMap of regressor name -> future values
+    /// * `level` - Confidence level (e.g., 0.95 for 95%)
+    fn predict_with_exog_intervals(
+        &self,
+        horizon: usize,
+        future_regressors: &HashMap<String, Vec<f64>>,
+        level: f64,
+    ) -> Result<Forecast> {
+        // Default: just return point predictions
+        let _ = level;
+        self.predict_with_exog(horizon, future_regressors)
     }
 }
 

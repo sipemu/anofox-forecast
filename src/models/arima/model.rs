@@ -10,13 +10,21 @@
 //! - SI(D): Seasonal differencing
 //! - SMA(Q): Seasonal moving average component
 //! - s: Seasonal period
+//!
+//! Both ARIMA and SARIMA support exogenous regressors (ARIMAX/SARIMAX).
+//! When a TimeSeries with regressors is provided:
+//! 1. OLS regression removes the exogenous effects
+//! 2. ARIMA/SARIMA is fit on the residuals
+//! 3. Forecasts add back the exogenous contribution
 
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
 use crate::models::arima::diff::{difference, integrate};
 use crate::models::Forecaster;
+use crate::utils::ols::{ols_fit, ols_residuals, OLSResult};
 use crate::utils::optimization::{nelder_mead, NelderMeadConfig};
 use crate::utils::stats::quantile_normal;
+use std::collections::HashMap;
 
 /// ARIMA model specification (non-seasonal).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,6 +119,8 @@ impl Default for SARIMASpec {
 /// - AR(p): Autoregressive component
 /// - I(d): Differencing for stationarity
 /// - MA(q): Moving average component
+///
+/// Supports exogenous regressors (ARIMAX) via TimeSeries.regressors.
 #[derive(Debug, Clone)]
 pub struct ARIMA {
     /// Model specification.
@@ -137,6 +147,8 @@ pub struct ARIMA {
     bic: Option<f64>,
     /// Series length.
     n: usize,
+    /// OLS result for exogenous regressors (if any).
+    exog_ols: Option<OLSResult>,
 }
 
 impl ARIMA {
@@ -155,6 +167,7 @@ impl ARIMA {
             aic: None,
             bic: None,
             n: 0,
+            exog_ols: None,
         }
     }
 
@@ -352,43 +365,13 @@ impl ARIMA {
         self.fitted_diff = Some(fitted);
         self.residuals = Some(residuals);
     }
-}
 
-impl Default for ARIMA {
-    fn default() -> Self {
-        Self::arima_111()
-    }
-}
-
-impl Forecaster for ARIMA {
-    fn fit(&mut self, series: &TimeSeries) -> Result<()> {
-        let values = series.primary_values();
-        let min_len = self.spec.d + self.spec.p.max(self.spec.q) + 2;
-
-        if values.len() < min_len {
-            return Err(ForecastError::InsufficientData {
-                needed: min_len,
-                got: values.len(),
-            });
-        }
-
-        self.n = values.len();
-        self.original = Some(values.to_vec());
-
-        // Apply differencing
-        let diff_series = difference(values, self.spec.d);
-        self.differenced = Some(diff_series.clone());
-
-        // Estimate parameters
-        self.estimate_parameters(&diff_series);
-
-        // Calculate fitted values and residuals
-        self.calculate_fitted(&diff_series);
-
-        Ok(())
-    }
-
-    fn predict(&self, horizon: usize) -> Result<Forecast> {
+    /// Internal prediction method that handles both with and without exogenous cases.
+    fn predict_internal(
+        &self,
+        horizon: usize,
+        future_regressors: Option<&HashMap<String, Vec<f64>>>,
+    ) -> Result<Forecast> {
         let original = self.original.as_ref().ok_or(ForecastError::FitRequired)?;
         let diff_series = self
             .differenced
@@ -399,6 +382,42 @@ impl Forecaster for ARIMA {
         if horizon == 0 {
             return Ok(Forecast::new());
         }
+
+        // Calculate exogenous contribution if applicable
+        let exog_contribution = if let Some(ols) = &self.exog_ols {
+            let future = future_regressors.ok_or_else(|| {
+                ForecastError::InvalidParameter(
+                    "Model was fit with exogenous regressors. Future regressor values required."
+                        .into(),
+                )
+            })?;
+
+            // Validate future regressors have correct length
+            for name in &ols.regressor_names {
+                let values = future.get(name).ok_or_else(|| {
+                    ForecastError::InvalidParameter(format!(
+                        "Missing future values for regressor '{}'",
+                        name
+                    ))
+                })?;
+                if values.len() != horizon {
+                    return Err(ForecastError::DimensionMismatch {
+                        expected: horizon,
+                        got: values.len(),
+                    });
+                }
+            }
+
+            // Predict exogenous contribution
+            Some(ols.predict(future)?)
+        } else {
+            if future_regressors.is_some_and(|r| !r.is_empty()) {
+                return Err(ForecastError::InvalidParameter(
+                    "Model was not fit with exogenous regressors".into(),
+                ));
+            }
+            None
+        };
 
         let p = self.spec.p;
         let q = self.spec.q;
@@ -433,13 +452,143 @@ impl Forecaster for ARIMA {
         let forecast_diff: Vec<f64> = extended_diff[diff_series.len()..].to_vec();
 
         // Integrate back to original scale
-        let predictions = if self.spec.d > 0 {
+        let mut predictions = if self.spec.d > 0 {
             integrate(&forecast_diff, original, self.spec.d)
         } else {
             forecast_diff
         };
 
+        // Add exogenous contribution
+        if let Some(exog) = exog_contribution {
+            for (i, pred) in predictions.iter_mut().enumerate() {
+                *pred += exog[i];
+            }
+        }
+
         Ok(Forecast::from_values(predictions))
+    }
+}
+
+impl Default for ARIMA {
+    fn default() -> Self {
+        Self::arima_111()
+    }
+}
+
+impl Forecaster for ARIMA {
+    fn fit(&mut self, series: &TimeSeries) -> Result<()> {
+        let values = series.primary_values();
+        let min_len = self.spec.d + self.spec.p.max(self.spec.q) + 2;
+
+        if values.len() < min_len {
+            return Err(ForecastError::InsufficientData {
+                needed: min_len,
+                got: values.len(),
+            });
+        }
+
+        self.n = values.len();
+
+        // Check for exogenous regressors
+        let adjusted_values = if series.has_regressors() {
+            // Extract regressors from TimeSeries
+            let regressors = series.all_regressors();
+
+            // Fit OLS: y ~ X
+            let ols_result = ols_fit(values, &regressors)?;
+
+            // Calculate residuals (y - OLS prediction)
+            let adjusted = ols_residuals(values, &ols_result, &regressors)?;
+
+            // Store OLS result for prediction
+            self.exog_ols = Some(ols_result);
+
+            adjusted
+        } else {
+            self.exog_ols = None;
+            values.to_vec()
+        };
+
+        self.original = Some(adjusted_values.clone());
+
+        // Apply differencing
+        let diff_series = difference(&adjusted_values, self.spec.d);
+        self.differenced = Some(diff_series.clone());
+
+        // Estimate parameters
+        self.estimate_parameters(&diff_series);
+
+        // Calculate fitted values and residuals
+        self.calculate_fitted(&diff_series);
+
+        Ok(())
+    }
+
+    fn predict(&self, horizon: usize) -> Result<Forecast> {
+        // If model was fit with exogenous regressors, require predict_with_exog
+        if self.exog_ols.is_some() {
+            return Err(ForecastError::InvalidParameter(
+                "Model was fit with exogenous regressors. Use predict_with_exog() and provide future regressor values.".into()
+            ));
+        }
+
+        self.predict_internal(horizon, None)
+    }
+
+    fn supports_exog(&self) -> bool {
+        true
+    }
+
+    fn has_exog(&self) -> bool {
+        self.exog_ols.is_some()
+    }
+
+    fn exog_names(&self) -> Option<&[String]> {
+        self.exog_ols
+            .as_ref()
+            .map(|ols| ols.regressor_names.as_slice())
+    }
+
+    fn predict_with_exog(
+        &self,
+        horizon: usize,
+        future_regressors: &HashMap<String, Vec<f64>>,
+    ) -> Result<Forecast> {
+        self.predict_internal(horizon, Some(future_regressors))
+    }
+
+    fn predict_with_exog_intervals(
+        &self,
+        horizon: usize,
+        future_regressors: &HashMap<String, Vec<f64>>,
+        level: f64,
+    ) -> Result<Forecast> {
+        let forecast = self.predict_with_exog(horizon, future_regressors)?;
+        let variance = self.residual_variance.unwrap_or(0.0);
+
+        if horizon == 0 {
+            return Ok(forecast);
+        }
+
+        let z = quantile_normal((1.0 + level) / 2.0);
+        let preds = forecast.primary();
+
+        let mut lower = Vec::with_capacity(horizon);
+        let mut upper = Vec::with_capacity(horizon);
+
+        for h in 1..=horizon {
+            let cumulative_var = variance * h as f64;
+            let se = cumulative_var.sqrt();
+
+            lower.push(preds[h - 1] - z * se);
+            upper.push(preds[h - 1] + z * se);
+        }
+
+        Ok(Forecast::from_values_with_intervals(
+            preds.to_vec(),
+            lower,
+            upper,
+        ))
     }
 
     fn predict_with_intervals(&self, horizon: usize, level: f64) -> Result<Forecast> {
@@ -519,6 +668,8 @@ impl Forecaster for ARIMA {
 /// - P, D, Q: Seasonal orders
 /// - s: Seasonal period
 ///
+/// Supports exogenous regressors (SARIMAX) via TimeSeries.regressors.
+///
 /// # Example
 /// ```
 /// use anofox_forecast::models::arima::SARIMA;
@@ -572,6 +723,8 @@ pub struct SARIMA {
     bic: Option<f64>,
     /// Series length.
     n: usize,
+    /// OLS result for exogenous regressors (if any).
+    exog_ols: Option<OLSResult>,
 }
 
 impl SARIMA {
@@ -612,6 +765,7 @@ impl SARIMA {
             aic: None,
             bic: None,
             n: 0,
+            exog_ols: None,
         }
     }
 
@@ -1031,85 +1185,13 @@ impl SARIMA {
 
         self.residuals = Some(residuals);
     }
-}
 
-impl Default for SARIMA {
-    fn default() -> Self {
-        Self::new(1, 1, 1, 0, 0, 0, 1)
-    }
-}
-
-impl Forecaster for SARIMA {
-    fn fit(&mut self, series: &TimeSeries) -> Result<()> {
-        let values = series.primary_values();
-        let d = self.spec.d;
-        let cap_d = self.spec.cap_d;
-        let s = self.spec.s;
-        let p = self.spec.p;
-        let q = self.spec.q;
-        let cap_p = self.spec.cap_p;
-        let cap_q = self.spec.cap_q;
-
-        // Calculate minimum required data
-        let seasonal_lag = if s > 1 { cap_p.max(cap_q) * s } else { 0 };
-        let min_len = d + cap_d * s + p.max(q).max(seasonal_lag) + 2;
-
-        if values.len() < min_len {
-            return Err(ForecastError::InsufficientData {
-                needed: min_len,
-                got: values.len(),
-            });
-        }
-
-        self.n = values.len();
-        self.original = Some(values.to_vec());
-
-        // Store last values for non-seasonal integration
-        if d > 0 {
-            self.last_values = vec![0.0]; // placeholder
-            let mut current = values.to_vec();
-            self.last_values.push(*current.last().unwrap_or(&0.0));
-
-            for _diff_level in 1..d {
-                current = difference(&current, 1);
-                if !current.is_empty() {
-                    self.last_values.push(*current.last().unwrap_or(&0.0));
-                }
-            }
-        }
-
-        // Apply non-seasonal differencing first
-        let nonseasonal_diff = difference(values, d);
-
-        // Store values for seasonal integration (from non-seasonally differenced series)
-        if cap_d > 0 && s > 1 {
-            let retain = cap_d * s + s;
-            let start = nonseasonal_diff.len().saturating_sub(retain);
-            self.seasonal_last_values = nonseasonal_diff[start..].to_vec();
-        }
-
-        // Apply seasonal differencing
-        let diff_series = Self::seasonal_difference(&nonseasonal_diff, cap_d, s);
-
-        if diff_series.is_empty() {
-            return Err(ForecastError::InsufficientData {
-                needed: min_len,
-                got: values.len(),
-            });
-        }
-
-        self.differenced = Some(diff_series.clone());
-
-        // Estimate parameters
-        self.estimate_parameters(&diff_series);
-
-        // Calculate fitted values and residuals
-        self.calculate_fitted(&diff_series);
-
-        Ok(())
-    }
-
-    fn predict(&self, horizon: usize) -> Result<Forecast> {
+    /// Internal prediction method that handles both with and without exogenous cases.
+    fn predict_internal(
+        &self,
+        horizon: usize,
+        future_regressors: Option<&HashMap<String, Vec<f64>>>,
+    ) -> Result<Forecast> {
         let original = self.original.as_ref().ok_or(ForecastError::FitRequired)?;
         let diff_series = self
             .differenced
@@ -1119,6 +1201,42 @@ impl Forecaster for SARIMA {
         if horizon == 0 {
             return Ok(Forecast::new());
         }
+
+        // Calculate exogenous contribution if applicable
+        let exog_contribution = if let Some(ols) = &self.exog_ols {
+            let future = future_regressors.ok_or_else(|| {
+                ForecastError::InvalidParameter(
+                    "Model was fit with exogenous regressors. Future regressor values required."
+                        .into(),
+                )
+            })?;
+
+            // Validate future regressors have correct length
+            for name in &ols.regressor_names {
+                let values = future.get(name).ok_or_else(|| {
+                    ForecastError::InvalidParameter(format!(
+                        "Missing future values for regressor '{}'",
+                        name
+                    ))
+                })?;
+                if values.len() != horizon {
+                    return Err(ForecastError::DimensionMismatch {
+                        expected: horizon,
+                        got: values.len(),
+                    });
+                }
+            }
+
+            // Predict exogenous contribution
+            Some(ols.predict(future)?)
+        } else {
+            if future_regressors.is_some_and(|r| !r.is_empty()) {
+                return Err(ForecastError::InvalidParameter(
+                    "Model was not fit with exogenous regressors".into(),
+                ));
+            }
+            None
+        };
 
         let p = self.spec.p;
         let q = self.spec.q;
@@ -1227,7 +1345,179 @@ impl Forecaster for SARIMA {
             result = integrate(&result, original, d);
         }
 
+        // Add exogenous contribution
+        if let Some(exog) = exog_contribution {
+            for (i, pred) in result.iter_mut().enumerate() {
+                *pred += exog[i];
+            }
+        }
+
         Ok(Forecast::from_values(result))
+    }
+}
+
+impl Default for SARIMA {
+    fn default() -> Self {
+        Self::new(1, 1, 1, 0, 0, 0, 1)
+    }
+}
+
+impl Forecaster for SARIMA {
+    fn fit(&mut self, series: &TimeSeries) -> Result<()> {
+        let values = series.primary_values();
+        let d = self.spec.d;
+        let cap_d = self.spec.cap_d;
+        let s = self.spec.s;
+        let p = self.spec.p;
+        let q = self.spec.q;
+        let cap_p = self.spec.cap_p;
+        let cap_q = self.spec.cap_q;
+
+        // Calculate minimum required data
+        let seasonal_lag = if s > 1 { cap_p.max(cap_q) * s } else { 0 };
+        let min_len = d + cap_d * s + p.max(q).max(seasonal_lag) + 2;
+
+        if values.len() < min_len {
+            return Err(ForecastError::InsufficientData {
+                needed: min_len,
+                got: values.len(),
+            });
+        }
+
+        self.n = values.len();
+
+        // Check for exogenous regressors
+        let adjusted_values = if series.has_regressors() {
+            // Extract regressors from TimeSeries
+            let regressors = series.all_regressors();
+
+            // Fit OLS: y ~ X
+            let ols_result = ols_fit(values, &regressors)?;
+
+            // Calculate residuals (y - OLS prediction)
+            let adjusted = ols_residuals(values, &ols_result, &regressors)?;
+
+            // Store OLS result for prediction
+            self.exog_ols = Some(ols_result);
+
+            adjusted
+        } else {
+            self.exog_ols = None;
+            values.to_vec()
+        };
+
+        self.original = Some(adjusted_values.clone());
+
+        // Store last values for non-seasonal integration
+        if d > 0 {
+            self.last_values = vec![0.0]; // placeholder
+            let mut current = adjusted_values.clone();
+            self.last_values.push(*current.last().unwrap_or(&0.0));
+
+            for _diff_level in 1..d {
+                current = difference(&current, 1);
+                if !current.is_empty() {
+                    self.last_values.push(*current.last().unwrap_or(&0.0));
+                }
+            }
+        }
+
+        // Apply non-seasonal differencing first
+        let nonseasonal_diff = difference(&adjusted_values, d);
+
+        // Store values for seasonal integration (from non-seasonally differenced series)
+        if cap_d > 0 && s > 1 {
+            let retain = cap_d * s + s;
+            let start = nonseasonal_diff.len().saturating_sub(retain);
+            self.seasonal_last_values = nonseasonal_diff[start..].to_vec();
+        }
+
+        // Apply seasonal differencing
+        let diff_series = Self::seasonal_difference(&nonseasonal_diff, cap_d, s);
+
+        if diff_series.is_empty() {
+            return Err(ForecastError::InsufficientData {
+                needed: min_len,
+                got: values.len(),
+            });
+        }
+
+        self.differenced = Some(diff_series.clone());
+
+        // Estimate parameters
+        self.estimate_parameters(&diff_series);
+
+        // Calculate fitted values and residuals
+        self.calculate_fitted(&diff_series);
+
+        Ok(())
+    }
+
+    fn predict(&self, horizon: usize) -> Result<Forecast> {
+        // If model was fit with exogenous regressors, require predict_with_exog
+        if self.exog_ols.is_some() {
+            return Err(ForecastError::InvalidParameter(
+                "Model was fit with exogenous regressors. Use predict_with_exog() and provide future regressor values.".into()
+            ));
+        }
+
+        self.predict_internal(horizon, None)
+    }
+
+    fn supports_exog(&self) -> bool {
+        true
+    }
+
+    fn has_exog(&self) -> bool {
+        self.exog_ols.is_some()
+    }
+
+    fn exog_names(&self) -> Option<&[String]> {
+        self.exog_ols
+            .as_ref()
+            .map(|ols| ols.regressor_names.as_slice())
+    }
+
+    fn predict_with_exog(
+        &self,
+        horizon: usize,
+        future_regressors: &HashMap<String, Vec<f64>>,
+    ) -> Result<Forecast> {
+        self.predict_internal(horizon, Some(future_regressors))
+    }
+
+    fn predict_with_exog_intervals(
+        &self,
+        horizon: usize,
+        future_regressors: &HashMap<String, Vec<f64>>,
+        level: f64,
+    ) -> Result<Forecast> {
+        let forecast = self.predict_with_exog(horizon, future_regressors)?;
+        let variance = self.residual_variance.unwrap_or(0.0);
+
+        if horizon == 0 {
+            return Ok(forecast);
+        }
+
+        let z = quantile_normal((1.0 + level) / 2.0);
+        let preds = forecast.primary();
+
+        let mut lower = Vec::with_capacity(horizon);
+        let mut upper = Vec::with_capacity(horizon);
+
+        for h in 1..=horizon {
+            let cumulative_var = variance * (1.0 + 0.1 * h as f64);
+            let se = cumulative_var.sqrt();
+
+            lower.push(preds[h - 1] - z * se);
+            upper.push(preds[h - 1] + z * se);
+        }
+
+        Ok(Forecast::from_values_with_intervals(
+            preds.to_vec(),
+            lower,
+            upper,
+        ))
     }
 
     fn predict_with_intervals(&self, horizon: usize, level: f64) -> Result<Forecast> {

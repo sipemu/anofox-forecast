@@ -7,10 +7,14 @@
 //! - Uses multiplicative mode (log transform) by default for positive series
 //! - In additive mode, standardizes data (subtract mean, divide by std)
 //! - Boosting: seasonal on every iteration, linear on odd, SES on even (after round 4)
+//!
+//! Supports exogenous regressors via TimeSeries.regressors.
 
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
 use crate::models::Forecaster;
+use crate::utils::ols::{ols_fit, ols_residuals, OLSResult};
+use std::collections::HashMap;
 
 /// MFLES forecasting model.
 ///
@@ -67,6 +71,8 @@ pub struct MFLES {
     is_multiplicative: bool,
     /// Seasonal pattern for tiling (one cycle, statsforecast compatible).
     seasonality: Option<Vec<f64>>,
+    /// OLS result for exogenous regressors (if any).
+    exog_ols: Option<OLSResult>,
 }
 
 impl MFLES {
@@ -95,6 +101,7 @@ impl MFLES {
             n: 0,
             is_multiplicative: false,
             seasonality: None,
+            exog_ols: None,
         }
     }
 
@@ -585,15 +592,139 @@ impl Default for MFLES {
     }
 }
 
+impl MFLES {
+    /// Internal prediction method that handles both with and without exogenous cases.
+    fn predict_internal(
+        &self,
+        horizon: usize,
+        future_regressors: Option<&HashMap<String, Vec<f64>>>,
+    ) -> Result<Forecast> {
+        let trend = self.trend.ok_or(ForecastError::FitRequired)?;
+
+        if horizon == 0 {
+            return Ok(Forecast::from_values(Vec::new()));
+        }
+
+        // Calculate exogenous contribution if applicable
+        let exog_contribution = if let Some(ols) = &self.exog_ols {
+            let future = future_regressors.ok_or_else(|| {
+                ForecastError::InvalidParameter(
+                    "Model was fit with exogenous regressors. Future regressor values required."
+                        .into(),
+                )
+            })?;
+
+            // Validate future regressors have correct length
+            for name in &ols.regressor_names {
+                let values = future.get(name).ok_or_else(|| {
+                    ForecastError::InvalidParameter(format!(
+                        "Missing future values for regressor '{}'",
+                        name
+                    ))
+                })?;
+                if values.len() != horizon {
+                    return Err(ForecastError::DimensionMismatch {
+                        expected: horizon,
+                        got: values.len(),
+                    });
+                }
+            }
+
+            // Predict exogenous contribution
+            Some(ols.predict(future)?)
+        } else {
+            if future_regressors.is_some_and(|r| !r.is_empty()) {
+                return Err(ForecastError::InvalidParameter(
+                    "Model was not fit with exogenous regressors".into(),
+                ));
+            }
+            None
+        };
+
+        let mut predictions = Vec::with_capacity(horizon);
+
+        // Calculate slope with penalty (matches statsforecast)
+        let last_point = trend[1];
+        let mut slope = last_point - trend[0];
+
+        if self.trend_penalty {
+            if let Some(penalty) = self.penalty {
+                slope *= penalty.max(0.0);
+            }
+        }
+
+        // Generate forecasts using tiling for seasonality (statsforecast compatible)
+        for h in 1..=horizon {
+            // Trend extrapolation: slope * h + last_point
+            let trend_val = slope * h as f64 + last_point;
+
+            // Seasonal component: tile the stored seasonality
+            let seasonal_val = if let Some(ref seasonality) = self.seasonality {
+                if !seasonality.is_empty() {
+                    // np.resize behavior: cycle through seasonality
+                    let idx = (h - 1) % seasonality.len();
+                    seasonality[idx]
+                } else {
+                    0.0
+                }
+            } else {
+                0.0
+            };
+
+            let pred = trend_val + seasonal_val;
+
+            // Inverse transform
+            let mut pred_original = if self.is_multiplicative {
+                pred.exp()
+            } else {
+                let mean_val = self.mean.unwrap_or(0.0);
+                let std_val = self.std.unwrap_or(1.0);
+                mean_val + pred * std_val
+            };
+
+            // Add exogenous contribution
+            if let Some(ref exog) = exog_contribution {
+                pred_original += exog[h - 1];
+            }
+
+            predictions.push(pred_original);
+        }
+
+        Ok(Forecast::from_values(predictions))
+    }
+}
+
 impl Forecaster for MFLES {
     fn fit(&mut self, series: &TimeSeries) -> Result<()> {
-        let values = series.primary_values();
-        let n = values.len();
+        let raw_values = series.primary_values();
+        let n = raw_values.len();
         self.n = n;
 
         if n < 4 {
             return Err(ForecastError::InsufficientData { needed: 4, got: n });
         }
+
+        // Check for exogenous regressors
+        let values: Vec<f64> = if series.has_regressors() {
+            // Extract regressors from TimeSeries
+            let regressors = series.all_regressors();
+
+            // Fit OLS: y ~ X
+            let ols_result = ols_fit(raw_values, &regressors)?;
+
+            // Calculate residuals (y - OLS prediction)
+            let adjusted = ols_residuals(raw_values, &ols_result, &regressors)?;
+
+            // Store OLS result for prediction
+            self.exog_ols = Some(ols_result);
+
+            adjusted
+        } else {
+            self.exog_ols = None;
+            raw_values.to_vec()
+        };
+
+        let values = &values;
 
         // Determine multiplicative mode
         let use_multiplicative = match self.multiplicative {
@@ -891,57 +1022,83 @@ impl Forecaster for MFLES {
     }
 
     fn predict(&self, horizon: usize) -> Result<Forecast> {
-        let trend = self.trend.ok_or(ForecastError::FitRequired)?;
+        // If model was fit with exogenous regressors, require predict_with_exog
+        if self.exog_ols.is_some() {
+            return Err(ForecastError::InvalidParameter(
+                "Model was fit with exogenous regressors. Use predict_with_exog() and provide future regressor values.".into()
+            ));
+        }
+
+        self.predict_internal(horizon, None)
+    }
+
+    fn supports_exog(&self) -> bool {
+        true
+    }
+
+    fn has_exog(&self) -> bool {
+        self.exog_ols.is_some()
+    }
+
+    fn exog_names(&self) -> Option<&[String]> {
+        self.exog_ols
+            .as_ref()
+            .map(|ols| ols.regressor_names.as_slice())
+    }
+
+    fn predict_with_exog(
+        &self,
+        horizon: usize,
+        future_regressors: &HashMap<String, Vec<f64>>,
+    ) -> Result<Forecast> {
+        self.predict_internal(horizon, Some(future_regressors))
+    }
+
+    fn predict_with_exog_intervals(
+        &self,
+        horizon: usize,
+        future_regressors: &HashMap<String, Vec<f64>>,
+        level: f64,
+    ) -> Result<Forecast> {
+        let point_forecast = self.predict_with_exog(horizon, future_regressors)?;
 
         if horizon == 0 {
-            return Ok(Forecast::from_values(Vec::new()));
+            return Ok(point_forecast);
         }
 
-        let mut predictions = Vec::with_capacity(horizon);
+        // Compute variance from residuals
+        let residuals = self.residuals.as_ref().ok_or(ForecastError::FitRequired)?;
+        let variance = if residuals.len() > 1 {
+            let mean_resid: f64 = residuals.iter().sum::<f64>() / residuals.len() as f64;
+            residuals
+                .iter()
+                .map(|r| (r - mean_resid).powi(2))
+                .sum::<f64>()
+                / (residuals.len() - 1) as f64
+        } else {
+            0.0
+        };
 
-        // Calculate slope with penalty (matches statsforecast)
-        let last_point = trend[1];
-        let mut slope = last_point - trend[0];
+        let std_dev = variance.sqrt();
+        let z = crate::utils::quantile_normal(0.5 + level / 2.0);
 
-        if self.trend_penalty {
-            if let Some(penalty) = self.penalty {
-                slope *= penalty.max(0.0);
-            }
-        }
+        let preds = point_forecast.primary();
+        let lower: Vec<f64> = preds
+            .iter()
+            .enumerate()
+            .map(|(h, &f)| f - z * std_dev * ((h + 1) as f64).sqrt())
+            .collect();
+        let upper: Vec<f64> = preds
+            .iter()
+            .enumerate()
+            .map(|(h, &f)| f + z * std_dev * ((h + 1) as f64).sqrt())
+            .collect();
 
-        // Generate forecasts using tiling for seasonality (statsforecast compatible)
-        for h in 1..=horizon {
-            // Trend extrapolation: slope * h + last_point
-            let trend_val = slope * h as f64 + last_point;
-
-            // Seasonal component: tile the stored seasonality
-            let seasonal_val = if let Some(ref seasonality) = self.seasonality {
-                if !seasonality.is_empty() {
-                    // np.resize behavior: cycle through seasonality
-                    let idx = (h - 1) % seasonality.len();
-                    seasonality[idx]
-                } else {
-                    0.0
-                }
-            } else {
-                0.0
-            };
-
-            let pred = trend_val + seasonal_val;
-
-            // Inverse transform
-            let pred_original = if self.is_multiplicative {
-                pred.exp()
-            } else {
-                let mean_val = self.mean.unwrap_or(0.0);
-                let std_val = self.std.unwrap_or(1.0);
-                mean_val + pred * std_val
-            };
-
-            predictions.push(pred_original);
-        }
-
-        Ok(Forecast::from_values(predictions))
+        Ok(Forecast::from_values_with_intervals(
+            preds.to_vec(),
+            lower,
+            upper,
+        ))
     }
 
     fn predict_with_intervals(&self, horizon: usize, level: f64) -> Result<Forecast> {

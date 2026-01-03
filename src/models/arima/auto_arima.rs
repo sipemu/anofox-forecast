@@ -6,6 +6,9 @@ use crate::models::arima::diff::suggest_differencing;
 use crate::models::arima::model::{ARIMA, SARIMA};
 use crate::models::Forecaster;
 
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+
 /// Configuration for AutoARIMA.
 #[derive(Debug, Clone)]
 pub struct AutoARIMAConfig {
@@ -25,6 +28,9 @@ pub struct AutoARIMAConfig {
     pub seasonal_period: usize,
     /// Use stepwise search (faster) vs exhaustive.
     pub stepwise: bool,
+    /// Use true stepwise (neighbor-based hill climbing) vs grid stepwise.
+    /// Only applies when stepwise=true. More efficient but may miss global optimum.
+    pub true_stepwise: bool,
     /// Selection criterion (use AIC for selection).
     pub use_aic: bool,
 }
@@ -40,6 +46,7 @@ impl Default for AutoARIMAConfig {
             max_cap_d: 1,
             seasonal_period: 0,
             stepwise: true,
+            true_stepwise: false, // Default to grid stepwise for backwards compatibility
             use_aic: true,
         }
     }
@@ -71,6 +78,14 @@ impl AutoARIMAConfig {
     /// Use exhaustive search instead of stepwise.
     pub fn exhaustive(mut self) -> Self {
         self.stepwise = false;
+        self
+    }
+
+    /// Use true stepwise search (neighbor-based hill climbing).
+    /// More efficient than grid stepwise but may miss global optimum.
+    pub fn with_true_stepwise(mut self) -> Self {
+        self.stepwise = true;
+        self.true_stepwise = true;
         self
     }
 }
@@ -326,29 +341,11 @@ impl AutoARIMA {
         candidates
     }
 
-    /// Get AIC from ARIMA model.
-    fn get_arima_criterion(&self, model: &ARIMA) -> Option<f64> {
-        if self.config.use_aic {
-            model.aic()
-        } else {
-            model.bic()
-        }
-    }
-
-    /// Get AIC from SARIMA model.
-    fn get_sarima_criterion(&self, model: &SARIMA) -> Option<f64> {
-        if self.config.use_aic {
-            model.aic()
-        } else {
-            model.bic()
-        }
-    }
-
     /// Fit and evaluate a model with given order.
-    fn evaluate_model(
-        &self,
+    fn evaluate_model_static(
         series: &TimeSeries,
         order: ModelOrder,
+        use_aic: bool,
     ) -> Option<(SelectedModel, f64)> {
         if order.is_seasonal() {
             // Fit SARIMA
@@ -363,9 +360,10 @@ impl AutoARIMA {
             );
 
             if model.fit(series).is_ok() {
-                if let Some(score) = self.get_sarima_criterion(&model) {
-                    if score.is_finite() {
-                        return Some((SelectedModel::SARIMA(model), score));
+                let score = if use_aic { model.aic() } else { model.bic() };
+                if let Some(s) = score {
+                    if s.is_finite() {
+                        return Some((SelectedModel::SARIMA(model), s));
                     }
                 }
             }
@@ -374,15 +372,229 @@ impl AutoARIMA {
             let mut model = ARIMA::new(order.p, order.d, order.q);
 
             if model.fit(series).is_ok() {
-                if let Some(score) = self.get_arima_criterion(&model) {
-                    if score.is_finite() {
-                        return Some((SelectedModel::ARIMA(model), score));
+                let score = if use_aic { model.aic() } else { model.bic() };
+                if let Some(s) = score {
+                    if s.is_finite() {
+                        return Some((SelectedModel::ARIMA(model), s));
                     }
                 }
             }
         }
 
         None
+    }
+
+    /// Generate neighbors of a given order (for true stepwise search).
+    fn get_neighbors(&self, order: ModelOrder) -> Vec<ModelOrder> {
+        let mut neighbors = Vec::new();
+        let s = self.config.seasonal_period;
+
+        // Non-seasonal neighbors: vary p and q by ±1
+        if order.p > 0 {
+            neighbors.push(ModelOrder {
+                p: order.p - 1,
+                ..order
+            });
+        }
+        if order.p < self.config.max_p {
+            neighbors.push(ModelOrder {
+                p: order.p + 1,
+                ..order
+            });
+        }
+        if order.q > 0 {
+            neighbors.push(ModelOrder {
+                q: order.q - 1,
+                ..order
+            });
+        }
+        if order.q < self.config.max_q {
+            neighbors.push(ModelOrder {
+                q: order.q + 1,
+                ..order
+            });
+        }
+
+        // Seasonal neighbors (if applicable)
+        if s > 1 {
+            if order.cap_p > 0 {
+                neighbors.push(ModelOrder {
+                    cap_p: order.cap_p - 1,
+                    ..order
+                });
+            }
+            if order.cap_p < self.config.max_cap_p {
+                neighbors.push(ModelOrder {
+                    cap_p: order.cap_p + 1,
+                    ..order
+                });
+            }
+            if order.cap_q > 0 {
+                neighbors.push(ModelOrder {
+                    cap_q: order.cap_q - 1,
+                    ..order
+                });
+            }
+            if order.cap_q < self.config.max_cap_q {
+                neighbors.push(ModelOrder {
+                    cap_q: order.cap_q + 1,
+                    ..order
+                });
+            }
+        }
+
+        neighbors
+    }
+
+    /// True stepwise search using neighbor-based hill climbing.
+    /// Starts from a baseline model and iteratively moves to the best neighbor.
+    fn true_stepwise_search(
+        &mut self,
+        series: &TimeSeries,
+        d: usize,
+        cap_d: usize,
+    ) -> Option<(ModelOrder, SelectedModel, f64)> {
+        let s = self.config.seasonal_period;
+        let use_aic = self.config.use_aic;
+
+        // Start with baseline: ARIMA(1, d, 1) or (0, d, 0) for simpler case
+        let initial_orders = vec![
+            ModelOrder {
+                p: 1,
+                d,
+                q: 1,
+                cap_p: if s > 1 { 1 } else { 0 },
+                cap_d,
+                cap_q: if s > 1 { 1 } else { 0 },
+                s,
+            },
+            ModelOrder {
+                p: 0,
+                d,
+                q: 0,
+                cap_p: 0,
+                cap_d,
+                cap_q: 0,
+                s,
+            },
+            ModelOrder {
+                p: 2,
+                d,
+                q: 2,
+                cap_p: 0,
+                cap_d,
+                cap_q: 0,
+                s,
+            },
+        ];
+
+        // Find best starting point
+        let mut best_order: Option<ModelOrder> = None;
+        let mut best_model: Option<SelectedModel> = None;
+        let mut best_score = f64::INFINITY;
+
+        for order in initial_orders {
+            if let Some((model, score)) = Self::evaluate_model_static(series, order, use_aic) {
+                self.model_scores.push((order, score));
+                if score < best_score {
+                    best_score = score;
+                    best_model = Some(model);
+                    best_order = Some(order);
+                }
+            }
+        }
+
+        let mut current_order = best_order?;
+        let mut current_score = best_score;
+        let mut current_model = best_model?;
+
+        // Hill climbing: keep moving to best neighbor until no improvement
+        let mut visited = std::collections::HashSet::new();
+        visited.insert((
+            current_order.p,
+            current_order.q,
+            current_order.cap_p,
+            current_order.cap_q,
+        ));
+
+        loop {
+            let neighbors = self.get_neighbors(current_order);
+            let mut improved = false;
+
+            for neighbor in neighbors {
+                let key = (neighbor.p, neighbor.q, neighbor.cap_p, neighbor.cap_q);
+                if visited.contains(&key) {
+                    continue;
+                }
+                visited.insert(key);
+
+                if let Some((model, score)) = Self::evaluate_model_static(series, neighbor, use_aic)
+                {
+                    self.model_scores.push((neighbor, score));
+
+                    if score < current_score {
+                        current_score = score;
+                        current_model = model;
+                        current_order = neighbor;
+                        improved = true;
+                    }
+                }
+            }
+
+            if !improved {
+                break;
+            }
+        }
+
+        Some((current_order, current_model, current_score))
+    }
+
+    /// Evaluate candidates - uses parallel processing when 'parallel' feature is enabled.
+    fn evaluate_candidates(
+        &self,
+        series: &TimeSeries,
+        candidates: &[ModelOrder],
+    ) -> Vec<(ModelOrder, SelectedModel, f64)> {
+        let values = series.primary_values();
+        let use_aic = self.config.use_aic;
+
+        // Filter candidates by data requirements
+        let valid_candidates: Vec<_> = candidates
+            .iter()
+            .filter(|order| {
+                let min_len = order.d
+                    + order.cap_d * order.s
+                    + order
+                        .p
+                        .max(order.q)
+                        .max(order.cap_p.max(order.cap_q) * order.s.max(1))
+                    + 5;
+                values.len() >= min_len
+            })
+            .copied()
+            .collect();
+
+        #[cfg(feature = "parallel")]
+        {
+            valid_candidates
+                .par_iter()
+                .filter_map(|&order| {
+                    Self::evaluate_model_static(series, order, use_aic)
+                        .map(|(model, score)| (order, model, score))
+                })
+                .collect()
+        }
+
+        #[cfg(not(feature = "parallel"))]
+        {
+            valid_candidates
+                .iter()
+                .filter_map(|&order| {
+                    Self::evaluate_model_static(series, order, use_aic)
+                        .map(|(model, score)| (order, model, score))
+                })
+                .collect()
+        }
     }
 }
 
@@ -440,46 +652,49 @@ impl Forecaster for AutoARIMA {
             vec![0]
         };
 
-        // Generate candidates for all (d, D) combinations
-        let mut candidates = Vec::new();
-        for &d in &d_range {
-            for &cap_d in &cap_d_range {
-                let new_candidates = if self.config.stepwise {
-                    self.stepwise_candidates(d, cap_d)
-                } else {
-                    self.exhaustive_candidates(d, cap_d)
-                };
-                candidates.extend(new_candidates);
-            }
-        }
-        // Remove duplicates
-        candidates.sort_by(|a, b| {
-            (a.p, a.d, a.q, a.cap_p, a.cap_d, a.cap_q)
-                .cmp(&(b.p, b.d, b.q, b.cap_p, b.cap_d, b.cap_q))
-        });
-        candidates.dedup();
-
         self.model_scores.clear();
         let mut best_model: Option<SelectedModel> = None;
         let mut best_order: Option<ModelOrder> = None;
         let mut best_score = f64::INFINITY;
 
-        // Fit each candidate
-        for order in candidates {
-            // Check data requirements for this order
-            let min_len = order.d
-                + order.cap_d * order.s
-                + order
-                    .p
-                    .max(order.q)
-                    .max(order.cap_p.max(order.cap_q) * order.s.max(1))
-                + 5;
-
-            if values.len() < min_len {
-                continue;
+        // Use true stepwise search if enabled (neighbor-based hill climbing)
+        if self.config.stepwise && self.config.true_stepwise {
+            for &d in &d_range {
+                for &cap_d in &cap_d_range {
+                    if let Some((order, model, score)) = self.true_stepwise_search(series, d, cap_d)
+                    {
+                        if score < best_score {
+                            best_score = score;
+                            best_model = Some(model);
+                            best_order = Some(order);
+                        }
+                    }
+                }
             }
+        } else {
+            // Generate candidates for all (d, D) combinations (grid search)
+            let mut candidates = Vec::new();
+            for &d in &d_range {
+                for &cap_d in &cap_d_range {
+                    let new_candidates = if self.config.stepwise {
+                        self.stepwise_candidates(d, cap_d)
+                    } else {
+                        self.exhaustive_candidates(d, cap_d)
+                    };
+                    candidates.extend(new_candidates);
+                }
+            }
+            // Remove duplicates
+            candidates.sort_by(|a, b| {
+                (a.p, a.d, a.q, a.cap_p, a.cap_d, a.cap_q)
+                    .cmp(&(b.p, b.d, b.q, b.cap_p, b.cap_d, b.cap_q))
+            });
+            candidates.dedup();
 
-            if let Some((model, score)) = self.evaluate_model(series, order) {
+            // Evaluate all candidates (parallel when feature enabled)
+            let results = self.evaluate_candidates(series, &candidates);
+
+            for (order, model, score) in results {
                 self.model_scores.push((order, score));
 
                 if score < best_score {
@@ -547,6 +762,58 @@ impl Forecaster for AutoARIMA {
         match &self.selected_model {
             Some(SelectedModel::SARIMA(_)) => "AutoARIMA (SARIMA)",
             _ => "AutoARIMA",
+        }
+    }
+
+    fn supports_exog(&self) -> bool {
+        true
+    }
+
+    fn has_exog(&self) -> bool {
+        match self.selected_model.as_ref() {
+            Some(SelectedModel::ARIMA(model)) => model.has_exog(),
+            Some(SelectedModel::SARIMA(model)) => model.has_exog(),
+            None => false,
+        }
+    }
+
+    fn exog_names(&self) -> Option<&[String]> {
+        match self.selected_model.as_ref()? {
+            SelectedModel::ARIMA(model) => model.exog_names(),
+            SelectedModel::SARIMA(model) => model.exog_names(),
+        }
+    }
+
+    fn predict_with_exog(
+        &self,
+        horizon: usize,
+        future_regressors: &std::collections::HashMap<String, Vec<f64>>,
+    ) -> Result<Forecast> {
+        match self.selected_model.as_ref() {
+            Some(SelectedModel::ARIMA(model)) => {
+                model.predict_with_exog(horizon, future_regressors)
+            }
+            Some(SelectedModel::SARIMA(model)) => {
+                model.predict_with_exog(horizon, future_regressors)
+            }
+            None => Err(ForecastError::FitRequired),
+        }
+    }
+
+    fn predict_with_exog_intervals(
+        &self,
+        horizon: usize,
+        future_regressors: &std::collections::HashMap<String, Vec<f64>>,
+        level: f64,
+    ) -> Result<Forecast> {
+        match self.selected_model.as_ref() {
+            Some(SelectedModel::ARIMA(model)) => {
+                model.predict_with_exog_intervals(horizon, future_regressors, level)
+            }
+            Some(SelectedModel::SARIMA(model)) => {
+                model.predict_with_exog_intervals(horizon, future_regressors, level)
+            }
+            None => Err(ForecastError::FitRequired),
         }
     }
 }
@@ -625,6 +892,32 @@ mod tests {
         assert!(model.selected_order().is_some());
         // Exhaustive should have more candidates
         assert!(model.model_scores().len() > 3);
+    }
+
+    #[test]
+    fn auto_arima_true_stepwise() {
+        let timestamps = make_timestamps(100);
+        let values: Vec<f64> = (0..100)
+            .map(|i| 10.0 + i as f64 * 0.5 + (i as f64 * 0.3).sin())
+            .collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let config = AutoARIMAConfig::default().with_true_stepwise();
+        let mut model = AutoARIMA::with_config(config);
+        model.fit(&ts).unwrap();
+
+        assert!(model.selected_order().is_some());
+        // True stepwise should find a model efficiently
+        // It evaluates initial models + neighbors, typically less than exhaustive
+        let n_models = model.model_scores().len();
+        assert!(
+            n_models > 0,
+            "Should evaluate at least some models, got {}",
+            n_models
+        );
+
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.horizon(), 5);
     }
 
     #[test]

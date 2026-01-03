@@ -556,6 +556,14 @@ impl TimeSeries {
         self.calendar.as_ref().and_then(|c| c.regressor(name))
     }
 
+    /// Get all regressors as a HashMap (clone).
+    pub fn all_regressors(&self) -> HashMap<String, Vec<f64>> {
+        self.calendar
+            .as_ref()
+            .map(|c| c.regressors().clone())
+            .unwrap_or_default()
+    }
+
     /// Extract a slice of the time series.
     pub fn slice(&self, start: usize, end: usize) -> Result<TimeSeries> {
         if start > end {

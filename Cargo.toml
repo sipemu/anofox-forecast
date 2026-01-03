@@ -1,6 +1,6 @@
 [package]
 name = "anofox-forecast"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 authors = ["Simon M"]
 description = "Time series forecasting library - Rust port of anofox-time"
@@ -9,7 +9,12 @@ repository = "https://github.com/DataZooDE/anofox-forecast"
 keywords = ["time-series", "forecasting", "arima", "ets", "statistics"]
 categories = ["science", "mathematics"]
 
+[features]
+default = []
+parallel = ["rayon"]
+
 [dependencies]
+rayon = { version = "1.10", optional = true }
 chrono = { version = "0.4", features = ["serde"] }
 trueno = "0.8"
 statrs = "0.18"
@@ -20,6 +25,9 @@ rustfft = "6.2"
 [dev-dependencies]
 approx = "0.5"
 criterion = "0.5"
+proptest = "1.5"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.148"
 
 [[bench]]
 name = "simd_benchmark"
@@ -97,10 +105,6 @@ path = "examples/analysis/outlier_detection.rs"
 [[example]]
 name = "seasonality"
 path = "examples/analysis/seasonality.rs"
-
-[[example]]
-name = "time_series_clustering"
-path = "examples/clustering/time_series_clustering.rs"
 
 [[example]]
 name = "scaling"

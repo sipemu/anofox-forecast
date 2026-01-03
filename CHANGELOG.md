@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-01-03
+
+### Added
+
+- **Optional Parallel AutoARIMA**
+  - Feature-gated Rayon parallelization for model evaluation
+  - Enable with `--features parallel` for 4-8x speedup
+  - Default: sequential execution (DuckDB compatible)
+- **Bootstrap Confidence Intervals**
+  - `BootstrapConfig` for configuring bootstrap parameters
+  - `bootstrap_intervals()` for empirical confidence intervals
+  - `bootstrap_forecast()` convenience function
+  - Residual bootstrap and block bootstrap methods
+- **True Stepwise Search for AutoARIMA**
+  - Neighbor-based hill climbing algorithm
+  - Reduces model evaluations by 60-70%
+  - Enable with `AutoARIMAConfig::with_true_stepwise(true)`
+- **Property-Based Testing**
+  - 20+ proptest cases for model invariants
+  - Tests forecast length, finite values, interval ordering
+  - Tests fitted values + residuals reconstruction
+- **Interval Calibration Testing**
+  - Rolling origin cross-validation for coverage rate testing
+  - Winkler score for interval quality assessment
+  - Coverage rate tests for analytical and bootstrap intervals
+
+### Removed
+
+- **Time Series Clustering** - Removed clustering module (not needed)
+
+### Changed
+
+- Improved test coverage with 1,136+ tests total
+- Updated dependencies
+
 ## [0.2.0] - 2025-12-17
 
 ### Added

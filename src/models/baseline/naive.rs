@@ -1,35 +1,123 @@
 //! Naive forecasting model.
 //!
 //! The naive method simply forecasts the last observed value for all future periods.
+//!
+//! Supports exogenous regressors via TimeSeries.regressors.
 
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
 use crate::models::Forecaster;
+use crate::utils::ols::{ols_fit, ols_residuals, OLSResult};
+use std::collections::HashMap;
 
 /// Naive forecaster that repeats the last value.
+///
+/// Supports exogenous regressors via TimeSeries.regressors.
 #[derive(Debug, Clone, Default)]
 pub struct Naive {
     last_value: Option<f64>,
     fitted: Option<Vec<f64>>,
     residuals: Option<Vec<f64>>,
     history: Option<Vec<f64>>,
+    /// OLS result for exogenous regressors (if any).
+    exog_ols: Option<OLSResult>,
 }
 
 impl Naive {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Internal prediction method that handles both with and without exogenous cases.
+    fn predict_internal(
+        &self,
+        horizon: usize,
+        future_regressors: Option<&HashMap<String, Vec<f64>>>,
+    ) -> Result<Forecast> {
+        let last = self.last_value.ok_or(ForecastError::FitRequired)?;
+
+        if horizon == 0 {
+            return Ok(Forecast::new());
+        }
+
+        // Calculate exogenous contribution if applicable
+        let exog_contribution = if let Some(ols) = &self.exog_ols {
+            let future = future_regressors.ok_or_else(|| {
+                ForecastError::InvalidParameter(
+                    "Model was fit with exogenous regressors. Future regressor values required."
+                        .into(),
+                )
+            })?;
+
+            // Validate future regressors have correct length
+            for name in &ols.regressor_names {
+                let values = future.get(name).ok_or_else(|| {
+                    ForecastError::InvalidParameter(format!(
+                        "Missing future values for regressor '{}'",
+                        name
+                    ))
+                })?;
+                if values.len() != horizon {
+                    return Err(ForecastError::DimensionMismatch {
+                        expected: horizon,
+                        got: values.len(),
+                    });
+                }
+            }
+
+            // Predict exogenous contribution
+            Some(ols.predict(future)?)
+        } else {
+            if future_regressors.is_some_and(|r| !r.is_empty()) {
+                return Err(ForecastError::InvalidParameter(
+                    "Model was not fit with exogenous regressors".into(),
+                ));
+            }
+            None
+        };
+
+        let mut predictions = Vec::with_capacity(horizon);
+        for h in 0..horizon {
+            let mut pred = last;
+            if let Some(ref exog) = exog_contribution {
+                pred += exog[h];
+            }
+            predictions.push(pred);
+        }
+
+        Ok(Forecast::from_values(predictions))
+    }
 }
 
 impl Forecaster for Naive {
     fn fit(&mut self, series: &TimeSeries) -> Result<()> {
-        let values = series.primary_values();
-        if values.is_empty() {
+        let raw_values = series.primary_values();
+        if raw_values.is_empty() {
             return Err(ForecastError::EmptyData);
         }
 
+        // Check for exogenous regressors
+        let values: Vec<f64> = if series.has_regressors() {
+            // Extract regressors from TimeSeries
+            let regressors = series.all_regressors();
+
+            // Fit OLS: y ~ X
+            let ols_result = ols_fit(raw_values, &regressors)?;
+
+            // Calculate residuals (y - OLS prediction)
+            let adjusted = ols_residuals(raw_values, &ols_result, &regressors)?;
+
+            // Store OLS result for prediction
+            self.exog_ols = Some(ols_result);
+
+            adjusted
+        } else {
+            self.exog_ols = None;
+            raw_values.to_vec()
+        };
+
         self.last_value = Some(*values.last().unwrap());
-        self.history = Some(values.to_vec());
+        self.history = Some(values.clone());
 
         // Fitted values are shifted history (y_hat[t] = y[t-1])
         let mut fitted = Vec::with_capacity(values.len());
@@ -53,14 +141,107 @@ impl Forecaster for Naive {
     }
 
     fn predict(&self, horizon: usize) -> Result<Forecast> {
+        // If model was fit with exogenous regressors, require predict_with_exog
+        if self.exog_ols.is_some() {
+            return Err(ForecastError::InvalidParameter(
+                "Model was fit with exogenous regressors. Use predict_with_exog() and provide future regressor values.".into()
+            ));
+        }
+
+        self.predict_internal(horizon, None)
+    }
+
+    fn supports_exog(&self) -> bool {
+        true
+    }
+
+    fn has_exog(&self) -> bool {
+        self.exog_ols.is_some()
+    }
+
+    fn exog_names(&self) -> Option<&[String]> {
+        self.exog_ols
+            .as_ref()
+            .map(|ols| ols.regressor_names.as_slice())
+    }
+
+    fn predict_with_exog(
+        &self,
+        horizon: usize,
+        future_regressors: &HashMap<String, Vec<f64>>,
+    ) -> Result<Forecast> {
+        self.predict_internal(horizon, Some(future_regressors))
+    }
+
+    fn predict_with_exog_intervals(
+        &self,
+        horizon: usize,
+        future_regressors: &HashMap<String, Vec<f64>>,
+        level: f64,
+    ) -> Result<Forecast> {
         let last = self.last_value.ok_or(ForecastError::FitRequired)?;
+        let _history = self.history.as_ref().ok_or(ForecastError::FitRequired)?;
 
         if horizon == 0 {
             return Ok(Forecast::new());
         }
 
-        let predictions = vec![last; horizon];
-        Ok(Forecast::from_values(predictions))
+        // Calculate exogenous contribution
+        let exog_contribution = if let Some(ols) = &self.exog_ols {
+            // Validate future regressors
+            for name in &ols.regressor_names {
+                let values = future_regressors.get(name).ok_or_else(|| {
+                    ForecastError::InvalidParameter(format!(
+                        "Missing future values for regressor '{}'",
+                        name
+                    ))
+                })?;
+                if values.len() != horizon {
+                    return Err(ForecastError::DimensionMismatch {
+                        expected: horizon,
+                        got: values.len(),
+                    });
+                }
+            }
+            Some(ols.predict(future_regressors)?)
+        } else {
+            None
+        };
+
+        // Calculate residual standard deviation for confidence intervals
+        let residuals = self.residuals.as_ref().ok_or(ForecastError::FitRequired)?;
+        let valid_residuals: Vec<f64> = residuals.iter().copied().filter(|r| !r.is_nan()).collect();
+
+        let z = quantile_normal((1.0 + level) / 2.0);
+        let sigma = if valid_residuals.is_empty() {
+            0.0
+        } else {
+            let n = valid_residuals.len() as f64;
+            let variance = crate::simd::sum_of_squares(&valid_residuals) / n;
+            variance.sqrt()
+        };
+
+        let mut predictions = Vec::with_capacity(horizon);
+        let mut lower = Vec::with_capacity(horizon);
+        let mut upper = Vec::with_capacity(horizon);
+
+        for h in 1..=horizon {
+            let mut pred = last;
+            if let Some(ref exog) = exog_contribution {
+                pred += exog[h - 1];
+            }
+            predictions.push(pred);
+
+            let se = sigma * (h as f64).sqrt();
+            lower.push(pred - z * se);
+            upper.push(pred + z * se);
+        }
+
+        Ok(Forecast::from_values_with_intervals(
+            predictions,
+            lower,
+            upper,
+        ))
     }
 
     fn predict_with_intervals(&self, horizon: usize, level: f64) -> Result<Forecast> {
