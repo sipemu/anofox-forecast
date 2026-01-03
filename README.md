@@ -12,7 +12,7 @@
 
 Time series forecasting library for Rust.
 
-Provides 35+ forecasting models, 76+ statistical features, seasonality decomposition, changepoint detection, anomaly detection, and bootstrap confidence intervals. Rust port of [anofox-time](https://github.com/DataZooDE/anofox-time) (C++).
+Provides 35+ forecasting models, 76+ statistical features, seasonality decomposition, changepoint detection, anomaly detection, and bootstrap confidence intervals.
 
 ## Features
 
