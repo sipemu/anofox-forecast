@@ -32,16 +32,13 @@ fn main() {
     // 6. Cusum: Sustained Shift Detection
     cusum_sustained_shift();
 
-    // 7. Periodicity: Seasonal Pattern Change
-    periodicity_seasonal();
-
-    // 8. Poisson: Count Data Rate Change
+    // 7. Poisson: Count Data Rate Change
     poisson_rate_change();
 
-    // 9. Comparative: Same data, different cost functions
+    // 8. Comparative: Same data, different cost functions
     comparative_analysis();
 
-    // 10. Summary guidance
+    // 9. Summary guidance
     print_guidance();
 
     println!("=== Changepoint Detection Types Example Complete ===");
@@ -246,40 +243,9 @@ fn cusum_sustained_shift() {
     println!("Segment means: {:?}\n", result.segment_means(&series));
 }
 
-/// Periodicity Cost: Detects changes in seasonal patterns
-fn periodicity_seasonal() {
-    println!("--- 7. Periodicity: Seasonal Pattern Change ---\n");
-
-    println!("Periodicity cost uses FFT to detect changes in seasonal patterns.");
-    println!("Best for: Seasonal data, detecting when periodicity changes.\n");
-
-    // First segment: period 8, second segment: period 16
-    let mut series: Vec<f64> = (0..64).map(|i| (2.0 * PI * i as f64 / 8.0).sin()).collect();
-    series.extend((0..64).map(|i| (2.0 * PI * i as f64 / 16.0).sin()));
-
-    println!("Data: sin wave period 8 (64 pts) then period 16 (64 pts)");
-    println!("True changepoint: 64\n");
-
-    let config = PeltConfig::default()
-        .cost_function(CostFunction::Periodicity)
-        .penalty(5.0);
-    let result = pelt_detect(&series, &config);
-
-    println!("Config: Periodicity cost, penalty=5.0");
-    println!("Detected changepoints: {:?}", result.changepoints);
-
-    // Compare with L2 (which won't see the period change well)
-    let config_l2 = PeltConfig::default()
-        .cost_function(CostFunction::L2)
-        .penalty(5.0);
-    let result_l2 = pelt_detect(&series, &config_l2);
-    println!("L2 changepoints (same data): {:?}", result_l2.changepoints);
-    println!("Periodicity cost specifically targets seasonal pattern changes\n");
-}
-
 /// Poisson Cost: For count data with rate changes
 fn poisson_rate_change() {
-    println!("--- 8. Poisson: Count Data Rate Change ---\n");
+    println!("--- 7. Poisson: Count Data Rate Change ---\n");
 
     println!("Poisson cost is designed for count data.");
     println!("Best for: Event counts, arrival rates, rare events.\n");
@@ -309,7 +275,7 @@ fn poisson_rate_change() {
 
 /// Compare different cost functions on the same data
 fn comparative_analysis() {
-    println!("--- 9. Comparative Analysis ---\n");
+    println!("--- 8. Comparative Analysis ---\n");
 
     println!("Same data analyzed with different cost functions.\n");
 
@@ -343,7 +309,7 @@ fn comparative_analysis() {
 
 /// Print guidance on when to use each cost function
 fn print_guidance() {
-    println!("--- 10. Cost Function Selection Guide ---\n");
+    println!("--- 9. Cost Function Selection Guide ---\n");
 
     println!(
         "
@@ -379,11 +345,6 @@ Cusum
   - Detects: Sustained mean shifts
   - Use when: Process monitoring, quality control
   - Good for: Gradual drifts, control charts
-
-Periodicity
-  - Detects: Seasonal pattern changes
-  - Use when: Time series has seasonality that may change
-  - Based on: FFT periodogram
 
 Poisson
   - Detects: Rate changes in count data

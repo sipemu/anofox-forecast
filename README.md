@@ -37,16 +37,13 @@ Provides 35+ forecasting models, 76+ statistical features, seasonality decomposi
   - STL (Seasonal-Trend decomposition using LOESS)
   - MSTL (Multiple Seasonal-Trend decomposition) for complex seasonality
 
-- **Periodicity Detection**
-  - ACF-based period detection
-  - FFT-based spectral analysis
-  - Autoperiod (hybrid FFT+ACF, Vlachos et al. 2005)
-  - CFD-Autoperiod (noise-resistant with clustering)
-  - SAZED ensemble (parameter-free, combines multiple methods)
+- **Spectral Analysis**
+  - Welch's periodogram for reduced variance spectral estimation
+  - For comprehensive periodicity detection, see [fdars](https://crates.io/crates/fdars-core)
 
 - **Changepoint Detection**
   - PELT algorithm with O(n) average complexity
-  - Multiple cost functions: L1, L2, Normal, Poisson
+  - Multiple cost functions: L1, L2, Normal, Poisson, LinearTrend, MeanVariance, Cusum
 
 - **Anomaly Detection**
   - Statistical methods (IQR, z-score)
@@ -177,28 +174,22 @@ let changepoints = pelt.detect(&ts)?;
 println!("Changepoints at indices: {:?}", changepoints);
 ```
 
-### Periodicity Detection
+### Spectral Analysis
 
 ```rust
-use anofox_forecast::detection::{
-    detect_period, detect_period_ensemble, Autoperiod, PeriodicityDetector,
-};
+use anofox_forecast::detection::welch_periodogram;
 
-// Quick detection with default settings
-let result = detect_period(&values);
-println!("Detected period: {:?}", result.primary_period);
+// Welch's periodogram with overlapping windows
+let psd = welch_periodogram(&values, 64, 0.5);
 
-// Ensemble method (combines ACF, FFT, and other detectors)
-let result = detect_period_ensemble(&values);
-println!("Period: {:?}, Confidence: {:.2}", result.primary_period, result.confidence());
-
-// Custom detector with specific parameters
-let detector = Autoperiod::new(2, 365, 3.0, 0.2);
-let result = detector.detect(&values);
-for p in &result.periods {
-    println!("Period: {}, Score: {:.4}, Source: {:?}", p.period, p.score, p.source);
+// Find dominant period
+if let Some((period, power)) = psd.iter().max_by(|a, b| a.1.partial_cmp(&b.1).unwrap()) {
+    println!("Dominant period: {}, power: {:.4}", period, power);
 }
 ```
+
+> For comprehensive periodicity detection (ACF, FFT, Autoperiod, CFD-Autoperiod, SAZED),
+> see the [fdars](https://crates.io/crates/fdars-core) crate.
 
 ## API Reference
 
@@ -245,7 +236,7 @@ for p in &result.periods {
 - [statrs](https://crates.io/crates/statrs) - Statistical distributions and functions
 - [thiserror](https://crates.io/crates/thiserror) - Error handling
 - [rand](https://crates.io/crates/rand) - Random number generation
-- [rustfft](https://crates.io/crates/rustfft) - Fast Fourier Transform for periodicity detection
+- [rustfft](https://crates.io/crates/rustfft) - Fast Fourier Transform for spectral analysis
 
 ## License
 

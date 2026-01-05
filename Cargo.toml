@@ -102,9 +102,6 @@ path = "examples/analysis/changepoint_types.rs"
 name = "outlier_detection"
 path = "examples/analysis/outlier_detection.rs"
 
-[[example]]
-name = "seasonality"
-path = "examples/analysis/seasonality.rs"
 
 [[example]]
 name = "scaling"
@@ -138,6 +135,3 @@ path = "examples/validation/forecast_export.rs"
 name = "feature_export"
 path = "examples/validation/feature_export.rs"
 
-[[example]]
-name = "detect_period"
-path = "examples/analysis/detect_period.rs"

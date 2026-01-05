@@ -3,8 +3,6 @@
 //! Cost functions evaluate the "cost" of fitting a model to a segment of data.
 //! Lower cost indicates a better fit.
 
-use crate::detection::periodogram;
-
 /// Cost function type.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum CostFunction {
@@ -26,8 +24,6 @@ pub enum CostFunction {
     /// CUSUM cost: cumulative sum based detection for sustained mean shifts.
     /// Good for quality control / monitoring applications.
     Cusum,
-    /// Periodicity cost: detects changes in seasonal patterns using FFT.
-    Periodicity,
 }
 
 /// Compute the cost of a segment using the specified cost function.
@@ -44,7 +40,6 @@ pub fn segment_cost(segment: &[f64], cost_fn: CostFunction) -> f64 {
         CostFunction::LinearTrend => linear_trend_cost(segment),
         CostFunction::MeanVariance => mean_variance_cost(segment),
         CostFunction::Cusum => cusum_cost(segment),
-        CostFunction::Periodicity => periodicity_cost(segment),
     }
 }
 
@@ -204,55 +199,6 @@ pub fn cusum_cost(segment: &[f64]) -> f64 {
     }
 
     max_cusum
-}
-
-/// Periodicity cost: detects changes in seasonal patterns using FFT.
-///
-/// Based on FFT/periodogram analysis of the segment.
-/// Measures the deviation from the dominant periodic pattern.
-/// Cost = total variance * (1 - periodicity_strength)
-///
-/// Lower cost = segment has strong, consistent periodicity.
-/// Changes in seasonal pattern will create segment boundaries.
-pub fn periodicity_cost(segment: &[f64]) -> f64 {
-    let n = segment.len();
-    if n < 8 {
-        // Too short for meaningful periodicity analysis
-        return l2_cost(segment); // Fall back to L2
-    }
-
-    let mean = segment.iter().sum::<f64>() / n as f64;
-    let total_variance: f64 = segment.iter().map(|x| (x - mean).powi(2)).sum();
-
-    if total_variance < 1e-10 {
-        return 0.0; // Constant segment
-    }
-
-    // Compute periodogram to find dominant frequencies
-    let psd = periodogram(segment);
-
-    if psd.is_empty() {
-        return l2_cost(segment);
-    }
-
-    // Sum of top k frequency powers
-    let k_top = 3.min(psd.len());
-    let mut powers: Vec<f64> = psd.iter().map(|(_, p)| *p).collect();
-    powers.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
-
-    let explained_power: f64 = powers.iter().take(k_top).sum();
-    let total_power: f64 = powers.iter().sum();
-
-    if total_power < 1e-10 {
-        return total_variance;
-    }
-
-    // Periodicity strength: fraction of variance explained by dominant frequencies
-    let periodicity_strength = explained_power / total_power;
-
-    // Cost = unexplained variance
-    // High periodicity_strength -> low cost (good periodic fit)
-    total_variance * (1.0 - periodicity_strength * 0.9) // Scale factor to avoid zero cost
 }
 
 /// Compute the cost for the entire series given changepoint locations.
@@ -587,49 +533,6 @@ mod tests {
         assert!(cost > 10.0); // Should be high due to sustained deviation
     }
 
-    // ==================== periodicity_cost ====================
-
-    #[test]
-    fn periodicity_cost_empty() {
-        assert_relative_eq!(periodicity_cost(&[]), 0.0, epsilon = 1e-10);
-    }
-
-    #[test]
-    fn periodicity_cost_short() {
-        let segment = vec![1.0, 2.0, 3.0];
-        // Should fall back to L2
-        let cost = periodicity_cost(&segment);
-        assert_relative_eq!(cost, l2_cost(&segment), epsilon = 1e-10);
-    }
-
-    #[test]
-    fn periodicity_cost_constant() {
-        let segment = vec![5.0; 64];
-        assert_relative_eq!(periodicity_cost(&segment), 0.0, epsilon = 1e-10);
-    }
-
-    #[test]
-    fn periodicity_cost_pure_sine() {
-        // Perfect periodicity should have low cost
-        let segment: Vec<f64> = (0..64)
-            .map(|i| (2.0 * std::f64::consts::PI * i as f64 / 8.0).sin())
-            .collect();
-        let cost = periodicity_cost(&segment);
-
-        // Compare to L2 cost (no periodic model)
-        let l2 = l2_cost(&segment);
-        assert!(cost < l2); // Periodic cost should be lower
-    }
-
-    #[test]
-    fn periodicity_cost_white_noise() {
-        // Pseudo-random data should have higher cost
-        let segment: Vec<f64> = (0..64).map(|i| ((i * 17 + 3) % 11) as f64 - 5.0).collect();
-        let cost = periodicity_cost(&segment);
-        // Cost should be positive for non-periodic data
-        assert!(cost > 0.0);
-    }
-
     // ==================== segment_cost with new functions ====================
 
     #[test]
@@ -651,13 +554,6 @@ mod tests {
     fn segment_cost_cusum() {
         let segment = vec![5.0; 10];
         let cost = segment_cost(&segment, CostFunction::Cusum);
-        assert_relative_eq!(cost, 0.0, epsilon = 1e-10);
-    }
-
-    #[test]
-    fn segment_cost_periodicity() {
-        let segment = vec![5.0; 64];
-        let cost = segment_cost(&segment, CostFunction::Periodicity);
         assert_relative_eq!(cost, 0.0, epsilon = 1e-10);
     }
 }

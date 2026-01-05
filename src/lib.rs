@@ -1,10 +1,13 @@
 //! # anofox-forecast
 //!
-//! Time series forecasting library - Rust port of anofox-time C++.
+//! Time series forecasting library for Rust.
 //!
-//! Provides 35+ forecasting models including ARIMA, ETS, Theta, TBATS,
-//! and baseline methods, along with seasonality analysis, changepoint
-//! detection, and outlier detection.
+//! Provides 35+ forecasting models including ARIMA, ETS, Theta,
+//! and baseline methods, along with seasonality decomposition (STL/MSTL),
+//! changepoint detection, and outlier detection.
+//!
+//! For comprehensive periodicity detection, see the
+//! [fdars](https://crates.io/crates/fdars-core) crate.
 
 // Allow some clippy warnings for cleaner code in specific cases
 #![allow(clippy::upper_case_acronyms)]

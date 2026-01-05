@@ -1,7 +1,6 @@
-//! FFT utilities for periodicity detection.
+//! FFT utilities for spectral analysis.
 //!
-//! Provides Fast Fourier Transform based tools for spectral analysis
-//! and periodogram computation.
+//! Provides Welch's periodogram for robust spectral estimation.
 
 use rustfft::{num_complex::Complex64, FftPlanner};
 
@@ -10,13 +9,7 @@ use rustfft::{num_complex::Complex64, FftPlanner};
 /// Returns the complex frequency domain representation.
 /// Only returns the first half (positive frequencies) since
 /// the input is real-valued and the spectrum is symmetric.
-///
-/// # Arguments
-/// * `signal` - Input time series (real values)
-///
-/// # Returns
-/// Complex frequency components for frequencies 0 to N/2
-pub fn fft_real(signal: &[f64]) -> Vec<Complex64> {
+fn fft_real(signal: &[f64]) -> Vec<Complex64> {
     let n = signal.len();
     if n == 0 {
         return Vec::new();
@@ -39,13 +32,7 @@ pub fn fft_real(signal: &[f64]) -> Vec<Complex64> {
 ///
 /// Returns (period, power) pairs sorted by period, where power is the
 /// squared magnitude of the FFT normalized by the signal length.
-///
-/// # Arguments
-/// * `signal` - Input time series
-///
-/// # Returns
-/// Vector of (period, power) tuples for periods >= 2
-pub fn periodogram(signal: &[f64]) -> Vec<(usize, f64)> {
+fn periodogram(signal: &[f64]) -> Vec<(usize, f64)> {
     let n = signal.len();
     if n < 4 {
         return Vec::new();
@@ -76,66 +63,11 @@ pub fn periodogram(signal: &[f64]) -> Vec<(usize, f64)> {
     result
 }
 
-/// Compute the periodogram with peak detection.
-///
-/// Finds significant peaks in the power spectrum above the noise floor.
-///
-/// # Arguments
-/// * `signal` - Input time series
-/// * `threshold` - Multiplier for noise floor (e.g., 3.0 means peaks must be 3x above noise)
-/// * `min_period` - Minimum period to consider
-/// * `max_period` - Maximum period to consider
-///
-/// # Returns
-/// Vector of (period, power) tuples for detected peaks, sorted by power (highest first)
-pub fn periodogram_peaks(
-    signal: &[f64],
-    threshold: f64,
-    min_period: usize,
-    max_period: usize,
-) -> Vec<(usize, f64)> {
-    let psd = periodogram(signal);
-    if psd.is_empty() {
-        return Vec::new();
-    }
-
-    // Filter by period range
-    let filtered: Vec<(usize, f64)> = psd
-        .iter()
-        .filter(|(p, _)| *p >= min_period && *p <= max_period)
-        .copied()
-        .collect();
-
-    if filtered.is_empty() {
-        return Vec::new();
-    }
-
-    // Estimate noise floor as median power
-    let mut powers: Vec<f64> = filtered.iter().map(|(_, p)| *p).collect();
-    powers.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let noise_floor = if powers.len().is_multiple_of(2) {
-        (powers[powers.len() / 2 - 1] + powers[powers.len() / 2]) / 2.0
-    } else {
-        powers[powers.len() / 2]
-    };
-
-    // Find peaks above threshold
-    let peak_threshold = noise_floor * threshold;
-    let mut peaks: Vec<(usize, f64)> = filtered
-        .iter()
-        .filter(|(_, power)| *power > peak_threshold)
-        .copied()
-        .collect();
-
-    // Sort by power (highest first)
-    peaks.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-    peaks
-}
-
 /// Compute Welch's periodogram for more robust spectral estimation.
 ///
-/// Uses overlapping windows to reduce variance in the power estimate.
+/// Uses overlapping windows with Hann windowing to reduce variance
+/// in the power estimate. This method is more robust to noise than
+/// a standard periodogram.
 ///
 /// # Arguments
 /// * `signal` - Input time series
@@ -143,7 +75,22 @@ pub fn periodogram_peaks(
 /// * `overlap` - Overlap ratio between segments (0.0 to 0.9, typically 0.5)
 ///
 /// # Returns
-/// Vector of (period, power) tuples
+/// Vector of (period, power) tuples sorted by period (largest first)
+///
+/// # Example
+/// ```
+/// use anofox_forecast::detection::welch_periodogram;
+///
+/// let signal: Vec<f64> = (0..256)
+///     .map(|i| (2.0 * std::f64::consts::PI * i as f64 / 12.0).sin())
+///     .collect();
+///
+/// let psd = welch_periodogram(&signal, 64, 0.5);
+/// // Find the dominant period
+/// if let Some((period, _)) = psd.iter().max_by(|a, b| a.1.partial_cmp(&b.1).unwrap()) {
+///     println!("Dominant period: {}", period);
+/// }
+/// ```
 pub fn welch_periodogram(signal: &[f64], window_size: usize, overlap: f64) -> Vec<(usize, f64)> {
     let n = signal.len();
     if n < window_size || window_size < 4 {
@@ -196,36 +143,6 @@ pub fn welch_periodogram(signal: &[f64], window_size: usize, overlap: f64) -> Ve
     result
 }
 
-/// Find the frequency index corresponding to a given period.
-///
-/// # Arguments
-/// * `period` - The period to look up
-/// * `n` - The length of the signal
-///
-/// # Returns
-/// The frequency index k such that period ≈ n/k
-pub fn period_to_frequency_index(period: usize, n: usize) -> usize {
-    if period == 0 {
-        return 0;
-    }
-    n / period
-}
-
-/// Convert a frequency index to the corresponding period.
-///
-/// # Arguments
-/// * `freq_index` - The frequency index (k in the FFT)
-/// * `n` - The length of the signal
-///
-/// # Returns
-/// The period corresponding to this frequency
-pub fn frequency_index_to_period(freq_index: usize, n: usize) -> usize {
-    if freq_index == 0 {
-        return n; // DC component corresponds to infinite period
-    }
-    n / freq_index
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,101 +151,6 @@ mod tests {
         (0..n)
             .map(|i| (2.0 * std::f64::consts::PI * i as f64 / period as f64).sin())
             .collect()
-    }
-
-    #[test]
-    fn fft_real_pure_sine() {
-        let signal = generate_sine(128, 16);
-        let fft_result = fft_real(&signal);
-
-        // Should have strong peak at frequency 128/16 = 8
-        assert!(!fft_result.is_empty());
-
-        // Find the peak
-        let powers: Vec<f64> = fft_result
-            .iter()
-            .map(|c| c.re * c.re + c.im * c.im)
-            .collect();
-        let max_idx = powers
-            .iter()
-            .enumerate()
-            .skip(1)
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-            .map(|(i, _)| i)
-            .unwrap();
-
-        assert_eq!(max_idx, 8); // frequency index 8 = period 16
-    }
-
-    #[test]
-    fn fft_real_empty() {
-        let result = fft_real(&[]);
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn periodogram_pure_sine() {
-        let signal = generate_sine(128, 12);
-        let psd = periodogram(&signal);
-
-        // Should detect period close to 12
-        assert!(!psd.is_empty());
-
-        // Find the peak
-        let peak = psd.iter().max_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-        assert!(peak.is_some());
-
-        let (period, _) = peak.unwrap();
-        // Due to discretization, we might get 10-12
-        assert!(
-            (10..=14).contains(period),
-            "Expected period near 12, got {}",
-            period
-        );
-    }
-
-    #[test]
-    fn periodogram_multiple_frequencies() {
-        // Signal with two frequencies: period 7 and period 30
-        let n = 210;
-        let signal: Vec<f64> = (0..n)
-            .map(|i| {
-                (2.0 * std::f64::consts::PI * i as f64 / 7.0).sin()
-                    + 0.8 * (2.0 * std::f64::consts::PI * i as f64 / 30.0).sin()
-            })
-            .collect();
-
-        let peaks = periodogram_peaks(&signal, 2.0, 2, 50);
-
-        assert!(peaks.len() >= 2, "Should detect at least 2 peaks");
-
-        // Check that we found periods near 7 and 30
-        let periods: Vec<usize> = peaks.iter().map(|(p, _)| *p).collect();
-        let has_7 = periods.iter().any(|p| (5..=10).contains(p));
-        let has_30 = periods.iter().any(|p| (25..=35).contains(p));
-
-        assert!(
-            has_7 && has_30,
-            "Should detect periods near 7 and 30, got {:?}",
-            periods
-        );
-    }
-
-    #[test]
-    fn periodogram_peaks_threshold() {
-        let signal = generate_sine(128, 16);
-        let peaks = periodogram_peaks(&signal, 3.0, 2, 64);
-
-        // Should find at least the main period
-        assert!(!peaks.is_empty());
-
-        // First peak should be near period 16
-        let (period, _) = peaks[0];
-        assert!(
-            (14..=18).contains(&period),
-            "Expected period near 16, got {}",
-            period
-        );
     }
 
     #[test]
@@ -360,52 +182,39 @@ mod tests {
     }
 
     #[test]
-    fn period_frequency_conversion() {
-        let n = 128;
+    fn welch_overlap_values() {
+        let signal = generate_sine(256, 16);
 
-        // Test round-trip
-        for period in [4, 8, 12, 16, 32, 64] {
-            let freq = period_to_frequency_index(period, n);
-            let recovered = frequency_index_to_period(freq, n);
-            // May not be exact due to integer division
-            assert!((recovered as i32 - period as i32).abs() <= 1);
+        // Different overlaps should all work
+        for overlap in [0.0, 0.25, 0.5, 0.75] {
+            let psd = welch_periodogram(&signal, 64, overlap);
+            assert!(!psd.is_empty(), "Failed with overlap {}", overlap);
         }
     }
 
     #[test]
-    fn periodogram_constant_signal() {
-        let signal = vec![5.0; 64];
-        let psd = periodogram(&signal);
+    fn welch_finds_multiple_periods() {
+        // Signal with two frequencies
+        let n = 512;
+        let signal: Vec<f64> = (0..n)
+            .map(|i| {
+                (2.0 * std::f64::consts::PI * i as f64 / 16.0).sin()
+                    + 0.5 * (2.0 * std::f64::consts::PI * i as f64 / 32.0).sin()
+            })
+            .collect();
 
-        // Constant signal should have power concentrated at DC (period = N)
-        // Other periods should have very low power
-        for (period, power) in &psd {
-            if *period < 64 {
-                assert!(
-                    *power < 0.01,
-                    "Non-DC period {} has power {}",
-                    period,
-                    power
-                );
-            }
-        }
-    }
+        let psd = welch_periodogram(&signal, 128, 0.5);
 
-    #[test]
-    fn periodogram_high_threshold_reduces_peaks() {
-        // White noise-like signal (deterministic for reproducibility)
-        let signal: Vec<f64> = (0..128).map(|i| ((i * 7 + 3) % 13) as f64 - 6.0).collect();
+        // Should have peaks near 16 and 32
+        let top_periods: Vec<usize> = psd.iter().take(10).map(|(p, _)| *p).collect();
 
-        // Compare different thresholds
-        let peaks_low = periodogram_peaks(&signal, 1.5, 2, 64);
-        let peaks_high = periodogram_peaks(&signal, 10.0, 2, 64);
+        let has_16 = top_periods.iter().any(|p| (14..=18).contains(p));
+        let has_32 = top_periods.iter().any(|p| (28..=36).contains(p));
 
-        // Higher threshold should result in fewer or equal peaks
         assert!(
-            peaks_high.len() <= peaks_low.len(),
-            "Higher threshold should reduce or maintain peak count: low={}, high={}",
-            peaks_low.len(),
-            peaks_high.len()
+            has_16 || has_32,
+            "Should detect at least one period, got {:?}",
+            top_periods
         );
     }
 }

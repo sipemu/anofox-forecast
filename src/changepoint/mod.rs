@@ -15,7 +15,6 @@
 //! - **LinearTrend**: Detects slope/trend changes
 //! - **MeanVariance**: Joint mean and variance changes
 //! - **Cusum**: Cumulative sum for sustained shifts
-//! - **Periodicity**: Seasonal pattern changes
 //!
 //! # Example
 //!
@@ -42,7 +41,7 @@ pub mod cost;
 pub mod pelt;
 
 pub use cost::{
-    cusum_cost, l1_cost, l2_cost, linear_trend_cost, mean_variance_cost, normal_cost,
-    periodicity_cost, poisson_cost, segment_cost, total_cost, CostFunction,
+    cusum_cost, l1_cost, l2_cost, linear_trend_cost, mean_variance_cost, normal_cost, poisson_cost,
+    segment_cost, total_cost, CostFunction,
 };
 pub use pelt::{pelt_detect, PeltConfig, PeltResult};

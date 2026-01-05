@@ -616,40 +616,4 @@ mod tests {
         // (might still detect some due to segment boundaries)
         assert!(result.n_changepoints <= 2);
     }
-
-    #[test]
-    fn pelt_periodicity_detects_period_change() {
-        use std::f64::consts::PI;
-
-        // First segment: period 8
-        let mut series: Vec<f64> = (0..64).map(|i| (2.0 * PI * i as f64 / 8.0).sin()).collect();
-        // Second segment: period 16
-        series.extend((0..64).map(|i| (2.0 * PI * i as f64 / 16.0).sin()));
-
-        let config = PeltConfig::default()
-            .cost_function(CostFunction::Periodicity)
-            .penalty(5.0);
-        let result = pelt_detect(&series, &config);
-
-        // Should detect the period change
-        assert!(result.n_changepoints >= 1);
-    }
-
-    #[test]
-    fn pelt_periodicity_consistent_period() {
-        use std::f64::consts::PI;
-
-        // Consistent period throughout
-        let series: Vec<f64> = (0..128)
-            .map(|i| (2.0 * PI * i as f64 / 12.0).sin())
-            .collect();
-
-        let config = PeltConfig::default()
-            .cost_function(CostFunction::Periodicity)
-            .penalty(20.0);
-        let result = pelt_detect(&series, &config);
-
-        // Consistent period should have few or no changepoints
-        assert!(result.n_changepoints <= 1);
-    }
 }
