@@ -1,6 +1,6 @@
 [package]
 name = "anofox-forecast"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 authors = ["Simon M"]
 description = "Time series forecasting library - Rust port of anofox-time"
