@@ -195,7 +195,7 @@ fn compute_modified_z_scores(series: &[f64], threshold: f64) -> (Vec<f64>, f64) 
     let mut sorted: Vec<f64> = series.iter().filter(|x| x.is_finite()).copied().collect();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
-    let median = if sorted.len().is_multiple_of(2) {
+    let median = if sorted.len() % 2 == 0 {
         (sorted[sorted.len() / 2 - 1] + sorted[sorted.len() / 2]) / 2.0
     } else {
         sorted[sorted.len() / 2]
@@ -205,7 +205,7 @@ fn compute_modified_z_scores(series: &[f64], threshold: f64) -> (Vec<f64>, f64) 
     let mut abs_deviations: Vec<f64> = series.iter().map(|x| (x - median).abs()).collect();
     abs_deviations.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
-    let mad = if abs_deviations.len().is_multiple_of(2) {
+    let mad = if abs_deviations.len() % 2 == 0 {
         (abs_deviations[abs_deviations.len() / 2 - 1] + abs_deviations[abs_deviations.len() / 2])
             / 2.0
     } else {

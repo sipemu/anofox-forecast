@@ -81,9 +81,9 @@ impl STL {
         // Default parameters following Cleveland et al. (1990)
         let ns = seasonal_period;
         let nt = (1.5 * seasonal_period as f64 / (1.0 - 1.5 / ns as f64)).ceil() as usize;
-        let nt = if nt.is_multiple_of(2) { nt + 1 } else { nt }; // Must be odd
+        let nt = if nt % 2 == 0 { nt + 1 } else { nt }; // Must be odd
         let nl = seasonal_period;
-        let nl = if nl.is_multiple_of(2) { nl + 1 } else { nl }; // Must be odd
+        let nl = if nl % 2 == 0 { nl + 1 } else { nl }; // Must be odd
 
         Self {
             seasonal_period,
@@ -98,13 +98,13 @@ impl STL {
 
     /// Set custom seasonal smoothness (ns parameter).
     pub fn with_seasonal_smoothness(mut self, ns: usize) -> Self {
-        self.seasonal_smoothness = if ns.is_multiple_of(2) { ns + 1 } else { ns };
+        self.seasonal_smoothness = if ns % 2 == 0 { ns + 1 } else { ns };
         self
     }
 
     /// Set custom trend smoothness (nt parameter).
     pub fn with_trend_smoothness(mut self, nt: usize) -> Self {
-        self.trend_smoothness = if nt.is_multiple_of(2) { nt + 1 } else { nt };
+        self.trend_smoothness = if nt % 2 == 0 { nt + 1 } else { nt };
         self
     }
 
@@ -370,7 +370,7 @@ impl STL {
         // Compute median absolute deviation
         let mut sorted = abs_remainder.clone();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let median = if n.is_multiple_of(2) {
+        let median = if n % 2 == 0 {
             (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
         } else {
             sorted[n / 2]

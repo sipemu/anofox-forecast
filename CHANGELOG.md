@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-01-07
+
+### Fixed
+
+- **Stable Rust Compatibility**
+  - Replaced unstable `is_multiple_of()` method with `% 2 == 0`
+  - Fixes WASM builds on stable Rust 1.86.0+
+
 ## [0.3.1] - 2026-01-07
 
 ### Added
