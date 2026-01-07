@@ -5,7 +5,7 @@ edition = "2021"
 authors = ["Simon M"]
 description = "Time series forecasting library - Rust port of anofox-time"
 license = "MIT"
-repository = "https://github.com/DataZooDE/anofox-forecast"
+repository = "https://github.com/sipemu/anofox-forecast"
 keywords = ["time-series", "forecasting", "arima", "ets", "statistics"]
 categories = ["science", "mathematics"]
 
