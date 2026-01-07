@@ -16,6 +16,12 @@
 #![allow(clippy::needless_range_loop)]
 #![allow(clippy::manual_memcpy)]
 
+// Prevent use of parallel feature on WASM targets (rayon requires OS threads)
+#[cfg(all(feature = "parallel", target_arch = "wasm32"))]
+compile_error!(
+    "The 'parallel' feature is not supported on WASM targets. Build without --features parallel"
+);
+
 pub mod changepoint;
 pub mod core;
 pub mod detection;
