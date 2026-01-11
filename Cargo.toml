@@ -25,6 +25,7 @@ statrs = "0.18"
 thiserror = "2.0"
 rand = "0.8"
 rustfft = "6.2"
+anofox-regression = "0.5.0"
 
 [dev-dependencies]
 approx = "0.5"
