@@ -292,6 +292,10 @@ println!("Upper: {:?}", intervals.upper());
 - [rand](https://crates.io/crates/rand) - Random number generation
 - [rustfft](https://crates.io/crates/rustfft) - Fast Fourier Transform for spectral analysis
 
+## Acknowledgments
+
+The postprocessing module is a Rust port of [PostForecasts.jl](https://github.com/lipiecki/PostForecasts.jl). See [THIRDPARTY_NOTICE.md](THIRDPARTY_NOTICE.md) for full attribution and references to the research papers that inspired this implementation.
+
 ## License
 
 MIT License - see [LICENSE](LICENSE) for details.
