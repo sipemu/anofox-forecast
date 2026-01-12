@@ -30,6 +30,7 @@ struct TrueCoefficients {
 
 #[derive(Deserialize)]
 struct ReferenceOutput {
+    #[allow(dead_code)]
     model: String,
     horizon: usize,
     forecast: Vec<f64>,

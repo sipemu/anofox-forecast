@@ -49,9 +49,10 @@ use crate::error::{ForecastError, Result};
 use crate::postprocess::QuantileForecasts;
 
 /// Regularization method for QRA.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum QRARegularization {
     /// Standard quantile regression (no regularization).
+    #[default]
     None,
     /// L1 regularized (Lasso) quantile regression.
     Lasso {
@@ -65,12 +66,6 @@ pub enum QRARegularization {
     },
     /// Isotonic QRA variant for monotone constraints.
     Isotonic,
-}
-
-impl Default for QRARegularization {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 /// Result of fitting a QRA predictor.
@@ -187,8 +182,8 @@ impl QRAPredictor {
     ///
     /// # Arguments
     ///
-    /// * `forecasts_matrix` - Matrix where each column is one forecaster's predictions
-    ///                        Shape: (n_samples, n_forecasters)
+    /// * `forecasts_matrix` - Matrix where each column is one forecaster's predictions.
+    ///   Shape: (n_samples, n_forecasters)
     /// * `actuals` - Actual values corresponding to the forecasts
     ///
     /// # Returns
@@ -273,8 +268,8 @@ impl QRAPredictor {
     /// # Arguments
     ///
     /// * `result` - The fitted QRA result
-    /// * `forecasts_matrix` - New forecasts from each model
-    ///                        Shape: (n_times, n_forecasters)
+    /// * `forecasts_matrix` - New forecasts from each model.
+    ///   Shape: (n_times, n_forecasters)
     ///
     /// # Returns
     ///
@@ -306,7 +301,8 @@ impl QRAPredictor {
         let x = Mat::from_fn(n_times, n_forecasters, |i, j| forecasts_matrix[i][j]);
 
         // Predict for each quantile
-        let mut forecast_values: Vec<Vec<f64>> = vec![Vec::with_capacity(self.quantiles.len()); n_times];
+        let mut forecast_values: Vec<Vec<f64>> =
+            vec![Vec::with_capacity(self.quantiles.len()); n_times];
 
         for (q_idx, fitted) in result.fitted_models.iter().enumerate() {
             let preds = fitted.predict(&x);
@@ -446,7 +442,11 @@ mod tests {
 
         fn make_forecasts_matrix(n: usize, n_forecasters: usize) -> Vec<Vec<f64>> {
             (0..n)
-                .map(|i| (0..n_forecasters).map(|j| i as f64 + j as f64 * 0.1).collect())
+                .map(|i| {
+                    (0..n_forecasters)
+                        .map(|j| i as f64 + j as f64 * 0.1)
+                        .collect()
+                })
                 .collect()
         }
 
@@ -531,7 +531,11 @@ mod tests {
 
         fn make_forecasts_matrix(n: usize, n_forecasters: usize) -> Vec<Vec<f64>> {
             (0..n)
-                .map(|i| (0..n_forecasters).map(|j| i as f64 + j as f64 * 0.1).collect())
+                .map(|i| {
+                    (0..n_forecasters)
+                        .map(|j| i as f64 + j as f64 * 0.1)
+                        .collect()
+                })
                 .collect()
         }
 
@@ -611,7 +615,11 @@ mod tests {
 
         fn make_forecasts_matrix(n: usize, n_forecasters: usize) -> Vec<Vec<f64>> {
             (0..n)
-                .map(|i| (0..n_forecasters).map(|j| i as f64 + j as f64 * 0.1).collect())
+                .map(|i| {
+                    (0..n_forecasters)
+                        .map(|j| i as f64 + j as f64 * 0.1)
+                        .collect()
+                })
                 .collect()
         }
 
@@ -667,7 +675,10 @@ mod tests {
 
             // Should combine to produce better forecasts
             let coeffs = result.coefficients(0).unwrap();
-            assert!(coeffs.len() >= 2, "Should have coefficients for both forecasters");
+            assert!(
+                coeffs.len() >= 2,
+                "Should have coefficients for both forecasters"
+            );
         }
 
         #[test]

@@ -5,6 +5,7 @@
 //!
 //! Run with: cargo run --example postprocess_qra_ensemble
 
+#![allow(clippy::needless_range_loop)]
 use anofox_forecast::postprocess::QRAPredictor;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -63,7 +64,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!(
                 "  q={:.1}: intercept={:.3}, F1={:.3}, F2={:.3}, F3={:.3}",
                 q,
-                coeffs.get(0).unwrap_or(&0.0),
+                coeffs.first().unwrap_or(&0.0),
                 coeffs.get(1).unwrap_or(&0.0),
                 coeffs.get(2).unwrap_or(&0.0),
                 coeffs.get(3).unwrap_or(&0.0)
@@ -82,7 +83,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!(
                 "  q={:.1}: intercept={:.3}, F1={:.3}, F2={:.3}, F3={:.3}",
                 q,
-                coeffs.get(0).unwrap_or(&0.0),
+                coeffs.first().unwrap_or(&0.0),
                 coeffs.get(1).unwrap_or(&0.0),
                 coeffs.get(2).unwrap_or(&0.0),
                 coeffs.get(3).unwrap_or(&0.0)
@@ -147,7 +148,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("\n=== Evaluation ===");
-    println!("80% interval coverage: {}/10 = {:.0}%", covered, covered as f64 * 10.0);
+    println!(
+        "80% interval coverage: {}/10 = {:.0}%",
+        covered,
+        covered as f64 * 10.0
+    );
     println!("Average interval width: {:.2}", total_width / 10.0);
 
     println!("\nNotes:");

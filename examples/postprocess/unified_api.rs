@@ -95,11 +95,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut covered = 0;
         let mut total_width = 0.0;
 
-        for i in 0..intervals.len() {
-            let lower = intervals.lower()[i];
-            let upper = intervals.upper()[i];
-            let actual = val_actuals[i];
-
+        for ((&lower, &upper), &actual) in intervals
+            .lower()
+            .iter()
+            .zip(intervals.upper())
+            .zip(&val_actuals)
+        {
             if actual >= lower && actual <= upper {
                 covered += 1;
             }
@@ -149,11 +150,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("{:-<45}", "");
 
-    for i in 0..3 {
+    for (i, &forecast) in test_forecasts.iter().enumerate().take(3) {
         let q_row = quantiles.at_time(i).unwrap();
         println!(
             "{:<10.2} {:>10.2} {:>10.2} {:>10.2}",
-            test_forecasts[i], q_row[0], q_row[1], q_row[2]
+            forecast, q_row[0], q_row[1], q_row[2]
         );
     }
     println!("  ... (showing first 3 of 10)");

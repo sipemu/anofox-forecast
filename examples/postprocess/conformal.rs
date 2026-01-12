@@ -5,6 +5,7 @@
 //! - Cross-validation conformal (uses all data, slower)
 //! - Jackknife+ (leave-one-out with finite sample validity)
 //!
+#![allow(clippy::needless_range_loop)]
 //! Run with: cargo run --example postprocess_conformal
 
 use anofox_forecast::postprocess::{ConformalMethod, ConformalPredictor, PointForecasts};
@@ -63,7 +64,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Compare interval widths
     println!("\n=== Comparison ===");
-    println!("{:<12} {:>15} {:>15}", "Method", "Avg Width", "Quantile Value");
+    println!(
+        "{:<12} {:>15} {:>15}",
+        "Method", "Avg Width", "Quantile Value"
+    );
     println!("{:-<45}", "");
 
     let split_width: f64 = split_intervals

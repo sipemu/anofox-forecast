@@ -21,11 +21,9 @@
 
 use crate::error::{ForecastError, Result};
 use crate::postprocess::{
-    ConformalMethod, ConformalPredictor, ConformalResult,
-    HistoricalSimResult, HistoricalSimulator,
-    NormalPredictor, NormalResult,
-    IDRPredictor, IDRResult,
-    PointForecasts, PredictionIntervals, QuantileForecasts,
+    ConformalMethod, ConformalPredictor, ConformalResult, HistoricalSimResult, HistoricalSimulator,
+    IDRPredictor, IDRResult, NormalPredictor, NormalResult, PointForecasts, PredictionIntervals,
+    QuantileForecasts,
 };
 
 /// Postprocessing model specification.
@@ -73,12 +71,18 @@ impl PostModel {
 
     /// Create a historical simulation model.
     pub fn historical_sim(quantiles: Vec<f64>) -> Self {
-        Self::HistoricalSim { quantiles, window_size: None }
+        Self::HistoricalSim {
+            quantiles,
+            window_size: None,
+        }
     }
 
     /// Create a historical simulation model with rolling window.
     pub fn historical_sim_rolling(quantiles: Vec<f64>, window_size: usize) -> Self {
-        Self::HistoricalSim { quantiles, window_size: Some(window_size) }
+        Self::HistoricalSim {
+            quantiles,
+            window_size: Some(window_size),
+        }
     }
 
     /// Create a normal predictor model.
@@ -155,11 +159,7 @@ impl PostProcessor {
     /// # Returns
     ///
     /// A trained model that can be used for prediction.
-    pub fn train(
-        &self,
-        forecasts: &PointForecasts,
-        actuals: &[f64],
-    ) -> Result<TrainedModel> {
+    pub fn train(&self, forecasts: &PointForecasts, actuals: &[f64]) -> Result<TrainedModel> {
         let forecast_values = forecasts.values();
 
         match &self.model {
@@ -168,7 +168,10 @@ impl PostProcessor {
                 let result = predictor.fit(forecast_values, actuals)?;
                 Ok(TrainedModel::Conformal(result))
             }
-            PostModel::HistoricalSim { quantiles, window_size } => {
+            PostModel::HistoricalSim {
+                quantiles,
+                window_size,
+            } => {
                 let simulator = if let Some(w) = window_size {
                     HistoricalSimulator::with_window(quantiles.clone(), *w)
                 } else {
@@ -212,7 +215,13 @@ impl PostProcessor {
                 let predictor = ConformalPredictor::new(*coverage, method.clone());
                 Ok(predictor.predict_values(result, values))
             }
-            (TrainedModel::HistoricalSim(result), PostModel::HistoricalSim { quantiles, window_size }) => {
+            (
+                TrainedModel::HistoricalSim(result),
+                PostModel::HistoricalSim {
+                    quantiles,
+                    window_size,
+                },
+            ) => {
                 let simulator = if let Some(w) = window_size {
                     HistoricalSimulator::with_window(quantiles.clone(), *w)
                 } else {
@@ -237,8 +246,8 @@ impl PostProcessor {
                 quantiles_to_intervals(&q_forecasts, coverage)
             }
             _ => Err(ForecastError::InvalidParameter(
-                "trained model does not match processor model".to_string()
-            ))
+                "trained model does not match processor model".to_string(),
+            )),
         }
     }
 
@@ -260,7 +269,13 @@ impl PostProcessor {
         let values = forecasts.values();
 
         match (trained, &self.model) {
-            (TrainedModel::HistoricalSim(result), PostModel::HistoricalSim { quantiles, window_size }) => {
+            (
+                TrainedModel::HistoricalSim(result),
+                PostModel::HistoricalSim {
+                    quantiles,
+                    window_size,
+                },
+            ) => {
                 let simulator = if let Some(w) = window_size {
                     HistoricalSimulator::with_window(quantiles.clone(), *w)
                 } else {
@@ -285,7 +300,9 @@ impl PostProcessor {
                 let lower_q = alpha / 2.0;
                 let upper_q = 1.0 - alpha / 2.0;
 
-                let q_values: Vec<Vec<f64>> = intervals.lower().iter()
+                let q_values: Vec<Vec<f64>> = intervals
+                    .lower()
+                    .iter()
                     .zip(intervals.upper().iter())
                     .map(|(&l, &u)| vec![l, u])
                     .collect();
@@ -293,8 +310,8 @@ impl PostProcessor {
                 QuantileForecasts::from_values(vec![lower_q, upper_q], q_values)
             }
             _ => Err(ForecastError::InvalidParameter(
-                "trained model does not match processor model".to_string()
-            ))
+                "trained model does not match processor model".to_string(),
+            )),
         }
     }
 
@@ -327,7 +344,7 @@ fn quantiles_to_intervals(
     let n_q = quantiles.n_quantiles();
     if n_q < 2 {
         return Err(ForecastError::InvalidParameter(
-            "need at least 2 quantiles for intervals".to_string()
+            "need at least 2 quantiles for intervals".to_string(),
         ));
     }
 
@@ -379,7 +396,11 @@ mod tests {
         #[test]
         fn historical_sim_constructor() {
             let model = PostModel::historical_sim(vec![0.1, 0.5, 0.9]);
-            if let PostModel::HistoricalSim { quantiles, window_size } = model {
+            if let PostModel::HistoricalSim {
+                quantiles,
+                window_size,
+            } = model
+            {
                 assert_eq!(quantiles, vec![0.1, 0.5, 0.9]);
                 assert!(window_size.is_none());
             } else {
@@ -421,7 +442,11 @@ mod tests {
         fn model_is_clonable() {
             let model = PostModel::conformal(0.90);
             let cloned = model.clone();
-            if let (PostModel::Conformal { coverage: c1, .. }, PostModel::Conformal { coverage: c2, .. }) = (model, cloned) {
+            if let (
+                PostModel::Conformal { coverage: c1, .. },
+                PostModel::Conformal { coverage: c2, .. },
+            ) = (model, cloned)
+            {
                 assert!((c1 - c2).abs() < 1e-10);
             }
         }

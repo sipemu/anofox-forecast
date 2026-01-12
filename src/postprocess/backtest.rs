@@ -312,7 +312,7 @@ impl BacktestResult {
             let actuals = self
                 .actuals_by_horizon
                 .get(&horizon)
-                .ok_or_else(|| ForecastError::EmptyData)?;
+                .ok_or(ForecastError::EmptyData)?;
 
             if forecasts.is_empty() {
                 continue;
@@ -527,7 +527,11 @@ impl PostProcessor {
                 .get(h)
                 .or_else(|| {
                     // Fall back to max available horizon if requested horizon not available
-                    models.horizons().iter().max().and_then(|&max_h| models.get(max_h))
+                    models
+                        .horizons()
+                        .iter()
+                        .max()
+                        .and_then(|&max_h| models.get(max_h))
                 })
                 .ok_or_else(|| {
                     ForecastError::InvalidParameter(format!("no model available for horizon {}", h))
@@ -608,10 +612,7 @@ mod tests {
             let (forecasts, actuals) = make_data(100);
             let processor = PostProcessor::conformal(0.90);
 
-            let config = BacktestConfig::new()
-                .initial_window(50)
-                .step(10)
-                .horizon(5);
+            let config = BacktestConfig::new().initial_window(50).step(10).horizon(5);
 
             let result = processor.backtest(&forecasts, &actuals, config).unwrap();
 
@@ -695,10 +696,7 @@ mod tests {
             let (forecasts, actuals) = make_data(100);
             let processor = PostProcessor::conformal(0.90);
 
-            let config = BacktestConfig::new()
-                .initial_window(50)
-                .step(10)
-                .horizon(5);
+            let config = BacktestConfig::new().initial_window(50).step(10).horizon(5);
 
             let result = processor.backtest(&forecasts, &actuals, config).unwrap();
 
@@ -735,10 +733,7 @@ mod tests {
             let (forecasts, actuals) = make_data(100);
             let processor = PostProcessor::conformal(0.90);
 
-            let config = BacktestConfig::new()
-                .initial_window(50)
-                .step(10)
-                .horizon(5);
+            let config = BacktestConfig::new().initial_window(50).step(10).horizon(5);
 
             let result = processor.backtest(&forecasts, &actuals, config).unwrap();
             let fold = result.fold(0).unwrap();
@@ -788,9 +783,7 @@ mod tests {
             let (forecasts, actuals) = make_data(30);
             let processor = PostProcessor::conformal(0.90);
 
-            let config = BacktestConfig::new()
-                .initial_window(50)
-                .horizon(5);
+            let config = BacktestConfig::new().initial_window(50).horizon(5);
 
             let result = processor.backtest(&forecasts, &actuals, config);
             assert!(result.is_err());

@@ -29,7 +29,7 @@
 //! ```
 
 use crate::error::{ForecastError, Result};
-use crate::postprocess::{QuantileForecasts, ConformalMethod};
+use crate::postprocess::{ConformalMethod, QuantileForecasts};
 
 /// Configuration for conformalize operation.
 #[derive(Debug, Clone)]
@@ -127,7 +127,12 @@ pub fn conformalize(
     calib_forecasts: &QuantileForecasts,
     calib_actuals: &[f64],
 ) -> Result<ConformalizeResult> {
-    conformalize_with_config(forecasts, calib_forecasts, calib_actuals, ConformalizeConfig::default())
+    conformalize_with_config(
+        forecasts,
+        calib_forecasts,
+        calib_actuals,
+        ConformalizeConfig::default(),
+    )
 }
 
 /// Conformalize with custom configuration.
@@ -205,7 +210,11 @@ pub fn conformalize_with_config(
         scores.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         // Use conformal quantile: ceil((n+1) * coverage) / n
-        let target_coverage = if config.symmetric { tau.max(1.0 - tau) } else { tau };
+        let target_coverage = if config.symmetric {
+            tau.max(1.0 - tau)
+        } else {
+            tau
+        };
         let idx = ((n_calib as f64 + 1.0) * target_coverage).ceil() as usize;
         let idx = idx.min(n_calib).saturating_sub(1);
 
@@ -311,21 +320,22 @@ mod tests {
         fn make_simple_forecasts() -> QuantileForecasts {
             QuantileForecasts::from_values(
                 vec![0.1, 0.5, 0.9],
-                vec![
-                    vec![5.0, 10.0, 15.0],
-                    vec![6.0, 11.0, 16.0],
-                ],
-            ).unwrap()
+                vec![vec![5.0, 10.0, 15.0], vec![6.0, 11.0, 16.0]],
+            )
+            .unwrap()
         }
 
         fn make_calibration_data() -> (QuantileForecasts, Vec<f64>) {
             let forecasts = QuantileForecasts::from_values(
                 vec![0.1, 0.5, 0.9],
-                (0..20).map(|i| {
-                    let base = i as f64;
-                    vec![base - 2.0, base, base + 2.0]
-                }).collect(),
-            ).unwrap();
+                (0..20)
+                    .map(|i| {
+                        let base = i as f64;
+                        vec![base - 2.0, base, base + 2.0]
+                    })
+                    .collect(),
+            )
+            .unwrap();
             let actuals: Vec<f64> = (0..20).map(|i| i as f64 + 0.5).collect();
             (forecasts, actuals)
         }
@@ -377,18 +387,15 @@ mod tests {
 
         #[test]
         fn fails_on_length_mismatch() {
-            let forecasts = QuantileForecasts::from_values(
-                vec![0.1, 0.5, 0.9],
-                vec![vec![5.0, 10.0, 15.0]],
-            ).unwrap();
+            let forecasts =
+                QuantileForecasts::from_values(vec![0.1, 0.5, 0.9], vec![vec![5.0, 10.0, 15.0]])
+                    .unwrap();
 
             let calib = QuantileForecasts::from_values(
                 vec![0.1, 0.5, 0.9],
-                vec![
-                    vec![1.0, 2.0, 3.0],
-                    vec![2.0, 3.0, 4.0],
-                ],
-            ).unwrap();
+                vec![vec![1.0, 2.0, 3.0], vec![2.0, 3.0, 4.0]],
+            )
+            .unwrap();
 
             // Actuals has 3 points but calib has 2
             let actuals = vec![1.5, 2.5, 3.5];
@@ -399,15 +406,12 @@ mod tests {
 
         #[test]
         fn fails_on_empty_calibration() {
-            let forecasts = QuantileForecasts::from_values(
-                vec![0.1, 0.5, 0.9],
-                vec![vec![5.0, 10.0, 15.0]],
-            ).unwrap();
+            let forecasts =
+                QuantileForecasts::from_values(vec![0.1, 0.5, 0.9], vec![vec![5.0, 10.0, 15.0]])
+                    .unwrap();
 
-            let calib = QuantileForecasts::from_values(
-                vec![0.1, 0.5, 0.9],
-                Vec::<Vec<f64>>::new(),
-            ).unwrap();
+            let calib = QuantileForecasts::from_values(vec![0.1, 0.5, 0.9], Vec::<Vec<f64>>::new())
+                .unwrap();
 
             let actuals: Vec<f64> = vec![];
 
@@ -417,19 +421,16 @@ mod tests {
 
         #[test]
         fn fails_on_mismatched_quantiles() {
-            let forecasts = QuantileForecasts::from_values(
-                vec![0.1, 0.5, 0.9],
-                vec![vec![5.0, 10.0, 15.0]],
-            ).unwrap();
+            let forecasts =
+                QuantileForecasts::from_values(vec![0.1, 0.5, 0.9], vec![vec![5.0, 10.0, 15.0]])
+                    .unwrap();
 
             // Different quantile levels
             let calib = QuantileForecasts::from_values(
                 vec![0.25, 0.5, 0.75],
-                vec![
-                    vec![1.0, 2.0, 3.0],
-                    vec![2.0, 3.0, 4.0],
-                ],
-            ).unwrap();
+                vec![vec![1.0, 2.0, 3.0], vec![2.0, 3.0, 4.0]],
+            )
+            .unwrap();
 
             let actuals = vec![1.5, 2.5];
 
@@ -448,11 +449,14 @@ mod tests {
         fn make_forecasts(n: usize) -> QuantileForecasts {
             QuantileForecasts::from_values(
                 vec![0.1, 0.5, 0.9],
-                (0..n).map(|i| {
-                    let base = 10.0 + i as f64;
-                    vec![base - 2.0, base, base + 2.0]
-                }).collect(),
-            ).unwrap()
+                (0..n)
+                    .map(|i| {
+                        let base = 10.0 + i as f64;
+                        vec![base - 2.0, base, base + 2.0]
+                    })
+                    .collect(),
+            )
+            .unwrap()
         }
 
         #[test]
@@ -504,8 +508,12 @@ mod tests {
             let original_lower = forecasts.at_time(0).unwrap()[0];
             let adjusted_lower = result.forecasts().at_time(0).unwrap()[0];
 
-            assert!(adjusted_lower <= original_lower,
-                "lower quantile should decrease (was {}, now {})", original_lower, adjusted_lower);
+            assert!(
+                adjusted_lower <= original_lower,
+                "lower quantile should decrease (was {}, now {})",
+                original_lower,
+                adjusted_lower
+            );
         }
 
         #[test]
@@ -521,8 +529,12 @@ mod tests {
             let original_upper = forecasts.at_time(0).unwrap()[2];
             let adjusted_upper = result.forecasts().at_time(0).unwrap()[2];
 
-            assert!(adjusted_upper >= original_upper,
-                "upper quantile should increase (was {}, now {})", original_upper, adjusted_upper);
+            assert!(
+                adjusted_upper >= original_upper,
+                "upper quantile should increase (was {}, now {})",
+                original_upper,
+                adjusted_upper
+            );
         }
 
         #[test]
@@ -550,8 +562,11 @@ mod tests {
             let result = conformalize(&forecasts, &calib, &actuals).unwrap();
 
             for &cov in result.original_coverage() {
-                assert!(cov >= 0.0 && cov <= 1.0,
-                    "coverage should be in [0, 1], got {}", cov);
+                assert!(
+                    (0.0..=1.0).contains(&cov),
+                    "coverage should be in [0, 1], got {}",
+                    cov
+                );
             }
         }
     }
@@ -566,19 +581,25 @@ mod tests {
         fn make_data() -> (QuantileForecasts, QuantileForecasts, Vec<f64>) {
             let forecasts = QuantileForecasts::from_values(
                 vec![0.1, 0.5, 0.9],
-                (0..5).map(|i| {
-                    let base = i as f64;
-                    vec![base - 1.0, base, base + 1.0]
-                }).collect(),
-            ).unwrap();
+                (0..5)
+                    .map(|i| {
+                        let base = i as f64;
+                        vec![base - 1.0, base, base + 1.0]
+                    })
+                    .collect(),
+            )
+            .unwrap();
 
             let calib = QuantileForecasts::from_values(
                 vec![0.1, 0.5, 0.9],
-                (0..30).map(|i| {
-                    let base = i as f64;
-                    vec![base - 1.0, base, base + 1.0]
-                }).collect(),
-            ).unwrap();
+                (0..30)
+                    .map(|i| {
+                        let base = i as f64;
+                        vec![base - 1.0, base, base + 1.0]
+                    })
+                    .collect(),
+            )
+            .unwrap();
 
             let actuals: Vec<f64> = (0..30).map(|i| i as f64 + 0.2).collect();
 
@@ -620,15 +641,14 @@ mod tests {
 
         #[test]
         fn works_with_single_quantile() {
-            let forecasts = QuantileForecasts::from_values(
-                vec![0.5],
-                vec![vec![10.0], vec![11.0]],
-            ).unwrap();
+            let forecasts =
+                QuantileForecasts::from_values(vec![0.5], vec![vec![10.0], vec![11.0]]).unwrap();
 
             let calib = QuantileForecasts::from_values(
                 vec![0.5],
                 (0..20).map(|i| vec![i as f64]).collect(),
-            ).unwrap();
+            )
+            .unwrap();
 
             let actuals: Vec<f64> = (0..20).map(|i| i as f64 + 0.5).collect();
 
@@ -639,18 +659,20 @@ mod tests {
         #[test]
         fn works_with_perfect_calibration() {
             // Forecasts match actuals perfectly
-            let forecasts = QuantileForecasts::from_values(
-                vec![0.1, 0.5, 0.9],
-                vec![vec![8.0, 10.0, 12.0]],
-            ).unwrap();
+            let forecasts =
+                QuantileForecasts::from_values(vec![0.1, 0.5, 0.9], vec![vec![8.0, 10.0, 12.0]])
+                    .unwrap();
 
             let calib = QuantileForecasts::from_values(
                 vec![0.1, 0.5, 0.9],
-                (0..30).map(|i| {
-                    let base = i as f64;
-                    vec![base - 2.0, base, base + 2.0]
-                }).collect(),
-            ).unwrap();
+                (0..30)
+                    .map(|i| {
+                        let base = i as f64;
+                        vec![base - 2.0, base, base + 2.0]
+                    })
+                    .collect(),
+            )
+            .unwrap();
 
             // Perfect coverage - actuals between lower and upper
             let actuals: Vec<f64> = (0..30).map(|i| i as f64).collect();
@@ -661,18 +683,20 @@ mod tests {
 
         #[test]
         fn works_with_extreme_values() {
-            let forecasts = QuantileForecasts::from_values(
-                vec![0.1, 0.9],
-                vec![vec![-1000.0, 1000.0]],
-            ).unwrap();
+            let forecasts =
+                QuantileForecasts::from_values(vec![0.1, 0.9], vec![vec![-1000.0, 1000.0]])
+                    .unwrap();
 
             let calib = QuantileForecasts::from_values(
                 vec![0.1, 0.9],
-                (0..20).map(|i| {
-                    let base = i as f64;
-                    vec![base - 10.0, base + 10.0]
-                }).collect(),
-            ).unwrap();
+                (0..20)
+                    .map(|i| {
+                        let base = i as f64;
+                        vec![base - 10.0, base + 10.0]
+                    })
+                    .collect(),
+            )
+            .unwrap();
 
             let actuals: Vec<f64> = (0..20).map(|i| i as f64).collect();
 
@@ -682,16 +706,10 @@ mod tests {
 
         #[test]
         fn handles_minimum_calibration_size() {
-            let forecasts = QuantileForecasts::from_values(
-                vec![0.5],
-                vec![vec![5.0]],
-            ).unwrap();
+            let forecasts = QuantileForecasts::from_values(vec![0.5], vec![vec![5.0]]).unwrap();
 
             // Single calibration point
-            let calib = QuantileForecasts::from_values(
-                vec![0.5],
-                vec![vec![4.0]],
-            ).unwrap();
+            let calib = QuantileForecasts::from_values(vec![0.5], vec![vec![4.0]]).unwrap();
 
             let actuals = vec![4.5];
 
@@ -711,19 +729,25 @@ mod tests {
         fn consistent_results_on_same_input() {
             let forecasts = QuantileForecasts::from_values(
                 vec![0.1, 0.5, 0.9],
-                (0..10).map(|i| {
-                    let base = i as f64 * 2.0;
-                    vec![base - 1.0, base, base + 1.0]
-                }).collect(),
-            ).unwrap();
+                (0..10)
+                    .map(|i| {
+                        let base = i as f64 * 2.0;
+                        vec![base - 1.0, base, base + 1.0]
+                    })
+                    .collect(),
+            )
+            .unwrap();
 
             let calib = QuantileForecasts::from_values(
                 vec![0.1, 0.5, 0.9],
-                (0..50).map(|i| {
-                    let base = i as f64;
-                    vec![base - 1.0, base, base + 1.0]
-                }).collect(),
-            ).unwrap();
+                (0..50)
+                    .map(|i| {
+                        let base = i as f64;
+                        vec![base - 1.0, base, base + 1.0]
+                    })
+                    .collect(),
+            )
+            .unwrap();
 
             let actuals: Vec<f64> = (0..50).map(|i| i as f64 + 0.3).collect();
 
@@ -773,11 +797,14 @@ mod tests {
             // This creates systematic under-coverage
             let calib_forecasts = QuantileForecasts::from_values(
                 vec![0.1, 0.5, 0.9],
-                (0..n_calib).map(|i| {
-                    let center = 50.0 + i as f64;  // No sine term!
-                    vec![center - 0.5, center, center + 0.5]  // Too narrow for ±5 variation
-                }).collect(),
-            ).unwrap();
+                (0..n_calib)
+                    .map(|i| {
+                        let center = 50.0 + i as f64; // No sine term!
+                        vec![center - 0.5, center, center + 0.5] // Too narrow for ±5 variation
+                    })
+                    .collect(),
+            )
+            .unwrap();
 
             // Test forecasts (same pattern - missing the sine)
             let n_test = 50;
@@ -787,16 +814,22 @@ mod tests {
 
             let test_forecasts = QuantileForecasts::from_values(
                 vec![0.1, 0.5, 0.9],
-                (n_calib..n_calib + n_test).map(|i| {
-                    let center = 50.0 + i as f64;
-                    vec![center - 0.5, center, center + 0.5]
-                }).collect(),
-            ).unwrap();
+                (n_calib..n_calib + n_test)
+                    .map(|i| {
+                        let center = 50.0 + i as f64;
+                        vec![center - 0.5, center, center + 0.5]
+                    })
+                    .collect(),
+            )
+            .unwrap();
 
             // Verify original coverage is low (intervals don't capture ±5 sine)
             let original_coverage = compute_coverage(&test_forecasts, &test_actuals, 0, 2);
-            assert!(original_coverage < 0.80,
-                "original should under-cover, got {:.1}%", original_coverage * 100.0);
+            assert!(
+                original_coverage < 0.80,
+                "original should under-cover, got {:.1}%",
+                original_coverage * 100.0
+            );
 
             // Apply conformalize
             let result = conformalize(&test_forecasts, &calib_forecasts, &calib_actuals).unwrap();
@@ -804,9 +837,12 @@ mod tests {
 
             // Coverage should improve significantly
             let calibrated_coverage = compute_coverage(calibrated, &test_actuals, 0, 2);
-            assert!(calibrated_coverage > original_coverage,
+            assert!(
+                calibrated_coverage > original_coverage,
                 "calibrated coverage ({:.1}%) should exceed original ({:.1}%)",
-                calibrated_coverage * 100.0, original_coverage * 100.0);
+                calibrated_coverage * 100.0,
+                original_coverage * 100.0
+            );
         }
 
         #[test]
@@ -821,66 +857,85 @@ mod tests {
             // Forecasts ignore the sine variation - centered on 100.0 with tiny intervals
             let forecasts = QuantileForecasts::from_values(
                 vec![0.1, 0.5, 0.9],
-                (0..n).map(|_| {
-                    vec![99.8, 100.0, 100.2]  // Way too tight for ±3 variation
-                }).collect(),
-            ).unwrap();
+                (0..n)
+                    .map(|_| {
+                        vec![99.8, 100.0, 100.2] // Way too tight for ±3 variation
+                    })
+                    .collect(),
+            )
+            .unwrap();
 
             // Split into calibration and test
             let split = 150;
             let calib_forecasts = QuantileForecasts::from_values(
                 vec![0.1, 0.5, 0.9],
-                (0..split).map(|t| forecasts.at_time(t).unwrap().to_vec()).collect(),
-            ).unwrap();
+                (0..split)
+                    .map(|t| forecasts.at_time(t).unwrap().to_vec())
+                    .collect(),
+            )
+            .unwrap();
             let calib_actuals = &actuals[..split];
 
             let test_forecasts = QuantileForecasts::from_values(
                 vec![0.1, 0.5, 0.9],
-                (split..n).map(|t| forecasts.at_time(t).unwrap().to_vec()).collect(),
-            ).unwrap();
+                (split..n)
+                    .map(|t| forecasts.at_time(t).unwrap().to_vec())
+                    .collect(),
+            )
+            .unwrap();
             let test_actuals = &actuals[split..];
 
             // Original coverage should be very low
             let orig_cov = compute_coverage(&test_forecasts, test_actuals, 0, 2);
-            assert!(orig_cov < 0.50, "expected severe under-coverage, got {:.1}%", orig_cov * 100.0);
+            assert!(
+                orig_cov < 0.50,
+                "expected severe under-coverage, got {:.1}%",
+                orig_cov * 100.0
+            );
 
             // After conformalize
             let result = conformalize(&test_forecasts, &calib_forecasts, calib_actuals).unwrap();
             let new_cov = compute_coverage(result.forecasts(), test_actuals, 0, 2);
 
             // Should be much better
-            assert!(new_cov >= 0.70,
+            assert!(
+                new_cov >= 0.70,
                 "conformalized coverage ({:.1}%) should be much better than original ({:.1}%)",
-                new_cov * 100.0, orig_cov * 100.0);
+                new_cov * 100.0,
+                orig_cov * 100.0
+            );
         }
 
         #[test]
         fn well_calibrated_forecasts_stay_well_calibrated() {
             // Already well-calibrated forecasts shouldn't get worse
             let n = 100;
-            let actuals: Vec<f64> = (0..n)
-                .map(|i| 50.0 + i as f64 * 0.1)
-                .collect();
+            let actuals: Vec<f64> = (0..n).map(|i| 50.0 + i as f64 * 0.1).collect();
 
             // Intervals that should achieve ~80% coverage naturally
             let forecasts = QuantileForecasts::from_values(
                 vec![0.1, 0.5, 0.9],
-                actuals.iter().map(|&a| {
-                    vec![a - 1.5, a, a + 1.5]
-                }).collect(),
-            ).unwrap();
+                actuals.iter().map(|&a| vec![a - 1.5, a, a + 1.5]).collect(),
+            )
+            .unwrap();
 
             let split = 70;
             let calib_forecasts = QuantileForecasts::from_values(
                 vec![0.1, 0.5, 0.9],
-                (0..split).map(|t| forecasts.at_time(t).unwrap().to_vec()).collect(),
-            ).unwrap();
+                (0..split)
+                    .map(|t| forecasts.at_time(t).unwrap().to_vec())
+                    .collect(),
+            )
+            .unwrap();
             let calib_actuals = &actuals[..split];
 
             let test_forecasts = QuantileForecasts::from_values(
                 vec![0.1, 0.5, 0.9],
-                (split..n).map(|t| forecasts.at_time(t).unwrap().to_vec()).collect(),
-            ).unwrap();
+                (split..n)
+                    .map(|t| forecasts.at_time(t).unwrap().to_vec())
+                    .collect(),
+            )
+            .unwrap();
             let test_actuals = &actuals[split..];
 
             let orig_cov = compute_coverage(&test_forecasts, test_actuals, 0, 2);
@@ -889,9 +944,12 @@ mod tests {
             let new_cov = compute_coverage(result.forecasts(), test_actuals, 0, 2);
 
             // Coverage should stay good (not get dramatically worse)
-            assert!(new_cov >= orig_cov * 0.9,
+            assert!(
+                new_cov >= orig_cov * 0.9,
                 "well-calibrated forecasts shouldn't get much worse: {:.1}% -> {:.1}%",
-                orig_cov * 100.0, new_cov * 100.0);
+                orig_cov * 100.0,
+                new_cov * 100.0
+            );
         }
 
         #[test]
@@ -902,10 +960,14 @@ mod tests {
             // Median slightly biased high
             let forecasts = QuantileForecasts::from_values(
                 vec![0.1, 0.5, 0.9],
-                actuals.iter().map(|&a| {
-                    vec![a - 2.0, a + 1.0, a + 4.0]  // Median is biased +1
-                }).collect(),
-            ).unwrap();
+                actuals
+                    .iter()
+                    .map(|&a| {
+                        vec![a - 2.0, a + 1.0, a + 4.0] // Median is biased +1
+                    })
+                    .collect(),
+            )
+            .unwrap();
 
             let result = conformalize(&forecasts, &forecasts, &actuals).unwrap();
 
@@ -915,7 +977,7 @@ mod tests {
 
             // All coverages should be valid probabilities
             for &c in orig_cov {
-                assert!(c >= 0.0 && c <= 1.0);
+                assert!((0.0..=1.0).contains(&c));
             }
         }
 
@@ -927,27 +989,41 @@ mod tests {
 
             let forecasts = QuantileForecasts::from_values(
                 vec![0.1, 0.5, 0.9],
-                actuals.iter().map(|&a| {
-                    vec![a + 1.0, a + 3.0, a + 5.0]  // All biased high
-                }).collect(),
-            ).unwrap();
+                actuals
+                    .iter()
+                    .map(|&a| {
+                        vec![a + 1.0, a + 3.0, a + 5.0] // All biased high
+                    })
+                    .collect(),
+            )
+            .unwrap();
 
             let split = 70;
             let calib_forecasts = QuantileForecasts::from_values(
                 vec![0.1, 0.5, 0.9],
-                (0..split).map(|t| forecasts.at_time(t).unwrap().to_vec()).collect(),
-            ).unwrap();
+                (0..split)
+                    .map(|t| forecasts.at_time(t).unwrap().to_vec())
+                    .collect(),
+            )
+            .unwrap();
 
             let test_forecasts = QuantileForecasts::from_values(
                 vec![0.1, 0.5, 0.9],
-                (split..n).map(|t| forecasts.at_time(t).unwrap().to_vec()).collect(),
-            ).unwrap();
+                (split..n)
+                    .map(|t| forecasts.at_time(t).unwrap().to_vec())
+                    .collect(),
+            )
+            .unwrap();
 
-            let result = conformalize(&test_forecasts, &calib_forecasts, &actuals[..split]).unwrap();
+            let result =
+                conformalize(&test_forecasts, &calib_forecasts, &actuals[..split]).unwrap();
 
             // Lower quantile should have been pushed down significantly
             let adj = result.adjustments();
-            assert!(adj[0] > 0.0, "lower quantile should have positive adjustment");
+            assert!(
+                adj[0] > 0.0,
+                "lower quantile should have positive adjustment"
+            );
         }
     }
 
@@ -963,19 +1039,20 @@ mod tests {
             // All quantiles have same value (degenerate distribution)
             let forecasts = QuantileForecasts::from_values(
                 vec![0.1, 0.5, 0.9],
-                vec![
-                    vec![5.0, 5.0, 5.0],
-                    vec![6.0, 6.0, 6.0],
-                ],
-            ).unwrap();
+                vec![vec![5.0, 5.0, 5.0], vec![6.0, 6.0, 6.0]],
+            )
+            .unwrap();
 
             let calib = QuantileForecasts::from_values(
                 vec![0.1, 0.5, 0.9],
-                (0..20).map(|i| {
-                    let v = i as f64;
-                    vec![v, v, v]
-                }).collect(),
-            ).unwrap();
+                (0..20)
+                    .map(|i| {
+                        let v = i as f64;
+                        vec![v, v, v]
+                    })
+                    .collect(),
+            )
+            .unwrap();
 
             let actuals: Vec<f64> = (0..20).map(|i| i as f64 + 0.5).collect();
 
@@ -995,12 +1072,14 @@ mod tests {
             let forecasts = QuantileForecasts::from_values(
                 vec![0.1, 0.5, 0.9],
                 vec![vec![100.0, 110.0, 120.0]],
-            ).unwrap();
+            )
+            .unwrap();
 
             let calib = QuantileForecasts::from_values(
                 vec![0.1, 0.5, 0.9],
                 (0..30).map(|_| vec![100.0, 110.0, 120.0]).collect(),
-            ).unwrap();
+            )
+            .unwrap();
 
             // All actuals far below the forecasts
             let actuals: Vec<f64> = (0..30).map(|i| i as f64).collect();
@@ -1011,21 +1090,24 @@ mod tests {
             // Lower quantile should be adjusted down significantly
             let r = result.unwrap();
             let calibrated = r.forecasts().at_time(0).unwrap();
-            assert!(calibrated[0] < 100.0,
-                "lower quantile should be pushed down, got {}", calibrated[0]);
+            assert!(
+                calibrated[0] < 100.0,
+                "lower quantile should be pushed down, got {}",
+                calibrated[0]
+            );
         }
 
         #[test]
         fn handles_all_actuals_above_upper_quantile() {
-            let forecasts = QuantileForecasts::from_values(
-                vec![0.1, 0.5, 0.9],
-                vec![vec![0.0, 5.0, 10.0]],
-            ).unwrap();
+            let forecasts =
+                QuantileForecasts::from_values(vec![0.1, 0.5, 0.9], vec![vec![0.0, 5.0, 10.0]])
+                    .unwrap();
 
             let calib = QuantileForecasts::from_values(
                 vec![0.1, 0.5, 0.9],
                 (0..30).map(|_| vec![0.0, 5.0, 10.0]).collect(),
-            ).unwrap();
+            )
+            .unwrap();
 
             // All actuals far above the forecasts
             let actuals: Vec<f64> = (0..30).map(|i| 100.0 + i as f64).collect();
@@ -1036,25 +1118,25 @@ mod tests {
             // Upper quantile should be adjusted up significantly
             let r = result.unwrap();
             let calibrated = r.forecasts().at_time(0).unwrap();
-            assert!(calibrated[2] > 10.0,
-                "upper quantile should be pushed up, got {}", calibrated[2]);
+            assert!(
+                calibrated[2] > 10.0,
+                "upper quantile should be pushed up, got {}",
+                calibrated[2]
+            );
         }
 
         #[test]
         fn handles_very_small_calibration_set() {
-            let forecasts = QuantileForecasts::from_values(
-                vec![0.1, 0.5, 0.9],
-                vec![vec![5.0, 10.0, 15.0]],
-            ).unwrap();
+            let forecasts =
+                QuantileForecasts::from_values(vec![0.1, 0.5, 0.9], vec![vec![5.0, 10.0, 15.0]])
+                    .unwrap();
 
             // Only 2 calibration points
             let calib = QuantileForecasts::from_values(
                 vec![0.1, 0.5, 0.9],
-                vec![
-                    vec![4.0, 9.0, 14.0],
-                    vec![6.0, 11.0, 16.0],
-                ],
-            ).unwrap();
+                vec![vec![4.0, 9.0, 14.0], vec![6.0, 11.0, 16.0]],
+            )
+            .unwrap();
 
             let actuals = vec![9.5, 11.5];
 
@@ -1068,15 +1150,19 @@ mod tests {
             let forecasts = QuantileForecasts::from_values(
                 vec![0.1, 0.5, 0.9],
                 vec![vec![scale - 1e9, scale, scale + 1e9]],
-            ).unwrap();
+            )
+            .unwrap();
 
             let calib = QuantileForecasts::from_values(
                 vec![0.1, 0.5, 0.9],
-                (0..30).map(|i| {
-                    let base = scale + (i as f64 * 1e8);
-                    vec![base - 1e9, base, base + 1e9]
-                }).collect(),
-            ).unwrap();
+                (0..30)
+                    .map(|i| {
+                        let base = scale + (i as f64 * 1e8);
+                        vec![base - 1e9, base, base + 1e9]
+                    })
+                    .collect(),
+            )
+            .unwrap();
 
             let actuals: Vec<f64> = (0..30).map(|i| scale + (i as f64 * 1e8) + 5e8).collect();
 
@@ -1094,17 +1180,23 @@ mod tests {
             let forecasts = QuantileForecasts::from_values(
                 vec![0.1, 0.5, 0.9],
                 vec![vec![scale * 0.9, scale, scale * 1.1]],
-            ).unwrap();
+            )
+            .unwrap();
 
             let calib = QuantileForecasts::from_values(
                 vec![0.1, 0.5, 0.9],
-                (0..30).map(|i| {
-                    let base = scale * (1.0 + i as f64 * 0.01);
-                    vec![base * 0.9, base, base * 1.1]
-                }).collect(),
-            ).unwrap();
+                (0..30)
+                    .map(|i| {
+                        let base = scale * (1.0 + i as f64 * 0.01);
+                        vec![base * 0.9, base, base * 1.1]
+                    })
+                    .collect(),
+            )
+            .unwrap();
 
-            let actuals: Vec<f64> = (0..30).map(|i| scale * (1.0 + i as f64 * 0.01 + 0.05)).collect();
+            let actuals: Vec<f64> = (0..30)
+                .map(|i| scale * (1.0 + i as f64 * 0.01 + 0.05))
+                .collect();
 
             let result = conformalize(&forecasts, &calib, &actuals);
             assert!(result.is_ok(), "should handle small magnitudes");
@@ -1112,18 +1204,20 @@ mod tests {
 
         #[test]
         fn handles_negative_values() {
-            let forecasts = QuantileForecasts::from_values(
-                vec![0.1, 0.5, 0.9],
-                vec![vec![-15.0, -10.0, -5.0]],
-            ).unwrap();
+            let forecasts =
+                QuantileForecasts::from_values(vec![0.1, 0.5, 0.9], vec![vec![-15.0, -10.0, -5.0]])
+                    .unwrap();
 
             let calib = QuantileForecasts::from_values(
                 vec![0.1, 0.5, 0.9],
-                (0..30).map(|i| {
-                    let base = -50.0 + i as f64;
-                    vec![base - 5.0, base, base + 5.0]
-                }).collect(),
-            ).unwrap();
+                (0..30)
+                    .map(|i| {
+                        let base = -50.0 + i as f64;
+                        vec![base - 5.0, base, base + 5.0]
+                    })
+                    .collect(),
+            )
+            .unwrap();
 
             let actuals: Vec<f64> = (0..30).map(|i| -50.0 + i as f64 + 2.0).collect();
 
@@ -1132,23 +1226,28 @@ mod tests {
 
             let calibrated = result.unwrap().into_forecasts();
             let row = calibrated.at_time(0).unwrap();
-            assert!(row[0] <= row[1] && row[1] <= row[2], "monotonicity preserved");
+            assert!(
+                row[0] <= row[1] && row[1] <= row[2],
+                "monotonicity preserved"
+            );
         }
 
         #[test]
         fn handles_mixed_sign_values() {
-            let forecasts = QuantileForecasts::from_values(
-                vec![0.1, 0.5, 0.9],
-                vec![vec![-5.0, 0.0, 5.0]],
-            ).unwrap();
+            let forecasts =
+                QuantileForecasts::from_values(vec![0.1, 0.5, 0.9], vec![vec![-5.0, 0.0, 5.0]])
+                    .unwrap();
 
             let calib = QuantileForecasts::from_values(
                 vec![0.1, 0.5, 0.9],
-                (0..30).map(|i| {
-                    let base = -15.0 + i as f64;
-                    vec![base - 3.0, base, base + 3.0]
-                }).collect(),
-            ).unwrap();
+                (0..30)
+                    .map(|i| {
+                        let base = -15.0 + i as f64;
+                        vec![base - 3.0, base, base + 3.0]
+                    })
+                    .collect(),
+            )
+            .unwrap();
 
             let actuals: Vec<f64> = (0..30).map(|i| -15.0 + i as f64 + 1.0).collect();
 
@@ -1159,18 +1258,20 @@ mod tests {
         #[test]
         fn handles_zero_width_original_intervals() {
             // q10 = q90 (point forecast, no uncertainty)
-            let forecasts = QuantileForecasts::from_values(
-                vec![0.1, 0.5, 0.9],
-                vec![vec![10.0, 10.0, 10.0]],
-            ).unwrap();
+            let forecasts =
+                QuantileForecasts::from_values(vec![0.1, 0.5, 0.9], vec![vec![10.0, 10.0, 10.0]])
+                    .unwrap();
 
             let calib = QuantileForecasts::from_values(
                 vec![0.1, 0.5, 0.9],
-                (0..30).map(|i| {
-                    let v = i as f64;
-                    vec![v, v, v]
-                }).collect(),
-            ).unwrap();
+                (0..30)
+                    .map(|i| {
+                        let v = i as f64;
+                        vec![v, v, v]
+                    })
+                    .collect(),
+            )
+            .unwrap();
 
             let actuals: Vec<f64> = (0..30).map(|i| i as f64 + 2.0).collect();
 
@@ -1181,20 +1282,24 @@ mod tests {
             let calibrated = result.unwrap().into_forecasts();
             let row = calibrated.at_time(0).unwrap();
             let width = row[2] - row[0];
-            assert!(width > 0.0, "should create non-zero width interval, got {}", width);
+            assert!(
+                width > 0.0,
+                "should create non-zero width interval, got {}",
+                width
+            );
         }
 
         #[test]
         fn handles_constant_actuals() {
-            let forecasts = QuantileForecasts::from_values(
-                vec![0.1, 0.5, 0.9],
-                vec![vec![8.0, 10.0, 12.0]],
-            ).unwrap();
+            let forecasts =
+                QuantileForecasts::from_values(vec![0.1, 0.5, 0.9], vec![vec![8.0, 10.0, 12.0]])
+                    .unwrap();
 
             let calib = QuantileForecasts::from_values(
                 vec![0.1, 0.5, 0.9],
                 (0..30).map(|_| vec![8.0, 10.0, 12.0]).collect(),
-            ).unwrap();
+            )
+            .unwrap();
 
             // All actuals are the same
             let actuals: Vec<f64> = vec![10.0; 30];
@@ -1210,14 +1315,16 @@ mod tests {
             let forecasts = QuantileForecasts::from_values(
                 quantiles.clone(),
                 vec![(1..10).map(|i| i as f64).collect()],
-            ).unwrap();
+            )
+            .unwrap();
 
             let calib = QuantileForecasts::from_values(
                 quantiles.clone(),
-                (0..50).map(|t| {
-                    (1..10).map(|i| t as f64 * 0.1 + i as f64).collect()
-                }).collect(),
-            ).unwrap();
+                (0..50)
+                    .map(|t| (1..10).map(|i| t as f64 * 0.1 + i as f64).collect())
+                    .collect(),
+            )
+            .unwrap();
 
             let actuals: Vec<f64> = (0..50).map(|i| 5.0 + i as f64 * 0.1).collect();
 
@@ -1228,7 +1335,7 @@ mod tests {
             let calibrated = result.unwrap().into_forecasts();
             let row = calibrated.at_time(0).unwrap();
             for i in 1..row.len() {
-                assert!(row[i-1] <= row[i], "monotonicity violated at {}", i);
+                assert!(row[i - 1] <= row[i], "monotonicity violated at {}", i);
             }
         }
     }
@@ -1249,42 +1356,54 @@ mod tests {
 
             // Scenario 1: Forecasts that mostly contain the actuals
             // Actuals vary slightly around 50, forecasts have wide intervals around 50
-            let actuals_good: Vec<f64> = (0..n).map(|i| 50.0 + 0.5 * ((i as f64 * 0.1).sin())).collect();
+            let actuals_good: Vec<f64> = (0..n)
+                .map(|i| 50.0 + 0.5 * ((i as f64 * 0.1).sin()))
+                .collect();
             let well_calibrated = QuantileForecasts::from_values(
                 vec![0.1, 0.5, 0.9],
-                (0..n).map(|_| vec![48.0, 50.0, 52.0]).collect(),  // Wide enough
-            ).unwrap();
+                (0..n).map(|_| vec![48.0, 50.0, 52.0]).collect(), // Wide enough
+            )
+            .unwrap();
 
             // Scenario 2: Forecasts that systematically miss (actuals outside intervals)
             // Actuals at 50, but forecasts centered at 60
             let actuals_bad: Vec<f64> = (0..n).map(|_| 50.0).collect();
             let poorly_calibrated = QuantileForecasts::from_values(
                 vec![0.1, 0.5, 0.9],
-                (0..n).map(|_| vec![58.0, 60.0, 62.0]).collect(),  // Centered at wrong value!
-            ).unwrap();
+                (0..n).map(|_| vec![58.0, 60.0, 62.0]).collect(), // Centered at wrong value!
+            )
+            .unwrap();
 
-            let result_good = conformalize(&well_calibrated, &well_calibrated, &actuals_good).unwrap();
-            let result_bad = conformalize(&poorly_calibrated, &poorly_calibrated, &actuals_bad).unwrap();
+            let result_good =
+                conformalize(&well_calibrated, &well_calibrated, &actuals_good).unwrap();
+            let result_bad =
+                conformalize(&poorly_calibrated, &poorly_calibrated, &actuals_bad).unwrap();
 
             // The poorly calibrated model needs larger adjustments because actuals
             // are consistently outside the intervals
             let adj_good = result_good.adjustments()[0];
             let adj_bad = result_bad.adjustments()[0];
 
-            assert!(adj_bad > adj_good,
+            assert!(
+                adj_bad > adj_good,
                 "poorly calibrated should need larger adjustment: good={}, bad={}",
-                adj_good, adj_bad);
+                adj_good,
+                adj_bad
+            );
         }
 
         #[test]
         fn intervals_widen_or_stay_same_in_symmetric_mode() {
             let n = 50;
-            let actuals: Vec<f64> = (0..n).map(|i| 50.0 + i as f64 + 3.0 * ((i as f64 * 0.1).sin())).collect();
+            let actuals: Vec<f64> = (0..n)
+                .map(|i| 50.0 + i as f64 + 3.0 * ((i as f64 * 0.1).sin()))
+                .collect();
 
             let forecasts = QuantileForecasts::from_values(
                 vec![0.1, 0.5, 0.9],
                 actuals.iter().map(|&a| vec![a - 1.0, a, a + 1.0]).collect(),
-            ).unwrap();
+            )
+            .unwrap();
 
             let result = conformalize(&forecasts, &forecasts, &actuals).unwrap();
             let calibrated = result.forecasts();
@@ -1296,8 +1415,13 @@ mod tests {
                 let orig_width = orig[2] - orig[0];
                 let cal_width = cal[2] - cal[0];
 
-                assert!(cal_width >= orig_width - 1e-10,
-                    "interval at t={} should not shrink: {} -> {}", t, orig_width, cal_width);
+                assert!(
+                    cal_width >= orig_width - 1e-10,
+                    "interval at t={} should not shrink: {} -> {}",
+                    t,
+                    orig_width,
+                    cal_width
+                );
             }
         }
 
@@ -1308,31 +1432,37 @@ mod tests {
                 // Case 1: Normal data
                 (
                     (0..50).map(|i| i as f64).collect(),
-                    (0..50).map(|i| vec![i as f64 - 2.0, i as f64, i as f64 + 2.0]).collect(),
+                    (0..50)
+                        .map(|i| vec![i as f64 - 2.0, i as f64, i as f64 + 2.0])
+                        .collect(),
                 ),
                 // Case 2: High variance
                 (
-                    (0..50).map(|i| i as f64 + 10.0 * ((i as f64 * 0.3).sin())).collect(),
-                    (0..50).map(|i| {
-                        let b = i as f64;
-                        vec![b - 1.0, b, b + 1.0]
-                    }).collect(),
+                    (0..50)
+                        .map(|i| i as f64 + 10.0 * ((i as f64 * 0.3).sin()))
+                        .collect(),
+                    (0..50)
+                        .map(|i| {
+                            let b = i as f64;
+                            vec![b - 1.0, b, b + 1.0]
+                        })
+                        .collect(),
                 ),
                 // Case 3: Biased forecasts
                 (
                     (0..50).map(|i| i as f64).collect(),
-                    (0..50).map(|i| {
-                        let b = i as f64 + 5.0;  // Biased high
-                        vec![b - 1.0, b, b + 1.0]
-                    }).collect(),
+                    (0..50)
+                        .map(|i| {
+                            let b = i as f64 + 5.0; // Biased high
+                            vec![b - 1.0, b, b + 1.0]
+                        })
+                        .collect(),
                 ),
             ];
 
             for (actuals, forecast_values) in test_cases {
-                let forecasts = QuantileForecasts::from_values(
-                    vec![0.1, 0.5, 0.9],
-                    forecast_values,
-                ).unwrap();
+                let forecasts =
+                    QuantileForecasts::from_values(vec![0.1, 0.5, 0.9], forecast_values).unwrap();
 
                 let result = conformalize(&forecasts, &forecasts, &actuals).unwrap();
                 let calibrated = result.forecasts();
@@ -1353,11 +1483,14 @@ mod tests {
             let make_forecasts = |n: usize| {
                 QuantileForecasts::from_values(
                     vec![0.1, 0.5, 0.9],
-                    (0..n).map(|i| {
-                        let b = i as f64;
-                        vec![b - 1.0, b, b + 1.0]
-                    }).collect(),
-                ).unwrap()
+                    (0..n)
+                        .map(|i| {
+                            let b = i as f64;
+                            vec![b - 1.0, b, b + 1.0]
+                        })
+                        .collect(),
+                )
+                .unwrap()
             };
 
             let test_forecast = make_forecasts(10);
@@ -1368,7 +1501,8 @@ mod tests {
 
             // With 100 calibration points
             let calib_100 = make_forecasts(100);
-            let result_100 = conformalize(&test_forecast, &calib_100, &base_actuals[..100]).unwrap();
+            let result_100 =
+                conformalize(&test_forecast, &calib_100, &base_actuals[..100]).unwrap();
 
             // Adjustments should be in the same ballpark
             for i in 0..3 {
@@ -1378,8 +1512,13 @@ mod tests {
 
                 // Should be within 50% of each other (generous bound)
                 let max_adj = adj_50.abs().max(adj_100.abs()).max(0.1);
-                assert!(diff < max_adj * 0.5,
-                    "adjustment {} changed too much: {} vs {}", i, adj_50, adj_100);
+                assert!(
+                    diff < max_adj * 0.5,
+                    "adjustment {} changed too much: {} vs {}",
+                    i,
+                    adj_50,
+                    adj_100
+                );
             }
         }
 
@@ -1387,36 +1526,51 @@ mod tests {
         fn extreme_quantiles_adjusted_appropriately() {
             // Very extreme quantiles (0.01, 0.99) should get larger adjustments
             let n = 200;
-            let actuals: Vec<f64> = (0..n).map(|i| i as f64 + 5.0 * ((i as f64 * 0.1).sin())).collect();
+            let actuals: Vec<f64> = (0..n)
+                .map(|i| i as f64 + 5.0 * ((i as f64 * 0.1).sin()))
+                .collect();
 
             let forecasts = QuantileForecasts::from_values(
                 vec![0.01, 0.1, 0.5, 0.9, 0.99],
-                actuals.iter().map(|&a| {
-                    vec![a - 2.0, a - 1.0, a, a + 1.0, a + 2.0]
-                }).collect(),
-            ).unwrap();
+                actuals
+                    .iter()
+                    .map(|&a| vec![a - 2.0, a - 1.0, a, a + 1.0, a + 2.0])
+                    .collect(),
+            )
+            .unwrap();
 
             let result = conformalize(&forecasts, &forecasts, &actuals).unwrap();
             let adj = result.adjustments();
 
             // q0.01 should have >= adjustment than q0.1 (more extreme = needs more coverage)
-            assert!(adj[0] >= adj[1] * 0.9,
-                "q0.01 adjustment ({}) should be >= q0.1 ({})", adj[0], adj[1]);
+            assert!(
+                adj[0] >= adj[1] * 0.9,
+                "q0.01 adjustment ({}) should be >= q0.1 ({})",
+                adj[0],
+                adj[1]
+            );
 
             // q0.99 should have >= adjustment than q0.9
-            assert!(adj[4] >= adj[3] * 0.9,
-                "q0.99 adjustment ({}) should be >= q0.9 ({})", adj[4], adj[3]);
+            assert!(
+                adj[4] >= adj[3] * 0.9,
+                "q0.99 adjustment ({}) should be >= q0.9 ({})",
+                adj[4],
+                adj[3]
+            );
         }
 
         #[test]
         fn result_is_deterministic() {
             let n = 50;
-            let actuals: Vec<f64> = (0..n).map(|i| i as f64 + ((i as f64 * 0.2).sin())).collect();
+            let actuals: Vec<f64> = (0..n)
+                .map(|i| i as f64 + ((i as f64 * 0.2).sin()))
+                .collect();
 
             let forecasts = QuantileForecasts::from_values(
                 vec![0.1, 0.5, 0.9],
                 actuals.iter().map(|&a| vec![a - 1.5, a, a + 1.5]).collect(),
-            ).unwrap();
+            )
+            .unwrap();
 
             let result1 = conformalize(&forecasts, &forecasts, &actuals).unwrap();
             let result2 = conformalize(&forecasts, &forecasts, &actuals).unwrap();
@@ -1447,19 +1601,20 @@ mod tests {
             // Simple, reproducible test case
             let forecasts = QuantileForecasts::from_values(
                 vec![0.1, 0.5, 0.9],
-                vec![
-                    vec![8.0, 10.0, 12.0],
-                    vec![9.0, 11.0, 13.0],
-                ],
-            ).unwrap();
+                vec![vec![8.0, 10.0, 12.0], vec![9.0, 11.0, 13.0]],
+            )
+            .unwrap();
 
             let calib = QuantileForecasts::from_values(
                 vec![0.1, 0.5, 0.9],
-                (0..20).map(|i| {
-                    let b = i as f64;
-                    vec![b - 2.0, b, b + 2.0]
-                }).collect(),
-            ).unwrap();
+                (0..20)
+                    .map(|i| {
+                        let b = i as f64;
+                        vec![b - 2.0, b, b + 2.0]
+                    })
+                    .collect(),
+            )
+            .unwrap();
 
             // Actuals slightly above median
             let actuals: Vec<f64> = (0..20).map(|i| i as f64 + 0.5).collect();
@@ -1478,7 +1633,7 @@ mod tests {
 
             // All original coverages should be in [0, 1]
             for &cov in result.original_coverage() {
-                assert!(cov >= 0.0 && cov <= 1.0);
+                assert!((0.0..=1.0).contains(&cov));
             }
         }
 
@@ -1489,26 +1644,31 @@ mod tests {
 
             let calib = QuantileForecasts::from_values(
                 vec![0.1, 0.5, 0.9],
-                (0..50).map(|i| {
-                    let b = i as f64;
-                    vec![b - 1.0, b, b + 1.0]
-                }).collect(),
-            ).unwrap();
+                (0..50)
+                    .map(|i| {
+                        let b = i as f64;
+                        vec![b - 1.0, b, b + 1.0]
+                    })
+                    .collect(),
+            )
+            .unwrap();
 
             // Actuals consistently 2.0 above forecast median
             let actuals: Vec<f64> = (0..50).map(|i| i as f64 + 2.0).collect();
 
-            let test = QuantileForecasts::from_values(
-                vec![0.1, 0.5, 0.9],
-                vec![vec![49.0, 50.0, 51.0]],
-            ).unwrap();
+            let test =
+                QuantileForecasts::from_values(vec![0.1, 0.5, 0.9], vec![vec![49.0, 50.0, 51.0]])
+                    .unwrap();
 
             let result = conformalize(&test, &calib, &actuals).unwrap();
             let calibrated = result.forecasts().at_time(0).unwrap();
 
             // Upper bound should have increased (actuals tend to be high)
-            assert!(calibrated[2] > 51.0,
-                "upper quantile should increase from 51.0, got {}", calibrated[2]);
+            assert!(
+                calibrated[2] > 51.0,
+                "upper quantile should increase from 51.0, got {}",
+                calibrated[2]
+            );
         }
 
         #[test]
@@ -1518,22 +1678,30 @@ mod tests {
 
             let calib = QuantileForecasts::from_values(
                 vec![0.1, 0.5, 0.9],
-                (0..100).map(|i| {
-                    let b = i as f64;
-                    vec![b - 2.0, b, b + 2.0]
-                }).collect(),
-            ).unwrap();
+                (0..100)
+                    .map(|i| {
+                        let b = i as f64;
+                        vec![b - 2.0, b, b + 2.0]
+                    })
+                    .collect(),
+            )
+            .unwrap();
 
             // Symmetric residuals around the median
-            let actuals: Vec<f64> = (0..100).map(|i| {
-                let b = i as f64;
-                if i % 2 == 0 { b + 1.0 } else { b - 1.0 }
-            }).collect();
+            let actuals: Vec<f64> = (0..100)
+                .map(|i| {
+                    let b = i as f64;
+                    if i % 2 == 0 {
+                        b + 1.0
+                    } else {
+                        b - 1.0
+                    }
+                })
+                .collect();
 
-            let test = QuantileForecasts::from_values(
-                vec![0.1, 0.5, 0.9],
-                vec![vec![48.0, 50.0, 52.0]],
-            ).unwrap();
+            let test =
+                QuantileForecasts::from_values(vec![0.1, 0.5, 0.9], vec![vec![48.0, 50.0, 52.0]])
+                    .unwrap();
 
             let result = conformalize(&test, &calib, &actuals).unwrap();
 
@@ -1545,37 +1713,38 @@ mod tests {
 
             // Should be approximately equal
             let diff = (lower_expansion - upper_expansion).abs();
-            assert!(diff < 0.1,
+            assert!(
+                diff < 0.1,
                 "symmetric adjustments should be similar: lower={}, upper={}",
-                lower_expansion, upper_expansion);
+                lower_expansion,
+                upper_expansion
+            );
         }
 
         #[test]
         fn coverage_calculation_correct() {
             // Verify original_coverage is computed correctly
             let calib = QuantileForecasts::from_values(
-                vec![0.5],  // Just median for simplicity
+                vec![0.5], // Just median for simplicity
                 (0..10).map(|i| vec![i as f64]).collect(),
-            ).unwrap();
+            )
+            .unwrap();
 
             // 6 out of 10 actuals are below median forecast
             let actuals = vec![
-                -1.0,  // below 0
-                0.5,   // below 1
-                1.5,   // below 2
-                2.5,   // below 3
-                3.5,   // below 4
-                4.5,   // below 5
-                6.5,   // above 6
-                7.5,   // above 7
-                8.5,   // above 8
-                9.5,   // above 9
+                -1.0, // below 0
+                0.5,  // below 1
+                1.5,  // below 2
+                2.5,  // below 3
+                3.5,  // below 4
+                4.5,  // below 5
+                6.5,  // above 6
+                7.5,  // above 7
+                8.5,  // above 8
+                9.5,  // above 9
             ];
 
-            let test = QuantileForecasts::from_values(
-                vec![0.5],
-                vec![vec![5.0]],
-            ).unwrap();
+            let test = QuantileForecasts::from_values(vec![0.5], vec![vec![5.0]]).unwrap();
 
             let result = conformalize(&test, &calib, &actuals).unwrap();
 
@@ -1586,7 +1755,11 @@ mod tests {
             //            8:(8.5<=8)=F, 9:(9.5<=9)=F
             // = 6/10 = 0.6
             let cov = result.original_coverage()[0];
-            assert!((cov - 0.6).abs() < 0.01, "expected coverage 0.6, got {}", cov);
+            assert!(
+                (cov - 0.6).abs() < 0.01,
+                "expected coverage 0.6, got {}",
+                cov
+            );
         }
     }
 }

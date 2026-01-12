@@ -169,7 +169,7 @@ impl MFLES {
         }
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let mid = sorted.len() / 2;
-        if sorted.len() % 2 == 0 {
+        if sorted.len().is_multiple_of(2) {
             (sorted[mid - 1] + sorted[mid]) / 2.0
         } else {
             sorted[mid]
@@ -1813,7 +1813,7 @@ mod tests {
         // Values should be bounded [-1, 1] for sin/cos
         for col in &series {
             for &val in col {
-                assert!(val >= -1.0 && val <= 1.0);
+                assert!((-1.0..=1.0).contains(&val));
             }
         }
     }

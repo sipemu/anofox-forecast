@@ -49,6 +49,26 @@ Some forecasting models and baseline methods are inspired by [StatsForecast](htt
 
 **License**: Apache License 2.0
 
+## tsfresh
+
+The time series feature extraction module (`src/features/`) is inspired by [tsfresh](https://github.com/blue-yonder/tsfresh), a Python library for automatic extraction of relevant features from time series.
+
+**Original Authors**: Blue Yonder GmbH and contributors
+
+**License**: MIT License
+
+**Reference**:
+
+- Christ, M., Braun, N., Neuffer, J., & Kempa-Liehr, A. W. (2018). Time Series FeatuRe Extraction on basis of Scalable Hypothesis tests (tsfresh – A Python package). *Neurocomputing*, 307, 72-77.
+
+### Features Inspired By tsfresh
+
+- Approximate entropy, sample entropy, permutation entropy
+- Complexity measures (C3, CID, Lempel-Ziv)
+- Autocorrelation and partial autocorrelation features
+- Distribution features (skewness, kurtosis)
+- Trend and stationarity tests
+
 ## Other Dependencies
 
 This project uses several Rust crates as dependencies. See `Cargo.toml` for the complete list. Each dependency is used under its respective license:

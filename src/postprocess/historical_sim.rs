@@ -352,7 +352,10 @@ mod tests {
             let q_vals = result.quantile_values();
 
             for i in 1..q_vals.len() {
-                assert!(q_vals[i] >= q_vals[i - 1], "Quantile values should be sorted");
+                assert!(
+                    q_vals[i] >= q_vals[i - 1],
+                    "Quantile values should be sorted"
+                );
             }
         }
 
@@ -429,8 +432,7 @@ mod tests {
             let result = sim.fit(&forecasts, &actuals).unwrap();
 
             let timestamps = make_timestamps(2);
-            let new_forecasts =
-                PointForecasts::new(timestamps.clone(), vec![20.0, 21.0]).unwrap();
+            let new_forecasts = PointForecasts::new(timestamps.clone(), vec![20.0, 21.0]).unwrap();
             let quantiles = sim.predict(&result, &new_forecasts).unwrap();
 
             assert!(quantiles.has_timestamps());

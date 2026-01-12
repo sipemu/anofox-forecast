@@ -313,7 +313,7 @@ impl Theta {
         let mut trend = vec![f64::NAN; series.len()];
 
         for i in half..(series.len() - half) {
-            let sum: f64 = if period % 2 == 0 {
+            let sum: f64 = if period.is_multiple_of(2) {
                 // Even period: weighted endpoints (2x12-MA for period=12)
                 let mut s = 0.5 * series[i - half] + 0.5 * series[i + half];
                 for &val in series.iter().take(i + half).skip(i - half + 1) {

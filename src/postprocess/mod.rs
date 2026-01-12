@@ -39,7 +39,9 @@ mod types;
 
 pub use backtest::{BacktestConfig, BacktestFold, BacktestResult, CalibratedModelByHorizon};
 pub use conformal::{ConformalMethod, ConformalPredictor, ConformalResult};
-pub use conformalize::{conformalize, conformalize_with_config, ConformalizeConfig, ConformalizeResult};
+pub use conformalize::{
+    conformalize, conformalize_with_config, ConformalizeConfig, ConformalizeResult,
+};
 pub use historical_sim::{HistoricalSimResult, HistoricalSimulator};
 pub use idr::{IDRPredictor, IDRResult};
 pub use normal::{NormalPredictor, NormalResult};

@@ -165,9 +165,7 @@ impl IDRPredictor {
 
         // Compute residuals
         let fitted_values = fitted.fitted_values();
-        let residuals: Vec<f64> = (0..n)
-            .map(|i| actuals[i] - fitted_values[i])
-            .collect();
+        let residuals: Vec<f64> = (0..n).map(|i| actuals[i] - fitted_values[i]).collect();
 
         // Sort residuals to compute quantiles
         let mut sorted_residuals = residuals.clone();
@@ -233,8 +231,10 @@ impl IDRPredictor {
 
         // Compute residual quantile adjustments from the y_grid
         // Find the residual quantiles from the first grid point's offsets
-        let residual_quantiles: Vec<f64> = if !result.y_grid.is_empty() && !result.x_grid.is_empty() {
-            let first_base = result.y_grid[0].iter()
+        let residual_quantiles: Vec<f64> = if !result.y_grid.is_empty() && !result.x_grid.is_empty()
+        {
+            let first_base = result.y_grid[0]
+                .iter()
                 .zip(result.quantiles.iter())
                 .map(|(&y, _)| y)
                 .collect::<Vec<_>>();
@@ -267,11 +267,7 @@ impl IDRPredictor {
     }
 
     /// Generate quantile forecasts from raw values.
-    pub fn predict_values(
-        &self,
-        result: &IDRResult,
-        values: &[f64],
-    ) -> Result<QuantileForecasts> {
+    pub fn predict_values(&self, result: &IDRResult, values: &[f64]) -> Result<QuantileForecasts> {
         let forecasts = PointForecasts::from_values(values.to_vec());
         self.predict(result, &forecasts)
     }
@@ -439,8 +435,7 @@ mod tests {
             let result = pred.fit(&forecasts, &actuals).unwrap();
 
             let timestamps = make_timestamps(2);
-            let new_forecasts =
-                PointForecasts::new(timestamps.clone(), vec![20.0, 21.0]).unwrap();
+            let new_forecasts = PointForecasts::new(timestamps.clone(), vec![20.0, 21.0]).unwrap();
             let quantiles = pred.predict(&result, &new_forecasts).unwrap();
 
             assert!(quantiles.has_timestamps());
@@ -472,8 +467,11 @@ mod tests {
             let quantiles = pred.predict(&result, &new_forecasts).unwrap();
 
             let row = quantiles.at_time(0).unwrap();
-            assert!(row[0] <= row[1] && row[1] <= row[2],
-                "Quantiles should be monotonic: {:?}", row);
+            assert!(
+                row[0] <= row[1] && row[1] <= row[2],
+                "Quantiles should be monotonic: {:?}",
+                row
+            );
         }
 
         #[test]

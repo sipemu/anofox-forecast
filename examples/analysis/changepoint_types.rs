@@ -6,7 +6,6 @@
 //! Run with: cargo run --example changepoint_types
 
 use anofox_forecast::changepoint::{pelt_detect, CostFunction, PeltConfig};
-use std::f64::consts::PI;
 
 fn main() {
     println!("=== Changepoint Detection: Cost Function Types ===\n");

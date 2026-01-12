@@ -326,12 +326,7 @@ impl QuantileForecasts {
         if quantile_idx >= self.quantiles.len() {
             return None;
         }
-        Some(
-            self.values
-                .iter()
-                .map(|row| row[quantile_idx])
-                .collect(),
-        )
+        Some(self.values.iter().map(|row| row[quantile_idx]).collect())
     }
 
     /// Get the median (0.5 quantile) if available.
@@ -657,8 +652,7 @@ mod tests {
 
         #[test]
         fn with_model_name_sets_name() {
-            let forecasts = PointForecasts::from_values(vec![1.0])
-                .with_model_name("ARIMA");
+            let forecasts = PointForecasts::from_values(vec![1.0]).with_model_name("ARIMA");
 
             assert_eq!(forecasts.model_name(), Some("ARIMA"));
         }
@@ -740,17 +734,11 @@ mod tests {
         fn new_creates_valid_forecasts() {
             let timestamps = make_timestamps(2);
             let quantiles = vec![0.1, 0.5, 0.9];
-            let values = vec![
-                vec![8.0, 10.0, 12.0],
-                vec![9.0, 12.0, 15.0],
-            ];
+            let values = vec![vec![8.0, 10.0, 12.0], vec![9.0, 12.0, 15.0]];
 
-            let forecasts = QuantileForecasts::new(
-                timestamps.clone(),
-                quantiles.clone(),
-                values.clone(),
-            )
-            .unwrap();
+            let forecasts =
+                QuantileForecasts::new(timestamps.clone(), quantiles.clone(), values.clone())
+                    .unwrap();
 
             assert_eq!(forecasts.n_times(), 2);
             assert_eq!(forecasts.n_quantiles(), 3);
@@ -843,10 +831,7 @@ mod tests {
         #[test]
         fn at_time_returns_row() {
             let quantiles = vec![0.1, 0.5, 0.9];
-            let values = vec![
-                vec![8.0, 10.0, 12.0],
-                vec![9.0, 12.0, 15.0],
-            ];
+            let values = vec![vec![8.0, 10.0, 12.0], vec![9.0, 12.0, 15.0]];
             let forecasts = QuantileForecasts::from_values(quantiles, values).unwrap();
 
             assert_eq!(forecasts.at_time(0), Some(&[8.0, 10.0, 12.0][..]));
@@ -857,10 +842,7 @@ mod tests {
         #[test]
         fn at_quantile_returns_column() {
             let quantiles = vec![0.1, 0.5, 0.9];
-            let values = vec![
-                vec![8.0, 10.0, 12.0],
-                vec![9.0, 12.0, 15.0],
-            ];
+            let values = vec![vec![8.0, 10.0, 12.0], vec![9.0, 12.0, 15.0]];
             let forecasts = QuantileForecasts::from_values(quantiles, values).unwrap();
 
             assert_eq!(forecasts.at_quantile(0), Some(vec![8.0, 9.0]));
@@ -872,10 +854,7 @@ mod tests {
         #[test]
         fn median_returns_50th_quantile() {
             let quantiles = vec![0.1, 0.5, 0.9];
-            let values = vec![
-                vec![8.0, 10.0, 12.0],
-                vec![9.0, 12.0, 15.0],
-            ];
+            let values = vec![vec![8.0, 10.0, 12.0], vec![9.0, 12.0, 15.0]];
             let forecasts = QuantileForecasts::from_values(quantiles, values).unwrap();
 
             assert_eq!(forecasts.median(), Some(vec![10.0, 12.0]));
@@ -893,10 +872,7 @@ mod tests {
         #[test]
         fn get_returns_specific_value() {
             let quantiles = vec![0.1, 0.5, 0.9];
-            let values = vec![
-                vec![8.0, 10.0, 12.0],
-                vec![9.0, 12.0, 15.0],
-            ];
+            let values = vec![vec![8.0, 10.0, 12.0], vec![9.0, 12.0, 15.0]];
             let forecasts = QuantileForecasts::from_values(quantiles, values).unwrap();
 
             assert_eq!(forecasts.get(0, 0), Some(8.0));
@@ -958,13 +934,9 @@ mod tests {
             let lower = vec![8.0, 9.0, 10.0];
             let upper = vec![12.0, 13.0, 14.0];
 
-            let intervals = PredictionIntervals::new(
-                timestamps.clone(),
-                lower.clone(),
-                upper.clone(),
-                0.90,
-            )
-            .unwrap();
+            let intervals =
+                PredictionIntervals::new(timestamps.clone(), lower.clone(), upper.clone(), 0.90)
+                    .unwrap();
 
             assert_eq!(intervals.len(), 3);
             assert!(!intervals.is_empty());
@@ -1015,8 +987,7 @@ mod tests {
 
         #[test]
         fn from_bounds_creates_without_timestamps() {
-            let intervals =
-                PredictionIntervals::from_bounds(vec![8.0], vec![12.0], 0.90).unwrap();
+            let intervals = PredictionIntervals::from_bounds(vec![8.0], vec![12.0], 0.90).unwrap();
 
             assert!(!intervals.has_timestamps());
         }
@@ -1050,12 +1021,8 @@ mod tests {
 
         #[test]
         fn midpoints_calculates_interval_centers() {
-            let intervals = PredictionIntervals::from_bounds(
-                vec![8.0, 10.0],
-                vec![12.0, 20.0],
-                0.90,
-            )
-            .unwrap();
+            let intervals =
+                PredictionIntervals::from_bounds(vec![8.0, 10.0], vec![12.0, 20.0], 0.90).unwrap();
 
             assert_eq!(intervals.midpoints(), vec![10.0, 15.0]);
         }
@@ -1075,8 +1042,7 @@ mod tests {
 
         #[test]
         fn contains_includes_boundary_values() {
-            let intervals =
-                PredictionIntervals::from_bounds(vec![8.0], vec![12.0], 0.90).unwrap();
+            let intervals = PredictionIntervals::from_bounds(vec![8.0], vec![12.0], 0.90).unwrap();
 
             assert_eq!(intervals.contains(&[8.0]), vec![true]); // Lower bound
             assert_eq!(intervals.contains(&[12.0]), vec![true]); // Upper bound
@@ -1098,36 +1064,24 @@ mod tests {
 
         #[test]
         fn empirical_coverage_returns_none_on_length_mismatch() {
-            let intervals = PredictionIntervals::from_bounds(
-                vec![8.0, 9.0],
-                vec![12.0, 13.0],
-                0.90,
-            )
-            .unwrap();
+            let intervals =
+                PredictionIntervals::from_bounds(vec![8.0, 9.0], vec![12.0, 13.0], 0.90).unwrap();
 
             assert_eq!(intervals.empirical_coverage(&[10.0]), None);
         }
 
         #[test]
         fn empirical_coverage_handles_all_contained() {
-            let intervals = PredictionIntervals::from_bounds(
-                vec![0.0, 0.0],
-                vec![100.0, 100.0],
-                0.90,
-            )
-            .unwrap();
+            let intervals =
+                PredictionIntervals::from_bounds(vec![0.0, 0.0], vec![100.0, 100.0], 0.90).unwrap();
 
             assert_eq!(intervals.empirical_coverage(&[50.0, 50.0]), Some(1.0));
         }
 
         #[test]
         fn empirical_coverage_handles_none_contained() {
-            let intervals = PredictionIntervals::from_bounds(
-                vec![0.0, 0.0],
-                vec![10.0, 10.0],
-                0.90,
-            )
-            .unwrap();
+            let intervals =
+                PredictionIntervals::from_bounds(vec![0.0, 0.0], vec![10.0, 10.0], 0.90).unwrap();
 
             assert_eq!(intervals.empirical_coverage(&[50.0, 50.0]), Some(0.0));
         }
@@ -1135,8 +1089,7 @@ mod tests {
         #[test]
         fn allows_equal_lower_and_upper() {
             // Point intervals should be allowed
-            let intervals =
-                PredictionIntervals::from_bounds(vec![10.0], vec![10.0], 0.90).unwrap();
+            let intervals = PredictionIntervals::from_bounds(vec![10.0], vec![10.0], 0.90).unwrap();
 
             assert_eq!(intervals.widths(), vec![0.0]);
             assert_eq!(intervals.contains(&[10.0]), vec![true]);

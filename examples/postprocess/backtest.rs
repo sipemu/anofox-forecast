@@ -118,10 +118,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let coverage_by_h = result_horizon.coverage_by_horizon();
     let widths_by_h = result_horizon.widths_by_horizon();
 
-    println!(
-        "{:<10} {:>12} {:>12}",
-        "Horizon", "Coverage", "Avg Width"
-    );
+    println!("{:<10} {:>12} {:>12}", "Horizon", "Coverage", "Avg Width");
     println!("{:-<36}", "");
 
     for h in 1..=7 {
@@ -163,10 +160,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n--- Horizon-Specific Calibration ---");
 
     let horizon_models = result_horizon.calibrated_model_by_horizon(&processor)?;
-    println!(
-        "Trained {} horizon-specific models",
-        horizon_models.len()
-    );
+    println!("Trained {} horizon-specific models", horizon_models.len());
     println!("Horizons: {:?}", horizon_models.horizons());
 
     // Use horizon-specific models for prediction
@@ -202,10 +196,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ("Normal", PostProcessor::normal(vec![0.05, 0.5, 0.95])),
     ];
 
-    let config_compare = BacktestConfig::new()
-        .initial_window(50)
-        .step(10)
-        .horizon(5);
+    let config_compare = BacktestConfig::new().initial_window(50).step(10).horizon(5);
 
     println!(
         "{:<15} {:>12} {:>12} {:>12}",

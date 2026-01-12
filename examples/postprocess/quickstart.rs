@@ -5,6 +5,8 @@
 //!
 //! Run with: cargo run --example postprocess_quickstart
 
+#![allow(clippy::needless_range_loop)]
+
 use anofox_forecast::postprocess::{PointForecasts, PostProcessor};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -40,16 +42,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\nTrained postprocessor on historical errors");
 
     // Step 4: Generate prediction intervals for new forecasts
-    let future_forecasts: Vec<f64> = (0..7)
-        .map(|i| 20.0 + 0.1 * i as f64)
-        .collect();
+    let future_forecasts: Vec<f64> = (0..7).map(|i| 20.0 + 0.1 * i as f64).collect();
 
     let new_forecasts = PointForecasts::from_values(future_forecasts.clone());
     let intervals = processor.predict_intervals(&trained, &new_forecasts)?;
 
     // Step 5: Display results
     println!("\n7-Day Forecast with 90% Prediction Intervals:");
-    println!("{:<6} {:>10} {:>10} {:>10} {:>10}", "Day", "Forecast", "Lower", "Upper", "Width");
+    println!(
+        "{:<6} {:>10} {:>10} {:>10} {:>10}",
+        "Day", "Forecast", "Lower", "Upper", "Width"
+    );
     println!("{:-<50}", "");
 
     for i in 0..intervals.len() {

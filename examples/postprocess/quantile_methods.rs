@@ -5,6 +5,7 @@
 //! - NormalPredictor: Gaussian error assumption
 //! - IDRPredictor: Isotonic distributional regression
 //!
+#![allow(clippy::needless_range_loop)]
 //! Run with: cargo run --example postprocess_quantile_methods
 
 use anofox_forecast::postprocess::{
@@ -105,8 +106,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             hist_quantiles.at_time(i).unwrap()[4] - hist_quantiles.at_time(i).unwrap()[0];
         let norm_width =
             normal_quantiles.at_time(i).unwrap()[4] - normal_quantiles.at_time(i).unwrap()[0];
-        let idr_width =
-            idr_quantiles.at_time(i).unwrap()[4] - idr_quantiles.at_time(i).unwrap()[0];
+        let idr_width = idr_quantiles.at_time(i).unwrap()[4] - idr_quantiles.at_time(i).unwrap()[0];
 
         println!(
             "{:<10.2} {:>12.2} {:>12.2} {:>12.2}",

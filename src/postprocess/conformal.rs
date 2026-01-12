@@ -24,7 +24,7 @@
 //! ```
 
 use crate::error::{ForecastError, Result};
-use crate::postprocess::{PredictionIntervals, PointForecasts};
+use crate::postprocess::{PointForecasts, PredictionIntervals};
 
 /// Conformal prediction method.
 #[derive(Debug, Clone, PartialEq)]
@@ -411,10 +411,8 @@ mod tests {
 
         #[test]
         fn new_creates_predictor() {
-            let predictor = ConformalPredictor::new(
-                0.90,
-                ConformalMethod::Split { cal_fraction: 0.2 },
-            );
+            let predictor =
+                ConformalPredictor::new(0.90, ConformalMethod::Split { cal_fraction: 0.2 });
             assert!((predictor.coverage() - 0.90).abs() < 1e-10);
         }
 

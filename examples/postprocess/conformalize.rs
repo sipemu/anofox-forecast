@@ -5,6 +5,7 @@
 //!
 //! Run with: cargo run --example postprocess_conformalize
 
+#![allow(clippy::needless_range_loop)]
 use anofox_forecast::postprocess::{conformalize, QuantileForecasts};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -69,8 +70,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect();
 
-    let test_forecasts =
-        QuantileForecasts::from_values(vec![0.1, 0.5, 0.9], test_quantile_values)?;
+    let test_forecasts = QuantileForecasts::from_values(vec![0.1, 0.5, 0.9], test_quantile_values)?;
 
     // Apply conformalize to recalibrate
     println!("Applying conformalize()...\n");
@@ -81,9 +81,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Display adjustments
     println!("Learned adjustments:");
     let adjustments = result.adjustments();
-    println!("  q10 adjustment: {:.3} (widens lower bound)", adjustments[0]);
+    println!(
+        "  q10 adjustment: {:.3} (widens lower bound)",
+        adjustments[0]
+    );
     println!("  q50 adjustment: {:.3}", adjustments[1]);
-    println!("  q90 adjustment: {:.3} (widens upper bound)", adjustments[2]);
+    println!(
+        "  q90 adjustment: {:.3} (widens upper bound)",
+        adjustments[2]
+    );
 
     // Compare before and after
     println!("\n=== Before vs After Conformalization ===");

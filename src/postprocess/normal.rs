@@ -151,11 +151,7 @@ impl NormalPredictor {
         let std_dev = variance.sqrt();
 
         // Compute z-scores for each quantile using the inverse normal CDF
-        let z_scores: Vec<f64> = self
-            .quantiles
-            .iter()
-            .map(|&q| quantile_normal(q))
-            .collect();
+        let z_scores: Vec<f64> = self.quantiles.iter().map(|&q| quantile_normal(q)).collect();
 
         Ok(NormalResult {
             mean,
@@ -234,7 +230,7 @@ fn quantile_normal(p: f64) -> f64 {
         -3.969683028665376e+01,
         2.209460984245205e+02,
         -2.759285104469687e+02,
-        1.383577518672690e+02,
+        1.383_577_518_672_69e2,
         -3.066479806614716e+01,
         2.506628277459239e+00,
     ];
@@ -528,8 +524,7 @@ mod tests {
             let result = pred.fit(&forecasts, &actuals).unwrap();
 
             let timestamps = make_timestamps(2);
-            let new_forecasts =
-                PointForecasts::new(timestamps.clone(), vec![20.0, 21.0]).unwrap();
+            let new_forecasts = PointForecasts::new(timestamps.clone(), vec![20.0, 21.0]).unwrap();
             let quantiles = pred.predict(&result, &new_forecasts).unwrap();
 
             assert!(quantiles.has_timestamps());
