@@ -505,7 +505,7 @@ mod tests {
         assert!(result.n_changepoints >= 1);
         let cp = result.changepoints[0];
         assert!(
-            cp >= 45 && cp <= 55,
+            (45..=55).contains(&cp),
             "Expected changepoint near 50, got {}",
             cp
         );
@@ -566,7 +566,7 @@ mod tests {
         assert!(result.n_changepoints >= 1);
         let cp = result.changepoints[0];
         assert!(
-            cp >= 15 && cp <= 25,
+            (15..=25).contains(&cp),
             "Expected changepoint near 20, got {}",
             cp
         );
@@ -594,7 +594,7 @@ mod tests {
         assert!(result.n_changepoints >= 1);
         let cp = result.changepoints[0];
         assert!(
-            cp >= 15 && cp <= 25,
+            (15..=25).contains(&cp),
             "Expected changepoint near 20, got {}",
             cp
         );

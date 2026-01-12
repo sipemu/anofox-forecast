@@ -55,6 +55,14 @@ Provides 35+ forecasting models, 76+ statistical features, seasonality decomposi
   - Empirical confidence intervals for any model
   - Configurable sample size and reproducibility
 
+- **Probabilistic Postprocessing**
+  - Conformal Prediction: Distribution-free intervals with coverage guarantees
+  - Historical Simulation: Non-parametric empirical error distribution
+  - Normal Predictor: Gaussian error assumption baseline
+  - IDR: Isotonic Distributional Regression (state-of-the-art calibration)
+  - QRA: Quantile Regression Averaging for ensemble combining
+  - Backtesting: Rolling/expanding window evaluation with horizon-aware calibration
+
 - **Data Transformations**
   - Scaling: standardization, min-max, robust scaling
   - Box-Cox transformation with automatic lambda selection
@@ -191,6 +199,37 @@ if let Some((period, power)) = psd.iter().max_by(|a, b| a.1.partial_cmp(&b.1).un
 > For comprehensive periodicity detection (ACF, FFT, Autoperiod, CFD-Autoperiod, SAZED),
 > see the [fdars](https://crates.io/crates/fdars-core) crate.
 
+### Probabilistic Postprocessing
+
+```rust
+use anofox_forecast::postprocess::{PostProcessor, PointForecasts, BacktestConfig};
+
+// Historical forecasts and actuals for calibration
+let train_forecasts = PointForecasts::from_values(train_f);
+let train_actuals = vec![/* ... */];
+
+// Create a conformal predictor with 90% coverage
+let processor = PostProcessor::conformal(0.90);
+
+// Backtest with horizon-aware calibration
+let config = BacktestConfig::new()
+    .initial_window(100)
+    .step(10)
+    .horizon(7)
+    .horizon_aware(true);
+
+let results = processor.backtest(&train_forecasts, &train_actuals, config)?;
+println!("Coverage: {:.1}%", results.coverage() * 100.0);
+
+// Train calibrated model and predict
+let trained = processor.train(&train_forecasts, &train_actuals)?;
+let new_forecasts = PointForecasts::from_values(new_f);
+let intervals = processor.predict_intervals(&trained, &new_forecasts)?;
+
+println!("Lower: {:?}", intervals.lower());
+println!("Upper: {:?}", intervals.upper());
+```
+
 ## API Reference
 
 ### Core Types
@@ -229,6 +268,21 @@ if let Some((period, power)) = psd.iter().max_by(|a, b| a.1.partial_cmp(&b.1).un
 | Complexity | `c3`, `cid_ce`, `lempel_ziv_complexity` |
 | Trend | `linear_trend`, `adf_test`, `ar_coefficient` |
 
+### Postprocessing Types
+
+| Type | Description |
+|------|-------------|
+| `PostProcessor` | Unified API for all postprocessing methods |
+| `PointForecasts` | Wrapper for point forecast values |
+| `QuantileForecasts` | Multi-quantile forecast container |
+| `PredictionIntervals` | Lower/upper bound intervals |
+| `BacktestConfig` | Configuration for rolling/expanding backtests |
+| `BacktestResult` | Backtest metrics with per-horizon analysis |
+| `ConformalPredictor` | Distribution-free prediction intervals |
+| `HistoricalSimulator` | Empirical error distribution |
+| `IDRPredictor` | Isotonic Distributional Regression |
+| `QRAPredictor` | Quantile Regression Averaging |
+
 ## Dependencies
 
 - [chrono](https://crates.io/crates/chrono) - Date and time handling
@@ -237,6 +291,10 @@ if let Some((period, power)) = psd.iter().max_by(|a, b| a.1.partial_cmp(&b.1).un
 - [thiserror](https://crates.io/crates/thiserror) - Error handling
 - [rand](https://crates.io/crates/rand) - Random number generation
 - [rustfft](https://crates.io/crates/rustfft) - Fast Fourier Transform for spectral analysis
+
+## Acknowledgments
+
+The postprocessing module is a Rust port of [PostForecasts.jl](https://github.com/lipiecki/PostForecasts.jl). Feature extraction is inspired by [tsfresh](https://github.com/blue-yonder/tsfresh). Forecasting models are validated against [StatsForecast](https://github.com/Nixtla/statsforecast) by Nixtla. See [THIRDPARTY_NOTICE.md](THIRDPARTY_NOTICE.md) for full attribution and references to the research papers that inspired this implementation.
 
 ## License
 

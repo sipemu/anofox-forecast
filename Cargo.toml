@@ -10,9 +10,10 @@ keywords = ["time-series", "forecasting", "arima", "ets", "statistics"]
 categories = ["science", "mathematics"]
 
 [features]
-default = []
+default = ["postprocess"]
 parallel = ["rayon"]
 js = ["getrandom/js"]
+postprocess = ["dep:faer", "dep:anofox-regression"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
@@ -25,6 +26,8 @@ statrs = "0.18"
 thiserror = "2.0"
 rand = "0.8"
 rustfft = "6.2"
+anofox-regression = { version = "0.5.0", optional = true }
+faer = { version = "0.23", optional = true, default-features = false, features = ["std", "linalg"] }
 
 [dev-dependencies]
 approx = "0.5"
@@ -35,10 +38,6 @@ serde_json = "1.0.148"
 
 [[bench]]
 name = "simd_benchmark"
-harness = false
-
-[[bench]]
-name = "periodicity"
 harness = false
 
 # Examples
@@ -138,4 +137,33 @@ path = "examples/validation/forecast_export.rs"
 [[example]]
 name = "feature_export"
 path = "examples/validation/feature_export.rs"
+
+# Postprocess examples
+[[example]]
+name = "postprocess_quickstart"
+path = "examples/postprocess/quickstart.rs"
+
+[[example]]
+name = "postprocess_conformal"
+path = "examples/postprocess/conformal.rs"
+
+[[example]]
+name = "postprocess_quantile_methods"
+path = "examples/postprocess/quantile_methods.rs"
+
+[[example]]
+name = "postprocess_qra_ensemble"
+path = "examples/postprocess/qra_ensemble.rs"
+
+[[example]]
+name = "postprocess_conformalize"
+path = "examples/postprocess/conformalize.rs"
+
+[[example]]
+name = "postprocess_unified_api"
+path = "examples/postprocess/unified_api.rs"
+
+[[example]]
+name = "postprocess_backtest"
+path = "examples/postprocess/backtest.rs"
 

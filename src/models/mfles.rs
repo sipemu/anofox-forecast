@@ -1813,7 +1813,7 @@ mod tests {
         // Values should be bounded [-1, 1] for sin/cos
         for col in &series {
             for &val in col {
-                assert!(val >= -1.0 && val <= 1.0);
+                assert!((-1.0..=1.0).contains(&val));
             }
         }
     }
