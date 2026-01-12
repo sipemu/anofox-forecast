@@ -141,3 +141,32 @@ path = "examples/validation/forecast_export.rs"
 name = "feature_export"
 path = "examples/validation/feature_export.rs"
 
+# Postprocess examples
+[[example]]
+name = "postprocess_quickstart"
+path = "examples/postprocess/quickstart.rs"
+
+[[example]]
+name = "postprocess_conformal"
+path = "examples/postprocess/conformal.rs"
+
+[[example]]
+name = "postprocess_quantile_methods"
+path = "examples/postprocess/quantile_methods.rs"
+
+[[example]]
+name = "postprocess_qra_ensemble"
+path = "examples/postprocess/qra_ensemble.rs"
+
+[[example]]
+name = "postprocess_conformalize"
+path = "examples/postprocess/conformalize.rs"
+
+[[example]]
+name = "postprocess_unified_api"
+path = "examples/postprocess/unified_api.rs"
+
+[[example]]
+name = "postprocess_backtest"
+path = "examples/postprocess/backtest.rs"
+
