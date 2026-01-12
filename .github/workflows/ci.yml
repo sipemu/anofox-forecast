@@ -71,8 +71,8 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
-      - name: Build for WASM (without postprocess)
-        run: cargo build --target wasm32-unknown-unknown --no-default-features --features js
+      - name: Build for WASM (with postprocess)
+        run: cargo build --target wasm32-unknown-unknown --features postprocess,js
       - name: Check for WASM (no features)
         run: cargo check --target wasm32-unknown-unknown --no-default-features
 
