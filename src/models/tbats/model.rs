@@ -115,7 +115,7 @@ impl TBATS {
 
     /// Maximum number of harmonics for a given period.
     fn max_harmonics(period: usize) -> usize {
-        if period.is_multiple_of(2) {
+        if period % 2 == 0 {
             period / 2
         } else {
             (period - 1) / 2

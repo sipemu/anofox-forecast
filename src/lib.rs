@@ -15,6 +15,7 @@
 #![allow(clippy::type_complexity)]
 #![allow(clippy::needless_range_loop)]
 #![allow(clippy::manual_memcpy)]
+#![allow(clippy::manual_is_multiple_of)] // is_multiple_of is unstable on WASM
 
 // Prevent use of parallel feature on WASM targets (rayon requires OS threads)
 #[cfg(all(feature = "parallel", target_arch = "wasm32"))]
@@ -28,6 +29,7 @@ pub mod detection;
 pub mod error;
 pub mod features;
 pub mod models;
+#[cfg(feature = "postprocess")]
 pub mod postprocess;
 pub mod seasonality;
 pub mod simd;

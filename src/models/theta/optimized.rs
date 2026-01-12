@@ -262,7 +262,7 @@ impl OptimizedTheta {
         let mut trend = vec![f64::NAN; series.len()];
 
         for i in half..(series.len() - half) {
-            let sum: f64 = if period.is_multiple_of(2) {
+            let sum: f64 = if period % 2 == 0 {
                 let mut s = 0.5 * series[i - half] + 0.5 * series[i + half];
                 for &val in series.iter().take(i + half).skip(i - half + 1) {
                     s += val;

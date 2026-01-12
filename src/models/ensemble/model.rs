@@ -102,7 +102,7 @@ impl Ensemble {
                     let mut vals: Vec<f64> = values.iter().map(|v| v[h]).collect();
                     vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                     let n = vals.len();
-                    combined[h] = if n.is_multiple_of(2) {
+                    combined[h] = if n % 2 == 0 {
                         (vals[n / 2 - 1] + vals[n / 2]) / 2.0
                     } else {
                         vals[n / 2]
