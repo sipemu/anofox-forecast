@@ -184,7 +184,7 @@ impl QuantileForecasts {
     ///
     /// * `timestamps` - Timestamps for each forecast point
     /// * `quantiles` - Quantile levels (must be in (0, 1))
-    /// * `values` - Matrix where values[t][q] is the q-th quantile at time t
+    /// * `values` - Matrix where `values[t][q]` is the q-th quantile at time t
     ///
     /// # Errors
     ///

@@ -184,9 +184,9 @@ pub struct BacktestResult {
     pooled_forecasts: Vec<f64>,
     /// Pooled actuals (all folds concatenated).
     pooled_actuals: Vec<f64>,
-    /// Per-horizon forecasts (horizon -> Vec<forecast>).
+    /// Per-horizon forecasts (horizon -> forecasts vector).
     forecasts_by_horizon: HashMap<usize, Vec<f64>>,
-    /// Per-horizon actuals (horizon -> Vec<actual>).
+    /// Per-horizon actuals (horizon -> actuals vector).
     actuals_by_horizon: HashMap<usize, Vec<f64>>,
     /// Per-horizon coverage (computed lazily).
     coverage_by_horizon: HashMap<usize, f64>,
