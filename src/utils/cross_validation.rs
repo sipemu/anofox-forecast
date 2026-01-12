@@ -1409,11 +1409,9 @@ mod tests {
     fn grouped_cv_basic() {
         let timestamps = make_timestamps(30);
 
-        let series_a = TimeSeries::univariate(
-            timestamps.clone(),
-            (0..30).map(|i| i as f64).collect(),
-        )
-        .unwrap();
+        let series_a =
+            TimeSeries::univariate(timestamps.clone(), (0..30).map(|i| i as f64).collect())
+                .unwrap();
 
         let series_b = TimeSeries::univariate(
             timestamps.clone(),
@@ -1443,17 +1441,11 @@ mod tests {
         let timestamps_short = make_timestamps(20);
         let timestamps_long = make_timestamps(30);
 
-        let series_short = TimeSeries::univariate(
-            timestamps_short,
-            (0..20).map(|i| i as f64).collect(),
-        )
-        .unwrap();
+        let series_short =
+            TimeSeries::univariate(timestamps_short, (0..20).map(|i| i as f64).collect()).unwrap();
 
-        let series_long = TimeSeries::univariate(
-            timestamps_long,
-            (0..30).map(|i| i as f64).collect(),
-        )
-        .unwrap();
+        let series_long =
+            TimeSeries::univariate(timestamps_long, (0..30).map(|i| i as f64).collect()).unwrap();
 
         let series_map = vec![
             ("short".to_string(), series_short),
