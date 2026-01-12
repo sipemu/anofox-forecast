@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-01-12
+
+### Added
+
+- **Probabilistic Forecasting Module** (`postprocess` feature, enabled by default)
+  - `PostProcessor` - Unified API for probabilistic forecast calibration
+  - `PredictionIntervals` - Multi-level interval representation with coverage guarantees
+  - **Conformal Prediction** - Distribution-free prediction intervals
+  - **Conformalized Quantile Regression** - Calibrated quantile forecasts
+  - **Quantile Regression Averaging (QRA)** - Ensemble-based probabilistic forecasts
+  - **Historical Simulation** - Bootstrap-based uncertainty estimation
+  - **Normal Approximation** - Parametric prediction intervals
+  - **Isotonic Distributional Regression (IDR)** - Non-parametric calibration
+  - **Backtesting** - Horizon-aware backtesting with automatic calibration
+    - `BacktestConfig` with expanding/rolling windows
+    - Per-horizon calibration for improved accuracy
+    - Coverage and calibration error metrics
+
+- **Cross-Validation Enhancements**
+  - `CvFoldGenerator` - Standalone fold generation for custom workflows
+  - `gap` parameter - Prevents data leakage from lagged features
+  - `purge` parameter - Removes observations to prevent lookahead bias (financial applications)
+  - `FillStrategy` trait - Handle unknown future features during CV
+    - Implementations: `LastValueFill`, `MeanFill`, `MedianFill`, `ZeroFill`, `ConstantFill`, `ModeFill`
+  - `train_test_split()` - Simple ratio or index-based splitting
+  - `train_test_split_at()` - Split at specific index
+  - `grouped_cross_validate()` - Multi-series CV with consistent fold boundaries
+  - `GroupedCVResults` - Per-group and aggregated metrics
+  - `Fold` struct - Explicit train/test index representation
+
+- **Architecture Documentation**
+  - ADR explaining CV split design decisions
+  - Documents why CV split lives in DuckDB extension vs this crate
+  - Component distribution rationale (fold generation, orchestration, etc.)
+
+- **New Examples**
+  - `postprocess/quickstart.rs` - Getting started with probabilistic forecasts
+  - `postprocess/conformal.rs` - Conformal prediction intervals
+  - `postprocess/conformalize.rs` - Conformalized quantile regression
+  - `postprocess/qra_ensemble.rs` - QRA ensemble methods
+  - `postprocess/quantile_methods.rs` - Various quantile approaches
+  - `postprocess/unified_api.rs` - PostProcessor unified API
+  - `postprocess/backtest.rs` - Backtesting workflows
+
+### Changed
+
+- Cross-validation now returns `folds` field in `CVResults` for transparency
+- Test coverage increased to 1,316+ tests
+
+### Dependencies
+
+- Added `faer` (optional) for linear algebra in postprocessing
+- Added `anofox-regression` v0.5.0 (optional) for quantile regression
+
 ## [0.3.2] - 2026-01-07
 
 ### Fixed
