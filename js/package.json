@@ -1,5 +1,5 @@
 {
-  "name": "@anofox/forecast",
+  "name": "@sipemu/anofox-forecast",
   "version": "0.4.0",
   "description": "Time series forecasting library - WebAssembly bindings for anofox-forecast",
   "type": "module",

@@ -1,11 +1,11 @@
-# @anofox/forecast
+# @sipemu/anofox-forecast
 
 WebAssembly bindings for [anofox-forecast](https://crates.io/crates/anofox-forecast), a comprehensive time series forecasting library.
 
 ## Installation
 
 ```bash
-npm install @anofox/forecast
+npm install @sipemu/anofox-forecast
 ```
 
 ## Usage
@@ -13,7 +13,7 @@ npm install @anofox/forecast
 ### Basic Example
 
 ```javascript
-import { TimeSeries, NaiveForecaster, ThetaForecaster } from '@anofox/forecast';
+import { TimeSeries, NaiveForecaster, ThetaForecaster } from '@sipemu/anofox-forecast';
 
 // Create a time series from values
 const data = [10, 12, 15, 14, 18, 20, 22, 25, 24, 28];
@@ -31,7 +31,7 @@ console.log('Predictions:', forecast.values);
 ### With Timestamps
 
 ```javascript
-import { TimeSeries } from '@anofox/forecast';
+import { TimeSeries } from '@sipemu/anofox-forecast';
 
 const values = [10, 12, 15, 14, 18];
 const timestamps = [
@@ -114,7 +114,7 @@ const ts = TimeSeries.withTimestamps(
 Some models support prediction intervals:
 
 ```javascript
-import { NaiveForecaster } from '@anofox/forecast';
+import { NaiveForecaster } from '@sipemu/anofox-forecast';
 
 const model = new NaiveForecaster();
 model.fit(ts);
@@ -186,7 +186,7 @@ const ets = new ETSForecaster("A", "A", "M", 12);
 ## Node.js Usage
 
 ```javascript
-import { TimeSeries, AutoARIMAForecaster } from '@anofox/forecast';
+import { TimeSeries, AutoARIMAForecaster } from '@sipemu/anofox-forecast';
 
 // Load your data
 const data = [/* your time series data */];

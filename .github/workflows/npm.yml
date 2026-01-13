@@ -32,6 +32,10 @@ jobs:
       - name: Build WASM package
         run: wasm-pack build crates/anofox-forecast-js --target web --out-dir ../../js --out-name anofox_forecast_js
 
+      - name: Restore custom package.json and README
+        run: |
+          git checkout js/package.json js/README.md
+
       - name: Upload WASM artifacts
         uses: actions/upload-artifact@v4
         with:
