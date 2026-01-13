@@ -41,7 +41,7 @@ jobs:
 
   publish-npm:
     name: Publish to npm
-    needs: build-wasm
+    needs: [build-wasm, test-wasm]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
