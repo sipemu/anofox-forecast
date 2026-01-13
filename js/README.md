@@ -1,6 +1,6 @@
 # @anofox/forecast
 
-WebAssembly bindings for [anofox-forecast](https://crates.io/crates/anofox-forecast), a time series forecasting library.
+WebAssembly bindings for [anofox-forecast](https://crates.io/crates/anofox-forecast), a comprehensive time series forecasting library.
 
 ## Installation
 
@@ -48,23 +48,68 @@ const ts = TimeSeries.withTimestamps(
 );
 ```
 
-### Available Forecasters
+## Available Forecasters
 
-| Forecaster | Description |
-|------------|-------------|
-| `NaiveForecaster` | Uses the last observation as forecast |
-| `MeanForecaster` | Uses the historical mean as forecast |
-| `SeasonalNaiveForecaster` | Uses observations from the same season |
-| `RandomWalkDriftForecaster` | Random walk with drift |
-| `WindowAverageForecaster` | Rolling window average |
-| `SESForecaster` | Simple Exponential Smoothing |
-| `HoltForecaster` | Double Exponential Smoothing (Holt's method) |
-| `HoltWintersForecaster` | Triple Exponential Smoothing |
-| `DampedHoltWintersForecaster` | Damped trend variant |
-| `ThetaForecaster` | Theta method |
-| `OptimizedThetaForecaster` | Optimized Theta method |
+### Baseline Models
 
-### Prediction Intervals
+| Forecaster | Description | Parameters |
+|------------|-------------|------------|
+| `NaiveForecaster` | Last observation repeated | - |
+| `MeanForecaster` | Historical mean | - |
+| `SeasonalNaiveForecaster` | Same season from previous cycle | `period` |
+| `RandomWalkDriftForecaster` | Random walk with trend | - |
+| `SMAForecaster` | Simple Moving Average | `window` |
+| `WindowAverageForecaster` | Rolling window average | `window_size` |
+| `SeasonalWindowAverageForecaster` | Seasonal window average | `period`, `window` |
+
+### Exponential Smoothing Models
+
+| Forecaster | Description | Parameters |
+|------------|-------------|------------|
+| `SESForecaster` | Simple Exponential Smoothing | `alpha` |
+| `HoltForecaster` | Holt Linear Trend (Double ES) | `alpha`, `beta` |
+| `HoltWintersForecaster` | Triple Exponential Smoothing | `alpha`, `beta`, `gamma`, `period` |
+| `SeasonalESForecaster` | Seasonal Exponential Smoothing | `period` |
+| `ETSForecaster` | ETS state-space model | `error`, `trend`, `seasonal`, `period` |
+| `AutoETSForecaster` | Automatic ETS selection | - |
+
+### Theta Models
+
+| Forecaster | Description | Parameters |
+|------------|-------------|------------|
+| `ThetaForecaster` | Standard Theta method | - |
+| `OptimizedThetaForecaster` | Optimized Theta | - |
+| `DynamicThetaForecaster` | Dynamic coefficient updates | `alpha` |
+| `AutoThetaForecaster` | Automatic Theta selection | - |
+
+### ARIMA Models
+
+| Forecaster | Description | Parameters |
+|------------|-------------|------------|
+| `ARIMAForecaster` | ARIMA | `p`, `d`, `q` |
+| `SARIMAForecaster` | Seasonal ARIMA | `p`, `d`, `q`, `P`, `D`, `Q`, `period` |
+| `AutoARIMAForecaster` | Automatic ARIMA selection | - |
+
+### Intermittent Demand Models
+
+| Forecaster | Description | Parameters |
+|------------|-------------|------------|
+| `CrostonForecaster` | Croston's method | - |
+| `TSBForecaster` | Teunter-Syntetos-Babai | - |
+| `ADIDAForecaster` | Aggregate-Disaggregate approach | - |
+| `IMAPAForecaster` | Multiple Aggregation Prediction | - |
+
+### Advanced Models
+
+| Forecaster | Description | Parameters |
+|------------|-------------|------------|
+| `TBATSForecaster` | TBATS (complex seasonality) | `seasonal_periods[]` |
+| `AutoTBATSForecaster` | Automatic TBATS | `seasonal_periods[]` |
+| `MFLESForecaster` | Multiple Frequency LOESS | `seasonal_periods[]` |
+| `MSTLForecasterWrapper` | MSTL decomposition | `seasonal_periods[]` |
+| `GARCHForecaster` | GARCH volatility model | `p`, `q` |
+
+## Prediction Intervals
 
 Some models support prediction intervals:
 
@@ -103,6 +148,18 @@ console.log('Upper bound:', forecast.upper);
 - `forecast.hasLower()` - Check if lower interval exists
 - `forecast.hasUpper()` - Check if upper interval exists
 
+### ETS Model Specification
+
+For `ETSForecaster`, use string codes:
+- **Error**: `"A"` (additive) or `"M"` (multiplicative)
+- **Trend**: `"N"` (none), `"A"` (additive), or `"Ad"` (additive damped)
+- **Seasonal**: `"N"` (none), `"A"` (additive), or `"M"` (multiplicative)
+
+```javascript
+// ETS(A,A,M) - Additive error, Additive trend, Multiplicative seasonal
+const ets = new ETSForecaster("A", "A", "M", 12);
+```
+
 ## Browser Usage
 
 ```html
@@ -115,7 +172,7 @@ console.log('Upper bound:', forecast.upper);
     const data = new Float64Array([10, 12, 15, 14, 18, 20, 22, 25]);
     const ts = new TimeSeries(data);
 
-    const model = new ThetaForecaster(2.0);
+    const model = new ThetaForecaster();
     model.fit(ts);
 
     const forecast = model.predict(5);
@@ -129,15 +186,14 @@ console.log('Upper bound:', forecast.upper);
 ## Node.js Usage
 
 ```javascript
-import { readFile } from 'fs/promises';
-import { TimeSeries, OptimizedThetaForecaster } from '@anofox/forecast';
+import { TimeSeries, AutoARIMAForecaster } from '@anofox/forecast';
 
 // Load your data
 const data = [/* your time series data */];
 const ts = new TimeSeries(new Float64Array(data));
 
-// Forecast
-const model = new OptimizedThetaForecaster();
+// Forecast with AutoARIMA
+const model = new AutoARIMAForecaster();
 model.fit(ts);
 const forecast = model.predict(10);
 ```
@@ -145,7 +201,8 @@ const forecast = model.predict(10);
 ## Limitations
 
 - The `parallel` feature from the Rust crate is not available in WASM
-- Some advanced features like postprocessing (conformal prediction) are not yet exposed
+- Postprocessing features (conformal prediction, IDR) are not yet exposed
+- Cross-validation utilities are not yet exposed
 
 ## License
 

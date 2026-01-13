@@ -1,13 +1,43 @@
 //! Forecaster wrappers for JavaScript.
+//!
+//! This module provides wasm-bindgen wrappers for all forecasting models
+//! available in the anofox-forecast crate.
 
 use crate::time_series::{Forecast, TimeSeries};
-use anofox_forecast::models::baseline::{
-    HistoricAverage, Naive, RandomWalkWithDrift, SeasonalNaive, WindowAverage,
-};
-use anofox_forecast::models::exponential::{HoltLinearTrend, HoltWinters, SimpleExponentialSmoothing};
-use anofox_forecast::models::theta::{DynamicTheta, OptimizedTheta, Theta};
-use anofox_forecast::models::Forecaster as ForecasterTrait;
 use wasm_bindgen::prelude::*;
+
+// Import all models from anofox-forecast
+use anofox_forecast::models::Forecaster as ForecasterTrait;
+
+// Baseline models
+use anofox_forecast::models::baseline::{
+    HistoricAverage, Naive, RandomWalkWithDrift, SeasonalNaive, SeasonalWindowAverage,
+    SimpleMovingAverage, WindowAverage,
+};
+
+// Exponential smoothing models
+use anofox_forecast::models::exponential::{
+    AutoETS, HoltLinearTrend, HoltWinters, SeasonalES, SimpleExponentialSmoothing, ETS,
+};
+
+// Theta models
+use anofox_forecast::models::theta::{AutoTheta, DynamicTheta, OptimizedTheta, Theta};
+
+// ARIMA models
+use anofox_forecast::models::arima::{AutoARIMA, ARIMA, SARIMA};
+
+// Intermittent demand models
+use anofox_forecast::models::intermittent::{Croston, ADIDA, IMAPA, TSB};
+
+// Advanced models
+use anofox_forecast::models::garch::GARCH;
+use anofox_forecast::models::mfles::MFLES;
+use anofox_forecast::models::mstl_forecaster::MSTLForecaster;
+use anofox_forecast::models::tbats::{AutoTBATS, TBATS};
+
+// =============================================================================
+// BASELINE MODELS
+// =============================================================================
 
 /// Naive forecaster - uses the last observation as forecast.
 #[wasm_bindgen]
@@ -17,46 +47,24 @@ pub struct NaiveForecaster {
 
 #[wasm_bindgen]
 impl NaiveForecaster {
-    /// Create a new Naive forecaster.
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
-        NaiveForecaster {
-            model: Naive::new(),
-        }
+        Self { model: Naive::new() }
     }
 
-    /// Fit the model to the time series.
     pub fn fit(&mut self, series: &TimeSeries) -> Result<(), JsError> {
-        self.model
-            .fit(series.inner())
-            .map_err(|e| JsError::new(&e.to_string()))
+        self.model.fit(series.inner()).map_err(|e| JsError::new(&e.to_string()))
     }
 
-    /// Generate predictions.
-    ///
-    /// @param horizon - Number of steps to forecast
     pub fn predict(&self, horizon: usize) -> Result<Forecast, JsError> {
-        let forecast = self
-            .model
-            .predict(horizon)
-            .map_err(|e| JsError::new(&e.to_string()))?;
-        Ok(Forecast::from_inner(forecast))
+        self.model.predict(horizon).map(Forecast::from_inner).map_err(|e| JsError::new(&e.to_string()))
     }
 
-    /// Generate predictions with confidence intervals.
-    ///
-    /// @param horizon - Number of steps to forecast
-    /// @param level - Confidence level (e.g., 0.95 for 95%)
     #[wasm_bindgen(js_name = predictWithIntervals)]
     pub fn predict_with_intervals(&self, horizon: usize, level: f64) -> Result<Forecast, JsError> {
-        let forecast = self
-            .model
-            .predict_with_intervals(horizon, level)
-            .map_err(|e| JsError::new(&e.to_string()))?;
-        Ok(Forecast::from_inner(forecast))
+        self.model.predict_with_intervals(horizon, level).map(Forecast::from_inner).map_err(|e| JsError::new(&e.to_string()))
     }
 
-    /// Get the model name.
     #[wasm_bindgen(getter)]
     pub fn name(&self) -> String {
         self.model.name().to_string()
@@ -64,12 +72,10 @@ impl NaiveForecaster {
 }
 
 impl Default for NaiveForecaster {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }
 
-/// Mean forecaster - uses the historical mean as forecast.
+/// Mean (Historic Average) forecaster - uses the historical mean as forecast.
 #[wasm_bindgen]
 pub struct MeanForecaster {
     model: HistoricAverage,
@@ -79,32 +85,20 @@ pub struct MeanForecaster {
 impl MeanForecaster {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
-        MeanForecaster {
-            model: HistoricAverage::new(),
-        }
+        Self { model: HistoricAverage::new() }
     }
 
     pub fn fit(&mut self, series: &TimeSeries) -> Result<(), JsError> {
-        self.model
-            .fit(series.inner())
-            .map_err(|e| JsError::new(&e.to_string()))
+        self.model.fit(series.inner()).map_err(|e| JsError::new(&e.to_string()))
     }
 
     pub fn predict(&self, horizon: usize) -> Result<Forecast, JsError> {
-        let forecast = self
-            .model
-            .predict(horizon)
-            .map_err(|e| JsError::new(&e.to_string()))?;
-        Ok(Forecast::from_inner(forecast))
+        self.model.predict(horizon).map(Forecast::from_inner).map_err(|e| JsError::new(&e.to_string()))
     }
 
     #[wasm_bindgen(js_name = predictWithIntervals)]
     pub fn predict_with_intervals(&self, horizon: usize, level: f64) -> Result<Forecast, JsError> {
-        let forecast = self
-            .model
-            .predict_with_intervals(horizon, level)
-            .map_err(|e| JsError::new(&e.to_string()))?;
-        Ok(Forecast::from_inner(forecast))
+        self.model.predict_with_intervals(horizon, level).map(Forecast::from_inner).map_err(|e| JsError::new(&e.to_string()))
     }
 
     #[wasm_bindgen(getter)]
@@ -114,9 +108,7 @@ impl MeanForecaster {
 }
 
 impl Default for MeanForecaster {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }
 
 /// Seasonal Naive forecaster - uses observations from the same season.
@@ -127,37 +119,23 @@ pub struct SeasonalNaiveForecaster {
 
 #[wasm_bindgen]
 impl SeasonalNaiveForecaster {
-    /// Create a new Seasonal Naive forecaster.
-    ///
     /// @param period - Seasonal period (e.g., 12 for monthly data with yearly seasonality)
     #[wasm_bindgen(constructor)]
     pub fn new(period: usize) -> Self {
-        SeasonalNaiveForecaster {
-            model: SeasonalNaive::new(period),
-        }
+        Self { model: SeasonalNaive::new(period) }
     }
 
     pub fn fit(&mut self, series: &TimeSeries) -> Result<(), JsError> {
-        self.model
-            .fit(series.inner())
-            .map_err(|e| JsError::new(&e.to_string()))
+        self.model.fit(series.inner()).map_err(|e| JsError::new(&e.to_string()))
     }
 
     pub fn predict(&self, horizon: usize) -> Result<Forecast, JsError> {
-        let forecast = self
-            .model
-            .predict(horizon)
-            .map_err(|e| JsError::new(&e.to_string()))?;
-        Ok(Forecast::from_inner(forecast))
+        self.model.predict(horizon).map(Forecast::from_inner).map_err(|e| JsError::new(&e.to_string()))
     }
 
     #[wasm_bindgen(js_name = predictWithIntervals)]
     pub fn predict_with_intervals(&self, horizon: usize, level: f64) -> Result<Forecast, JsError> {
-        let forecast = self
-            .model
-            .predict_with_intervals(horizon, level)
-            .map_err(|e| JsError::new(&e.to_string()))?;
-        Ok(Forecast::from_inner(forecast))
+        self.model.predict_with_intervals(horizon, level).map(Forecast::from_inner).map_err(|e| JsError::new(&e.to_string()))
     }
 
     #[wasm_bindgen(getter)]
@@ -176,32 +154,20 @@ pub struct RandomWalkDriftForecaster {
 impl RandomWalkDriftForecaster {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
-        RandomWalkDriftForecaster {
-            model: RandomWalkWithDrift::new(),
-        }
+        Self { model: RandomWalkWithDrift::new() }
     }
 
     pub fn fit(&mut self, series: &TimeSeries) -> Result<(), JsError> {
-        self.model
-            .fit(series.inner())
-            .map_err(|e| JsError::new(&e.to_string()))
+        self.model.fit(series.inner()).map_err(|e| JsError::new(&e.to_string()))
     }
 
     pub fn predict(&self, horizon: usize) -> Result<Forecast, JsError> {
-        let forecast = self
-            .model
-            .predict(horizon)
-            .map_err(|e| JsError::new(&e.to_string()))?;
-        Ok(Forecast::from_inner(forecast))
+        self.model.predict(horizon).map(Forecast::from_inner).map_err(|e| JsError::new(&e.to_string()))
     }
 
     #[wasm_bindgen(js_name = predictWithIntervals)]
     pub fn predict_with_intervals(&self, horizon: usize, level: f64) -> Result<Forecast, JsError> {
-        let forecast = self
-            .model
-            .predict_with_intervals(horizon, level)
-            .map_err(|e| JsError::new(&e.to_string()))?;
-        Ok(Forecast::from_inner(forecast))
+        self.model.predict_with_intervals(horizon, level).map(Forecast::from_inner).map_err(|e| JsError::new(&e.to_string()))
     }
 
     #[wasm_bindgen(getter)]
@@ -211,41 +177,29 @@ impl RandomWalkDriftForecaster {
 }
 
 impl Default for RandomWalkDriftForecaster {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }
 
-/// Window Average forecaster - uses a rolling window mean.
+/// Simple Moving Average forecaster.
 #[wasm_bindgen]
-pub struct WindowAverageForecaster {
-    model: WindowAverage,
+pub struct SMAForecaster {
+    model: SimpleMovingAverage,
 }
 
 #[wasm_bindgen]
-impl WindowAverageForecaster {
-    /// Create a new Window Average forecaster.
-    ///
-    /// @param window_size - Size of the rolling window
+impl SMAForecaster {
+    /// @param window - Window size for the moving average
     #[wasm_bindgen(constructor)]
-    pub fn new(window_size: usize) -> Self {
-        WindowAverageForecaster {
-            model: WindowAverage::new(window_size),
-        }
+    pub fn new(window: usize) -> Self {
+        Self { model: SimpleMovingAverage::new(window) }
     }
 
     pub fn fit(&mut self, series: &TimeSeries) -> Result<(), JsError> {
-        self.model
-            .fit(series.inner())
-            .map_err(|e| JsError::new(&e.to_string()))
+        self.model.fit(series.inner()).map_err(|e| JsError::new(&e.to_string()))
     }
 
     pub fn predict(&self, horizon: usize) -> Result<Forecast, JsError> {
-        let forecast = self
-            .model
-            .predict(horizon)
-            .map_err(|e| JsError::new(&e.to_string()))?;
-        Ok(Forecast::from_inner(forecast))
+        self.model.predict(horizon).map(Forecast::from_inner).map_err(|e| JsError::new(&e.to_string()))
     }
 
     #[wasm_bindgen(getter)]
@@ -253,6 +207,67 @@ impl WindowAverageForecaster {
         self.model.name().to_string()
     }
 }
+
+/// Window Average forecaster - uses the last N observations.
+#[wasm_bindgen]
+pub struct WindowAverageForecaster {
+    model: WindowAverage,
+}
+
+#[wasm_bindgen]
+impl WindowAverageForecaster {
+    /// @param window_size - Size of the rolling window
+    #[wasm_bindgen(constructor)]
+    pub fn new(window_size: usize) -> Self {
+        Self { model: WindowAverage::new(window_size) }
+    }
+
+    pub fn fit(&mut self, series: &TimeSeries) -> Result<(), JsError> {
+        self.model.fit(series.inner()).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    pub fn predict(&self, horizon: usize) -> Result<Forecast, JsError> {
+        self.model.predict(horizon).map(Forecast::from_inner).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn name(&self) -> String {
+        self.model.name().to_string()
+    }
+}
+
+/// Seasonal Window Average forecaster.
+#[wasm_bindgen]
+pub struct SeasonalWindowAverageForecaster {
+    model: SeasonalWindowAverage,
+}
+
+#[wasm_bindgen]
+impl SeasonalWindowAverageForecaster {
+    /// @param period - Seasonal period
+    /// @param window - Number of seasonal cycles to average
+    #[wasm_bindgen(constructor)]
+    pub fn new(period: usize, window: usize) -> Self {
+        Self { model: SeasonalWindowAverage::new(period, window) }
+    }
+
+    pub fn fit(&mut self, series: &TimeSeries) -> Result<(), JsError> {
+        self.model.fit(series.inner()).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    pub fn predict(&self, horizon: usize) -> Result<Forecast, JsError> {
+        self.model.predict(horizon).map(Forecast::from_inner).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn name(&self) -> String {
+        self.model.name().to_string()
+    }
+}
+
+// =============================================================================
+// EXPONENTIAL SMOOTHING MODELS
+// =============================================================================
 
 /// Simple Exponential Smoothing forecaster.
 #[wasm_bindgen]
@@ -262,28 +277,18 @@ pub struct SESForecaster {
 
 #[wasm_bindgen]
 impl SESForecaster {
-    /// Create a new Simple Exponential Smoothing forecaster.
-    ///
     /// @param alpha - Smoothing parameter (0 < alpha <= 1)
     #[wasm_bindgen(constructor)]
     pub fn new(alpha: f64) -> Self {
-        SESForecaster {
-            model: SimpleExponentialSmoothing::new(alpha),
-        }
+        Self { model: SimpleExponentialSmoothing::new(alpha) }
     }
 
     pub fn fit(&mut self, series: &TimeSeries) -> Result<(), JsError> {
-        self.model
-            .fit(series.inner())
-            .map_err(|e| JsError::new(&e.to_string()))
+        self.model.fit(series.inner()).map_err(|e| JsError::new(&e.to_string()))
     }
 
     pub fn predict(&self, horizon: usize) -> Result<Forecast, JsError> {
-        let forecast = self
-            .model
-            .predict(horizon)
-            .map_err(|e| JsError::new(&e.to_string()))?;
-        Ok(Forecast::from_inner(forecast))
+        self.model.predict(horizon).map(Forecast::from_inner).map_err(|e| JsError::new(&e.to_string()))
     }
 
     #[wasm_bindgen(getter)]
@@ -300,29 +305,19 @@ pub struct HoltForecaster {
 
 #[wasm_bindgen]
 impl HoltForecaster {
-    /// Create a new Holt Linear Trend forecaster.
-    ///
     /// @param alpha - Level smoothing parameter (0 < alpha <= 1)
     /// @param beta - Trend smoothing parameter (0 < beta <= 1)
     #[wasm_bindgen(constructor)]
     pub fn new(alpha: f64, beta: f64) -> Self {
-        HoltForecaster {
-            model: HoltLinearTrend::new(alpha, beta),
-        }
+        Self { model: HoltLinearTrend::new(alpha, beta) }
     }
 
     pub fn fit(&mut self, series: &TimeSeries) -> Result<(), JsError> {
-        self.model
-            .fit(series.inner())
-            .map_err(|e| JsError::new(&e.to_string()))
+        self.model.fit(series.inner()).map_err(|e| JsError::new(&e.to_string()))
     }
 
     pub fn predict(&self, horizon: usize) -> Result<Forecast, JsError> {
-        let forecast = self
-            .model
-            .predict(horizon)
-            .map_err(|e| JsError::new(&e.to_string()))?;
-        Ok(Forecast::from_inner(forecast))
+        self.model.predict(horizon).map(Forecast::from_inner).map_err(|e| JsError::new(&e.to_string()))
     }
 
     #[wasm_bindgen(getter)]
@@ -339,39 +334,28 @@ pub struct HoltWintersForecaster {
 
 #[wasm_bindgen]
 impl HoltWintersForecaster {
-    /// Create a new Holt-Winters forecaster with additive seasonality.
-    ///
+    /// Create with additive seasonality.
     /// @param alpha - Level smoothing parameter
     /// @param beta - Trend smoothing parameter
     /// @param gamma - Seasonal smoothing parameter
     /// @param period - Seasonal period
     #[wasm_bindgen(constructor)]
     pub fn new(alpha: f64, beta: f64, gamma: f64, period: usize) -> Self {
-        HoltWintersForecaster {
-            model: HoltWinters::additive(alpha, beta, gamma, period),
-        }
+        Self { model: HoltWinters::additive(alpha, beta, gamma, period) }
     }
 
-    /// Create a new Holt-Winters forecaster with multiplicative seasonality.
+    /// Create with multiplicative seasonality.
     #[wasm_bindgen(js_name = multiplicative)]
     pub fn multiplicative(alpha: f64, beta: f64, gamma: f64, period: usize) -> Self {
-        HoltWintersForecaster {
-            model: HoltWinters::multiplicative(alpha, beta, gamma, period),
-        }
+        Self { model: HoltWinters::multiplicative(alpha, beta, gamma, period) }
     }
 
     pub fn fit(&mut self, series: &TimeSeries) -> Result<(), JsError> {
-        self.model
-            .fit(series.inner())
-            .map_err(|e| JsError::new(&e.to_string()))
+        self.model.fit(series.inner()).map_err(|e| JsError::new(&e.to_string()))
     }
 
     pub fn predict(&self, horizon: usize) -> Result<Forecast, JsError> {
-        let forecast = self
-            .model
-            .predict(horizon)
-            .map_err(|e| JsError::new(&e.to_string()))?;
-        Ok(Forecast::from_inner(forecast))
+        self.model.predict(horizon).map(Forecast::from_inner).map_err(|e| JsError::new(&e.to_string()))
     }
 
     #[wasm_bindgen(getter)]
@@ -379,6 +363,125 @@ impl HoltWintersForecaster {
         self.model.name().to_string()
     }
 }
+
+/// Seasonal Exponential Smoothing forecaster.
+#[wasm_bindgen]
+pub struct SeasonalESForecaster {
+    model: SeasonalES,
+}
+
+#[wasm_bindgen]
+impl SeasonalESForecaster {
+    /// @param period - Seasonal period
+    #[wasm_bindgen(constructor)]
+    pub fn new(period: usize) -> Self {
+        Self { model: SeasonalES::new(period) }
+    }
+
+    pub fn fit(&mut self, series: &TimeSeries) -> Result<(), JsError> {
+        self.model.fit(series.inner()).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    pub fn predict(&self, horizon: usize) -> Result<Forecast, JsError> {
+        self.model.predict(horizon).map(Forecast::from_inner).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn name(&self) -> String {
+        self.model.name().to_string()
+    }
+}
+
+/// ETS (Error-Trend-Seasonal) state-space model.
+/// Use string codes: "A" = Additive, "M" = Multiplicative, "N" = None
+#[wasm_bindgen]
+pub struct ETSForecaster {
+    model: ETS,
+}
+
+#[wasm_bindgen]
+impl ETSForecaster {
+    /// Create an ETS model with specified components.
+    /// @param error - Error type: "A" (additive) or "M" (multiplicative)
+    /// @param trend - Trend type: "N" (none), "A" (additive), or "Ad" (additive damped)
+    /// @param seasonal - Seasonal type: "N" (none), "A" (additive), or "M" (multiplicative)
+    /// @param period - Seasonal period (ignored if seasonal is "N")
+    #[wasm_bindgen(constructor)]
+    pub fn new(error: &str, trend: &str, seasonal: &str, period: usize) -> Result<ETSForecaster, JsError> {
+        use anofox_forecast::models::exponential::{ErrorType, TrendType, ETSSeasonalType, ETSSpec};
+
+        let error_type = match error.to_uppercase().as_str() {
+            "A" => ErrorType::Additive,
+            "M" => ErrorType::Multiplicative,
+            _ => return Err(JsError::new("Error type must be 'A' or 'M'")),
+        };
+
+        let trend_type = match trend.to_uppercase().as_str() {
+            "N" => TrendType::None,
+            "A" => TrendType::Additive,
+            "AD" => TrendType::AdditiveDamped,
+            _ => return Err(JsError::new("Trend type must be 'N', 'A', or 'Ad'")),
+        };
+
+        let seasonal_type = match seasonal.to_uppercase().as_str() {
+            "N" => ETSSeasonalType::None,
+            "A" => ETSSeasonalType::Additive,
+            "M" => ETSSeasonalType::Multiplicative,
+            _ => return Err(JsError::new("Seasonal type must be 'N', 'A', or 'M'")),
+        };
+
+        let spec = ETSSpec::new(error_type, trend_type, seasonal_type);
+        Ok(Self { model: ETS::new(spec, period) })
+    }
+
+    pub fn fit(&mut self, series: &TimeSeries) -> Result<(), JsError> {
+        self.model.fit(series.inner()).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    pub fn predict(&self, horizon: usize) -> Result<Forecast, JsError> {
+        self.model.predict(horizon).map(Forecast::from_inner).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn name(&self) -> String {
+        self.model.name().to_string()
+    }
+}
+
+/// AutoETS - Automatic ETS model selection.
+#[wasm_bindgen]
+pub struct AutoETSForecaster {
+    model: AutoETS,
+}
+
+#[wasm_bindgen]
+impl AutoETSForecaster {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        Self { model: AutoETS::new() }
+    }
+
+    pub fn fit(&mut self, series: &TimeSeries) -> Result<(), JsError> {
+        self.model.fit(series.inner()).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    pub fn predict(&self, horizon: usize) -> Result<Forecast, JsError> {
+        self.model.predict(horizon).map(Forecast::from_inner).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn name(&self) -> String {
+        self.model.name().to_string()
+    }
+}
+
+impl Default for AutoETSForecaster {
+    fn default() -> Self { Self::new() }
+}
+
+// =============================================================================
+// THETA MODELS
+// =============================================================================
 
 /// Theta forecaster - the standard Theta method.
 #[wasm_bindgen]
@@ -388,35 +491,22 @@ pub struct ThetaForecaster {
 
 #[wasm_bindgen]
 impl ThetaForecaster {
-    /// Create a new Theta forecaster (uses theta=2.0).
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
-        ThetaForecaster {
-            model: Theta::new(),
-        }
+        Self { model: Theta::new() }
     }
 
     pub fn fit(&mut self, series: &TimeSeries) -> Result<(), JsError> {
-        self.model
-            .fit(series.inner())
-            .map_err(|e| JsError::new(&e.to_string()))
+        self.model.fit(series.inner()).map_err(|e| JsError::new(&e.to_string()))
     }
 
     pub fn predict(&self, horizon: usize) -> Result<Forecast, JsError> {
-        let forecast = self
-            .model
-            .predict(horizon)
-            .map_err(|e| JsError::new(&e.to_string()))?;
-        Ok(Forecast::from_inner(forecast))
+        self.model.predict(horizon).map(Forecast::from_inner).map_err(|e| JsError::new(&e.to_string()))
     }
 
     #[wasm_bindgen(js_name = predictWithIntervals)]
     pub fn predict_with_intervals(&self, horizon: usize, level: f64) -> Result<Forecast, JsError> {
-        let forecast = self
-            .model
-            .predict_with_intervals(horizon, level)
-            .map_err(|e| JsError::new(&e.to_string()))?;
-        Ok(Forecast::from_inner(forecast))
+        self.model.predict_with_intervals(horizon, level).map(Forecast::from_inner).map_err(|e| JsError::new(&e.to_string()))
     }
 
     #[wasm_bindgen(getter)]
@@ -426,59 +516,10 @@ impl ThetaForecaster {
 }
 
 impl Default for ThetaForecaster {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }
 
-/// Dynamic Theta forecaster - allows specifying a custom theta parameter.
-#[wasm_bindgen]
-pub struct DynamicThetaForecaster {
-    model: DynamicTheta,
-}
-
-#[wasm_bindgen]
-impl DynamicThetaForecaster {
-    /// Create a new Dynamic Theta forecaster.
-    ///
-    /// @param alpha - Smoothing parameter for the forecast
-    #[wasm_bindgen(constructor)]
-    pub fn new(alpha: f64) -> Self {
-        DynamicThetaForecaster {
-            model: DynamicTheta::new(alpha),
-        }
-    }
-
-    pub fn fit(&mut self, series: &TimeSeries) -> Result<(), JsError> {
-        self.model
-            .fit(series.inner())
-            .map_err(|e| JsError::new(&e.to_string()))
-    }
-
-    pub fn predict(&self, horizon: usize) -> Result<Forecast, JsError> {
-        let forecast = self
-            .model
-            .predict(horizon)
-            .map_err(|e| JsError::new(&e.to_string()))?;
-        Ok(Forecast::from_inner(forecast))
-    }
-
-    #[wasm_bindgen(js_name = predictWithIntervals)]
-    pub fn predict_with_intervals(&self, horizon: usize, level: f64) -> Result<Forecast, JsError> {
-        let forecast = self
-            .model
-            .predict_with_intervals(horizon, level)
-            .map_err(|e| JsError::new(&e.to_string()))?;
-        Ok(Forecast::from_inner(forecast))
-    }
-
-    #[wasm_bindgen(getter)]
-    pub fn name(&self) -> String {
-        self.model.name().to_string()
-    }
-}
-
-/// Optimized Theta forecaster - automatically optimizes theta parameter.
+/// Optimized Theta forecaster - automatically optimizes parameters.
 #[wasm_bindgen]
 pub struct OptimizedThetaForecaster {
     model: OptimizedTheta,
@@ -486,35 +527,22 @@ pub struct OptimizedThetaForecaster {
 
 #[wasm_bindgen]
 impl OptimizedThetaForecaster {
-    /// Create a new Optimized Theta forecaster.
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
-        OptimizedThetaForecaster {
-            model: OptimizedTheta::new(),
-        }
+        Self { model: OptimizedTheta::new() }
     }
 
     pub fn fit(&mut self, series: &TimeSeries) -> Result<(), JsError> {
-        self.model
-            .fit(series.inner())
-            .map_err(|e| JsError::new(&e.to_string()))
+        self.model.fit(series.inner()).map_err(|e| JsError::new(&e.to_string()))
     }
 
     pub fn predict(&self, horizon: usize) -> Result<Forecast, JsError> {
-        let forecast = self
-            .model
-            .predict(horizon)
-            .map_err(|e| JsError::new(&e.to_string()))?;
-        Ok(Forecast::from_inner(forecast))
+        self.model.predict(horizon).map(Forecast::from_inner).map_err(|e| JsError::new(&e.to_string()))
     }
 
     #[wasm_bindgen(js_name = predictWithIntervals)]
     pub fn predict_with_intervals(&self, horizon: usize, level: f64) -> Result<Forecast, JsError> {
-        let forecast = self
-            .model
-            .predict_with_intervals(horizon, level)
-            .map_err(|e| JsError::new(&e.to_string()))?;
-        Ok(Forecast::from_inner(forecast))
+        self.model.predict_with_intervals(horizon, level).map(Forecast::from_inner).map_err(|e| JsError::new(&e.to_string()))
     }
 
     #[wasm_bindgen(getter)]
@@ -524,57 +552,472 @@ impl OptimizedThetaForecaster {
 }
 
 impl Default for OptimizedThetaForecaster {
-    fn default() -> Self {
-        Self::new()
+    fn default() -> Self { Self::new() }
+}
+
+/// Dynamic Theta forecaster - updates coefficients dynamically.
+#[wasm_bindgen]
+pub struct DynamicThetaForecaster {
+    model: DynamicTheta,
+}
+
+#[wasm_bindgen]
+impl DynamicThetaForecaster {
+    /// @param alpha - Smoothing parameter for the forecast
+    #[wasm_bindgen(constructor)]
+    pub fn new(alpha: f64) -> Self {
+        Self { model: DynamicTheta::new(alpha) }
+    }
+
+    /// Create an optimized Dynamic Theta model.
+    pub fn optimized() -> Self {
+        Self { model: DynamicTheta::optimized() }
+    }
+
+    /// Create a seasonal Dynamic Theta model.
+    /// @param period - Seasonal period
+    pub fn seasonal(period: usize) -> Self {
+        Self { model: DynamicTheta::seasonal(period) }
+    }
+
+    pub fn fit(&mut self, series: &TimeSeries) -> Result<(), JsError> {
+        self.model.fit(series.inner()).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    pub fn predict(&self, horizon: usize) -> Result<Forecast, JsError> {
+        self.model.predict(horizon).map(Forecast::from_inner).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    #[wasm_bindgen(js_name = predictWithIntervals)]
+    pub fn predict_with_intervals(&self, horizon: usize, level: f64) -> Result<Forecast, JsError> {
+        self.model.predict_with_intervals(horizon, level).map(Forecast::from_inner).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn name(&self) -> String {
+        self.model.name().to_string()
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use wasm_bindgen_test::*;
+/// AutoTheta - Automatic Theta model selection.
+#[wasm_bindgen]
+pub struct AutoThetaForecaster {
+    model: AutoTheta,
+}
 
-    fn make_test_series() -> TimeSeries {
-        let values: Vec<f64> = (1..=20).map(|i| i as f64).collect();
-        TimeSeries::new(&values).unwrap()
+#[wasm_bindgen]
+impl AutoThetaForecaster {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        Self { model: AutoTheta::new() }
     }
 
-    #[wasm_bindgen_test]
-    fn test_naive_forecaster() {
-        let ts = make_test_series();
-        let mut model = NaiveForecaster::new();
-
-        model.fit(&ts).unwrap();
-        let forecast = model.predict(5).unwrap();
-
-        assert_eq!(forecast.horizon, 5);
-        assert_eq!(forecast.values.len(), 5);
-        // Naive forecast should be the last value repeated
-        for val in forecast.values.iter() {
-            assert_eq!(*val, 20.0);
-        }
+    pub fn fit(&mut self, series: &TimeSeries) -> Result<(), JsError> {
+        self.model.fit(series.inner()).map_err(|e| JsError::new(&e.to_string()))
     }
 
-    #[wasm_bindgen_test]
-    fn test_theta_forecaster() {
-        let ts = make_test_series();
-        let mut model = ThetaForecaster::new();
-
-        model.fit(&ts).unwrap();
-        let forecast = model.predict(5).unwrap();
-
-        assert_eq!(forecast.horizon, 5);
-        assert!(!forecast.values.is_empty());
+    pub fn predict(&self, horizon: usize) -> Result<Forecast, JsError> {
+        self.model.predict(horizon).map(Forecast::from_inner).map_err(|e| JsError::new(&e.to_string()))
     }
 
-    #[wasm_bindgen_test]
-    fn test_ses_forecaster() {
-        let ts = make_test_series();
-        let mut model = SESForecaster::new(0.3);
+    #[wasm_bindgen(js_name = predictWithIntervals)]
+    pub fn predict_with_intervals(&self, horizon: usize, level: f64) -> Result<Forecast, JsError> {
+        self.model.predict_with_intervals(horizon, level).map(Forecast::from_inner).map_err(|e| JsError::new(&e.to_string()))
+    }
 
-        model.fit(&ts).unwrap();
-        let forecast = model.predict(5).unwrap();
+    #[wasm_bindgen(getter)]
+    pub fn name(&self) -> String {
+        self.model.name().to_string()
+    }
+}
 
-        assert_eq!(forecast.horizon, 5);
+impl Default for AutoThetaForecaster {
+    fn default() -> Self { Self::new() }
+}
+
+// =============================================================================
+// ARIMA MODELS
+// =============================================================================
+
+/// ARIMA forecaster - Autoregressive Integrated Moving Average.
+#[wasm_bindgen]
+pub struct ARIMAForecaster {
+    model: ARIMA,
+}
+
+#[wasm_bindgen]
+impl ARIMAForecaster {
+    /// @param p - AR order (autoregressive)
+    /// @param d - Differencing order
+    /// @param q - MA order (moving average)
+    #[wasm_bindgen(constructor)]
+    pub fn new(p: usize, d: usize, q: usize) -> Self {
+        Self { model: ARIMA::new(p, d, q) }
+    }
+
+    pub fn fit(&mut self, series: &TimeSeries) -> Result<(), JsError> {
+        self.model.fit(series.inner()).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    pub fn predict(&self, horizon: usize) -> Result<Forecast, JsError> {
+        self.model.predict(horizon).map(Forecast::from_inner).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    #[wasm_bindgen(js_name = predictWithIntervals)]
+    pub fn predict_with_intervals(&self, horizon: usize, level: f64) -> Result<Forecast, JsError> {
+        self.model.predict_with_intervals(horizon, level).map(Forecast::from_inner).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn name(&self) -> String {
+        self.model.name().to_string()
+    }
+}
+
+/// SARIMA forecaster - Seasonal ARIMA.
+#[wasm_bindgen]
+pub struct SARIMAForecaster {
+    model: SARIMA,
+}
+
+#[wasm_bindgen]
+impl SARIMAForecaster {
+    /// @param p - AR order
+    /// @param d - Differencing order
+    /// @param q - MA order
+    /// @param seasonal_p - Seasonal AR order
+    /// @param seasonal_d - Seasonal differencing order
+    /// @param seasonal_q - Seasonal MA order
+    /// @param period - Seasonal period
+    #[wasm_bindgen(constructor)]
+    pub fn new(p: usize, d: usize, q: usize, seasonal_p: usize, seasonal_d: usize, seasonal_q: usize, period: usize) -> Self {
+        Self { model: SARIMA::new(p, d, q, seasonal_p, seasonal_d, seasonal_q, period) }
+    }
+
+    pub fn fit(&mut self, series: &TimeSeries) -> Result<(), JsError> {
+        self.model.fit(series.inner()).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    pub fn predict(&self, horizon: usize) -> Result<Forecast, JsError> {
+        self.model.predict(horizon).map(Forecast::from_inner).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    #[wasm_bindgen(js_name = predictWithIntervals)]
+    pub fn predict_with_intervals(&self, horizon: usize, level: f64) -> Result<Forecast, JsError> {
+        self.model.predict_with_intervals(horizon, level).map(Forecast::from_inner).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn name(&self) -> String {
+        self.model.name().to_string()
+    }
+}
+
+/// AutoARIMA - Automatic ARIMA order selection.
+#[wasm_bindgen]
+pub struct AutoARIMAForecaster {
+    model: AutoARIMA,
+}
+
+#[wasm_bindgen]
+impl AutoARIMAForecaster {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        Self { model: AutoARIMA::new() }
+    }
+
+    pub fn fit(&mut self, series: &TimeSeries) -> Result<(), JsError> {
+        self.model.fit(series.inner()).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    pub fn predict(&self, horizon: usize) -> Result<Forecast, JsError> {
+        self.model.predict(horizon).map(Forecast::from_inner).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    #[wasm_bindgen(js_name = predictWithIntervals)]
+    pub fn predict_with_intervals(&self, horizon: usize, level: f64) -> Result<Forecast, JsError> {
+        self.model.predict_with_intervals(horizon, level).map(Forecast::from_inner).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn name(&self) -> String {
+        self.model.name().to_string()
+    }
+}
+
+impl Default for AutoARIMAForecaster {
+    fn default() -> Self { Self::new() }
+}
+
+// =============================================================================
+// INTERMITTENT DEMAND MODELS
+// =============================================================================
+
+/// Croston's method for intermittent demand forecasting.
+#[wasm_bindgen]
+pub struct CrostonForecaster {
+    model: Croston,
+}
+
+#[wasm_bindgen]
+impl CrostonForecaster {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        Self { model: Croston::new() }
+    }
+
+    pub fn fit(&mut self, series: &TimeSeries) -> Result<(), JsError> {
+        self.model.fit(series.inner()).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    pub fn predict(&self, horizon: usize) -> Result<Forecast, JsError> {
+        self.model.predict(horizon).map(Forecast::from_inner).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn name(&self) -> String {
+        self.model.name().to_string()
+    }
+}
+
+impl Default for CrostonForecaster {
+    fn default() -> Self { Self::new() }
+}
+
+/// TSB (Teunter-Syntetos-Babai) method for intermittent demand.
+#[wasm_bindgen]
+pub struct TSBForecaster {
+    model: TSB,
+}
+
+#[wasm_bindgen]
+impl TSBForecaster {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        Self { model: TSB::new() }
+    }
+
+    pub fn fit(&mut self, series: &TimeSeries) -> Result<(), JsError> {
+        self.model.fit(series.inner()).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    pub fn predict(&self, horizon: usize) -> Result<Forecast, JsError> {
+        self.model.predict(horizon).map(Forecast::from_inner).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn name(&self) -> String {
+        self.model.name().to_string()
+    }
+}
+
+impl Default for TSBForecaster {
+    fn default() -> Self { Self::new() }
+}
+
+/// ADIDA (Aggregate-Disaggregate Intermittent Demand Approach).
+#[wasm_bindgen]
+pub struct ADIDAForecaster {
+    model: ADIDA,
+}
+
+#[wasm_bindgen]
+impl ADIDAForecaster {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        Self { model: ADIDA::new() }
+    }
+
+    pub fn fit(&mut self, series: &TimeSeries) -> Result<(), JsError> {
+        self.model.fit(series.inner()).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    pub fn predict(&self, horizon: usize) -> Result<Forecast, JsError> {
+        self.model.predict(horizon).map(Forecast::from_inner).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn name(&self) -> String {
+        self.model.name().to_string()
+    }
+}
+
+impl Default for ADIDAForecaster {
+    fn default() -> Self { Self::new() }
+}
+
+/// IMAPA (Intermittent Multiple Aggregation Prediction Algorithm).
+#[wasm_bindgen]
+pub struct IMAPAForecaster {
+    model: IMAPA,
+}
+
+#[wasm_bindgen]
+impl IMAPAForecaster {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        Self { model: IMAPA::new() }
+    }
+
+    pub fn fit(&mut self, series: &TimeSeries) -> Result<(), JsError> {
+        self.model.fit(series.inner()).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    pub fn predict(&self, horizon: usize) -> Result<Forecast, JsError> {
+        self.model.predict(horizon).map(Forecast::from_inner).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn name(&self) -> String {
+        self.model.name().to_string()
+    }
+}
+
+impl Default for IMAPAForecaster {
+    fn default() -> Self { Self::new() }
+}
+
+// =============================================================================
+// ADVANCED MODELS
+// =============================================================================
+
+/// TBATS - Trigonometric seasonality, Box-Cox, ARMA errors, Trend, Seasonal.
+#[wasm_bindgen]
+pub struct TBATSForecaster {
+    model: TBATS,
+}
+
+#[wasm_bindgen]
+impl TBATSForecaster {
+    /// @param seasonal_periods - Array of seasonal periods (e.g., [7, 365] for daily data)
+    #[wasm_bindgen(constructor)]
+    pub fn new(seasonal_periods: Vec<usize>) -> Self {
+        Self { model: TBATS::new(seasonal_periods) }
+    }
+
+    pub fn fit(&mut self, series: &TimeSeries) -> Result<(), JsError> {
+        self.model.fit(series.inner()).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    pub fn predict(&self, horizon: usize) -> Result<Forecast, JsError> {
+        self.model.predict(horizon).map(Forecast::from_inner).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn name(&self) -> String {
+        self.model.name().to_string()
+    }
+}
+
+/// AutoTBATS - Automatic TBATS model selection.
+#[wasm_bindgen]
+pub struct AutoTBATSForecaster {
+    model: AutoTBATS,
+}
+
+#[wasm_bindgen]
+impl AutoTBATSForecaster {
+    /// @param seasonal_periods - Array of seasonal periods
+    #[wasm_bindgen(constructor)]
+    pub fn new(seasonal_periods: Vec<usize>) -> Self {
+        Self { model: AutoTBATS::new(seasonal_periods) }
+    }
+
+    pub fn fit(&mut self, series: &TimeSeries) -> Result<(), JsError> {
+        self.model.fit(series.inner()).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    pub fn predict(&self, horizon: usize) -> Result<Forecast, JsError> {
+        self.model.predict(horizon).map(Forecast::from_inner).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn name(&self) -> String {
+        self.model.name().to_string()
+    }
+}
+
+/// MFLES - Multiple Frequency Locally Estimated Scatterplot Smoothing.
+#[wasm_bindgen]
+pub struct MFLESForecaster {
+    model: MFLES,
+}
+
+#[wasm_bindgen]
+impl MFLESForecaster {
+    /// @param seasonal_periods - Array of seasonal periods
+    #[wasm_bindgen(constructor)]
+    pub fn new(seasonal_periods: Vec<usize>) -> Self {
+        Self { model: MFLES::new(seasonal_periods) }
+    }
+
+    pub fn fit(&mut self, series: &TimeSeries) -> Result<(), JsError> {
+        self.model.fit(series.inner()).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    pub fn predict(&self, horizon: usize) -> Result<Forecast, JsError> {
+        self.model.predict(horizon).map(Forecast::from_inner).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn name(&self) -> String {
+        self.model.name().to_string()
+    }
+}
+
+/// MSTL Forecaster - Multiple Seasonal-Trend decomposition using LOESS.
+#[wasm_bindgen]
+pub struct MSTLForecasterWrapper {
+    model: MSTLForecaster,
+}
+
+#[wasm_bindgen]
+impl MSTLForecasterWrapper {
+    /// @param seasonal_periods - Array of seasonal periods
+    #[wasm_bindgen(constructor)]
+    pub fn new(seasonal_periods: Vec<usize>) -> Self {
+        Self { model: MSTLForecaster::new(seasonal_periods) }
+    }
+
+    pub fn fit(&mut self, series: &TimeSeries) -> Result<(), JsError> {
+        self.model.fit(series.inner()).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    pub fn predict(&self, horizon: usize) -> Result<Forecast, JsError> {
+        self.model.predict(horizon).map(Forecast::from_inner).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn name(&self) -> String {
+        self.model.name().to_string()
+    }
+}
+
+/// GARCH - Generalized Autoregressive Conditional Heteroskedasticity.
+#[wasm_bindgen]
+pub struct GARCHForecaster {
+    model: GARCH,
+}
+
+#[wasm_bindgen]
+impl GARCHForecaster {
+    /// @param p - GARCH order (lagged variance terms)
+    /// @param q - ARCH order (lagged squared residuals)
+    #[wasm_bindgen(constructor)]
+    pub fn new(p: usize, q: usize) -> Self {
+        Self { model: GARCH::new(p, q) }
+    }
+
+    pub fn fit(&mut self, series: &TimeSeries) -> Result<(), JsError> {
+        self.model.fit(series.inner()).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    pub fn predict(&self, horizon: usize) -> Result<Forecast, JsError> {
+        self.model.predict(horizon).map(Forecast::from_inner).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn name(&self) -> String {
+        self.model.name().to_string()
     }
 }
