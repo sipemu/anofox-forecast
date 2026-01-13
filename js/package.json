@@ -1,0 +1,35 @@
+{
+  "name": "@anofox/forecast",
+  "version": "0.4.0",
+  "description": "Time series forecasting library - WebAssembly bindings for anofox-forecast",
+  "type": "module",
+  "main": "anofox_forecast_js.js",
+  "types": "anofox_forecast_js.d.ts",
+  "files": [
+    "*.wasm",
+    "*.js",
+    "*.d.ts",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sipemu/anofox-forecast"
+  },
+  "keywords": [
+    "time-series",
+    "forecasting",
+    "wasm",
+    "webassembly",
+    "arima",
+    "ets",
+    "theta",
+    "statistics"
+  ],
+  "author": "Simon M",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/sipemu/anofox-forecast/issues"
+  },
+  "homepage": "https://github.com/sipemu/anofox-forecast#readme",
+  "sideEffects": false
+}

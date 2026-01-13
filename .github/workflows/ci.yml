@@ -75,6 +75,22 @@ jobs:
         run: cargo build --target wasm32-unknown-unknown --features postprocess,js
       - name: Check for WASM (no features)
         run: cargo check --target wasm32-unknown-unknown --no-default-features
+      - name: Build anofox-forecast-js crate
+        run: cargo build -p anofox-forecast-js --target wasm32-unknown-unknown --release
+
+  wasm-test:
+    name: WASM Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - name: Run WASM tests
+        run: wasm-pack test --headless --chrome crates/anofox-forecast-js
 
   coverage:
     name: Coverage
@@ -99,7 +115,7 @@ jobs:
   publish:
     name: Publish to crates.io
     runs-on: ubuntu-latest
-    needs: [test, clippy, fmt, docs, wasm]
+    needs: [test, clippy, fmt, docs, wasm, wasm-test]
     if: github.event_name == 'release'
     steps:
       - uses: actions/checkout@v4
