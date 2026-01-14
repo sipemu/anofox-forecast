@@ -56,6 +56,18 @@ This document provides a comprehensive reference for all public APIs in the `ano
 - [Validation](#validation)
 - [Changepoint Detection](#changepoint-detection)
 - [Utilities](#utilities)
+- [Probabilistic Postprocessing](#probabilistic-postprocessing)
+  - [PointForecasts](#pointforecasts)
+  - [QuantileForecasts](#quantileforecasts)
+  - [PredictionIntervals](#predictionintervals)
+  - [ConformalPredictor](#conformalpredictor)
+  - [HistoricalSimulator](#historicalsimulator)
+  - [NormalPredictor](#normalpredictor)
+  - [IDRPredictor](#idrpredictor)
+  - [QRAPredictor](#qrapredictor)
+  - [PostProcessor](#postprocessor)
+  - [Backtesting](#backtesting)
+  - [Conformalize](#conformalize)
 
 ---
 
@@ -1378,6 +1390,410 @@ use anofox_forecast::utils::bootstrap::{bootstrap_forecast, BootstrapConfig};
 
 let config = BootstrapConfig::new(500).with_seed(42);
 let forecast = bootstrap_forecast(&model, &ts, 12, 0.95, &config)?;
+```
+
+[Back to top](#api-reference)
+
+---
+
+## Probabilistic Postprocessing
+
+The postprocessing module provides methods to convert point forecasts into calibrated
+predictive distributions with coverage guarantees. It follows the approach of
+[PostForecasts.jl](https://github.com/lipiecki/PostForecasts.jl).
+
+### Core Types
+
+#### PointForecasts
+
+Point forecasts with optional timestamps and metadata.
+
+```rust
+pub struct PointForecasts {
+    timestamps: Vec<DateTime<Utc>>,
+    values: Vec<f64>,
+    model_name: Option<String>,
+}
+
+impl PointForecasts {
+    pub fn new(timestamps: Vec<DateTime<Utc>>, values: Vec<f64>) -> Result<Self>;
+    pub fn from_values(values: Vec<f64>) -> Self;
+    pub fn empty() -> Self;
+    pub fn with_model_name(self, name: impl Into<String>) -> Self;
+    pub fn len(&self) -> usize;
+    pub fn values(&self) -> &[f64];
+    pub fn timestamps(&self) -> &[DateTime<Utc>];
+}
+```
+
+#### QuantileForecasts
+
+Multi-quantile forecasts representing a discrete predictive distribution.
+
+```rust
+pub struct QuantileForecasts {
+    timestamps: Vec<DateTime<Utc>>,
+    quantiles: Vec<f64>,
+    values: Vec<Vec<f64>>,  // values[time][quantile]
+}
+
+impl QuantileForecasts {
+    pub fn new(timestamps: Vec<DateTime<Utc>>, quantiles: Vec<f64>, values: Vec<Vec<f64>>) -> Result<Self>;
+    pub fn from_values(quantiles: Vec<f64>, values: Vec<Vec<f64>>) -> Result<Self>;
+    pub fn n_times(&self) -> usize;
+    pub fn n_quantiles(&self) -> usize;
+    pub fn quantiles(&self) -> &[f64];
+    pub fn at_time(&self, idx: usize) -> Option<&[f64]>;
+    pub fn at_quantile(&self, idx: usize) -> Option<Vec<f64>>;
+    pub fn median(&self) -> Option<Vec<f64>>;
+    pub fn to_prediction_intervals(&self, coverage: f64) -> Option<PredictionIntervals>;
+}
+```
+
+#### PredictionIntervals
+
+Lower and upper bounds with coverage level.
+
+```rust
+pub struct PredictionIntervals {
+    timestamps: Vec<DateTime<Utc>>,
+    lower: Vec<f64>,
+    upper: Vec<f64>,
+    coverage: f64,
+}
+
+impl PredictionIntervals {
+    pub fn new(timestamps: Vec<DateTime<Utc>>, lower: Vec<f64>, upper: Vec<f64>, coverage: f64) -> Result<Self>;
+    pub fn from_bounds(lower: Vec<f64>, upper: Vec<f64>, coverage: f64) -> Result<Self>;
+    pub fn lower(&self) -> &[f64];
+    pub fn upper(&self) -> &[f64];
+    pub fn coverage(&self) -> f64;
+    pub fn widths(&self) -> Vec<f64>;
+    pub fn midpoints(&self) -> Vec<f64>;
+    pub fn contains(&self, values: &[f64]) -> Vec<bool>;
+    pub fn empirical_coverage(&self, actuals: &[f64]) -> Option<f64>;
+}
+```
+
+[Back to top](#api-reference)
+
+---
+
+### ConformalPredictor
+
+Distribution-free prediction intervals with coverage guarantees.
+
+```rust
+pub struct ConformalPredictor {
+    coverage: f64,
+    method: ConformalMethod,
+}
+
+pub enum ConformalMethod {
+    Split { cal_fraction: f64 },
+    CrossVal { n_folds: usize },
+    JackknifePlus,
+}
+
+impl ConformalPredictor {
+    pub fn new(coverage: f64, method: ConformalMethod) -> Self;
+    pub fn split(coverage: f64) -> Self;
+    pub fn cross_val(coverage: f64, n_folds: usize) -> Self;
+    pub fn jackknife_plus(coverage: f64) -> Self;
+    pub fn fit(&self, forecasts: &[f64], actuals: &[f64]) -> Result<ConformalResult>;
+    pub fn predict(&self, result: &ConformalResult, forecasts: &PointForecasts) -> PredictionIntervals;
+    pub fn predict_values(&self, result: &ConformalResult, values: &[f64]) -> PredictionIntervals;
+}
+
+pub struct ConformalResult {
+    pub fn scores(&self) -> &[f64];
+    pub fn quantile_value(&self) -> f64;
+    pub fn coverage(&self) -> f64;
+    pub fn method(&self) -> &ConformalMethod;
+}
+```
+
+| Method | Description |
+|--------|-------------|
+| `Split` | Fast method using a holdout calibration set |
+| `CrossVal` | Uses all data via k-fold cross-validation |
+| `JackknifePlus` | Leave-one-out with finite sample validity |
+
+**Example:**
+```rust
+use anofox_forecast::postprocess::{ConformalPredictor, ConformalMethod, PointForecasts};
+
+let predictor = ConformalPredictor::split(0.90);
+let result = predictor.fit(&historical_forecasts, &historical_actuals)?;
+
+let new_forecasts = PointForecasts::from_values(vec![20.0, 21.0, 22.0]);
+let intervals = predictor.predict(&result, &new_forecasts);
+```
+
+[Back to top](#api-reference)
+
+---
+
+### HistoricalSimulator
+
+Non-parametric empirical error distribution for uncertainty quantification.
+
+```rust
+pub struct HistoricalSimulator {
+    quantiles: Vec<f64>,
+    window_size: Option<usize>,
+}
+
+impl HistoricalSimulator {
+    pub fn new(quantiles: Vec<f64>) -> Self;
+    pub fn with_window(quantiles: Vec<f64>, window_size: usize) -> Self;
+    pub fn fit(&self, forecasts: &[f64], actuals: &[f64]) -> Result<HistoricalSimResult>;
+    pub fn predict_values(&self, result: &HistoricalSimResult, values: &[f64]) -> Result<QuantileForecasts>;
+}
+```
+
+[Back to top](#api-reference)
+
+---
+
+### NormalPredictor
+
+Gaussian error assumption baseline for uncertainty quantification.
+
+```rust
+pub struct NormalPredictor {
+    quantiles: Vec<f64>,
+}
+
+impl NormalPredictor {
+    pub fn new(quantiles: Vec<f64>) -> Self;
+    pub fn fit(&self, forecasts: &[f64], actuals: &[f64]) -> Result<NormalResult>;
+    pub fn predict_values(&self, result: &NormalResult, values: &[f64]) -> Result<QuantileForecasts>;
+}
+```
+
+[Back to top](#api-reference)
+
+---
+
+### IDRPredictor
+
+Isotonic Distributional Regression for state-of-the-art calibration.
+
+```rust
+pub struct IDRPredictor {
+    quantiles: Vec<f64>,
+}
+
+impl IDRPredictor {
+    pub fn new(quantiles: Vec<f64>) -> Self;
+    pub fn fit(&self, forecasts: &[f64], actuals: &[f64]) -> Result<IDRResult>;
+    pub fn predict_values(&self, result: &IDRResult, values: &[f64]) -> Result<QuantileForecasts>;
+}
+```
+
+[Back to top](#api-reference)
+
+---
+
+### QRAPredictor
+
+Quantile Regression Averaging for ensemble combining.
+
+```rust
+pub struct QRAPredictor {
+    quantiles: Vec<f64>,
+    regularization: QRARegularization,
+}
+
+pub enum QRARegularization {
+    None,
+    L1(f64),
+    L2(f64),
+}
+
+impl QRAPredictor {
+    pub fn new(quantiles: Vec<f64>) -> Self;
+    pub fn with_regularization(quantiles: Vec<f64>, reg: QRARegularization) -> Self;
+}
+```
+
+[Back to top](#api-reference)
+
+---
+
+### PostProcessor
+
+Unified interface for all postprocessing methods.
+
+```rust
+pub struct PostProcessor {
+    model: PostModel,
+}
+
+pub enum PostModel {
+    Conformal { coverage: f64, method: ConformalMethod },
+    HistoricalSim { quantiles: Vec<f64>, window_size: Option<usize> },
+    Normal { quantiles: Vec<f64> },
+    IDR { quantiles: Vec<f64> },
+}
+
+impl PostProcessor {
+    pub fn new(model: PostModel) -> Self;
+    pub fn conformal(coverage: f64) -> Self;
+    pub fn historical_sim(quantiles: Vec<f64>) -> Self;
+    pub fn normal(quantiles: Vec<f64>) -> Self;
+    pub fn idr(quantiles: Vec<f64>) -> Self;
+    pub fn train(&self, forecasts: &PointForecasts, actuals: &[f64]) -> Result<TrainedModel>;
+    pub fn predict_intervals(&self, trained: &TrainedModel, forecasts: &PointForecasts) -> Result<PredictionIntervals>;
+    pub fn predict_quantiles(&self, trained: &TrainedModel, forecasts: &PointForecasts) -> Result<QuantileForecasts>;
+    pub fn point_to_quantiles(&self, train_forecasts: &PointForecasts, train_actuals: &[f64], predict_forecasts: &PointForecasts) -> Result<QuantileForecasts>;
+}
+
+pub enum TrainedModel {
+    Conformal(ConformalResult),
+    HistoricalSim(HistoricalSimResult),
+    Normal(NormalResult),
+    IDR(IDRResult),
+}
+```
+
+**Example:**
+```rust
+use anofox_forecast::postprocess::{PostProcessor, PointForecasts};
+
+// Create a conformal processor with 90% coverage
+let processor = PostProcessor::conformal(0.90);
+
+// Train on historical data
+let train_forecasts = PointForecasts::from_values(historical_f);
+let trained = processor.train(&train_forecasts, &historical_actuals)?;
+
+// Generate prediction intervals
+let new_forecasts = PointForecasts::from_values(new_f);
+let intervals = processor.predict_intervals(&trained, &new_forecasts)?;
+```
+
+[Back to top](#api-reference)
+
+---
+
+### Backtesting
+
+Rolling/expanding window backtesting with horizon-aware calibration.
+
+```rust
+pub struct BacktestConfig {
+    pub initial_window: usize,
+    pub step: usize,
+    pub horizon: usize,
+    pub expanding: bool,
+    pub horizon_aware: bool,
+}
+
+impl BacktestConfig {
+    pub fn new() -> Self;
+    pub fn initial_window(self, size: usize) -> Self;
+    pub fn step(self, step: usize) -> Self;
+    pub fn horizon(self, horizon: usize) -> Self;
+    pub fn expanding(self, expanding: bool) -> Self;
+    pub fn horizon_aware(self, aware: bool) -> Self;
+}
+
+pub struct BacktestResult {
+    pub fn n_folds(&self) -> usize;
+    pub fn config(&self) -> &BacktestConfig;
+    pub fn folds(&self) -> impl Iterator<Item = &BacktestFold>;
+    pub fn coverage(&self) -> f64;
+    pub fn calibration_error(&self, target_coverage: f64) -> f64;
+    pub fn interval_widths(&self) -> f64;
+    pub fn coverage_by_horizon(&self) -> &HashMap<usize, f64>;
+    pub fn calibrated_model(&self, processor: &PostProcessor) -> Result<TrainedModel>;
+    pub fn calibrated_model_by_horizon(&self, processor: &PostProcessor) -> Result<CalibratedModelByHorizon>;
+}
+
+pub struct BacktestFold {
+    pub fold_idx: usize,
+    pub train_start: usize,
+    pub train_end: usize,
+    pub test_start: usize,
+    pub test_end: usize,
+    pub intervals: PredictionIntervals,
+    pub actuals: Vec<f64>,
+    pub coverage: f64,
+    pub avg_width: f64,
+}
+```
+
+**Example:**
+```rust
+use anofox_forecast::postprocess::{PostProcessor, BacktestConfig, PointForecasts};
+
+let processor = PostProcessor::conformal(0.90);
+
+let config = BacktestConfig::new()
+    .initial_window(100)
+    .step(10)
+    .horizon(7)
+    .horizon_aware(true);
+
+let forecasts = PointForecasts::from_values(all_forecasts);
+let results = processor.backtest(&forecasts, &all_actuals, config)?;
+
+println!("Coverage: {:.1}%", results.coverage() * 100.0);
+println!("Calibration error: {:.3}", results.calibration_error(0.90));
+```
+
+[Back to top](#api-reference)
+
+---
+
+### Conformalize
+
+Recalibrate quantile forecasts using conformal prediction.
+
+```rust
+pub fn conformalize(
+    forecasts: &QuantileForecasts,
+    calib_forecasts: &QuantileForecasts,
+    calib_actuals: &[f64],
+) -> Result<ConformalizeResult>;
+
+pub fn conformalize_with_config(
+    forecasts: &QuantileForecasts,
+    calib_forecasts: &QuantileForecasts,
+    calib_actuals: &[f64],
+    config: ConformalizeConfig,
+) -> Result<ConformalizeResult>;
+
+pub struct ConformalizeConfig {
+    method: ConformalMethod,
+    symmetric: bool,
+}
+
+impl ConformalizeConfig {
+    pub fn new() -> Self;
+    pub fn method(self, method: ConformalMethod) -> Self;
+    pub fn symmetric(self, symmetric: bool) -> Self;
+}
+
+pub struct ConformalizeResult {
+    pub fn forecasts(&self) -> &QuantileForecasts;
+    pub fn into_forecasts(self) -> QuantileForecasts;
+    pub fn adjustments(&self) -> &[f64];
+    pub fn original_coverage(&self) -> &[f64];
+}
+```
+
+**Example:**
+```rust
+use anofox_forecast::postprocess::{conformalize, QuantileForecasts};
+
+// Calibrate quantile forecasts
+let calibrated = conformalize(&test_forecasts, &calib_forecasts, &calib_actuals)?;
+
+// Get the recalibrated forecasts
+let improved = calibrated.into_forecasts();
 ```
 
 [Back to top](#api-reference)
