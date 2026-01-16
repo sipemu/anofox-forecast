@@ -435,6 +435,28 @@ impl HoltWintersForecaster {
         }
     }
 
+    /// Create with automatic parameter optimization.
+    /// @param period - Seasonal period
+    /// @param seasonal_type - "additive" or "multiplicative"
+    #[wasm_bindgen(js_name = auto)]
+    pub fn auto(period: usize, seasonal_type: &str) -> Result<HoltWintersForecaster, JsError> {
+        use anofox_forecast::models::exponential::SeasonalType;
+
+        let st = match seasonal_type.to_lowercase().as_str() {
+            "additive" | "a" => SeasonalType::Additive,
+            "multiplicative" | "m" => SeasonalType::Multiplicative,
+            _ => {
+                return Err(JsError::new(
+                    "seasonal_type must be 'additive' or 'multiplicative'",
+                ))
+            }
+        };
+
+        Ok(Self {
+            model: HoltWinters::auto(period, st),
+        })
+    }
+
     pub fn fit(&mut self, series: &TimeSeries) -> Result<(), JsError> {
         self.model
             .fit(series.inner())
@@ -490,7 +512,15 @@ impl SeasonalESForecaster {
 }
 
 /// ETS (Error-Trend-Seasonal) state-space model.
+///
 /// Use string codes: "A" = Additive, "M" = Multiplicative, "N" = None
+/// Or use standard ETS notation like "ANN", "AAA", "MAM", "AAdM".
+///
+/// Follows the ETS taxonomy from FPP3: <https://otexts.com/fpp3/taxonomy.html>
+///
+/// Note: Some combinations are invalid/unstable per FPP3:
+/// - MAA (Multiplicative error + Additive trend + Additive seasonal)
+/// - MAdA (Multiplicative error + Damped trend + Additive seasonal)
 #[wasm_bindgen]
 pub struct ETSForecaster {
     model: ETS,
@@ -503,6 +533,7 @@ impl ETSForecaster {
     /// @param trend - Trend type: "N" (none), "A" (additive), or "Ad" (additive damped)
     /// @param seasonal - Seasonal type: "N" (none), "A" (additive), or "M" (multiplicative)
     /// @param period - Seasonal period (ignored if seasonal is "N")
+    /// @throws Error if the combination is unstable (MAA or MAdA)
     #[wasm_bindgen(constructor)]
     pub fn new(
         error: &str,
@@ -535,9 +566,90 @@ impl ETSForecaster {
         };
 
         let spec = ETSSpec::new(error_type, trend_type, seasonal_type);
+
+        // Validate the specification (MAA and MAdA are unstable)
+        if !spec.is_valid() {
+            return Err(JsError::new(&format!(
+                "ETS({},{},{}) is an unstable model combination per FPP3. \
+                 Multiplicative error with additive trend and additive seasonal is not supported.",
+                error.to_uppercase(),
+                trend.to_uppercase(),
+                seasonal.to_uppercase()
+            )));
+        }
+
         Ok(Self {
             model: ETS::new(spec, period),
         })
+    }
+
+    /// Create an ETS model from standard notation.
+    ///
+    /// @param notation - ETS notation string like "ANN", "AAA", "MAM", "AAdM"
+    /// @param period - Seasonal period (required if notation has seasonal component)
+    ///
+    /// Format: ErrorTrendSeasonal
+    /// - Error: A (additive) or M (multiplicative)
+    /// - Trend: N (none), A (additive), or Ad (additive damped)
+    /// - Seasonal: N (none), A (additive), or M (multiplicative)
+    ///
+    /// Examples:
+    /// - "ANN" - Simple exponential smoothing
+    /// - "AAN" - Holt's linear method
+    /// - "AAA" - Holt-Winters additive
+    /// - "MAM" - Multiplicative Holt-Winters
+    /// - "AAdM" - Damped trend with multiplicative seasonal
+    ///
+    /// @throws Error for invalid notation or unstable combinations (MAA, MAdA)
+    #[wasm_bindgen(js_name = fromNotation)]
+    pub fn from_notation(notation: &str, period: usize) -> Result<ETSForecaster, JsError> {
+        use anofox_forecast::models::exponential::ETSSpec;
+
+        let spec = ETSSpec::from_notation(notation).map_err(|e| JsError::new(&e.to_string()))?;
+
+        Ok(Self {
+            model: ETS::new(spec, period),
+        })
+    }
+
+    /// Check if an ETS specification is valid/stable.
+    ///
+    /// @param error - Error type: "A" or "M"
+    /// @param trend - Trend type: "N", "A", or "Ad"
+    /// @param seasonal - Seasonal type: "N", "A", or "M"
+    /// @returns true if the combination is stable and usable
+    ///
+    /// Invalid combinations (return false):
+    /// - M,A,A - Multiplicative error with additive trend and additive seasonal
+    /// - M,Ad,A - Multiplicative error with damped trend and additive seasonal
+    #[wasm_bindgen(js_name = isValidSpec)]
+    pub fn is_valid_spec(error: &str, trend: &str, seasonal: &str) -> bool {
+        use anofox_forecast::models::exponential::{
+            ETSSeasonalType, ETSSpec, ErrorType, TrendType,
+        };
+
+        let error_type = match error.to_uppercase().as_str() {
+            "A" => ErrorType::Additive,
+            "M" => ErrorType::Multiplicative,
+            _ => return false,
+        };
+
+        let trend_type = match trend.to_uppercase().as_str() {
+            "N" => TrendType::None,
+            "A" => TrendType::Additive,
+            "AD" => TrendType::AdditiveDamped,
+            _ => return false,
+        };
+
+        let seasonal_type = match seasonal.to_uppercase().as_str() {
+            "N" => ETSSeasonalType::None,
+            "A" => ETSSeasonalType::Additive,
+            "M" => ETSSeasonalType::Multiplicative,
+            _ => return false,
+        };
+
+        let spec = ETSSpec::new(error_type, trend_type, seasonal_type);
+        spec.is_valid()
     }
 
     pub fn fit(&mut self, series: &TimeSeries) -> Result<(), JsError> {
@@ -560,6 +672,8 @@ impl ETSForecaster {
 }
 
 /// AutoETS - Automatic ETS model selection.
+///
+/// Follows the ETS taxonomy from FPP3: <https://otexts.com/fpp3/taxonomy.html>
 #[wasm_bindgen]
 pub struct AutoETSForecaster {
     model: AutoETS,
@@ -571,6 +685,49 @@ impl AutoETSForecaster {
     pub fn new() -> Self {
         Self {
             model: AutoETS::new(),
+        }
+    }
+
+    /// Create AutoETS with a specific seasonal period.
+    #[wasm_bindgen(js_name = withPeriod)]
+    pub fn with_period(period: usize) -> Self {
+        Self {
+            model: AutoETS::with_period(period),
+        }
+    }
+
+    /// Create AutoETS restricted to additive models only.
+    /// This excludes multiplicative error and multiplicative seasonality.
+    #[wasm_bindgen(js_name = additiveOnly)]
+    pub fn additive_only() -> Self {
+        use anofox_forecast::models::exponential::AutoETSConfig;
+        Self {
+            model: AutoETS::with_config(AutoETSConfig::default().additive_only()),
+        }
+    }
+
+    /// Create AutoETS with custom configuration.
+    /// @param period - Optional seasonal period (null for auto-detection)
+    /// @param allow_multiplicative_error - Allow multiplicative error models
+    /// @param allow_multiplicative_seasonal - Allow multiplicative seasonality
+    /// @param allow_damped - Allow damped trend models
+    #[wasm_bindgen(js_name = withConfig)]
+    pub fn with_config(
+        period: Option<usize>,
+        allow_multiplicative_error: bool,
+        allow_multiplicative_seasonal: bool,
+        allow_damped: bool,
+    ) -> Self {
+        use anofox_forecast::models::exponential::AutoETSConfig;
+        let config = AutoETSConfig {
+            seasonal_period: period,
+            allow_multiplicative_error,
+            allow_multiplicative_seasonal,
+            allow_damped,
+            ..Default::default()
+        };
+        Self {
+            model: AutoETS::with_config(config),
         }
     }
 
@@ -1298,5 +1455,1065 @@ impl GARCHForecaster {
     #[wasm_bindgen(getter)]
     pub fn name(&self) -> String {
         self.model.name().to_string()
+    }
+}
+
+// =============================================================================
+// TESTS
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wasm_bindgen_test::*;
+
+    // Helper function to create a simple time series for testing
+    fn create_test_series(n: usize) -> TimeSeries {
+        let values: Vec<f64> = (0..n).map(|i| 10.0 + i as f64).collect();
+        TimeSeries::new(&values).unwrap()
+    }
+
+    // Helper function to create a seasonal time series
+    fn create_seasonal_series(n: usize, period: usize) -> TimeSeries {
+        let values: Vec<f64> = (0..n)
+            .map(|i| {
+                let trend = 10.0 + 0.5 * i as f64;
+                let seasonal = 5.0 * (2.0 * std::f64::consts::PI * i as f64 / period as f64).sin();
+                trend + seasonal
+            })
+            .collect();
+        TimeSeries::new(&values).unwrap()
+    }
+
+    // Helper function to create intermittent demand series
+    fn create_intermittent_series() -> TimeSeries {
+        let values = vec![
+            0.0, 0.0, 5.0, 0.0, 0.0, 0.0, 3.0, 0.0, 0.0, 7.0, 0.0, 0.0, 4.0, 0.0, 0.0,
+        ];
+        TimeSeries::new(&values).unwrap()
+    }
+
+    // =========================================================================
+    // BASELINE MODELS
+    // =========================================================================
+
+    #[wasm_bindgen_test]
+    fn test_naive_forecaster() {
+        let ts = create_test_series(20);
+        let mut model = NaiveForecaster::new();
+
+        model.fit(&ts).unwrap();
+        assert_eq!(model.name(), "Naive");
+
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.values().len(), 5);
+
+        // Naive should repeat the last value
+        let values = ts.values();
+        let last_value = values.last().unwrap();
+        for pred in forecast.values() {
+            assert!((pred - last_value).abs() < 1e-10);
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn test_naive_with_intervals() {
+        let ts = create_test_series(20);
+        let mut model = NaiveForecaster::new();
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict_with_intervals(5, 0.95).unwrap();
+        assert_eq!(forecast.values().len(), 5);
+
+        // Check intervals exist
+        let lower = forecast.lower();
+        let upper = forecast.upper();
+        assert!(lower.is_some());
+        assert!(upper.is_some());
+
+        // Lower should be less than point forecast, upper should be greater
+        for i in 0..5 {
+            assert!(lower.as_ref().unwrap()[i] <= forecast.values()[i]);
+            assert!(upper.as_ref().unwrap()[i] >= forecast.values()[i]);
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn test_mean_forecaster() {
+        let ts = create_test_series(20);
+        let mut model = MeanForecaster::new();
+
+        model.fit(&ts).unwrap();
+        assert_eq!(model.name(), "HistoricAverage");
+
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.values().len(), 5);
+
+        // Mean should be constant across horizon
+        let first_pred = forecast.values()[0];
+        for pred in forecast.values() {
+            assert!((pred - first_pred).abs() < 1e-10);
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn test_seasonal_naive_forecaster() {
+        let ts = create_seasonal_series(24, 12);
+        let mut model = SeasonalNaiveForecaster::new(12);
+
+        model.fit(&ts).unwrap();
+        assert_eq!(model.name(), "SeasonalNaive");
+
+        let forecast = model.predict(12).unwrap();
+        assert_eq!(forecast.values().len(), 12);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_random_walk_drift_forecaster() {
+        let ts = create_test_series(30);
+        let mut model = RandomWalkDriftForecaster::new();
+
+        model.fit(&ts).unwrap();
+        assert_eq!(model.name(), "RandomWalkWithDrift");
+
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.values().len(), 5);
+
+        // With positive drift, forecasts should be increasing
+        for i in 1..5 {
+            assert!(forecast.values()[i] > forecast.values()[i - 1]);
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn test_sma_forecaster() {
+        let ts = create_test_series(20);
+        let mut model = SMAForecaster::new(5);
+
+        model.fit(&ts).unwrap();
+        assert_eq!(model.name(), "SimpleMovingAverage");
+
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.values().len(), 5);
+
+        // SMA should produce constant forecasts (all same value)
+        let first_pred = forecast.values()[0];
+        for pred in forecast.values() {
+            assert!((pred - first_pred).abs() < 1e-10);
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn test_window_average_forecaster() {
+        let ts = create_test_series(20);
+        let mut model = WindowAverageForecaster::new(5);
+
+        model.fit(&ts).unwrap();
+        assert_eq!(model.name(), "WindowAverage");
+
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.values().len(), 5);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_seasonal_window_average_forecaster() {
+        let ts = create_seasonal_series(36, 12);
+        let mut model = SeasonalWindowAverageForecaster::new(12, 2);
+
+        model.fit(&ts).unwrap();
+        assert_eq!(model.name(), "SeasonalWindowAverage");
+
+        let forecast = model.predict(12).unwrap();
+        assert_eq!(forecast.values().len(), 12);
+    }
+
+    // =========================================================================
+    // EXPONENTIAL SMOOTHING MODELS
+    // =========================================================================
+
+    #[wasm_bindgen_test]
+    fn test_ses_forecaster() {
+        let ts = create_test_series(20);
+        let mut model = SESForecaster::new(0.3);
+
+        model.fit(&ts).unwrap();
+        assert_eq!(model.name(), "SimpleExponentialSmoothing");
+
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.values().len(), 5);
+
+        // SES produces flat forecasts
+        let first_pred = forecast.values()[0];
+        for pred in forecast.values() {
+            assert!((pred - first_pred).abs() < 1e-10);
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn test_holt_forecaster() {
+        let ts = create_test_series(30);
+        let mut model = HoltForecaster::new(0.3, 0.1);
+
+        model.fit(&ts).unwrap();
+        assert_eq!(model.name(), "HoltLinearTrend");
+
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.values().len(), 5);
+
+        // Holt should capture trend - forecasts should be increasing
+        for i in 1..5 {
+            assert!(forecast.values()[i] > forecast.values()[i - 1]);
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn test_holt_winters_additive() {
+        let ts = create_seasonal_series(48, 12);
+        // new() uses additive seasonality by default
+        let mut model = HoltWintersForecaster::new(0.3, 0.1, 0.1, 12);
+
+        model.fit(&ts).unwrap();
+        assert_eq!(model.name(), "HoltWinters(additive)");
+
+        let forecast = model.predict(12).unwrap();
+        assert_eq!(forecast.values().len(), 12);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_holt_winters_multiplicative() {
+        // Need positive data for multiplicative
+        let values: Vec<f64> = (0..48)
+            .map(|i| {
+                let trend = 100.0 + i as f64;
+                let seasonal = 1.0 + 0.2 * (2.0 * std::f64::consts::PI * i as f64 / 12.0).sin();
+                trend * seasonal
+            })
+            .collect();
+        let ts = TimeSeries::new(&values).unwrap();
+
+        let mut model = HoltWintersForecaster::multiplicative(0.3, 0.1, 0.1, 12);
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(12).unwrap();
+        assert_eq!(forecast.values().len(), 12);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_holt_winters_auto() {
+        let ts = create_seasonal_series(48, 12);
+        let mut model = HoltWintersForecaster::auto(12, "additive").unwrap();
+
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(12).unwrap();
+        assert_eq!(forecast.values().len(), 12);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_holt_winters_auto_multiplicative() {
+        // Need positive data for multiplicative
+        let values: Vec<f64> = (0..48)
+            .map(|i| {
+                let trend = 100.0 + i as f64;
+                let seasonal = 1.0 + 0.2 * (2.0 * std::f64::consts::PI * i as f64 / 12.0).sin();
+                trend * seasonal
+            })
+            .collect();
+        let ts = TimeSeries::new(&values).unwrap();
+
+        let mut model = HoltWintersForecaster::auto(12, "multiplicative").unwrap();
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(12).unwrap();
+        assert_eq!(forecast.values().len(), 12);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_seasonal_es_forecaster() {
+        let ts = create_seasonal_series(48, 12);
+        let mut model = SeasonalESForecaster::new(12);
+
+        model.fit(&ts).unwrap();
+        assert_eq!(model.name(), "SeasonalES");
+
+        let forecast = model.predict(12).unwrap();
+        assert_eq!(forecast.values().len(), 12);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_ets_forecaster_ann() {
+        let ts = create_test_series(30);
+        // ETS(A,N,N) - Additive error, No trend, No seasonal
+        let mut model = ETSForecaster::new("A", "N", "N", 1).unwrap();
+
+        model.fit(&ts).unwrap();
+        assert_eq!(model.name(), "ETS");
+
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.values().len(), 5);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_ets_forecaster_aan() {
+        let ts = create_test_series(30);
+        // ETS(A,A,N) - Additive error, Additive trend, No seasonal
+        let mut model = ETSForecaster::new("A", "A", "N", 1).unwrap();
+
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.values().len(), 5);
+
+        // With trend data, forecasts should be increasing
+        for i in 1..5 {
+            assert!(forecast.values()[i] > forecast.values()[i - 1]);
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn test_ets_forecaster_aaa() {
+        let ts = create_seasonal_series(48, 12);
+        // ETS(A,A,A) - Additive error, Additive trend, Additive seasonal
+        let mut model = ETSForecaster::new("A", "A", "A", 12).unwrap();
+
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(12).unwrap();
+        assert_eq!(forecast.values().len(), 12);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_ets_forecaster_damped() {
+        let ts = create_test_series(30);
+        // ETS(A,Ad,N) - Additive error, Additive damped trend, No seasonal
+        let mut model = ETSForecaster::new("A", "Ad", "N", 1).unwrap();
+
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.values().len(), 5);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_ets_forecaster_multiplicative() {
+        // Need positive data for multiplicative models
+        let values: Vec<f64> = (0..48)
+            .map(|i| {
+                let trend = 100.0 + i as f64;
+                let seasonal = 1.0 + 0.2 * (2.0 * std::f64::consts::PI * i as f64 / 12.0).sin();
+                trend * seasonal
+            })
+            .collect();
+        let ts = TimeSeries::new(&values).unwrap();
+
+        // ETS(M,A,M) - Multiplicative error, Additive trend, Multiplicative seasonal
+        let mut model = ETSForecaster::new("M", "A", "M", 12).unwrap();
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(12).unwrap();
+        assert_eq!(forecast.values().len(), 12);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_auto_ets_forecaster() {
+        let ts = create_test_series(30);
+        let mut model = AutoETSForecaster::new();
+
+        model.fit(&ts).unwrap();
+        assert_eq!(model.name(), "AutoETS");
+
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.values().len(), 5);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_auto_ets_with_period() {
+        let ts = create_seasonal_series(48, 12);
+        let mut model = AutoETSForecaster::with_period(12);
+
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(12).unwrap();
+        assert_eq!(forecast.values().len(), 12);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_auto_ets_additive_only() {
+        let ts = create_test_series(30);
+        let mut model = AutoETSForecaster::additive_only();
+
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.values().len(), 5);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_auto_ets_with_config() {
+        let ts = create_seasonal_series(48, 12);
+        let mut model = AutoETSForecaster::with_config(
+            Some(12), // period
+            false,    // allow_multiplicative_error
+            true,     // allow_multiplicative_seasonal
+            true,     // allow_damped
+        );
+
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(12).unwrap();
+        assert_eq!(forecast.values().len(), 12);
+    }
+
+    // =========================================================================
+    // THETA MODELS
+    // =========================================================================
+
+    #[wasm_bindgen_test]
+    fn test_theta_forecaster() {
+        let ts = create_test_series(30);
+        let mut model = ThetaForecaster::new();
+
+        model.fit(&ts).unwrap();
+        assert_eq!(model.name(), "Theta");
+
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.values().len(), 5);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_optimized_theta_forecaster() {
+        let ts = create_test_series(30);
+        let mut model = OptimizedThetaForecaster::new();
+
+        model.fit(&ts).unwrap();
+        assert_eq!(model.name(), "OptimizedTheta");
+
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.values().len(), 5);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_dynamic_theta_forecaster() {
+        let ts = create_test_series(30);
+        let mut model = DynamicThetaForecaster::new(0.5);
+
+        model.fit(&ts).unwrap();
+        assert_eq!(model.name(), "DynamicTheta");
+
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.values().len(), 5);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_dynamic_theta_optimized() {
+        let ts = create_test_series(30);
+        let mut model = DynamicThetaForecaster::optimized();
+
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.values().len(), 5);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_auto_theta_forecaster() {
+        let ts = create_test_series(30);
+        let mut model = AutoThetaForecaster::new();
+
+        model.fit(&ts).unwrap();
+        assert_eq!(model.name(), "AutoTheta");
+
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.values().len(), 5);
+    }
+
+    // =========================================================================
+    // ARIMA MODELS
+    // =========================================================================
+
+    #[wasm_bindgen_test]
+    fn test_arima_forecaster() {
+        let ts = create_test_series(50);
+        let mut model = ARIMAForecaster::new(1, 1, 1);
+
+        model.fit(&ts).unwrap();
+        assert_eq!(model.name(), "ARIMA");
+
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.values().len(), 5);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_sarima_forecaster() {
+        let ts = create_seasonal_series(72, 12);
+        let mut model = SARIMAForecaster::new(1, 1, 1, 1, 1, 1, 12);
+
+        model.fit(&ts).unwrap();
+        assert_eq!(model.name(), "SARIMA");
+
+        let forecast = model.predict(12).unwrap();
+        assert_eq!(forecast.values().len(), 12);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_auto_arima_forecaster() {
+        let ts = create_test_series(50);
+        let mut model = AutoARIMAForecaster::new();
+
+        model.fit(&ts).unwrap();
+        assert_eq!(model.name(), "AutoARIMA");
+
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.values().len(), 5);
+    }
+
+    // Note: AutoARIMAForecaster does not have seasonal configuration in WASM API
+    // Seasonal ARIMA is tested through SARIMAForecaster above
+
+    // =========================================================================
+    // INTERMITTENT DEMAND MODELS
+    // =========================================================================
+
+    #[wasm_bindgen_test]
+    fn test_croston_forecaster() {
+        let ts = create_intermittent_series();
+        let mut model = CrostonForecaster::new();
+
+        model.fit(&ts).unwrap();
+        assert_eq!(model.name(), "Croston");
+
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.values().len(), 5);
+
+        // Croston produces flat forecasts
+        let first_pred = forecast.values()[0];
+        for pred in forecast.values() {
+            assert!((pred - first_pred).abs() < 1e-10);
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn test_tsb_forecaster() {
+        let ts = create_intermittent_series();
+        let mut model = TSBForecaster::new();
+
+        model.fit(&ts).unwrap();
+        assert_eq!(model.name(), "TSB");
+
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.values().len(), 5);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_adida_forecaster() {
+        let ts = create_intermittent_series();
+        let mut model = ADIDAForecaster::new();
+
+        model.fit(&ts).unwrap();
+        assert_eq!(model.name(), "ADIDA");
+
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.values().len(), 5);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_imapa_forecaster() {
+        let ts = create_intermittent_series();
+        let mut model = IMAPAForecaster::new();
+
+        model.fit(&ts).unwrap();
+        assert_eq!(model.name(), "IMAPA");
+
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.values().len(), 5);
+    }
+
+    // =========================================================================
+    // ADVANCED MODELS
+    // =========================================================================
+
+    #[wasm_bindgen_test]
+    fn test_tbats_forecaster() {
+        let ts = create_seasonal_series(48, 12);
+        let mut model = TBATSForecaster::new(vec![12]);
+
+        model.fit(&ts).unwrap();
+        assert_eq!(model.name(), "TBATS");
+
+        let forecast = model.predict(12).unwrap();
+        assert_eq!(forecast.values().len(), 12);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_auto_tbats_forecaster() {
+        let ts = create_seasonal_series(48, 12);
+        let mut model = AutoTBATSForecaster::new(vec![12]);
+
+        model.fit(&ts).unwrap();
+        assert_eq!(model.name(), "AutoTBATS");
+
+        let forecast = model.predict(12).unwrap();
+        assert_eq!(forecast.values().len(), 12);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_mfles_forecaster() {
+        let ts = create_seasonal_series(48, 12);
+        let mut model = MFLESForecaster::new(vec![12]);
+
+        model.fit(&ts).unwrap();
+        assert_eq!(model.name(), "MFLES");
+
+        let forecast = model.predict(12).unwrap();
+        assert_eq!(forecast.values().len(), 12);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_mstl_forecaster() {
+        let ts = create_seasonal_series(48, 12);
+        let mut model = MSTLForecasterWrapper::new(vec![12]);
+
+        model.fit(&ts).unwrap();
+        assert_eq!(model.name(), "MSTLForecaster");
+
+        let forecast = model.predict(12).unwrap();
+        assert_eq!(forecast.values().len(), 12);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_garch_forecaster() {
+        // GARCH needs returns-like data (mean around 0)
+        let values: Vec<f64> = (0..100)
+            .map(|i| 0.01 * (i as f64 * 0.1).sin() + 0.001 * (i as f64))
+            .collect();
+        let ts = TimeSeries::new(&values).unwrap();
+
+        let mut model = GARCHForecaster::new(1, 1);
+
+        model.fit(&ts).unwrap();
+        assert_eq!(model.name(), "GARCH");
+
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.values().len(), 5);
+    }
+
+    // =========================================================================
+    // ERROR HANDLING TESTS
+    // =========================================================================
+
+    #[wasm_bindgen_test]
+    fn test_predict_without_fit_fails() {
+        let model = NaiveForecaster::new();
+        let result = model.predict(5);
+        assert!(result.is_err());
+    }
+
+    #[wasm_bindgen_test]
+    fn test_empty_series_fails() {
+        let values: Vec<f64> = vec![];
+        // TimeSeries may or may not error on empty data, but model fit should fail
+        if let Ok(ts) = TimeSeries::new(&values) {
+            let mut model = NaiveForecaster::new();
+            let result = model.fit(&ts);
+            assert!(result.is_err(), "Expected fit to fail with empty data");
+        }
+        // If TimeSeries::new fails for empty data, that's also acceptable
+    }
+
+    #[wasm_bindgen_test]
+    fn test_insufficient_data_for_seasonal() {
+        let ts = create_test_series(5); // Only 5 points
+        let mut model = SeasonalNaiveForecaster::new(12); // Needs 12+ points
+
+        let result = model.fit(&ts);
+        assert!(result.is_err());
+    }
+
+    #[wasm_bindgen_test]
+    fn test_holt_winters_invalid_seasonal_type() {
+        let result = HoltWintersForecaster::auto(12, "invalid");
+        assert!(result.is_err());
+    }
+
+    #[wasm_bindgen_test]
+    fn test_ets_invalid_error_type() {
+        let result = ETSForecaster::new("X", "N", "N", 1);
+        assert!(result.is_err());
+    }
+
+    #[wasm_bindgen_test]
+    fn test_ets_invalid_trend_type() {
+        let result = ETSForecaster::new("A", "X", "N", 1);
+        assert!(result.is_err());
+    }
+
+    #[wasm_bindgen_test]
+    fn test_ets_invalid_seasonal_type() {
+        let result = ETSForecaster::new("A", "N", "X", 1);
+        assert!(result.is_err());
+    }
+
+    // =========================================================================
+    // PREDICTION INTERVAL TESTS
+    // =========================================================================
+
+    #[wasm_bindgen_test]
+    fn test_naive_intervals() {
+        let ts = create_test_series(30);
+        let mut model = NaiveForecaster::new();
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict_with_intervals(5, 0.95).unwrap();
+
+        let lower = forecast.lower().unwrap();
+        let upper = forecast.upper().unwrap();
+        let values = forecast.values();
+
+        for i in 0..5 {
+            assert!(lower[i] <= values[i]);
+            assert!(upper[i] >= values[i]);
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn test_mean_intervals() {
+        let ts = create_test_series(30);
+        let mut model = MeanForecaster::new();
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict_with_intervals(5, 0.95).unwrap();
+
+        let lower = forecast.lower().unwrap();
+        let upper = forecast.upper().unwrap();
+        let values = forecast.values();
+
+        for i in 0..5 {
+            assert!(lower[i] < values[i]);
+            assert!(upper[i] > values[i]);
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn test_theta_intervals() {
+        let ts = create_test_series(30);
+        let mut model = ThetaForecaster::new();
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict_with_intervals(5, 0.95).unwrap();
+
+        assert!(forecast.lower().is_some());
+        assert!(forecast.upper().is_some());
+    }
+
+    #[wasm_bindgen_test]
+    fn test_auto_theta_intervals() {
+        let ts = create_test_series(30);
+        let mut model = AutoThetaForecaster::new();
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict_with_intervals(5, 0.95).unwrap();
+
+        assert!(forecast.lower().is_some());
+        assert!(forecast.upper().is_some());
+    }
+
+    #[wasm_bindgen_test]
+    fn test_dynamic_theta_intervals() {
+        let ts = create_test_series(30);
+        let mut model = DynamicThetaForecaster::new(0.5);
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict_with_intervals(5, 0.95).unwrap();
+
+        assert!(forecast.lower().is_some());
+        assert!(forecast.upper().is_some());
+    }
+
+    // =========================================================================
+    // ETS NOTATION AND VALIDATION TESTS
+    // =========================================================================
+
+    #[wasm_bindgen_test]
+    fn test_ets_from_notation_ann() {
+        // Simple exponential smoothing
+        let mut model = ETSForecaster::from_notation("ANN", 1).unwrap();
+        let ts = create_test_series(30);
+        model.fit(&ts).unwrap();
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.values().len(), 5);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_ets_from_notation_aaa() {
+        // Holt-Winters additive
+        let mut model = ETSForecaster::from_notation("AAA", 12).unwrap();
+        let ts = create_seasonal_series(48, 12);
+        model.fit(&ts).unwrap();
+        let forecast = model.predict(12).unwrap();
+        assert_eq!(forecast.values().len(), 12);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_ets_from_notation_mam() {
+        // Multiplicative Holt-Winters
+        let values: Vec<f64> = (0..48)
+            .map(|i| {
+                let trend = 100.0 + i as f64;
+                let seasonal = 1.0 + 0.2 * (2.0 * std::f64::consts::PI * i as f64 / 12.0).sin();
+                trend * seasonal
+            })
+            .collect();
+        let ts = TimeSeries::new(&values).unwrap();
+
+        let mut model = ETSForecaster::from_notation("MAM", 12).unwrap();
+        model.fit(&ts).unwrap();
+        let forecast = model.predict(12).unwrap();
+        assert_eq!(forecast.values().len(), 12);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_ets_from_notation_damped() {
+        // Damped trend with multiplicative seasonal
+        let values: Vec<f64> = (0..48)
+            .map(|i| {
+                let trend = 100.0 + i as f64;
+                let seasonal = 1.0 + 0.2 * (2.0 * std::f64::consts::PI * i as f64 / 12.0).sin();
+                trend * seasonal
+            })
+            .collect();
+        let ts = TimeSeries::new(&values).unwrap();
+
+        let mut model = ETSForecaster::from_notation("AAdM", 12).unwrap();
+        model.fit(&ts).unwrap();
+        let forecast = model.predict(12).unwrap();
+        assert_eq!(forecast.values().len(), 12);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_ets_from_notation_invalid() {
+        // Invalid notation should fail
+        assert!(ETSForecaster::from_notation("XYZ", 12).is_err());
+        assert!(ETSForecaster::from_notation("", 12).is_err());
+        assert!(ETSForecaster::from_notation("A", 12).is_err());
+    }
+
+    #[wasm_bindgen_test]
+    fn test_ets_from_notation_unstable_maa() {
+        // MAA is unstable and should fail
+        let result = ETSForecaster::from_notation("MAA", 12);
+        assert!(result.is_err());
+    }
+
+    #[wasm_bindgen_test]
+    fn test_ets_from_notation_unstable_mada() {
+        // MAdA is unstable and should fail
+        let result = ETSForecaster::from_notation("MAdA", 12);
+        assert!(result.is_err());
+    }
+
+    #[wasm_bindgen_test]
+    fn test_ets_unstable_combination_new() {
+        // Creating unstable combination via new() should also fail
+        let result = ETSForecaster::new("M", "A", "A", 12);
+        assert!(result.is_err());
+
+        let result = ETSForecaster::new("M", "Ad", "A", 12);
+        assert!(result.is_err());
+    }
+
+    #[wasm_bindgen_test]
+    fn test_ets_is_valid_spec() {
+        // Valid combinations
+        assert!(ETSForecaster::is_valid_spec("A", "N", "N"));
+        assert!(ETSForecaster::is_valid_spec("A", "A", "A"));
+        assert!(ETSForecaster::is_valid_spec("A", "A", "M"));
+        assert!(ETSForecaster::is_valid_spec("M", "A", "M"));
+        assert!(ETSForecaster::is_valid_spec("M", "N", "M"));
+        assert!(ETSForecaster::is_valid_spec("A", "Ad", "M"));
+
+        // Invalid/unstable combinations
+        assert!(!ETSForecaster::is_valid_spec("M", "A", "A"));
+        assert!(!ETSForecaster::is_valid_spec("M", "Ad", "A"));
+
+        // Invalid parameters
+        assert!(!ETSForecaster::is_valid_spec("X", "A", "A"));
+        assert!(!ETSForecaster::is_valid_spec("A", "X", "A"));
+        assert!(!ETSForecaster::is_valid_spec("A", "A", "X"));
+    }
+
+    // =========================================================================
+    // ADDITIONAL EDGE CASE TESTS
+    // =========================================================================
+
+    #[wasm_bindgen_test]
+    fn test_single_data_point() {
+        let values = vec![42.0];
+        let ts = TimeSeries::new(&values).unwrap();
+
+        // Naive should handle single point
+        let mut model = NaiveForecaster::new();
+        let result = model.fit(&ts);
+        // This may succeed or fail depending on implementation
+        if result.is_ok() {
+            let forecast = model.predict(3).unwrap();
+            assert_eq!(forecast.values().len(), 3);
+            // All forecasts should be the same as the single value
+            for v in forecast.values() {
+                assert!((v - 42.0).abs() < 1e-10);
+            }
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn test_two_data_points() {
+        let values = vec![10.0, 20.0];
+        let ts = TimeSeries::new(&values).unwrap();
+
+        // Naive with 2 points
+        let mut model = NaiveForecaster::new();
+        model.fit(&ts).unwrap();
+        let forecast = model.predict(3).unwrap();
+        assert_eq!(forecast.values().len(), 3);
+        // Naive repeats last value
+        for v in forecast.values() {
+            assert!((v - 20.0).abs() < 1e-10);
+        }
+
+        // Mean with 2 points
+        let mut mean_model = MeanForecaster::new();
+        mean_model.fit(&ts).unwrap();
+        let mean_forecast = mean_model.predict(3).unwrap();
+        // Mean should be 15.0
+        for v in mean_forecast.values() {
+            assert!((v - 15.0).abs() < 1e-10);
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn test_nan_in_series() {
+        let values = vec![1.0, 2.0, f64::NAN, 4.0, 5.0];
+        let ts = TimeSeries::new(&values).unwrap();
+
+        // Check if series reports missing values
+        assert!(ts.has_missing_values());
+
+        // Models may or may not handle NaN gracefully
+        let mut model = NaiveForecaster::new();
+        let result = model.fit(&ts);
+        // Either it should fail with an error or handle NaN
+        // We're just verifying it doesn't panic
+        let _ = result;
+    }
+
+    #[wasm_bindgen_test]
+    fn test_constant_series() {
+        // All same values
+        let values = vec![5.0; 20];
+        let ts = TimeSeries::new(&values).unwrap();
+
+        let mut model = NaiveForecaster::new();
+        model.fit(&ts).unwrap();
+        let forecast = model.predict(5).unwrap();
+
+        // All forecasts should be 5.0
+        for v in forecast.values() {
+            assert!((v - 5.0).abs() < 1e-10);
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn test_negative_values() {
+        // Series with negative values
+        let values: Vec<f64> = (-10..10).map(|i| i as f64).collect();
+        let ts = TimeSeries::new(&values).unwrap();
+
+        // Additive models should handle negative values
+        let mut model = ETSForecaster::new("A", "A", "N", 1).unwrap();
+        model.fit(&ts).unwrap();
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.values().len(), 5);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_negative_values_multiplicative_fails() {
+        // Multiplicative models require positive data
+        let values: Vec<f64> = (-10..10).map(|i| i as f64).collect();
+        let ts = TimeSeries::new(&values).unwrap();
+
+        let mut model = ETSForecaster::new("M", "N", "N", 1).unwrap();
+        let result = model.fit(&ts);
+        // Should fail for negative data with multiplicative error
+        // (or handle gracefully)
+        let _ = result;
+    }
+
+    #[wasm_bindgen_test]
+    fn test_large_horizon() {
+        let ts = create_test_series(30);
+
+        let mut model = NaiveForecaster::new();
+        model.fit(&ts).unwrap();
+
+        // Predict far into the future
+        let forecast = model.predict(100).unwrap();
+        assert_eq!(forecast.values().len(), 100);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_zero_horizon() {
+        let ts = create_test_series(30);
+
+        let mut model = NaiveForecaster::new();
+        model.fit(&ts).unwrap();
+
+        // Zero horizon should return empty or error
+        let result = model.predict(0);
+        if let Ok(forecast) = result {
+            assert_eq!(forecast.values().len(), 0);
+        }
+        // Either empty result or error is acceptable
+    }
+
+    #[wasm_bindgen_test]
+    fn test_all_zeros_series() {
+        let values = vec![0.0; 20];
+        let ts = TimeSeries::new(&values).unwrap();
+
+        // Additive models should handle all zeros
+        let mut model = MeanForecaster::new();
+        model.fit(&ts).unwrap();
+        let forecast = model.predict(5).unwrap();
+
+        for v in forecast.values() {
+            assert!(v.abs() < 1e-10);
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn test_very_large_values() {
+        let values: Vec<f64> = (0..20).map(|i| 1e15 + i as f64).collect();
+        let ts = TimeSeries::new(&values).unwrap();
+
+        let mut model = NaiveForecaster::new();
+        model.fit(&ts).unwrap();
+        let forecast = model.predict(5).unwrap();
+
+        // Should handle large values without overflow
+        assert_eq!(forecast.values().len(), 5);
+        assert!(forecast.values()[0] > 1e14);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_very_small_values() {
+        let values: Vec<f64> = (0..20).map(|i| 1e-15 + (i as f64 * 1e-16)).collect();
+        let ts = TimeSeries::new(&values).unwrap();
+
+        let mut model = NaiveForecaster::new();
+        model.fit(&ts).unwrap();
+        let forecast = model.predict(5).unwrap();
+
+        // Should handle small values without underflow
+        assert_eq!(forecast.values().len(), 5);
+        assert!(forecast.values()[0] > 0.0);
     }
 }

@@ -14,6 +14,28 @@ Time series forecasting library for Rust.
 
 Provides 35+ forecasting models, 76+ statistical features, seasonality decomposition, changepoint detection, anomaly detection, and bootstrap confidence intervals.
 
+## Use Cases
+
+**Need to run this on 10GB of data?** Use our [DuckDB extension](https://github.com/DataZooDE/anofox-forecast) for SQL-native forecasting at scale.
+
+**Need to use this in a React Dashboard?** Use our [npm package](https://www.npmjs.com/package/@sipemu/anofox-forecast) for WebAssembly-powered forecasting in the browser.
+
+```bash
+npm install @sipemu/anofox-forecast
+```
+
+```javascript
+import init, { TimeSeries, NaiveForecaster, AutoETSForecaster } from '@sipemu/anofox-forecast';
+
+await init();
+
+const ts = new TimeSeries([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+const model = new AutoETSForecaster();
+model.fit(ts);
+const forecast = model.predict(5);
+console.log(forecast.values);  // [11, 12, 13, 14, 15] (approx)
+```
+
 ## Features
 
 - **Forecasting Models (35+)**
@@ -80,7 +102,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-anofox-forecast = "0.3"
+anofox-forecast = "0.4"
 ```
 
 For parallel AutoARIMA (4-8x speedup):
