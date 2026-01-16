@@ -512,7 +512,15 @@ impl SeasonalESForecaster {
 }
 
 /// ETS (Error-Trend-Seasonal) state-space model.
+///
 /// Use string codes: "A" = Additive, "M" = Multiplicative, "N" = None
+/// Or use standard ETS notation like "ANN", "AAA", "MAM", "AAdM".
+///
+/// Follows the ETS taxonomy from FPP3: <https://otexts.com/fpp3/taxonomy.html>
+///
+/// Note: Some combinations are invalid/unstable per FPP3:
+/// - MAA (Multiplicative error + Additive trend + Additive seasonal)
+/// - MAdA (Multiplicative error + Damped trend + Additive seasonal)
 #[wasm_bindgen]
 pub struct ETSForecaster {
     model: ETS,
@@ -525,6 +533,7 @@ impl ETSForecaster {
     /// @param trend - Trend type: "N" (none), "A" (additive), or "Ad" (additive damped)
     /// @param seasonal - Seasonal type: "N" (none), "A" (additive), or "M" (multiplicative)
     /// @param period - Seasonal period (ignored if seasonal is "N")
+    /// @throws Error if the combination is unstable (MAA or MAdA)
     #[wasm_bindgen(constructor)]
     pub fn new(
         error: &str,
@@ -557,9 +566,90 @@ impl ETSForecaster {
         };
 
         let spec = ETSSpec::new(error_type, trend_type, seasonal_type);
+
+        // Validate the specification (MAA and MAdA are unstable)
+        if !spec.is_valid() {
+            return Err(JsError::new(&format!(
+                "ETS({},{},{}) is an unstable model combination per FPP3. \
+                 Multiplicative error with additive trend and additive seasonal is not supported.",
+                error.to_uppercase(),
+                trend.to_uppercase(),
+                seasonal.to_uppercase()
+            )));
+        }
+
         Ok(Self {
             model: ETS::new(spec, period),
         })
+    }
+
+    /// Create an ETS model from standard notation.
+    ///
+    /// @param notation - ETS notation string like "ANN", "AAA", "MAM", "AAdM"
+    /// @param period - Seasonal period (required if notation has seasonal component)
+    ///
+    /// Format: ErrorTrendSeasonal
+    /// - Error: A (additive) or M (multiplicative)
+    /// - Trend: N (none), A (additive), or Ad (additive damped)
+    /// - Seasonal: N (none), A (additive), or M (multiplicative)
+    ///
+    /// Examples:
+    /// - "ANN" - Simple exponential smoothing
+    /// - "AAN" - Holt's linear method
+    /// - "AAA" - Holt-Winters additive
+    /// - "MAM" - Multiplicative Holt-Winters
+    /// - "AAdM" - Damped trend with multiplicative seasonal
+    ///
+    /// @throws Error for invalid notation or unstable combinations (MAA, MAdA)
+    #[wasm_bindgen(js_name = fromNotation)]
+    pub fn from_notation(notation: &str, period: usize) -> Result<ETSForecaster, JsError> {
+        use anofox_forecast::models::exponential::ETSSpec;
+
+        let spec = ETSSpec::from_notation(notation).map_err(|e| JsError::new(&e.to_string()))?;
+
+        Ok(Self {
+            model: ETS::new(spec, period),
+        })
+    }
+
+    /// Check if an ETS specification is valid/stable.
+    ///
+    /// @param error - Error type: "A" or "M"
+    /// @param trend - Trend type: "N", "A", or "Ad"
+    /// @param seasonal - Seasonal type: "N", "A", or "M"
+    /// @returns true if the combination is stable and usable
+    ///
+    /// Invalid combinations (return false):
+    /// - M,A,A - Multiplicative error with additive trend and additive seasonal
+    /// - M,Ad,A - Multiplicative error with damped trend and additive seasonal
+    #[wasm_bindgen(js_name = isValidSpec)]
+    pub fn is_valid_spec(error: &str, trend: &str, seasonal: &str) -> bool {
+        use anofox_forecast::models::exponential::{
+            ETSSeasonalType, ETSSpec, ErrorType, TrendType,
+        };
+
+        let error_type = match error.to_uppercase().as_str() {
+            "A" => ErrorType::Additive,
+            "M" => ErrorType::Multiplicative,
+            _ => return false,
+        };
+
+        let trend_type = match trend.to_uppercase().as_str() {
+            "N" => TrendType::None,
+            "A" => TrendType::Additive,
+            "AD" => TrendType::AdditiveDamped,
+            _ => return false,
+        };
+
+        let seasonal_type = match seasonal.to_uppercase().as_str() {
+            "N" => ETSSeasonalType::None,
+            "A" => ETSSeasonalType::Additive,
+            "M" => ETSSeasonalType::Multiplicative,
+            _ => return false,
+        };
+
+        let spec = ETSSpec::new(error_type, trend_type, seasonal_type);
+        spec.is_valid()
     }
 
     pub fn fit(&mut self, series: &TimeSeries) -> Result<(), JsError> {
@@ -2137,5 +2227,293 @@ mod tests {
 
         assert!(forecast.lower().is_some());
         assert!(forecast.upper().is_some());
+    }
+
+    // =========================================================================
+    // ETS NOTATION AND VALIDATION TESTS
+    // =========================================================================
+
+    #[wasm_bindgen_test]
+    fn test_ets_from_notation_ann() {
+        // Simple exponential smoothing
+        let mut model = ETSForecaster::from_notation("ANN", 1).unwrap();
+        let ts = create_test_series(30);
+        model.fit(&ts).unwrap();
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.values().len(), 5);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_ets_from_notation_aaa() {
+        // Holt-Winters additive
+        let mut model = ETSForecaster::from_notation("AAA", 12).unwrap();
+        let ts = create_seasonal_series(48, 12);
+        model.fit(&ts).unwrap();
+        let forecast = model.predict(12).unwrap();
+        assert_eq!(forecast.values().len(), 12);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_ets_from_notation_mam() {
+        // Multiplicative Holt-Winters
+        let values: Vec<f64> = (0..48)
+            .map(|i| {
+                let trend = 100.0 + i as f64;
+                let seasonal = 1.0 + 0.2 * (2.0 * std::f64::consts::PI * i as f64 / 12.0).sin();
+                trend * seasonal
+            })
+            .collect();
+        let ts = TimeSeries::new(&values).unwrap();
+
+        let mut model = ETSForecaster::from_notation("MAM", 12).unwrap();
+        model.fit(&ts).unwrap();
+        let forecast = model.predict(12).unwrap();
+        assert_eq!(forecast.values().len(), 12);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_ets_from_notation_damped() {
+        // Damped trend with multiplicative seasonal
+        let values: Vec<f64> = (0..48)
+            .map(|i| {
+                let trend = 100.0 + i as f64;
+                let seasonal = 1.0 + 0.2 * (2.0 * std::f64::consts::PI * i as f64 / 12.0).sin();
+                trend * seasonal
+            })
+            .collect();
+        let ts = TimeSeries::new(&values).unwrap();
+
+        let mut model = ETSForecaster::from_notation("AAdM", 12).unwrap();
+        model.fit(&ts).unwrap();
+        let forecast = model.predict(12).unwrap();
+        assert_eq!(forecast.values().len(), 12);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_ets_from_notation_invalid() {
+        // Invalid notation should fail
+        assert!(ETSForecaster::from_notation("XYZ", 12).is_err());
+        assert!(ETSForecaster::from_notation("", 12).is_err());
+        assert!(ETSForecaster::from_notation("A", 12).is_err());
+    }
+
+    #[wasm_bindgen_test]
+    fn test_ets_from_notation_unstable_maa() {
+        // MAA is unstable and should fail
+        let result = ETSForecaster::from_notation("MAA", 12);
+        assert!(result.is_err());
+    }
+
+    #[wasm_bindgen_test]
+    fn test_ets_from_notation_unstable_mada() {
+        // MAdA is unstable and should fail
+        let result = ETSForecaster::from_notation("MAdA", 12);
+        assert!(result.is_err());
+    }
+
+    #[wasm_bindgen_test]
+    fn test_ets_unstable_combination_new() {
+        // Creating unstable combination via new() should also fail
+        let result = ETSForecaster::new("M", "A", "A", 12);
+        assert!(result.is_err());
+
+        let result = ETSForecaster::new("M", "Ad", "A", 12);
+        assert!(result.is_err());
+    }
+
+    #[wasm_bindgen_test]
+    fn test_ets_is_valid_spec() {
+        // Valid combinations
+        assert!(ETSForecaster::is_valid_spec("A", "N", "N"));
+        assert!(ETSForecaster::is_valid_spec("A", "A", "A"));
+        assert!(ETSForecaster::is_valid_spec("A", "A", "M"));
+        assert!(ETSForecaster::is_valid_spec("M", "A", "M"));
+        assert!(ETSForecaster::is_valid_spec("M", "N", "M"));
+        assert!(ETSForecaster::is_valid_spec("A", "Ad", "M"));
+
+        // Invalid/unstable combinations
+        assert!(!ETSForecaster::is_valid_spec("M", "A", "A"));
+        assert!(!ETSForecaster::is_valid_spec("M", "Ad", "A"));
+
+        // Invalid parameters
+        assert!(!ETSForecaster::is_valid_spec("X", "A", "A"));
+        assert!(!ETSForecaster::is_valid_spec("A", "X", "A"));
+        assert!(!ETSForecaster::is_valid_spec("A", "A", "X"));
+    }
+
+    // =========================================================================
+    // ADDITIONAL EDGE CASE TESTS
+    // =========================================================================
+
+    #[wasm_bindgen_test]
+    fn test_single_data_point() {
+        let values = vec![42.0];
+        let ts = TimeSeries::new(&values).unwrap();
+
+        // Naive should handle single point
+        let mut model = NaiveForecaster::new();
+        let result = model.fit(&ts);
+        // This may succeed or fail depending on implementation
+        if result.is_ok() {
+            let forecast = model.predict(3).unwrap();
+            assert_eq!(forecast.values().len(), 3);
+            // All forecasts should be the same as the single value
+            for v in forecast.values() {
+                assert!((v - 42.0).abs() < 1e-10);
+            }
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn test_two_data_points() {
+        let values = vec![10.0, 20.0];
+        let ts = TimeSeries::new(&values).unwrap();
+
+        // Naive with 2 points
+        let mut model = NaiveForecaster::new();
+        model.fit(&ts).unwrap();
+        let forecast = model.predict(3).unwrap();
+        assert_eq!(forecast.values().len(), 3);
+        // Naive repeats last value
+        for v in forecast.values() {
+            assert!((v - 20.0).abs() < 1e-10);
+        }
+
+        // Mean with 2 points
+        let mut mean_model = MeanForecaster::new();
+        mean_model.fit(&ts).unwrap();
+        let mean_forecast = mean_model.predict(3).unwrap();
+        // Mean should be 15.0
+        for v in mean_forecast.values() {
+            assert!((v - 15.0).abs() < 1e-10);
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn test_nan_in_series() {
+        let values = vec![1.0, 2.0, f64::NAN, 4.0, 5.0];
+        let ts = TimeSeries::new(&values).unwrap();
+
+        // Check if series reports missing values
+        assert!(ts.has_missing_values());
+
+        // Models may or may not handle NaN gracefully
+        let mut model = NaiveForecaster::new();
+        let result = model.fit(&ts);
+        // Either it should fail with an error or handle NaN
+        // We're just verifying it doesn't panic
+        let _ = result;
+    }
+
+    #[wasm_bindgen_test]
+    fn test_constant_series() {
+        // All same values
+        let values = vec![5.0; 20];
+        let ts = TimeSeries::new(&values).unwrap();
+
+        let mut model = NaiveForecaster::new();
+        model.fit(&ts).unwrap();
+        let forecast = model.predict(5).unwrap();
+
+        // All forecasts should be 5.0
+        for v in forecast.values() {
+            assert!((v - 5.0).abs() < 1e-10);
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn test_negative_values() {
+        // Series with negative values
+        let values: Vec<f64> = (-10..10).map(|i| i as f64).collect();
+        let ts = TimeSeries::new(&values).unwrap();
+
+        // Additive models should handle negative values
+        let mut model = ETSForecaster::new("A", "A", "N", 1).unwrap();
+        model.fit(&ts).unwrap();
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.values().len(), 5);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_negative_values_multiplicative_fails() {
+        // Multiplicative models require positive data
+        let values: Vec<f64> = (-10..10).map(|i| i as f64).collect();
+        let ts = TimeSeries::new(&values).unwrap();
+
+        let mut model = ETSForecaster::new("M", "N", "N", 1).unwrap();
+        let result = model.fit(&ts);
+        // Should fail for negative data with multiplicative error
+        // (or handle gracefully)
+        let _ = result;
+    }
+
+    #[wasm_bindgen_test]
+    fn test_large_horizon() {
+        let ts = create_test_series(30);
+
+        let mut model = NaiveForecaster::new();
+        model.fit(&ts).unwrap();
+
+        // Predict far into the future
+        let forecast = model.predict(100).unwrap();
+        assert_eq!(forecast.values().len(), 100);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_zero_horizon() {
+        let ts = create_test_series(30);
+
+        let mut model = NaiveForecaster::new();
+        model.fit(&ts).unwrap();
+
+        // Zero horizon should return empty or error
+        let result = model.predict(0);
+        if let Ok(forecast) = result {
+            assert_eq!(forecast.values().len(), 0);
+        }
+        // Either empty result or error is acceptable
+    }
+
+    #[wasm_bindgen_test]
+    fn test_all_zeros_series() {
+        let values = vec![0.0; 20];
+        let ts = TimeSeries::new(&values).unwrap();
+
+        // Additive models should handle all zeros
+        let mut model = MeanForecaster::new();
+        model.fit(&ts).unwrap();
+        let forecast = model.predict(5).unwrap();
+
+        for v in forecast.values() {
+            assert!(v.abs() < 1e-10);
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn test_very_large_values() {
+        let values: Vec<f64> = (0..20).map(|i| 1e15 + i as f64).collect();
+        let ts = TimeSeries::new(&values).unwrap();
+
+        let mut model = NaiveForecaster::new();
+        model.fit(&ts).unwrap();
+        let forecast = model.predict(5).unwrap();
+
+        // Should handle large values without overflow
+        assert_eq!(forecast.values().len(), 5);
+        assert!(forecast.values()[0] > 1e14);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_very_small_values() {
+        let values: Vec<f64> = (0..20).map(|i| 1e-15 + (i as f64 * 1e-16)).collect();
+        let ts = TimeSeries::new(&values).unwrap();
+
+        let mut model = NaiveForecaster::new();
+        model.fit(&ts).unwrap();
+        let forecast = model.predict(5).unwrap();
+
+        // Should handle small values without underflow
+        assert_eq!(forecast.values().len(), 5);
+        assert!(forecast.values()[0] > 0.0);
     }
 }
