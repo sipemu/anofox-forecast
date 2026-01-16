@@ -92,6 +92,29 @@ jobs:
       - name: Run WASM tests
         run: wasm-pack test --headless --chrome crates/anofox-forecast-js
 
+  js-test:
+    name: JavaScript Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - name: Build WASM package
+        run: wasm-pack build crates/anofox-forecast-js --target web --out-dir ../../js --out-name anofox_forecast_js
+      - name: Restore custom package.json and README
+        run: git checkout js/package.json js/README.md
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Run JavaScript tests
+        working-directory: js
+        run: node --test test.mjs
+
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
@@ -115,7 +138,7 @@ jobs:
   publish:
     name: Publish to crates.io
     runs-on: ubuntu-latest
-    needs: [test, clippy, fmt, docs, wasm, wasm-test]
+    needs: [test, clippy, fmt, docs, wasm, wasm-test, js-test]
     if: github.event_name == 'release'
     steps:
       - uses: actions/checkout@v4

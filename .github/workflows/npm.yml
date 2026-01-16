@@ -43,9 +43,31 @@ jobs:
           path: js/
           retention-days: 1
 
+  test-js:
+    name: Test JavaScript
+    needs: build-wasm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download WASM artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: wasm-package
+          path: js/
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run JavaScript tests
+        working-directory: js
+        run: node --test test.mjs
+
   publish-npm:
     name: Publish to npm
-    needs: [build-wasm, test-wasm]
+    needs: [build-wasm, test-wasm, test-js]
     runs-on: ubuntu-latest
     permissions:
       contents: read

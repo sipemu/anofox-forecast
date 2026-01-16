@@ -1,0 +1,5 @@
+# Generated WASM files (built by wasm-pack)
+*.wasm
+*.wasm.d.ts
+anofox_forecast_js.js
+anofox_forecast_js.d.ts
