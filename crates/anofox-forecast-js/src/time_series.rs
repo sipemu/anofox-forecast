@@ -22,9 +22,7 @@ impl TimeSeries {
     pub fn new(values: &[f64]) -> Result<TimeSeries, JsError> {
         // Create timestamps as sequential integers (as DateTime)
         let timestamps: Vec<chrono::DateTime<chrono::Utc>> = (0..values.len())
-            .map(|i| {
-                chrono::DateTime::from_timestamp(i as i64, 0).unwrap_or_else(chrono::Utc::now)
-            })
+            .map(|i| chrono::DateTime::from_timestamp(i as i64, 0).unwrap_or_else(chrono::Utc::now))
             .collect();
 
         let inner = InnerTimeSeries::univariate(timestamps, values.to_vec())
