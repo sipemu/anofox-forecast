@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-01-16
+
+### Added
+
+- **ETS Notation Parser & FPP3 Taxonomy Compliance**
+  - `ETSSpec::from_notation("AAA")` - Create ETS models from standard notation
+  - `ETSSpec::is_valid()` - Validate model combinations before fitting
+  - Reject unstable ETS combinations (MAA, MAdA) per [FPP3 taxonomy](https://otexts.com/fpp3/taxonomy.html)
+  - New convenience constructors: `ana()`, `anm()`, `aada()`, `aadm()`, `mnm()`, `madm()`
+
+- **WASM/npm Package Enhancements**
+  - `ETSForecaster.fromNotation("AAA", period)` - Standard notation in JavaScript
+  - `ETSForecaster.isValidSpec(error, trend, seasonal)` - Validation helper
+  - Constructor validation rejects unstable ETS combinations
+  - npm package documentation with ETS notation examples
+
+- **Comprehensive Test Coverage**
+  - 76 WASM tests covering all 29 forecaster classes
+  - 23 JavaScript integration tests (Node.js)
+  - Edge case tests: NaN handling, single data point, negative values, large/small values
+  - ETS notation parsing tests (valid, invalid, unstable combinations)
+
+- **CI/CD Improvements**
+  - JavaScript integration tests in CI workflow
+  - npm OIDC trusted publishing (no tokens required)
+  - Requires npm >= 11.5.1 for OIDC support
+
+- **Documentation**
+  - "Use Cases" section in README with DuckDB extension and npm package links
+  - Updated npm README with ETS notation API documentation
+  - FPP3 taxonomy reference in API docs
+
+### Changed
+
+- Test coverage increased to 1,400+ tests (unit + integration + WASM + JS)
+- Installation instructions updated to v0.4
+
 ## [0.4.0] - 2026-01-12
 
 ### Added
