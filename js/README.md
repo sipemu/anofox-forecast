@@ -160,6 +160,37 @@ For `ETSForecaster`, use string codes:
 const ets = new ETSForecaster("A", "A", "M", 12);
 ```
 
+#### Standard ETS Notation
+
+You can also use standard ETS notation (following [FPP3 taxonomy](https://otexts.com/fpp3/taxonomy.html)):
+
+```javascript
+// Create from notation string
+const model = ETSForecaster.fromNotation("AAA", 12);  // Holt-Winters additive
+const model = ETSForecaster.fromNotation("MAM", 12);  // Multiplicative Holt-Winters
+const model = ETSForecaster.fromNotation("AAdM", 12); // Damped trend, multiplicative seasonal
+```
+
+Valid notation format: `ErrorTrendSeasonal`
+- First letter: Error (A or M)
+- Second letter(s): Trend (N, A, or Ad)
+- Third letter: Seasonal (N, A, or M)
+
+#### Model Validation
+
+Some ETS combinations are unstable and will throw an error:
+- `MAA` - Multiplicative error + Additive trend + Additive seasonal
+- `MAdA` - Multiplicative error + Damped trend + Additive seasonal
+
+You can check validity before creating:
+
+```javascript
+// Check if a specification is valid
+ETSForecaster.isValidSpec("A", "A", "A");  // true
+ETSForecaster.isValidSpec("M", "A", "M");  // true
+ETSForecaster.isValidSpec("M", "A", "A");  // false (unstable)
+```
+
 ## Browser Usage
 
 ```html
