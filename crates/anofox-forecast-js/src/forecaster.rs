@@ -435,6 +435,28 @@ impl HoltWintersForecaster {
         }
     }
 
+    /// Create with automatic parameter optimization.
+    /// @param period - Seasonal period
+    /// @param seasonal_type - "additive" or "multiplicative"
+    #[wasm_bindgen(js_name = auto)]
+    pub fn auto(period: usize, seasonal_type: &str) -> Result<HoltWintersForecaster, JsError> {
+        use anofox_forecast::models::exponential::SeasonalType;
+
+        let st = match seasonal_type.to_lowercase().as_str() {
+            "additive" | "a" => SeasonalType::Additive,
+            "multiplicative" | "m" => SeasonalType::Multiplicative,
+            _ => {
+                return Err(JsError::new(
+                    "seasonal_type must be 'additive' or 'multiplicative'",
+                ))
+            }
+        };
+
+        Ok(Self {
+            model: HoltWinters::auto(period, st),
+        })
+    }
+
     pub fn fit(&mut self, series: &TimeSeries) -> Result<(), JsError> {
         self.model
             .fit(series.inner())
@@ -560,6 +582,8 @@ impl ETSForecaster {
 }
 
 /// AutoETS - Automatic ETS model selection.
+///
+/// Follows the ETS taxonomy from FPP3: <https://otexts.com/fpp3/taxonomy.html>
 #[wasm_bindgen]
 pub struct AutoETSForecaster {
     model: AutoETS,
@@ -571,6 +595,49 @@ impl AutoETSForecaster {
     pub fn new() -> Self {
         Self {
             model: AutoETS::new(),
+        }
+    }
+
+    /// Create AutoETS with a specific seasonal period.
+    #[wasm_bindgen(js_name = withPeriod)]
+    pub fn with_period(period: usize) -> Self {
+        Self {
+            model: AutoETS::with_period(period),
+        }
+    }
+
+    /// Create AutoETS restricted to additive models only.
+    /// This excludes multiplicative error and multiplicative seasonality.
+    #[wasm_bindgen(js_name = additiveOnly)]
+    pub fn additive_only() -> Self {
+        use anofox_forecast::models::exponential::AutoETSConfig;
+        Self {
+            model: AutoETS::with_config(AutoETSConfig::default().additive_only()),
+        }
+    }
+
+    /// Create AutoETS with custom configuration.
+    /// @param period - Optional seasonal period (null for auto-detection)
+    /// @param allow_multiplicative_error - Allow multiplicative error models
+    /// @param allow_multiplicative_seasonal - Allow multiplicative seasonality
+    /// @param allow_damped - Allow damped trend models
+    #[wasm_bindgen(js_name = withConfig)]
+    pub fn with_config(
+        period: Option<usize>,
+        allow_multiplicative_error: bool,
+        allow_multiplicative_seasonal: bool,
+        allow_damped: bool,
+    ) -> Self {
+        use anofox_forecast::models::exponential::AutoETSConfig;
+        let config = AutoETSConfig {
+            seasonal_period: period,
+            allow_multiplicative_error,
+            allow_multiplicative_seasonal,
+            allow_damped,
+            ..Default::default()
+        };
+        Self {
+            model: AutoETS::with_config(config),
         }
     }
 

@@ -116,6 +116,74 @@ impl ETSSpec {
         )
     }
 
+    /// ETS(A,N,A) - No trend with additive seasonality.
+    pub fn ana() -> Self {
+        Self::new(ErrorType::Additive, TrendType::None, SeasonalType::Additive)
+    }
+
+    /// ETS(A,N,M) - No trend with multiplicative seasonality.
+    pub fn anm() -> Self {
+        Self::new(
+            ErrorType::Additive,
+            TrendType::None,
+            SeasonalType::Multiplicative,
+        )
+    }
+
+    /// ETS(A,Ad,A) - Additive damped Holt-Winters.
+    pub fn aada() -> Self {
+        Self::new(
+            ErrorType::Additive,
+            TrendType::AdditiveDamped,
+            SeasonalType::Additive,
+        )
+    }
+
+    /// ETS(A,Ad,M) - Additive damped Holt-Winters with multiplicative seasonality.
+    pub fn aadm() -> Self {
+        Self::new(
+            ErrorType::Additive,
+            TrendType::AdditiveDamped,
+            SeasonalType::Multiplicative,
+        )
+    }
+
+    /// ETS(M,N,M) - Multiplicative error with multiplicative seasonality (no trend).
+    pub fn mnm() -> Self {
+        Self::new(
+            ErrorType::Multiplicative,
+            TrendType::None,
+            SeasonalType::Multiplicative,
+        )
+    }
+
+    /// ETS(M,Ad,M) - Multiplicative damped Holt-Winters.
+    pub fn madm() -> Self {
+        Self::new(
+            ErrorType::Multiplicative,
+            TrendType::AdditiveDamped,
+            SeasonalType::Multiplicative,
+        )
+    }
+
+    /// ETS(M,A,N) - Multiplicative error with additive trend (no seasonality).
+    pub fn man() -> Self {
+        Self::new(
+            ErrorType::Multiplicative,
+            TrendType::Additive,
+            SeasonalType::None,
+        )
+    }
+
+    /// ETS(M,Ad,N) - Multiplicative error with damped additive trend (no seasonality).
+    pub fn madn() -> Self {
+        Self::new(
+            ErrorType::Multiplicative,
+            TrendType::AdditiveDamped,
+            SeasonalType::None,
+        )
+    }
+
     /// Get a short name for this specification.
     pub fn short_name(&self) -> String {
         let e = match self.error {
@@ -148,6 +216,137 @@ impl ETSSpec {
     /// Check if this model has damping.
     pub fn is_damped(&self) -> bool {
         matches!(self.trend, TrendType::AdditiveDamped)
+    }
+
+    /// Check if this ETS specification is valid/stable.
+    ///
+    /// Per FPP3 taxonomy (<https://otexts.com/fpp3/taxonomy.html>), most ETS
+    /// combinations are valid, but two are numerically unstable:
+    /// - ETS(M,A,A) - Multiplicative error with additive trend and additive seasonal
+    /// - ETS(M,Ad,A) - Multiplicative error with damped trend and additive seasonal
+    ///
+    /// Returns `true` for valid/stable combinations, `false` for unstable ones.
+    pub fn is_valid(&self) -> bool {
+        // M,A,A and M,Ad,A are unstable (multiplicative error
+        // with additive trend AND additive seasonal)
+        !(self.error == ErrorType::Multiplicative
+            && matches!(self.trend, TrendType::Additive | TrendType::AdditiveDamped)
+            && self.seasonal == SeasonalType::Additive)
+    }
+
+    /// Parse ETS notation string like "ANN", "AAA", "MAM", "AAdM".
+    ///
+    /// Format: ErrorTrendSeasonal where:
+    /// - Error: A (additive) or M (multiplicative)
+    /// - Trend: N (none), A (additive), or Ad (additive damped)
+    /// - Seasonal: N (none), A (additive), or M (multiplicative)
+    ///
+    /// This follows the ETS taxonomy from FPP3:
+    /// <https://otexts.com/fpp3/taxonomy.html>
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The notation format is invalid
+    /// - The combination is unstable (MAA, MAdA)
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use anofox_forecast::models::exponential::ETSSpec;
+    ///
+    /// let spec = ETSSpec::from_notation("AAA").unwrap();
+    /// assert_eq!(spec, ETSSpec::aaa());
+    ///
+    /// let spec = ETSSpec::from_notation("MAdM").unwrap();
+    /// assert!(spec.is_damped());
+    ///
+    /// // Invalid combination returns error
+    /// assert!(ETSSpec::from_notation("MAA").is_err());
+    /// ```
+    pub fn from_notation(notation: &str) -> crate::error::Result<Self> {
+        use crate::error::ForecastError;
+
+        let notation = notation.to_uppercase();
+        let chars: Vec<char> = notation.chars().collect();
+
+        if chars.len() < 3 || chars.len() > 4 {
+            return Err(ForecastError::InvalidParameter(format!(
+                "ETS notation must be 3-4 characters, got '{}'",
+                notation
+            )));
+        }
+
+        // Parse error type (first character)
+        let error = match chars[0] {
+            'A' => ErrorType::Additive,
+            'M' => ErrorType::Multiplicative,
+            c => {
+                return Err(ForecastError::InvalidParameter(format!(
+                    "Invalid error type '{}', expected 'A' or 'M'",
+                    c
+                )))
+            }
+        };
+
+        // Parse trend and seasonal based on length
+        let (trend, seasonal) = if chars.len() == 4 {
+            // Format: E Ad S (e.g., "AAdN", "MAdM")
+            if chars[1] != 'A' || chars[2] != 'D' {
+                return Err(ForecastError::InvalidParameter(format!(
+                    "4-character notation must have 'Ad' for damped trend, got '{}{}'",
+                    chars[1], chars[2]
+                )));
+            }
+            let seasonal = match chars[3] {
+                'N' => SeasonalType::None,
+                'A' => SeasonalType::Additive,
+                'M' => SeasonalType::Multiplicative,
+                c => {
+                    return Err(ForecastError::InvalidParameter(format!(
+                        "Invalid seasonal type '{}', expected 'N', 'A', or 'M'",
+                        c
+                    )))
+                }
+            };
+            (TrendType::AdditiveDamped, seasonal)
+        } else {
+            // Format: E T S (e.g., "ANN", "AAA", "MAM")
+            let trend = match chars[1] {
+                'N' => TrendType::None,
+                'A' => TrendType::Additive,
+                c => {
+                    return Err(ForecastError::InvalidParameter(format!(
+                        "Invalid trend type '{}', expected 'N' or 'A' (use 'Ad' for damped)",
+                        c
+                    )))
+                }
+            };
+            let seasonal = match chars[2] {
+                'N' => SeasonalType::None,
+                'A' => SeasonalType::Additive,
+                'M' => SeasonalType::Multiplicative,
+                c => {
+                    return Err(ForecastError::InvalidParameter(format!(
+                        "Invalid seasonal type '{}', expected 'N', 'A', or 'M'",
+                        c
+                    )))
+                }
+            };
+            (trend, seasonal)
+        };
+
+        let spec = Self::new(error, trend, seasonal);
+
+        // Validate the combination
+        if !spec.is_valid() {
+            return Err(ForecastError::InvalidParameter(format!(
+                "ETS({}) is an unstable model combination per FPP3 taxonomy",
+                notation
+            )));
+        }
+
+        Ok(spec)
     }
 }
 
@@ -1529,6 +1728,215 @@ mod tests {
             "Average step {} should be close to {}",
             avg_step,
             expected_step
+        );
+    }
+
+    // =========================================================================
+    // Tests for ETSSpec::from_notation() and is_valid()
+    // =========================================================================
+
+    #[test]
+    fn ets_spec_from_notation_valid_3char() {
+        // Test all valid 3-character notations
+        assert_eq!(ETSSpec::from_notation("ANN").unwrap(), ETSSpec::ann());
+        assert_eq!(ETSSpec::from_notation("AAN").unwrap(), ETSSpec::aan());
+        assert_eq!(ETSSpec::from_notation("AAA").unwrap(), ETSSpec::aaa());
+        assert_eq!(ETSSpec::from_notation("AAM").unwrap(), ETSSpec::aam());
+        assert_eq!(ETSSpec::from_notation("ANA").unwrap(), ETSSpec::ana());
+        assert_eq!(ETSSpec::from_notation("ANM").unwrap(), ETSSpec::anm());
+        assert_eq!(ETSSpec::from_notation("MNN").unwrap(), ETSSpec::mnn());
+        assert_eq!(ETSSpec::from_notation("MAN").unwrap(), ETSSpec::man());
+        assert_eq!(ETSSpec::from_notation("MAM").unwrap(), ETSSpec::mam());
+        assert_eq!(ETSSpec::from_notation("MNM").unwrap(), ETSSpec::mnm());
+    }
+
+    #[test]
+    fn ets_spec_from_notation_valid_4char_damped() {
+        // Test all valid 4-character (damped trend) notations
+        assert_eq!(ETSSpec::from_notation("AAdN").unwrap(), ETSSpec::aadn());
+        assert_eq!(ETSSpec::from_notation("AAdA").unwrap(), ETSSpec::aada());
+        assert_eq!(ETSSpec::from_notation("AAdM").unwrap(), ETSSpec::aadm());
+        assert_eq!(ETSSpec::from_notation("MAdN").unwrap(), ETSSpec::madn());
+        assert_eq!(ETSSpec::from_notation("MAdM").unwrap(), ETSSpec::madm());
+    }
+
+    #[test]
+    fn ets_spec_from_notation_case_insensitive() {
+        // Test case insensitivity
+        assert_eq!(ETSSpec::from_notation("ann").unwrap(), ETSSpec::ann());
+        assert_eq!(ETSSpec::from_notation("Ann").unwrap(), ETSSpec::ann());
+        assert_eq!(ETSSpec::from_notation("aadn").unwrap(), ETSSpec::aadn());
+        assert_eq!(ETSSpec::from_notation("mam").unwrap(), ETSSpec::mam());
+        assert_eq!(ETSSpec::from_notation("MAdM").unwrap(), ETSSpec::madm());
+    }
+
+    #[test]
+    fn ets_spec_from_notation_invalid_unstable_combinations() {
+        // MAA and MAdA are unstable per FPP3 taxonomy
+        let result_maa = ETSSpec::from_notation("MAA");
+        assert!(result_maa.is_err());
+        assert!(result_maa
+            .unwrap_err()
+            .to_string()
+            .contains("unstable model combination"));
+
+        let result_mada = ETSSpec::from_notation("MAdA");
+        assert!(result_mada.is_err());
+        assert!(result_mada
+            .unwrap_err()
+            .to_string()
+            .contains("unstable model combination"));
+    }
+
+    #[test]
+    fn ets_spec_from_notation_invalid_format() {
+        // Too short
+        assert!(ETSSpec::from_notation("AA").is_err());
+        assert!(ETSSpec::from_notation("A").is_err());
+        assert!(ETSSpec::from_notation("").is_err());
+
+        // Too long
+        assert!(ETSSpec::from_notation("AAAAA").is_err());
+
+        // Invalid characters
+        assert!(ETSSpec::from_notation("XNN").is_err()); // Invalid error type
+        assert!(ETSSpec::from_notation("AXN").is_err()); // Invalid trend type
+        assert!(ETSSpec::from_notation("ANX").is_err()); // Invalid seasonal type
+
+        // Invalid 4-char format (not damped)
+        assert!(ETSSpec::from_notation("AANN").is_err());
+        assert!(ETSSpec::from_notation("ABNN").is_err());
+    }
+
+    #[test]
+    fn ets_spec_is_valid_stable_combinations() {
+        // All these should be valid
+        assert!(ETSSpec::ann().is_valid());
+        assert!(ETSSpec::aan().is_valid());
+        assert!(ETSSpec::aadn().is_valid());
+        assert!(ETSSpec::aaa().is_valid());
+        assert!(ETSSpec::aam().is_valid());
+        assert!(ETSSpec::ana().is_valid());
+        assert!(ETSSpec::anm().is_valid());
+        assert!(ETSSpec::aada().is_valid());
+        assert!(ETSSpec::aadm().is_valid());
+        assert!(ETSSpec::mnn().is_valid());
+        assert!(ETSSpec::man().is_valid());
+        assert!(ETSSpec::madn().is_valid());
+        assert!(ETSSpec::mam().is_valid());
+        assert!(ETSSpec::mnm().is_valid());
+        assert!(ETSSpec::madm().is_valid());
+    }
+
+    #[test]
+    fn ets_spec_is_valid_unstable_combinations() {
+        // MAA - Multiplicative error + Additive trend + Additive seasonal
+        let maa = ETSSpec::new(
+            ErrorType::Multiplicative,
+            TrendType::Additive,
+            SeasonalType::Additive,
+        );
+        assert!(!maa.is_valid());
+
+        // MAdA - Multiplicative error + Damped trend + Additive seasonal
+        let mada = ETSSpec::new(
+            ErrorType::Multiplicative,
+            TrendType::AdditiveDamped,
+            SeasonalType::Additive,
+        );
+        assert!(!mada.is_valid());
+    }
+
+    #[test]
+    fn ets_spec_from_notation_roundtrip() {
+        // Test that short_name output can be parsed back
+        // Note: short_name returns "ETS(A,A,N)" format, not "AAN"
+        // So we test the opposite direction: parse -> short_name
+        let specs = [
+            ("ANN", "ETS(A,N,N)"),
+            ("AAN", "ETS(A,A,N)"),
+            ("AAdN", "ETS(A,Ad,N)"),
+            ("AAA", "ETS(A,A,A)"),
+            ("AAM", "ETS(A,A,M)"),
+            ("MNN", "ETS(M,N,N)"),
+            ("MAM", "ETS(M,A,M)"),
+            ("MAdM", "ETS(M,Ad,M)"),
+        ];
+
+        for (notation, expected_name) in specs {
+            let spec = ETSSpec::from_notation(notation).unwrap();
+            assert_eq!(
+                spec.short_name(),
+                expected_name,
+                "Notation {} should produce {}",
+                notation,
+                expected_name
+            );
+        }
+    }
+
+    #[test]
+    fn ets_spec_new_constructors_match_manual() {
+        // Verify convenience constructors match manual construction
+        assert_eq!(
+            ETSSpec::ana(),
+            ETSSpec::new(ErrorType::Additive, TrendType::None, SeasonalType::Additive)
+        );
+        assert_eq!(
+            ETSSpec::anm(),
+            ETSSpec::new(
+                ErrorType::Additive,
+                TrendType::None,
+                SeasonalType::Multiplicative
+            )
+        );
+        assert_eq!(
+            ETSSpec::aada(),
+            ETSSpec::new(
+                ErrorType::Additive,
+                TrendType::AdditiveDamped,
+                SeasonalType::Additive
+            )
+        );
+        assert_eq!(
+            ETSSpec::aadm(),
+            ETSSpec::new(
+                ErrorType::Additive,
+                TrendType::AdditiveDamped,
+                SeasonalType::Multiplicative
+            )
+        );
+        assert_eq!(
+            ETSSpec::mnm(),
+            ETSSpec::new(
+                ErrorType::Multiplicative,
+                TrendType::None,
+                SeasonalType::Multiplicative
+            )
+        );
+        assert_eq!(
+            ETSSpec::madm(),
+            ETSSpec::new(
+                ErrorType::Multiplicative,
+                TrendType::AdditiveDamped,
+                SeasonalType::Multiplicative
+            )
+        );
+        assert_eq!(
+            ETSSpec::man(),
+            ETSSpec::new(
+                ErrorType::Multiplicative,
+                TrendType::Additive,
+                SeasonalType::None
+            )
+        );
+        assert_eq!(
+            ETSSpec::madn(),
+            ETSSpec::new(
+                ErrorType::Multiplicative,
+                TrendType::AdditiveDamped,
+                SeasonalType::None
+            )
         );
     }
 }

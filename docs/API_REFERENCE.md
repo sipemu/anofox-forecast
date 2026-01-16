@@ -454,7 +454,7 @@ pub enum SeasonalType {
 
 ### ETS
 
-Error-Trend-Seasonal state-space model supporting 30 model combinations.
+Error-Trend-Seasonal state-space model following the [FPP3 taxonomy](https://otexts.com/fpp3/taxonomy.html).
 
 ```rust
 pub struct ETS {
@@ -462,31 +462,74 @@ pub struct ETS {
 }
 
 impl ETS {
-    pub fn new(spec: ETSSpec) -> Self;
-    pub fn auto() -> Self;
+    pub fn new(spec: ETSSpec, period: usize) -> Self;
 }
 
 pub struct ETSSpec {
     pub error: ErrorType,
     pub trend: TrendType,
-    pub seasonal: SeasonalTypeETS,
-    pub period: Option<usize>,
-    pub damped: bool,
+    pub seasonal: SeasonalType,
 }
 
 pub enum ErrorType { Additive, Multiplicative }
-pub enum TrendType { None, Additive, Multiplicative }
-pub enum SeasonalTypeETS { None, Additive, Multiplicative }
+pub enum TrendType { None, Additive, AdditiveDamped }
+pub enum SeasonalType { None, Additive, Multiplicative }
 ```
 
-**Predefined Specs:**
+#### ETS Model Taxonomy
 
-| Method | Model | Description |
-|--------|-------|-------------|
-| `ETSSpec::ann()` | ETS(A,N,N) | Simple exponential smoothing |
-| `ETSSpec::aan()` | ETS(A,A,N) | Holt's linear trend |
-| `ETSSpec::aaa(period)` | ETS(A,A,A) | Additive Holt-Winters |
-| `ETSSpec::mam(period)` | ETS(M,A,M) | Multiplicative Holt-Winters |
+This implementation follows the ETS taxonomy from [Forecasting: Principles and Practice (FPP3)](https://otexts.com/fpp3/taxonomy.html).
+
+**Valid ETS Specifications (16 of 18 combinations):**
+
+| Code | Name | Constructor |
+|------|------|-------------|
+| ANN | Simple exponential smoothing | `ETSSpec::ann()` |
+| AAN | Holt's linear method | `ETSSpec::aan()` |
+| AAdN | Additive damped trend | `ETSSpec::aadn()` |
+| ANA | Seasonal (no trend, additive) | `ETSSpec::ana()` |
+| ANM | Seasonal (no trend, multiplicative) | `ETSSpec::anm()` |
+| AAA | Holt-Winters additive | `ETSSpec::aaa()` |
+| AAM | Holt-Winters multiplicative seasonal | `ETSSpec::aam()` |
+| AAdA | Damped Holt-Winters additive | `ETSSpec::aada()` |
+| AAdM | Damped Holt-Winters multiplicative | `ETSSpec::aadm()` |
+| MNN | Multiplicative error simple smoothing | `ETSSpec::mnn()` |
+| MAN | Multiplicative error with trend | `ETSSpec::man()` |
+| MAdN | Multiplicative error damped trend | `ETSSpec::madn()` |
+| MNM | Multiplicative error and seasonal | `ETSSpec::mnm()` |
+| MAM | Multiplicative Holt-Winters | `ETSSpec::mam()` |
+| MAdM | Damped multiplicative Holt-Winters | `ETSSpec::madm()` |
+
+**Invalid/Unstable (rejected):**
+
+| Code | Reason |
+|------|--------|
+| MAA | Multiplicative error + additive trend + additive seasonal |
+| MAdA | Multiplicative error + damped trend + additive seasonal |
+
+#### Parsing ETS Notation
+
+```rust
+impl ETSSpec {
+    /// Parse from notation string like "AAA", "MAM", "AAdM"
+    pub fn from_notation(notation: &str) -> Result<Self>;
+
+    /// Check if this combination is valid
+    pub fn is_valid(&self) -> bool;
+}
+```
+
+**Example:**
+```rust
+use anofox_forecast::models::exponential::ETSSpec;
+
+// Parse notation
+let spec = ETSSpec::from_notation("AAA")?;  // Holt-Winters additive
+let spec = ETSSpec::from_notation("MAdM")?; // Damped multiplicative
+
+// Invalid combinations return error
+assert!(ETSSpec::from_notation("MAA").is_err());
+```
 
 [Back to top](#api-reference)
 
