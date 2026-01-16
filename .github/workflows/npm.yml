@@ -86,13 +86,15 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Configure npm for OIDC publishing
+      - name: Upgrade npm for OIDC support
         run: |
+          echo "Current npm version:"
+          npm --version
+          echo "Upgrading npm to latest (need >= 11.5.1 for OIDC)..."
+          npm install -g npm@latest
+          echo "New npm version:"
           npm --version
           node --version
-          # Don't use any .npmrc - let npm use OIDC automatically
-          rm -f ~/.npmrc
-          npm config set registry https://registry.npmjs.org/
 
       - name: Verify package contents
         run: |
