@@ -43,6 +43,21 @@ The QRA implementation is based on:
 
 - Nowotarski, J., & Weron, R. (2015). Computing Electricity Spot Price Prediction Intervals Using Quantile Regression and Forecast Averaging. *Computational Statistics*, 30(3), 791-803.
 
+## Forecasting: Principles and Practice (FPP3)
+
+The ETS (Error-Trend-Seasonal) model taxonomy and validation rules are based on [Forecasting: Principles and Practice, 3rd edition](https://otexts.com/fpp3/) by Rob J. Hyndman and George Athanasopoulos.
+
+**Reference**:
+
+- Hyndman, R.J., & Athanasopoulos, G. (2021). *Forecasting: Principles and Practice*, 3rd edition, OTexts: Melbourne, Australia. https://otexts.com/fpp3/
+
+### Features Based on FPP3
+
+- ETS model notation (e.g., "ANN", "AAA", "MAM", "AAdM")
+- ETS model validation (rejection of unstable combinations MAA, MAdA)
+- ETS taxonomy with 16 valid model specifications
+- Exponential smoothing state-space framework
+
 ## StatsForecast
 
 Some forecasting models and baseline methods are inspired by [StatsForecast](https://github.com/Nixtla/statsforecast) by Nixtla.
