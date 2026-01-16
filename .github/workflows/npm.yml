@@ -86,6 +86,14 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Configure npm for OIDC publishing
+        run: |
+          npm --version
+          node --version
+          # Don't use any .npmrc - let npm use OIDC automatically
+          rm -f ~/.npmrc
+          npm config set registry https://registry.npmjs.org/
+
       - name: Verify package contents
         run: |
           echo "Package contents:"
