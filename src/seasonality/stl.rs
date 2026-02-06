@@ -142,6 +142,11 @@ impl STL {
         let mut trend = vec![0.0; n];
         let mut weights = vec![1.0; n];
 
+        // Pre-allocate inner-loop buffers
+        let mut detrended = vec![0.0; n];
+        let mut deseasonalized = vec![0.0; n];
+        let mut remainder = vec![0.0; n];
+
         // Outer loop (robustness)
         let outer_iters = if self.robust {
             self.outer_iterations.max(1)
@@ -153,11 +158,9 @@ impl STL {
             // Inner loop
             for _ in 0..self.inner_iterations {
                 // Step 1: Detrending
-                let detrended: Vec<f64> = series
-                    .iter()
-                    .zip(trend.iter())
-                    .map(|(y, t)| y - t)
-                    .collect();
+                for (d, (y, t)) in detrended.iter_mut().zip(series.iter().zip(trend.iter())) {
+                    *d = y - t;
+                }
 
                 // Step 2: Cycle-subseries smoothing
                 let cycle_subseries = self.smooth_cycle_subseries(&detrended, &weights);
@@ -171,11 +174,12 @@ impl STL {
                 }
 
                 // Step 5: Deseasonalizing
-                let deseasonalized: Vec<f64> = series
-                    .iter()
-                    .zip(seasonal.iter())
-                    .map(|(y, s)| y - s)
-                    .collect();
+                for (d, (y, s)) in deseasonalized
+                    .iter_mut()
+                    .zip(series.iter().zip(seasonal.iter()))
+                {
+                    *d = y - s;
+                }
 
                 // Step 6: Trend smoothing
                 trend = self.loess_smooth(&deseasonalized, self.trend_smoothness, &weights);
@@ -183,23 +187,25 @@ impl STL {
 
             // Update robustness weights
             if self.robust {
-                let remainder: Vec<f64> = series
-                    .iter()
-                    .zip(seasonal.iter())
+                for ((r, (y, s)), t) in remainder
+                    .iter_mut()
+                    .zip(series.iter().zip(seasonal.iter()))
                     .zip(trend.iter())
-                    .map(|((y, s), t)| y - s - t)
-                    .collect();
+                {
+                    *r = y - s - t;
+                }
                 weights = self.compute_robustness_weights(&remainder);
             }
         }
 
         // Compute final remainder
-        let remainder: Vec<f64> = series
-            .iter()
-            .zip(seasonal.iter())
+        for ((r, (y, s)), t) in remainder
+            .iter_mut()
+            .zip(series.iter().zip(seasonal.iter()))
             .zip(trend.iter())
-            .map(|((y, s), t)| y - s - t)
-            .collect();
+        {
+            *r = y - s - t;
+        }
 
         Some(STLResult {
             trend,
@@ -214,12 +220,18 @@ impl STL {
         let period = self.seasonal_period;
         let mut result = vec![0.0; n];
 
+        // Pre-allocate subseries buffers with max possible length
+        let max_subseries_len = n.div_ceil(period);
+        let mut subseries_values = Vec::with_capacity(max_subseries_len);
+        let mut subseries_weights = Vec::with_capacity(max_subseries_len);
+        let mut subseries_indices = Vec::with_capacity(max_subseries_len);
+
         // Process each cycle-subseries (one for each position in the seasonal cycle)
         for cycle_pos in 0..period {
-            // Extract subseries for this cycle position
-            let mut subseries_values = Vec::new();
-            let mut subseries_weights = Vec::new();
-            let mut subseries_indices = Vec::new();
+            // Clear and reuse buffers
+            subseries_values.clear();
+            subseries_weights.clear();
+            subseries_indices.clear();
 
             for (i, (&val, &w)) in detrended.iter().zip(weights.iter()).enumerate() {
                 if i % period == cycle_pos {

@@ -8,6 +8,9 @@ use crate::error::{ForecastError, Result};
 use crate::models::exponential::ets::{ETSSpec, ErrorType, SeasonalType, TrendType, ETS};
 use crate::models::Forecaster;
 
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+
 /// Selection criterion for AutoETS.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SelectionCriterion {
@@ -191,12 +194,39 @@ impl AutoETS {
     }
 
     /// Get the criterion value from a model.
-    fn get_criterion(&self, model: &ETS) -> Option<f64> {
-        match self.config.criterion {
+    fn get_criterion_static(criterion: SelectionCriterion, model: &ETS) -> Option<f64> {
+        match criterion {
             SelectionCriterion::AIC => model.aic(),
             SelectionCriterion::AICc => model.aicc(),
             SelectionCriterion::BIC => model.bic(),
         }
+    }
+
+    /// Fit and evaluate a single candidate model (static method for parallel use).
+    fn evaluate_candidate_static(
+        series: &TimeSeries,
+        spec: ETSSpec,
+        seasonal_period: usize,
+        criterion: SelectionCriterion,
+    ) -> Option<(ETSSpec, ETS, f64)> {
+        let period = if spec.has_seasonal() {
+            seasonal_period
+        } else {
+            1
+        };
+
+        let min_len = if spec.has_seasonal() { 2 * period } else { 2 };
+        if series.primary_values().len() < min_len {
+            return None;
+        }
+
+        let mut model = ETS::new(spec, period);
+        if model.fit(series).is_ok() {
+            if let Some(score) = Self::get_criterion_static(criterion, &model) {
+                return Some((spec, model, score));
+            }
+        }
+        None
     }
 }
 
@@ -224,35 +254,41 @@ impl Forecaster for AutoETS {
         let candidates = self.generate_candidates(has_seasonal);
         self.model_scores.clear();
 
+        let criterion = self.config.criterion;
+
+        // Fit each candidate and track scores (parallel when feature enabled)
+        let results: Vec<(ETSSpec, ETS, f64)>;
+
+        #[cfg(feature = "parallel")]
+        {
+            results = candidates
+                .par_iter()
+                .filter_map(|&spec| {
+                    Self::evaluate_candidate_static(series, spec, seasonal_period, criterion)
+                })
+                .collect();
+        }
+
+        #[cfg(not(feature = "parallel"))]
+        {
+            results = candidates
+                .iter()
+                .filter_map(|&spec| {
+                    Self::evaluate_candidate_static(series, spec, seasonal_period, criterion)
+                })
+                .collect();
+        }
+
         let mut best_model: Option<ETS> = None;
         let mut best_spec: Option<ETSSpec> = None;
         let mut best_score = f64::INFINITY;
 
-        // Fit each candidate and track scores
-        for spec in candidates {
-            let period = if spec.has_seasonal() {
-                seasonal_period
-            } else {
-                1
-            };
-
-            // Check if we have enough data for this specification
-            let min_len = if spec.has_seasonal() { 2 * period } else { 2 };
-            if values.len() < min_len {
-                continue;
-            }
-
-            let mut model = ETS::new(spec, period);
-            if model.fit(series).is_ok() {
-                if let Some(score) = self.get_criterion(&model) {
-                    self.model_scores.push((spec, score));
-
-                    if score < best_score {
-                        best_score = score;
-                        best_model = Some(model);
-                        best_spec = Some(spec);
-                    }
-                }
+        for (spec, model, score) in results {
+            self.model_scores.push((spec, score));
+            if score < best_score {
+                best_score = score;
+                best_model = Some(model);
+                best_spec = Some(spec);
             }
         }
 

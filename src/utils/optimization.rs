@@ -94,7 +94,9 @@ where
 
     // Initialize simplex with n+1 vertices
     let mut simplex: Vec<Vec<f64>> = Vec::with_capacity(n + 1);
-    simplex.push(initial.to_vec());
+    let mut first = initial.to_vec();
+    apply_bounds_in_place(&mut first, bounds);
+    simplex.push(first);
 
     for i in 0..n {
         let mut vertex = initial.to_vec();
@@ -104,11 +106,20 @@ where
             config.initial_step
         };
         vertex[i] += step;
-        simplex.push(apply_bounds(&vertex, bounds));
+        apply_bounds_in_place(&mut vertex, bounds);
+        simplex.push(vertex);
     }
 
     // Evaluate objective at all vertices
     let mut values: Vec<f64> = simplex.iter().map(|v| objective(v)).collect();
+
+    // Pre-allocate scratch buffers
+    let mut indices: Vec<usize> = (0..=n).collect();
+    let mut centroid = vec![0.0; n];
+    let mut reflected = vec![0.0; n];
+    let mut expanded = vec![0.0; n];
+    let mut contracted = vec![0.0; n];
+    let mut temp = vec![0.0; n];
 
     let mut iterations = 0;
     let mut converged = false;
@@ -116,8 +127,10 @@ where
     while iterations < config.max_iter {
         iterations += 1;
 
-        // Sort vertices by objective value
-        let mut indices: Vec<usize> = (0..=n).collect();
+        // Reset and sort indices by objective value
+        for (i, idx) in indices.iter_mut().enumerate() {
+            *idx = i;
+        }
         indices.sort_by(|&a, &b| {
             values[a]
                 .partial_cmp(&values[b])
@@ -136,7 +149,7 @@ where
         }
 
         // Also check if simplex has collapsed
-        let centroid = compute_centroid(&simplex, worst_idx);
+        compute_centroid_into(&simplex, worst_idx, &mut centroid);
         let max_dist = simplex
             .iter()
             .map(|v| euclidean_distance(v, &centroid))
@@ -147,28 +160,28 @@ where
         }
 
         // Reflection
-        let reflected = reflect(&simplex[worst_idx], &centroid, config.alpha);
-        let reflected = apply_bounds(&reflected, bounds);
+        reflect_into(&simplex[worst_idx], &centroid, config.alpha, &mut reflected);
+        apply_bounds_in_place(&mut reflected, bounds);
         let reflected_value = objective(&reflected);
 
         if reflected_value < values[second_worst_idx] && reflected_value >= values[best_idx] {
             // Accept reflection
-            simplex[worst_idx] = reflected;
+            simplex[worst_idx].copy_from_slice(&reflected);
             values[worst_idx] = reflected_value;
             continue;
         }
 
         if reflected_value < values[best_idx] {
             // Try expansion
-            let expanded = expand(&centroid, &reflected, config.gamma);
-            let expanded = apply_bounds(&expanded, bounds);
+            expand_into(&centroid, &reflected, config.gamma, &mut expanded);
+            apply_bounds_in_place(&mut expanded, bounds);
             let expanded_value = objective(&expanded);
 
             if expanded_value < reflected_value {
-                simplex[worst_idx] = expanded;
+                simplex[worst_idx].copy_from_slice(&expanded);
                 values[worst_idx] = expanded_value;
             } else {
-                simplex[worst_idx] = reflected;
+                simplex[worst_idx].copy_from_slice(&reflected);
                 values[worst_idx] = reflected_value;
             }
             continue;
@@ -177,36 +190,36 @@ where
         // Contraction
         if reflected_value < values[worst_idx] {
             // Outside contraction
-            let contracted = contract(&centroid, &reflected, config.rho);
-            let contracted = apply_bounds(&contracted, bounds);
+            contract_into(&centroid, &reflected, config.rho, &mut contracted);
+            apply_bounds_in_place(&mut contracted, bounds);
             let contracted_value = objective(&contracted);
 
             if contracted_value <= reflected_value {
-                simplex[worst_idx] = contracted;
+                simplex[worst_idx].copy_from_slice(&contracted);
                 values[worst_idx] = contracted_value;
                 continue;
             }
         } else {
             // Inside contraction
-            let contracted = contract(&centroid, &simplex[worst_idx], config.rho);
-            let contracted = apply_bounds(&contracted, bounds);
+            contract_into(&centroid, &simplex[worst_idx], config.rho, &mut contracted);
+            apply_bounds_in_place(&mut contracted, bounds);
             let contracted_value = objective(&contracted);
 
             if contracted_value < values[worst_idx] {
-                simplex[worst_idx] = contracted;
+                simplex[worst_idx].copy_from_slice(&contracted);
                 values[worst_idx] = contracted_value;
                 continue;
             }
         }
 
-        // Shrink
-        let best = simplex[best_idx].clone();
+        // Shrink -- copy best vertex into temp to avoid borrow conflict
+        temp.copy_from_slice(&simplex[best_idx]);
         for i in 0..=n {
             if i != best_idx {
                 for j in 0..n {
-                    simplex[i][j] = best[j] + config.sigma * (simplex[i][j] - best[j]);
+                    simplex[i][j] = temp[j] + config.sigma * (simplex[i][j] - temp[j]);
                 }
-                simplex[i] = apply_bounds(&simplex[i], bounds);
+                apply_bounds_in_place(&mut simplex[i], bounds);
                 values[i] = objective(&simplex[i]);
             }
         }
@@ -228,69 +241,56 @@ where
     }
 }
 
-/// Compute centroid of simplex excluding the worst vertex.
-fn compute_centroid(simplex: &[Vec<f64>], exclude_idx: usize) -> Vec<f64> {
-    let n = simplex[0].len();
+/// Compute centroid of simplex excluding one vertex, writing into `out`.
+fn compute_centroid_into(simplex: &[Vec<f64>], exclude_idx: usize, out: &mut [f64]) {
     let count = simplex.len() - 1;
-    let mut centroid = vec![0.0; n];
+    for o in out.iter_mut() {
+        *o = 0.0;
+    }
 
     for (i, vertex) in simplex.iter().enumerate() {
         if i != exclude_idx {
-            for j in 0..n {
-                centroid[j] += vertex[j];
+            for (o, v) in out.iter_mut().zip(vertex.iter()) {
+                *o += v;
             }
         }
     }
 
-    for c in &mut centroid {
-        *c /= count as f64;
+    let inv = 1.0 / count as f64;
+    for o in out.iter_mut() {
+        *o *= inv;
     }
-
-    centroid
 }
 
-/// Reflect a point through the centroid.
-fn reflect(point: &[f64], centroid: &[f64], alpha: f64) -> Vec<f64> {
-    centroid
-        .iter()
-        .zip(point.iter())
-        .map(|(c, p)| c + alpha * (c - p))
-        .collect()
+/// Reflect a point through the centroid, writing into `out`.
+fn reflect_into(point: &[f64], centroid: &[f64], alpha: f64, out: &mut [f64]) {
+    for ((o, c), p) in out.iter_mut().zip(centroid.iter()).zip(point.iter()) {
+        *o = c + alpha * (c - p);
+    }
 }
 
-/// Expand from centroid towards reflected point.
-fn expand(centroid: &[f64], reflected: &[f64], gamma: f64) -> Vec<f64> {
-    centroid
-        .iter()
-        .zip(reflected.iter())
-        .map(|(c, r)| c + gamma * (r - c))
-        .collect()
+/// Expand from centroid towards reflected point, writing into `out`.
+fn expand_into(centroid: &[f64], reflected: &[f64], gamma: f64, out: &mut [f64]) {
+    for ((o, c), r) in out.iter_mut().zip(centroid.iter()).zip(reflected.iter()) {
+        *o = c + gamma * (r - c);
+    }
 }
 
-/// Contract between centroid and a point.
-fn contract(centroid: &[f64], point: &[f64], rho: f64) -> Vec<f64> {
-    centroid
-        .iter()
-        .zip(point.iter())
-        .map(|(c, p)| c + rho * (p - c))
-        .collect()
+/// Contract between centroid and a point, writing into `out`.
+fn contract_into(centroid: &[f64], point: &[f64], rho: f64, out: &mut [f64]) {
+    for ((o, c), p) in out.iter_mut().zip(centroid.iter()).zip(point.iter()) {
+        *o = c + rho * (p - c);
+    }
 }
 
-/// Apply bounds to a point.
-fn apply_bounds(point: &[f64], bounds: Option<&[(f64, f64)]>) -> Vec<f64> {
-    match bounds {
-        None => point.to_vec(),
-        Some(b) => point
-            .iter()
-            .enumerate()
-            .map(|(i, &x)| {
-                if i < b.len() {
-                    x.clamp(b[i].0, b[i].1)
-                } else {
-                    x
-                }
-            })
-            .collect(),
+/// Apply bounds to a point in place.
+fn apply_bounds_in_place(point: &mut [f64], bounds: Option<&[(f64, f64)]>) {
+    if let Some(b) = bounds {
+        for (i, x) in point.iter_mut().enumerate() {
+            if i < b.len() {
+                *x = x.clamp(b[i].0, b[i].1);
+            }
+        }
     }
 }
 

@@ -63,68 +63,54 @@ pub fn calculate_metrics(
 
     let n = actual.len() as f64;
 
-    // MAE
-    let mae: f64 = actual
-        .iter()
-        .zip(predicted.iter())
-        .map(|(a, p)| (a - p).abs())
-        .sum::<f64>()
-        / n;
+    // Pass 1: compute sum_ae, sum_se, sum_ape, sum_smape, sum_actual, has_zero
+    let mut sum_ae = 0.0;
+    let mut sum_se = 0.0;
+    let mut sum_ape = 0.0;
+    let mut sum_smape = 0.0;
+    let mut sum_actual = 0.0;
+    let mut has_zero = false;
 
-    // MSE
-    let mse: f64 = actual
-        .iter()
-        .zip(predicted.iter())
-        .map(|(a, p)| (a - p).powi(2))
-        .sum::<f64>()
-        / n;
+    for (&a, &p) in actual.iter().zip(predicted.iter()) {
+        let diff = a - p;
+        let abs_diff = diff.abs();
+        sum_ae += abs_diff;
+        sum_se += diff * diff;
+        sum_actual += a;
 
-    // RMSE
+        if a == 0.0 {
+            has_zero = true;
+        } else {
+            sum_ape += abs_diff / a.abs();
+        }
+
+        let denom = a.abs() + p.abs();
+        if denom != 0.0 {
+            sum_smape += 2.0 * abs_diff / denom;
+        }
+    }
+
+    let mae = sum_ae / n;
+    let mse = sum_se / n;
     let rmse = mse.sqrt();
-
-    // MAPE (only if no zeros in actual)
-    let mape = if actual.contains(&0.0) {
+    let mape = if has_zero {
         None
     } else {
-        let sum: f64 = actual
-            .iter()
-            .zip(predicted.iter())
-            .map(|(a, p)| ((a - p) / a).abs())
-            .sum();
-        Some(100.0 * sum / n)
+        Some(100.0 * sum_ape / n)
     };
-
-    // SMAPE
-    let smape: f64 = actual
-        .iter()
-        .zip(predicted.iter())
-        .map(|(a, p)| {
-            let denom = a.abs() + p.abs();
-            if denom == 0.0 {
-                0.0
-            } else {
-                2.0 * (a - p).abs() / denom
-            }
-        })
-        .sum::<f64>()
-        * 100.0
-        / n;
+    let smape = 100.0 * sum_smape / n;
 
     // MASE
     let mase = calculate_mase(actual, predicted, seasonal_period);
 
-    // R-squared
-    let mean_actual = actual.iter().sum::<f64>() / n;
+    // Pass 2: R-squared (needs mean from pass 1)
+    let mean_actual = sum_actual / n;
     let ss_tot: f64 = actual.iter().map(|a| (a - mean_actual).powi(2)).sum();
-    let ss_res: f64 = actual
-        .iter()
-        .zip(predicted.iter())
-        .map(|(a, p)| (a - p).powi(2))
-        .sum();
+    // ss_res == sum_se, reuse from pass 1
     let r_squared = if ss_tot == 0.0 {
         1.0
     } else {
-        1.0 - ss_res / ss_tot
+        1.0 - sum_se / ss_tot
     };
 
     Ok(AccuracyMetrics {
