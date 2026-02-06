@@ -113,6 +113,9 @@ path = "examples/analysis/changepoint_types.rs"
 name = "outlier_detection"
 path = "examples/analysis/outlier_detection.rs"
 
+[[example]]
+name = "imputation"
+path = "examples/analysis/imputation.rs"
 
 [[example]]
 name = "scaling"
