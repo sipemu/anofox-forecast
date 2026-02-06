@@ -1,6 +1,7 @@
 //! TimeSeries data structure for representing temporal data.
 
 use crate::error::{ForecastError, Result};
+use crate::utils::stats::{nan_mean, nan_median};
 use chrono::{DateTime, Datelike, Duration, Utc};
 use std::collections::HashMap;
 
@@ -101,6 +102,14 @@ pub enum MissingValuePolicy {
     Fill(f64),
     /// Forward fill (use previous valid value).
     ForwardFill,
+    /// Backward fill (use next valid value).
+    BackwardFill,
+    /// Fill with mean of finite values.
+    FillMean,
+    /// Fill with median of finite values.
+    FillMedian,
+    /// Linear interpolation (edges filled with nearest valid value).
+    Interpolate,
     /// Return error if missing values found.
     Error,
 }
@@ -700,6 +709,90 @@ impl TimeSeries {
                     calendar: self.calendar.clone(),
                 })
             }
+            MissingValuePolicy::BackwardFill => {
+                let values: Vec<Vec<f64>> = self
+                    .values
+                    .iter()
+                    .map(|dim| {
+                        let mut result = dim.clone();
+                        let mut next_valid = None;
+                        for i in (0..result.len()).rev() {
+                            if result[i].is_nan() || result[i].is_infinite() {
+                                if let Some(v) = next_valid {
+                                    result[i] = v;
+                                }
+                            } else {
+                                next_valid = Some(result[i]);
+                            }
+                        }
+                        result
+                    })
+                    .collect();
+
+                Ok(TimeSeries {
+                    timestamps: self.timestamps.clone(),
+                    values,
+                    labels: self.labels.clone(),
+                    metadata: self.metadata.clone(),
+                    dimension_metadata: self.dimension_metadata.clone(),
+                    timezone: self.timezone.clone(),
+                    frequency: self.frequency,
+                    calendar: self.calendar.clone(),
+                })
+            }
+            MissingValuePolicy::FillMean => {
+                let values: Vec<Vec<f64>> = self
+                    .values
+                    .iter()
+                    .map(|dim| {
+                        let m = nan_mean(dim);
+                        dim.iter()
+                            .map(|&v| if v.is_nan() || v.is_infinite() { m } else { v })
+                            .collect()
+                    })
+                    .collect();
+
+                Ok(TimeSeries {
+                    timestamps: self.timestamps.clone(),
+                    values,
+                    labels: self.labels.clone(),
+                    metadata: self.metadata.clone(),
+                    dimension_metadata: self.dimension_metadata.clone(),
+                    timezone: self.timezone.clone(),
+                    frequency: self.frequency,
+                    calendar: self.calendar.clone(),
+                })
+            }
+            MissingValuePolicy::FillMedian => {
+                let values: Vec<Vec<f64>> = self
+                    .values
+                    .iter()
+                    .map(|dim| {
+                        let med = nan_median(dim);
+                        dim.iter()
+                            .map(|&v| {
+                                if v.is_nan() || v.is_infinite() {
+                                    med
+                                } else {
+                                    v
+                                }
+                            })
+                            .collect()
+                    })
+                    .collect();
+
+                Ok(TimeSeries {
+                    timestamps: self.timestamps.clone(),
+                    values,
+                    labels: self.labels.clone(),
+                    metadata: self.metadata.clone(),
+                    dimension_metadata: self.dimension_metadata.clone(),
+                    timezone: self.timezone.clone(),
+                    frequency: self.frequency,
+                    calendar: self.calendar.clone(),
+                })
+            }
+            MissingValuePolicy::Interpolate => Ok(self.interpolated(true)),
         }
     }
 
@@ -721,6 +814,328 @@ impl TimeSeries {
             frequency: self.frequency,
             calendar: self.calendar.clone(),
         }
+    }
+
+    /// Returns a boolean mask: true where value is NaN or Inf (primary dimension).
+    pub fn missing_mask(&self) -> Vec<bool> {
+        self.values[0]
+            .iter()
+            .map(|v| v.is_nan() || v.is_infinite())
+            .collect()
+    }
+
+    /// Count of missing values per dimension.
+    pub fn missing_count(&self) -> Vec<usize> {
+        self.values
+            .iter()
+            .map(|dim| dim.iter().filter(|v| v.is_nan() || v.is_infinite()).count())
+            .collect()
+    }
+
+    /// Forward-fill then backward-fill — handles both leading and trailing NaNs.
+    pub fn imputed_forward_backward(&self) -> TimeSeries {
+        let values: Vec<Vec<f64>> = self
+            .values
+            .iter()
+            .map(|dim| {
+                // Forward fill
+                let mut result = Vec::with_capacity(dim.len());
+                let mut last_valid = None;
+                for &v in dim {
+                    if v.is_nan() || v.is_infinite() {
+                        result.push(last_valid.unwrap_or(v));
+                    } else {
+                        last_valid = Some(v);
+                        result.push(v);
+                    }
+                }
+                // Backward fill remaining (leading NaNs)
+                let mut next_valid = None;
+                for i in (0..result.len()).rev() {
+                    if result[i].is_nan() || result[i].is_infinite() {
+                        if let Some(v) = next_valid {
+                            result[i] = v;
+                        }
+                    } else {
+                        next_valid = Some(result[i]);
+                    }
+                }
+                result
+            })
+            .collect();
+
+        TimeSeries {
+            timestamps: self.timestamps.clone(),
+            values,
+            labels: self.labels.clone(),
+            metadata: self.metadata.clone(),
+            dimension_metadata: self.dimension_metadata.clone(),
+            timezone: self.timezone.clone(),
+            frequency: self.frequency,
+            calendar: self.calendar.clone(),
+        }
+    }
+
+    /// Impute NaN using mean of valid values in a centered window.
+    ///
+    /// Window must be odd. Multi-pass (up to 3) for adjacent NaNs.
+    /// Remaining NaNs filled with global mean.
+    pub fn imputed_moving_average(&self, window: usize) -> Result<TimeSeries> {
+        if window == 0 || window % 2 == 0 {
+            return Err(ForecastError::InvalidParameter(
+                "moving average window must be odd and > 0".to_string(),
+            ));
+        }
+
+        let half = window / 2;
+        let values: Vec<Vec<f64>> = self
+            .values
+            .iter()
+            .map(|dim| {
+                let mut result = dim.clone();
+                let n = result.len();
+
+                // Multi-pass: up to 3 passes to handle adjacent NaNs
+                for _ in 0..3 {
+                    let mut changed = false;
+                    let snapshot = result.clone();
+                    for i in 0..n {
+                        if !(snapshot[i].is_nan() || snapshot[i].is_infinite()) {
+                            continue;
+                        }
+                        let start = i.saturating_sub(half);
+                        let end = (i + half + 1).min(n);
+                        let mut sum = 0.0;
+                        let mut count = 0usize;
+                        for j in start..end {
+                            if j != i && snapshot[j].is_finite() {
+                                sum += snapshot[j];
+                                count += 1;
+                            }
+                        }
+                        if count > 0 {
+                            result[i] = sum / count as f64;
+                            changed = true;
+                        }
+                    }
+                    if !changed {
+                        break;
+                    }
+                }
+
+                // Fill any remaining NaNs with global mean
+                let global_mean = nan_mean(&result);
+                for v in &mut result {
+                    if v.is_nan() || v.is_infinite() {
+                        *v = global_mean;
+                    }
+                }
+                result
+            })
+            .collect();
+
+        Ok(TimeSeries {
+            timestamps: self.timestamps.clone(),
+            values,
+            labels: self.labels.clone(),
+            metadata: self.metadata.clone(),
+            dimension_metadata: self.dimension_metadata.clone(),
+            timezone: self.timezone.clone(),
+            frequency: self.frequency,
+            calendar: self.calendar.clone(),
+        })
+    }
+
+    /// Impute NaN using the median of observed values at the same seasonal position.
+    ///
+    /// Groups values by (index % period), computes median per group, fills NaN.
+    /// Returns error if period is 0 or if >50% of values in any seasonal bucket are NaN.
+    pub fn imputed_seasonal(&self, period: usize) -> Result<TimeSeries> {
+        if period == 0 {
+            return Err(ForecastError::InvalidParameter(
+                "seasonal period must be > 0".to_string(),
+            ));
+        }
+        if self.len() < period {
+            return Err(ForecastError::InsufficientData {
+                needed: period,
+                got: self.len(),
+            });
+        }
+
+        let values: Vec<Vec<f64>> = self
+            .values
+            .iter()
+            .map(|dim| {
+                let n = dim.len();
+
+                // Collect finite values per seasonal bucket
+                let mut buckets: Vec<Vec<f64>> = vec![Vec::new(); period];
+                for (i, &v) in dim.iter().enumerate() {
+                    if v.is_finite() {
+                        buckets[i % period].push(v);
+                    }
+                }
+
+                // Compute median per bucket
+                let medians: Vec<f64> = buckets
+                    .iter()
+                    .map(|b| {
+                        if b.is_empty() {
+                            f64::NAN
+                        } else {
+                            let mut sorted = b.clone();
+                            sorted.sort_by(|a, b| {
+                                a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                            });
+                            let len = sorted.len();
+                            if len % 2 == 0 {
+                                (sorted[len / 2 - 1] + sorted[len / 2]) / 2.0
+                            } else {
+                                sorted[len / 2]
+                            }
+                        }
+                    })
+                    .collect();
+
+                // Fill NaN with seasonal median
+                let mut result = dim.clone();
+                for i in 0..n {
+                    if result[i].is_nan() || result[i].is_infinite() {
+                        result[i] = medians[i % period];
+                    }
+                }
+                result
+            })
+            .collect();
+
+        // Validate: check that no seasonal bucket had >50% NaN
+        for (d, dim) in self.values.iter().enumerate() {
+            let mut bucket_total: Vec<usize> = vec![0; period];
+            let mut bucket_missing: Vec<usize> = vec![0; period];
+            for (i, &v) in dim.iter().enumerate() {
+                bucket_total[i % period] += 1;
+                if v.is_nan() || v.is_infinite() {
+                    bucket_missing[i % period] += 1;
+                }
+            }
+            for (b, (&total, &missing)) in
+                bucket_total.iter().zip(bucket_missing.iter()).enumerate()
+            {
+                if total > 0 && missing as f64 / total as f64 > 0.5 {
+                    return Err(ForecastError::InvalidParameter(format!(
+                        "dimension {} seasonal bucket {} has >50% missing values ({}/{})",
+                        d, b, missing, total
+                    )));
+                }
+            }
+        }
+
+        Ok(TimeSeries {
+            timestamps: self.timestamps.clone(),
+            values,
+            labels: self.labels.clone(),
+            metadata: self.metadata.clone(),
+            dimension_metadata: self.dimension_metadata.clone(),
+            timezone: self.timezone.clone(),
+            frequency: self.frequency,
+            calendar: self.calendar.clone(),
+        })
+    }
+
+    /// Impute NaN values in all regressors using the given policy.
+    ///
+    /// Applies the policy to each regressor vector independently.
+    /// Only `Fill`, `ForwardFill`, `BackwardFill`, `FillMean`, `FillMedian`,
+    /// and `Interpolate` are supported. `Drop` and `Error` return an error.
+    pub fn with_imputed_regressors(&self, policy: MissingValuePolicy) -> Result<TimeSeries> {
+        match policy {
+            MissingValuePolicy::Drop | MissingValuePolicy::Error => {
+                return Err(ForecastError::InvalidParameter(
+                    "Drop and Error policies are not supported for regressor imputation"
+                        .to_string(),
+                ));
+            }
+            _ => {}
+        }
+
+        let mut result = self.clone();
+        if let Some(ref mut cal) = result.calendar {
+            let mut imputed_regressors = HashMap::new();
+            for (name, values) in cal.regressors() {
+                let imputed = match policy {
+                    MissingValuePolicy::Fill(fill_value) => values
+                        .iter()
+                        .map(|&v| {
+                            if v.is_nan() || v.is_infinite() {
+                                fill_value
+                            } else {
+                                v
+                            }
+                        })
+                        .collect(),
+                    MissingValuePolicy::ForwardFill => {
+                        let mut res = Vec::with_capacity(values.len());
+                        let mut last_valid = None;
+                        for &v in values {
+                            if v.is_nan() || v.is_infinite() {
+                                res.push(last_valid.unwrap_or(v));
+                            } else {
+                                last_valid = Some(v);
+                                res.push(v);
+                            }
+                        }
+                        res
+                    }
+                    MissingValuePolicy::BackwardFill => {
+                        let mut res = values.to_vec();
+                        let mut next_valid = None;
+                        for i in (0..res.len()).rev() {
+                            if res[i].is_nan() || res[i].is_infinite() {
+                                if let Some(v) = next_valid {
+                                    res[i] = v;
+                                }
+                            } else {
+                                next_valid = Some(res[i]);
+                            }
+                        }
+                        res
+                    }
+                    MissingValuePolicy::FillMean => {
+                        let m = nan_mean(values);
+                        values
+                            .iter()
+                            .map(|&v| if v.is_nan() || v.is_infinite() { m } else { v })
+                            .collect()
+                    }
+                    MissingValuePolicy::FillMedian => {
+                        let med = nan_median(values);
+                        values
+                            .iter()
+                            .map(|&v| {
+                                if v.is_nan() || v.is_infinite() {
+                                    med
+                                } else {
+                                    v
+                                }
+                            })
+                            .collect()
+                    }
+                    MissingValuePolicy::Interpolate => interpolate_series(values, true),
+                    MissingValuePolicy::Drop | MissingValuePolicy::Error => {
+                        unreachable!()
+                    }
+                };
+                imputed_regressors.insert(name.clone(), imputed);
+            }
+            // Replace regressors in calendar
+            let mut new_cal = CalendarAnnotations::new().with_holidays(cal.holidays().to_vec());
+            for (name, values) in imputed_regressors {
+                new_cal = new_cal.with_regressor(name, values);
+            }
+            result.calendar = Some(new_cal);
+        }
+        Ok(result)
     }
 
     /// Infer frequency from timestamps.
@@ -1915,5 +2330,289 @@ mod tests {
         // Jan 31 + 1mo = Feb 29 (clamped), which matches existing timestamp
         assert_eq!(filled.len(), 2);
         assert!(!filled.has_missing_values());
+    }
+
+    // === Missing value imputation tests ===
+
+    #[test]
+    fn backward_fill_basic() {
+        let timestamps = make_timestamps(5);
+        let values = vec![1.0, 2.0, 3.0, f64::NAN, f64::NAN];
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+        let result = ts.sanitized(MissingValuePolicy::BackwardFill).unwrap();
+        // Trailing NaN left as NaN (no next valid value)
+        assert_relative_eq!(result.primary_values()[0], 1.0);
+        assert_relative_eq!(result.primary_values()[1], 2.0);
+        assert_relative_eq!(result.primary_values()[2], 3.0);
+        assert!(result.primary_values()[3].is_nan());
+        assert!(result.primary_values()[4].is_nan());
+    }
+
+    #[test]
+    fn backward_fill_interior() {
+        let timestamps = make_timestamps(5);
+        let values = vec![1.0, f64::NAN, f64::NAN, 4.0, 5.0];
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+        let result = ts.sanitized(MissingValuePolicy::BackwardFill).unwrap();
+        assert_relative_eq!(result.primary_values()[0], 1.0);
+        assert_relative_eq!(result.primary_values()[1], 4.0);
+        assert_relative_eq!(result.primary_values()[2], 4.0);
+        assert_relative_eq!(result.primary_values()[3], 4.0);
+        assert_relative_eq!(result.primary_values()[4], 5.0);
+    }
+
+    #[test]
+    fn backward_fill_leading_nan() {
+        let timestamps = make_timestamps(4);
+        let values = vec![f64::NAN, f64::NAN, 3.0, 4.0];
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+        let result = ts.sanitized(MissingValuePolicy::BackwardFill).unwrap();
+        assert_relative_eq!(result.primary_values()[0], 3.0);
+        assert_relative_eq!(result.primary_values()[1], 3.0);
+        assert_relative_eq!(result.primary_values()[2], 3.0);
+        assert_relative_eq!(result.primary_values()[3], 4.0);
+    }
+
+    #[test]
+    fn fill_mean_basic() {
+        let timestamps = make_timestamps(5);
+        let values = vec![1.0, f64::NAN, 3.0, f64::NAN, 5.0];
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+        let result = ts.sanitized(MissingValuePolicy::FillMean).unwrap();
+        // Mean of [1, 3, 5] = 3.0
+        assert_relative_eq!(result.primary_values()[0], 1.0);
+        assert_relative_eq!(result.primary_values()[1], 3.0);
+        assert_relative_eq!(result.primary_values()[2], 3.0);
+        assert_relative_eq!(result.primary_values()[3], 3.0);
+        assert_relative_eq!(result.primary_values()[4], 5.0);
+    }
+
+    #[test]
+    fn fill_median_basic() {
+        let timestamps = make_timestamps(5);
+        let values = vec![1.0, f64::NAN, 3.0, f64::NAN, 10.0];
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+        let result = ts.sanitized(MissingValuePolicy::FillMedian).unwrap();
+        // Median of [1, 3, 10] = 3.0
+        assert_relative_eq!(result.primary_values()[0], 1.0);
+        assert_relative_eq!(result.primary_values()[1], 3.0);
+        assert_relative_eq!(result.primary_values()[2], 3.0);
+        assert_relative_eq!(result.primary_values()[3], 3.0);
+        assert_relative_eq!(result.primary_values()[4], 10.0);
+    }
+
+    #[test]
+    fn fill_mean_all_nan() {
+        let timestamps = make_timestamps(3);
+        let values = vec![f64::NAN, f64::NAN, f64::NAN];
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+        let result = ts.sanitized(MissingValuePolicy::FillMean).unwrap();
+        // All-NaN produces NaN fill
+        assert!(result.primary_values()[0].is_nan());
+        assert!(result.primary_values()[1].is_nan());
+        assert!(result.primary_values()[2].is_nan());
+    }
+
+    #[test]
+    fn fill_mean_with_inf() {
+        let timestamps = make_timestamps(4);
+        let values = vec![2.0, f64::INFINITY, 4.0, f64::NAN];
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+        let result = ts.sanitized(MissingValuePolicy::FillMean).unwrap();
+        // Mean of [2, 4] = 3.0, Inf and NaN both replaced
+        assert_relative_eq!(result.primary_values()[0], 2.0);
+        assert_relative_eq!(result.primary_values()[1], 3.0);
+        assert_relative_eq!(result.primary_values()[2], 4.0);
+        assert_relative_eq!(result.primary_values()[3], 3.0);
+    }
+
+    #[test]
+    fn interpolate_policy_matches_interpolated() {
+        let timestamps = make_timestamps(5);
+        let values = vec![1.0, f64::NAN, f64::NAN, 4.0, 5.0];
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let via_policy = ts.sanitized(MissingValuePolicy::Interpolate).unwrap();
+        let via_method = ts.interpolated(true);
+
+        for (a, b) in via_policy
+            .primary_values()
+            .iter()
+            .zip(via_method.primary_values().iter())
+        {
+            assert_relative_eq!(a, b, epsilon = 1e-10);
+        }
+    }
+
+    #[test]
+    fn missing_mask_correct() {
+        let timestamps = make_timestamps(5);
+        let values = vec![1.0, f64::NAN, 3.0, f64::INFINITY, 5.0];
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+        let mask = ts.missing_mask();
+        assert_eq!(mask, vec![false, true, false, true, false]);
+    }
+
+    #[test]
+    fn missing_count_multivariate() {
+        let timestamps = make_timestamps(4);
+        let values = vec![
+            vec![1.0, f64::NAN, 3.0, f64::NAN],      // 2 missing
+            vec![f64::NAN, 2.0, f64::NAN, f64::NAN], // 3 missing
+        ];
+        let ts = TimeSeriesBuilder::new()
+            .timestamps(timestamps)
+            .multivariate_values(values, ValueLayout::Column)
+            .build()
+            .unwrap();
+        assert_eq!(ts.missing_count(), vec![2, 3]);
+    }
+
+    #[test]
+    fn forward_backward_handles_leading() {
+        let timestamps = make_timestamps(5);
+        let values = vec![f64::NAN, f64::NAN, 3.0, f64::NAN, 5.0];
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+        let result = ts.imputed_forward_backward();
+        // Leading NaN filled backward from 3.0, interior NaN filled forward from 3.0
+        assert_relative_eq!(result.primary_values()[0], 3.0);
+        assert_relative_eq!(result.primary_values()[1], 3.0);
+        assert_relative_eq!(result.primary_values()[2], 3.0);
+        assert_relative_eq!(result.primary_values()[3], 3.0);
+        assert_relative_eq!(result.primary_values()[4], 5.0);
+    }
+
+    #[test]
+    fn forward_backward_handles_trailing() {
+        let timestamps = make_timestamps(4);
+        let values = vec![1.0, 2.0, f64::NAN, f64::NAN];
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+        let result = ts.imputed_forward_backward();
+        assert_relative_eq!(result.primary_values()[0], 1.0);
+        assert_relative_eq!(result.primary_values()[1], 2.0);
+        // Trailing NaN forward-filled from 2.0
+        assert_relative_eq!(result.primary_values()[2], 2.0);
+        assert_relative_eq!(result.primary_values()[3], 2.0);
+    }
+
+    #[test]
+    fn moving_average_single_gap() {
+        let timestamps = make_timestamps(5);
+        let values = vec![1.0, 2.0, f64::NAN, 4.0, 5.0];
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+        let result = ts.imputed_moving_average(3).unwrap();
+        // Window of 3: neighbors are 2.0 and 4.0 → mean = 3.0
+        assert_relative_eq!(result.primary_values()[2], 3.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn moving_average_adjacent_gaps() {
+        let timestamps = make_timestamps(6);
+        let values = vec![1.0, f64::NAN, f64::NAN, 4.0, 5.0, 6.0];
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+        let result = ts.imputed_moving_average(3).unwrap();
+        // After multi-pass, gaps should be filled
+        assert!(result.primary_values()[1].is_finite());
+        assert!(result.primary_values()[2].is_finite());
+    }
+
+    #[test]
+    fn moving_average_rejects_even_window() {
+        let timestamps = make_timestamps(5);
+        let values = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+        assert!(ts.imputed_moving_average(4).is_err());
+    }
+
+    #[test]
+    fn moving_average_rejects_zero_window() {
+        let timestamps = make_timestamps(3);
+        let values = vec![1.0, 2.0, 3.0];
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+        assert!(ts.imputed_moving_average(0).is_err());
+    }
+
+    #[test]
+    fn seasonal_imputation_basic() {
+        // Period 3: positions 0,1,2,0,1,2,0,1,2
+        let timestamps = make_timestamps(9);
+        let values = vec![
+            10.0,
+            20.0,
+            30.0, // cycle 1
+            11.0,
+            21.0,
+            31.0, // cycle 2
+            f64::NAN,
+            22.0,
+            32.0, // cycle 3 - NaN at position 0
+        ];
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+        let result = ts.imputed_seasonal(3).unwrap();
+        // Position 0 values: [10.0, 11.0], median = 10.5
+        assert_relative_eq!(result.primary_values()[6], 10.5, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn seasonal_imputation_insufficient_data() {
+        let timestamps = make_timestamps(3);
+        let values = vec![1.0, f64::NAN, 3.0];
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+        // Period 4 but only 3 data points
+        assert!(ts.imputed_seasonal(4).is_err());
+    }
+
+    #[test]
+    fn seasonal_imputation_rejects_zero_period() {
+        let timestamps = make_timestamps(5);
+        let values = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+        assert!(ts.imputed_seasonal(0).is_err());
+    }
+
+    #[test]
+    fn seasonal_imputation_rejects_too_many_missing() {
+        // Period 2: bucket 0 has indices [0, 2, 4], bucket 1 has [1, 3, 5]
+        let timestamps = make_timestamps(6);
+        let values = vec![f64::NAN, 1.0, f64::NAN, 2.0, f64::NAN, 3.0];
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+        // Bucket 0 is 100% NaN (3/3)
+        assert!(ts.imputed_seasonal(2).is_err());
+    }
+
+    #[test]
+    fn with_imputed_regressors_fill_mean() {
+        let timestamps = make_daily_timestamps(4);
+        let values = vec![1.0, 2.0, 3.0, 4.0];
+        let calendar = CalendarAnnotations::new()
+            .with_regressor("promo".to_string(), vec![1.0, f64::NAN, 3.0, f64::NAN]);
+
+        let mut ts = TimeSeries::univariate(timestamps, values).unwrap();
+        ts.set_calendar(calendar);
+
+        let result = ts
+            .with_imputed_regressors(MissingValuePolicy::FillMean)
+            .unwrap();
+        let promo = result.regressor("promo").unwrap();
+        // Mean of [1, 3] = 2.0
+        assert_relative_eq!(promo[0], 1.0);
+        assert_relative_eq!(promo[1], 2.0);
+        assert_relative_eq!(promo[2], 3.0);
+        assert_relative_eq!(promo[3], 2.0);
+    }
+
+    #[test]
+    fn with_imputed_regressors_rejects_drop() {
+        let timestamps = make_daily_timestamps(3);
+        let values = vec![1.0, 2.0, 3.0];
+        let calendar =
+            CalendarAnnotations::new().with_regressor("x".to_string(), vec![1.0, f64::NAN, 3.0]);
+
+        let mut ts = TimeSeries::univariate(timestamps, values).unwrap();
+        ts.set_calendar(calendar);
+
+        assert!(ts
+            .with_imputed_regressors(MissingValuePolicy::Drop)
+            .is_err());
     }
 }

@@ -98,6 +98,21 @@ pub fn ols_fit(y: &[f64], regressors: &HashMap<String, Vec<f64>>) -> Result<OLSR
         return Err(ForecastError::InsufficientData { needed: 1, got: 0 });
     }
 
+    // Validate y for NaN/Inf
+    if y.iter().any(|v| v.is_nan() || v.is_infinite()) {
+        return Err(ForecastError::MissingValues);
+    }
+
+    // Validate regressors for NaN/Inf
+    for (name, values) in regressors {
+        if values.iter().any(|v| v.is_nan() || v.is_infinite()) {
+            return Err(ForecastError::InvalidParameter(format!(
+                "Regressor '{}' contains NaN/Inf",
+                name
+            )));
+        }
+    }
+
     if regressors.is_empty() {
         // No regressors - just return the mean as intercept
         let intercept = y.iter().sum::<f64>() / n as f64;
@@ -430,5 +445,39 @@ mod tests {
         // Should be close to true values despite noise
         assert_relative_eq!(result.intercept, 2.5, epsilon = 0.1);
         assert_relative_eq!(result.coefficients[0], 1.7, epsilon = 0.1);
+    }
+
+    #[test]
+    fn ols_rejects_nan_in_y() {
+        let y = vec![1.0, f64::NAN, 3.0];
+        let mut regressors = HashMap::new();
+        regressors.insert("x".to_string(), vec![1.0, 2.0, 3.0]);
+
+        let result = ols_fit(&y, &regressors);
+        assert!(matches!(result, Err(ForecastError::MissingValues)));
+    }
+
+    #[test]
+    fn ols_rejects_inf_in_y() {
+        let y = vec![1.0, f64::INFINITY, 3.0];
+        let mut regressors = HashMap::new();
+        regressors.insert("x".to_string(), vec![1.0, 2.0, 3.0]);
+
+        let result = ols_fit(&y, &regressors);
+        assert!(matches!(result, Err(ForecastError::MissingValues)));
+    }
+
+    #[test]
+    fn ols_rejects_nan_in_regressor() {
+        let y = vec![1.0, 2.0, 3.0];
+        let mut regressors = HashMap::new();
+        regressors.insert("x".to_string(), vec![1.0, f64::NAN, 3.0]);
+
+        let result = ols_fit(&y, &regressors);
+        assert!(matches!(result, Err(ForecastError::InvalidParameter(_))));
+        if let Err(ForecastError::InvalidParameter(msg)) = result {
+            assert!(msg.contains("x"));
+            assert!(msg.contains("NaN/Inf"));
+        }
     }
 }

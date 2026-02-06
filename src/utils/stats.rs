@@ -85,6 +85,38 @@ pub fn median(values: &[f64]) -> f64 {
     }
 }
 
+/// Calculate the mean of finite values in a slice (skipping NaN/Inf).
+pub fn nan_mean(values: &[f64]) -> f64 {
+    let mut sum = 0.0;
+    let mut count = 0usize;
+    for &v in values {
+        if v.is_finite() {
+            sum += v;
+            count += 1;
+        }
+    }
+    if count == 0 {
+        f64::NAN
+    } else {
+        sum / count as f64
+    }
+}
+
+/// Calculate the median of finite values in a slice (skipping NaN/Inf).
+pub fn nan_median(values: &[f64]) -> f64 {
+    let mut finite: Vec<f64> = values.iter().copied().filter(|v| v.is_finite()).collect();
+    if finite.is_empty() {
+        return f64::NAN;
+    }
+    finite.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = finite.len();
+    if n % 2 == 0 {
+        (finite[n / 2 - 1] + finite[n / 2]) / 2.0
+    } else {
+        finite[n / 2]
+    }
+}
+
 /// Calculate the autocorrelation at a given lag.
 pub fn autocorrelation(values: &[f64], lag: usize) -> f64 {
     if values.len() <= lag {
@@ -177,5 +209,28 @@ mod tests {
         let acf1 = autocorrelation(&values, 1);
         // For a linear trend of length n, ACF(1) ≈ (n-2)/(n+1) ≈ 0.86 for n=20
         assert!(acf1 > 0.8);
+    }
+
+    #[test]
+    fn nan_mean_skips_nan_and_inf() {
+        assert_relative_eq!(
+            nan_mean(&[1.0, f64::NAN, 3.0, f64::INFINITY, 5.0]),
+            3.0,
+            epsilon = 1e-10
+        );
+        assert!(nan_mean(&[f64::NAN, f64::NAN]).is_nan());
+        assert!(nan_mean(&[]).is_nan());
+    }
+
+    #[test]
+    fn nan_median_skips_nan_and_inf() {
+        assert_relative_eq!(
+            nan_median(&[1.0, f64::NAN, 3.0, f64::INFINITY, 5.0]),
+            3.0,
+            epsilon = 1e-10
+        );
+        assert_relative_eq!(nan_median(&[1.0, f64::NAN, 4.0]), 2.5, epsilon = 1e-10);
+        assert!(nan_median(&[f64::NAN]).is_nan());
+        assert!(nan_median(&[]).is_nan());
     }
 }
