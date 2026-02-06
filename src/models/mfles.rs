@@ -12,7 +12,7 @@
 
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
-use crate::models::Forecaster;
+use crate::models::{validate_series_complete, Forecaster};
 use crate::utils::ols::{ols_fit, ols_residuals, OLSResult};
 use std::collections::HashMap;
 
@@ -696,6 +696,7 @@ impl MFLES {
 
 impl Forecaster for MFLES {
     fn fit(&mut self, series: &TimeSeries) -> Result<()> {
+        validate_series_complete(series)?;
         let raw_values = series.primary_values();
         let n = raw_values.len();
         self.n = n;

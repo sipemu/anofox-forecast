@@ -10,7 +10,7 @@
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
 use crate::models::exponential::{AutoETS, AutoETSConfig, SimpleExponentialSmoothing};
-use crate::models::Forecaster;
+use crate::models::{validate_series_complete, Forecaster};
 use crate::seasonality::{MSTLResult, MSTL};
 
 /// Method for forecasting the deseasonalized (trend + remainder) component.
@@ -292,6 +292,7 @@ impl Default for MSTLForecaster {
 
 impl Forecaster for MSTLForecaster {
     fn fit(&mut self, series: &TimeSeries) -> Result<()> {
+        validate_series_complete(series)?;
         let values = series.primary_values();
         self.n = values.len();
 

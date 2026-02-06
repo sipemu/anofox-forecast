@@ -46,6 +46,16 @@ impl Default for NelderMeadConfig {
     }
 }
 
+/// Sanitize objective value: replace NaN/Inf with MAX to prevent silent propagation.
+#[inline]
+fn sanitize_objective(value: f64) -> f64 {
+    if value.is_finite() {
+        value
+    } else {
+        f64::MAX
+    }
+}
+
 /// Perform Nelder-Mead simplex optimization.
 ///
 /// # Arguments
@@ -111,7 +121,10 @@ where
     }
 
     // Evaluate objective at all vertices
-    let mut values: Vec<f64> = simplex.iter().map(|v| objective(v)).collect();
+    let mut values: Vec<f64> = simplex
+        .iter()
+        .map(|v| sanitize_objective(objective(v)))
+        .collect();
 
     // Pre-allocate scratch buffers
     let mut indices: Vec<usize> = (0..=n).collect();
@@ -162,7 +175,7 @@ where
         // Reflection
         reflect_into(&simplex[worst_idx], &centroid, config.alpha, &mut reflected);
         apply_bounds_in_place(&mut reflected, bounds);
-        let reflected_value = objective(&reflected);
+        let reflected_value = sanitize_objective(objective(&reflected));
 
         if reflected_value < values[second_worst_idx] && reflected_value >= values[best_idx] {
             // Accept reflection
@@ -175,7 +188,7 @@ where
             // Try expansion
             expand_into(&centroid, &reflected, config.gamma, &mut expanded);
             apply_bounds_in_place(&mut expanded, bounds);
-            let expanded_value = objective(&expanded);
+            let expanded_value = sanitize_objective(objective(&expanded));
 
             if expanded_value < reflected_value {
                 simplex[worst_idx].copy_from_slice(&expanded);
@@ -192,7 +205,7 @@ where
             // Outside contraction
             contract_into(&centroid, &reflected, config.rho, &mut contracted);
             apply_bounds_in_place(&mut contracted, bounds);
-            let contracted_value = objective(&contracted);
+            let contracted_value = sanitize_objective(objective(&contracted));
 
             if contracted_value <= reflected_value {
                 simplex[worst_idx].copy_from_slice(&contracted);
@@ -203,7 +216,7 @@ where
             // Inside contraction
             contract_into(&centroid, &simplex[worst_idx], config.rho, &mut contracted);
             apply_bounds_in_place(&mut contracted, bounds);
-            let contracted_value = objective(&contracted);
+            let contracted_value = sanitize_objective(objective(&contracted));
 
             if contracted_value < values[worst_idx] {
                 simplex[worst_idx].copy_from_slice(&contracted);
@@ -220,7 +233,7 @@ where
                     simplex[i][j] = temp[j] + config.sigma * (simplex[i][j] - temp[j]);
                 }
                 apply_bounds_in_place(&mut simplex[i], bounds);
-                values[i] = objective(&simplex[i]);
+                values[i] = sanitize_objective(objective(&simplex[i]));
             }
         }
     }
@@ -473,5 +486,48 @@ mod tests {
         let result = nelder_mead(|x| (x[0] - 1.0).powi(2), &[0.0], None, config);
 
         assert_relative_eq!(result.optimal_point[0], 1.0, epsilon = 0.01);
+    }
+
+    #[test]
+    fn nelder_mead_nan_objective_handled() {
+        // Objective that returns NaN for negative x, valid for positive x
+        let result = nelder_mead(
+            |x| {
+                if x[0] < 0.0 {
+                    f64::NAN
+                } else {
+                    (x[0] - 3.0).powi(2)
+                }
+            },
+            &[1.0],
+            None,
+            NelderMeadConfig::default(),
+        );
+
+        // Should still converge to valid minimum despite NaN regions
+        assert!(result.converged);
+        assert!(result.optimal_value.is_finite());
+        assert_relative_eq!(result.optimal_point[0], 3.0, epsilon = 0.1);
+    }
+
+    #[test]
+    fn nelder_mead_inf_objective_handled() {
+        // Objective that returns Inf for some regions
+        let result = nelder_mead(
+            |x| {
+                if x[0] < -1.0 {
+                    f64::INFINITY
+                } else {
+                    (x[0] - 2.0).powi(2)
+                }
+            },
+            &[1.0],
+            None,
+            NelderMeadConfig::default(),
+        );
+
+        assert!(result.converged);
+        assert!(result.optimal_value.is_finite());
+        assert_relative_eq!(result.optimal_point[0], 2.0, epsilon = 0.1);
     }
 }

@@ -20,7 +20,7 @@
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
 use crate::models::arima::diff::{difference, integrate};
-use crate::models::Forecaster;
+use crate::models::{validate_series_complete, Forecaster};
 use crate::utils::ols::{ols_fit, ols_residuals, OLSResult};
 use crate::utils::optimization::{nelder_mead, NelderMeadConfig};
 use crate::utils::stats::quantile_normal;
@@ -477,6 +477,7 @@ impl Default for ARIMA {
 
 impl Forecaster for ARIMA {
     fn fit(&mut self, series: &TimeSeries) -> Result<()> {
+        validate_series_complete(series)?;
         let values = series.primary_values();
         let min_len = self.spec.d + self.spec.p.max(self.spec.q) + 2;
 
@@ -1364,6 +1365,7 @@ impl Default for SARIMA {
 
 impl Forecaster for SARIMA {
     fn fit(&mut self, series: &TimeSeries) -> Result<()> {
+        validate_series_complete(series)?;
         let values = series.primary_values();
         let d = self.spec.d;
         let cap_d = self.spec.cap_d;

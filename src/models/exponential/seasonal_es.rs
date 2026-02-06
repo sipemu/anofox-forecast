@@ -12,7 +12,7 @@
 
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
-use crate::models::Forecaster;
+use crate::models::{validate_series_complete, Forecaster};
 use crate::utils::optimization::{nelder_mead, NelderMeadConfig};
 use crate::utils::stats::quantile_normal;
 
@@ -242,6 +242,7 @@ impl Default for SeasonalES {
 
 impl Forecaster for SeasonalES {
     fn fit(&mut self, series: &TimeSeries) -> Result<()> {
+        validate_series_complete(series)?;
         let values = series.primary_values();
         let n = values.len();
         self.n = n;

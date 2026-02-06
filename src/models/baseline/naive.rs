@@ -6,7 +6,7 @@
 
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
-use crate::models::Forecaster;
+use crate::models::{validate_series_complete, Forecaster};
 use crate::utils::ols::{ols_fit, ols_residuals, OLSResult};
 use std::collections::HashMap;
 
@@ -91,6 +91,7 @@ impl Naive {
 
 impl Forecaster for Naive {
     fn fit(&mut self, series: &TimeSeries) -> Result<()> {
+        validate_series_complete(series)?;
         let raw_values = series.primary_values();
         if raw_values.is_empty() {
             return Err(ForecastError::EmptyData);

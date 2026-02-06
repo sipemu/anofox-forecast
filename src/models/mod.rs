@@ -17,4 +17,4 @@ pub use garch::GARCH;
 pub use mfles::MFLES;
 pub use mstl_forecaster::{MSTLForecaster, SeasonalForecastMethod, TrendForecastMethod};
 pub use tbats::{AutoTBATS, TBATS};
-pub use traits::{BoxedForecaster, Forecaster, ModelRegistry, ModelSpec};
+pub use traits::{validate_series_complete, BoxedForecaster, Forecaster, ModelRegistry, ModelSpec};

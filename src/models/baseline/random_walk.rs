@@ -4,7 +4,7 @@
 
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
-use crate::models::Forecaster;
+use crate::models::{validate_series_complete, Forecaster};
 
 /// Random walk with drift forecaster.
 ///
@@ -32,6 +32,7 @@ impl RandomWalkWithDrift {
 
 impl Forecaster for RandomWalkWithDrift {
     fn fit(&mut self, series: &TimeSeries) -> Result<()> {
+        validate_series_complete(series)?;
         let values = series.primary_values();
         if values.len() < 2 {
             return Err(ForecastError::InsufficientData {

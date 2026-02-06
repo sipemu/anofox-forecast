@@ -6,7 +6,9 @@
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
 use crate::models::exponential::ets::{ETSSpec, ErrorType, SeasonalType, TrendType, ETS};
-use crate::models::Forecaster;
+use crate::models::{validate_series_complete, Forecaster};
+use crate::utils::ols::{ols_fit, ols_residuals, OLSResult};
+use std::collections::HashMap;
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -99,6 +101,8 @@ pub struct AutoETS {
     selected_spec: Option<ETSSpec>,
     /// All fitted models and their scores.
     model_scores: Vec<(ETSSpec, f64)>,
+    /// OLS result for exogenous regressors.
+    exog_ols: Option<OLSResult>,
 }
 
 impl AutoETS {
@@ -109,6 +113,7 @@ impl AutoETS {
             selected_model: None,
             selected_spec: None,
             model_scores: Vec::new(),
+            exog_ols: None,
         }
     }
 
@@ -119,6 +124,7 @@ impl AutoETS {
             selected_model: None,
             selected_spec: None,
             model_scores: Vec::new(),
+            exog_ols: None,
         }
     }
 
@@ -238,13 +244,29 @@ impl Default for AutoETS {
 
 impl Forecaster for AutoETS {
     fn fit(&mut self, series: &TimeSeries) -> Result<()> {
-        let values = series.primary_values();
-        if values.len() < 4 {
+        validate_series_complete(series)?;
+        let raw_values = series.primary_values();
+        if raw_values.len() < 4 {
             return Err(ForecastError::InsufficientData {
                 needed: 4,
-                got: values.len(),
+                got: raw_values.len(),
             });
         }
+
+        // Handle exogenous regressors
+        let eval_series = if series.has_regressors() {
+            let regressors = series.all_regressors();
+            let ols_result = ols_fit(raw_values, &regressors)?;
+            let adjusted = ols_residuals(raw_values, &ols_result, &regressors)?;
+            self.exog_ols = Some(ols_result);
+            // Create adjusted series without regressors for candidate evaluation
+            TimeSeries::univariate(series.timestamps().to_vec(), adjusted)?
+        } else {
+            self.exog_ols = None;
+            series.clone()
+        };
+
+        let values = eval_series.primary_values();
 
         // Determine seasonal period
         let seasonal_period = self.config.seasonal_period.unwrap_or(1);
@@ -264,7 +286,7 @@ impl Forecaster for AutoETS {
             results = candidates
                 .par_iter()
                 .filter_map(|&spec| {
-                    Self::evaluate_candidate_static(series, spec, seasonal_period, criterion)
+                    Self::evaluate_candidate_static(&eval_series, spec, seasonal_period, criterion)
                 })
                 .collect();
         }
@@ -274,7 +296,7 @@ impl Forecaster for AutoETS {
             results = candidates
                 .iter()
                 .filter_map(|&spec| {
-                    Self::evaluate_candidate_static(series, spec, seasonal_period, criterion)
+                    Self::evaluate_candidate_static(&eval_series, spec, seasonal_period, criterion)
                 })
                 .collect();
         }
@@ -309,6 +331,11 @@ impl Forecaster for AutoETS {
     }
 
     fn predict(&self, horizon: usize) -> Result<Forecast> {
+        if self.exog_ols.is_some() {
+            return Err(ForecastError::InvalidParameter(
+                "Model was fit with exogenous regressors. Use predict_with_exog() and provide future regressor values.".into()
+            ));
+        }
         let model = self
             .selected_model
             .as_ref()
@@ -317,6 +344,11 @@ impl Forecaster for AutoETS {
     }
 
     fn predict_with_intervals(&self, horizon: usize, level: f64) -> Result<Forecast> {
+        if self.exog_ols.is_some() {
+            return Err(ForecastError::InvalidParameter(
+                "Model was fit with exogenous regressors. Use predict_with_exog_intervals() and provide future regressor values.".into()
+            ));
+        }
         let model = self
             .selected_model
             .as_ref()
@@ -340,6 +372,142 @@ impl Forecaster for AutoETS {
 
     fn name(&self) -> &str {
         "AutoETS"
+    }
+
+    fn supports_exog(&self) -> bool {
+        true
+    }
+
+    fn has_exog(&self) -> bool {
+        self.exog_ols.is_some()
+    }
+
+    fn exog_names(&self) -> Option<&[String]> {
+        self.exog_ols
+            .as_ref()
+            .map(|ols| ols.regressor_names.as_slice())
+    }
+
+    fn predict_with_exog(
+        &self,
+        horizon: usize,
+        future_regressors: &HashMap<String, Vec<f64>>,
+    ) -> Result<Forecast> {
+        let model = self
+            .selected_model
+            .as_ref()
+            .ok_or(ForecastError::FitRequired)?;
+
+        // Get base forecast from selected ETS model (fit on adjusted series)
+        let base_forecast = model.predict(horizon)?;
+
+        if let Some(ols) = &self.exog_ols {
+            // Validate and compute exogenous contribution
+            for name in &ols.regressor_names {
+                let values = future_regressors.get(name).ok_or_else(|| {
+                    ForecastError::InvalidParameter(format!(
+                        "Missing future values for regressor '{}'",
+                        name
+                    ))
+                })?;
+                if values.len() != horizon {
+                    return Err(ForecastError::DimensionMismatch {
+                        expected: horizon,
+                        got: values.len(),
+                    });
+                }
+            }
+
+            let exog_pred = ols.predict(future_regressors)?;
+            let adjusted: Vec<f64> = base_forecast
+                .primary()
+                .iter()
+                .zip(exog_pred.iter())
+                .map(|(b, e)| b + e)
+                .collect();
+            Ok(Forecast::from_values(adjusted))
+        } else {
+            if !future_regressors.is_empty() {
+                return Err(ForecastError::InvalidParameter(
+                    "Model was not fit with exogenous regressors".into(),
+                ));
+            }
+            Ok(base_forecast)
+        }
+    }
+
+    fn predict_with_exog_intervals(
+        &self,
+        horizon: usize,
+        future_regressors: &HashMap<String, Vec<f64>>,
+        level: f64,
+    ) -> Result<Forecast> {
+        let model = self
+            .selected_model
+            .as_ref()
+            .ok_or(ForecastError::FitRequired)?;
+
+        // Get base forecast with intervals from selected ETS model
+        let base_forecast = model.predict_with_intervals(horizon, level)?;
+
+        if let Some(ols) = &self.exog_ols {
+            for name in &ols.regressor_names {
+                let values = future_regressors.get(name).ok_or_else(|| {
+                    ForecastError::InvalidParameter(format!(
+                        "Missing future values for regressor '{}'",
+                        name
+                    ))
+                })?;
+                if values.len() != horizon {
+                    return Err(ForecastError::DimensionMismatch {
+                        expected: horizon,
+                        got: values.len(),
+                    });
+                }
+            }
+
+            let exog_pred = ols.predict(future_regressors)?;
+
+            let preds: Vec<f64> = base_forecast
+                .primary()
+                .iter()
+                .zip(exog_pred.iter())
+                .map(|(b, e)| b + e)
+                .collect();
+
+            let lower = if base_forecast.has_lower() {
+                base_forecast
+                    .lower_series(0)
+                    .unwrap()
+                    .iter()
+                    .zip(exog_pred.iter())
+                    .map(|(b, e)| b + e)
+                    .collect()
+            } else {
+                preds.clone()
+            };
+
+            let upper = if base_forecast.has_upper() {
+                base_forecast
+                    .upper_series(0)
+                    .unwrap()
+                    .iter()
+                    .zip(exog_pred.iter())
+                    .map(|(b, e)| b + e)
+                    .collect()
+            } else {
+                preds.clone()
+            };
+
+            Ok(Forecast::from_values_with_intervals(preds, lower, upper))
+        } else {
+            if !future_regressors.is_empty() {
+                return Err(ForecastError::InvalidParameter(
+                    "Model was not fit with exogenous regressors".into(),
+                ));
+            }
+            Ok(base_forecast)
+        }
     }
 }
 

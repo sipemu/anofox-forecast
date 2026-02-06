@@ -9,7 +9,7 @@
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
 use crate::models::tbats::TBATS;
-use crate::models::Forecaster;
+use crate::models::{validate_series_complete, Forecaster};
 
 /// AutoTBATS - automatic TBATS model selection.
 ///
@@ -128,6 +128,7 @@ impl Default for AutoTBATS {
 
 impl Forecaster for AutoTBATS {
     fn fit(&mut self, series: &TimeSeries) -> Result<()> {
+        validate_series_complete(series)?;
         let values = series.primary_values();
 
         let min_required = self

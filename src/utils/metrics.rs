@@ -61,6 +61,10 @@ pub fn calculate_metrics(
         });
     }
 
+    if actual.iter().any(|v| !v.is_finite()) || predicted.iter().any(|v| !v.is_finite()) {
+        return Err(ForecastError::MissingValues);
+    }
+
     let n = actual.len() as f64;
 
     // Pass 1: compute sum_ae, sum_se, sum_ape, sum_smape, sum_actual, has_zero
@@ -318,5 +322,32 @@ mod tests {
         let metrics = calculate_metrics(&actual, &predicted, None).unwrap();
 
         assert!(metrics.r_squared < 0.0); // Worse than mean prediction
+    }
+
+    #[test]
+    fn calculate_metrics_nan_in_actual() {
+        let actual = vec![1.0, f64::NAN, 3.0];
+        let predicted = vec![1.0, 2.0, 3.0];
+
+        let result = calculate_metrics(&actual, &predicted, None);
+        assert!(matches!(result, Err(ForecastError::MissingValues)));
+    }
+
+    #[test]
+    fn calculate_metrics_nan_in_predicted() {
+        let actual = vec![1.0, 2.0, 3.0];
+        let predicted = vec![1.0, f64::NAN, 3.0];
+
+        let result = calculate_metrics(&actual, &predicted, None);
+        assert!(matches!(result, Err(ForecastError::MissingValues)));
+    }
+
+    #[test]
+    fn calculate_metrics_inf_in_actual() {
+        let actual = vec![1.0, f64::INFINITY, 3.0];
+        let predicted = vec![1.0, 2.0, 3.0];
+
+        let result = calculate_metrics(&actual, &predicted, None);
+        assert!(matches!(result, Err(ForecastError::MissingValues)));
     }
 }

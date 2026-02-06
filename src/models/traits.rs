@@ -4,6 +4,16 @@ use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
 use std::collections::HashMap;
 
+/// Validate that a time series has no missing values (NaN/Inf) before model fitting.
+///
+/// This should be called at the start of every `Forecaster::fit()` implementation.
+pub fn validate_series_complete(series: &TimeSeries) -> Result<()> {
+    if series.has_missing_values() {
+        return Err(ForecastError::MissingValues);
+    }
+    Ok(())
+}
+
 /// Common interface for all forecasting models.
 ///
 /// This trait is object-safe and can be used with `Box<dyn Forecaster>`.
@@ -273,8 +283,11 @@ impl Default for ModelRegistry {
 mod tests {
     use super::*;
     use crate::core::TimeSeries;
+    use crate::error::ForecastError;
     use crate::models::baseline::{Naive, RandomWalkWithDrift, SeasonalNaive, WindowAverage};
-    use crate::models::exponential::SimpleExponentialSmoothing;
+    use crate::models::exponential::{HoltLinearTrend, SimpleExponentialSmoothing, ETS};
+    use crate::models::intermittent::Croston;
+    use crate::models::theta::Theta;
     use chrono::{TimeZone, Utc};
 
     fn make_timestamps(n: usize) -> Vec<chrono::DateTime<Utc>> {
@@ -488,5 +501,95 @@ mod tests {
 
         let residuals = model.residuals().unwrap();
         assert_eq!(residuals.len(), 20);
+    }
+
+    fn make_nan_series() -> TimeSeries {
+        let timestamps = make_timestamps(20);
+        let mut values: Vec<f64> = (1..=20).map(|i| i as f64).collect();
+        values[5] = f64::NAN;
+        TimeSeries::univariate(timestamps, values).unwrap()
+    }
+
+    fn make_inf_series() -> TimeSeries {
+        let timestamps = make_timestamps(20);
+        let mut values: Vec<f64> = (1..=20).map(|i| i as f64).collect();
+        values[10] = f64::INFINITY;
+        TimeSeries::univariate(timestamps, values).unwrap()
+    }
+
+    #[test]
+    fn test_validate_series_complete_ok() {
+        let ts = make_test_series(20);
+        assert!(validate_series_complete(&ts).is_ok());
+    }
+
+    #[test]
+    fn test_validate_series_complete_nan() {
+        let ts = make_nan_series();
+        let err = validate_series_complete(&ts).unwrap_err();
+        assert_eq!(err, ForecastError::MissingValues);
+    }
+
+    #[test]
+    fn test_validate_series_complete_inf() {
+        let ts = make_inf_series();
+        let err = validate_series_complete(&ts).unwrap_err();
+        assert_eq!(err, ForecastError::MissingValues);
+    }
+
+    #[test]
+    fn test_naive_rejects_nan() {
+        let ts = make_nan_series();
+        let mut model = Naive::new();
+        let err = model.fit(&ts).unwrap_err();
+        assert_eq!(err, ForecastError::MissingValues);
+    }
+
+    #[test]
+    fn test_ses_rejects_nan() {
+        let ts = make_nan_series();
+        let mut model = SimpleExponentialSmoothing::new(0.3);
+        let err = model.fit(&ts).unwrap_err();
+        assert_eq!(err, ForecastError::MissingValues);
+    }
+
+    #[test]
+    fn test_holt_rejects_nan() {
+        let ts = make_nan_series();
+        let mut model = HoltLinearTrend::auto();
+        let err = model.fit(&ts).unwrap_err();
+        assert_eq!(err, ForecastError::MissingValues);
+    }
+
+    #[test]
+    fn test_ets_rejects_nan() {
+        let ts = make_nan_series();
+        let mut model = ETS::default();
+        let err = model.fit(&ts).unwrap_err();
+        assert_eq!(err, ForecastError::MissingValues);
+    }
+
+    #[test]
+    fn test_theta_rejects_nan() {
+        let ts = make_nan_series();
+        let mut model = Theta::new();
+        let err = model.fit(&ts).unwrap_err();
+        assert_eq!(err, ForecastError::MissingValues);
+    }
+
+    #[test]
+    fn test_croston_rejects_nan() {
+        let ts = make_nan_series();
+        let mut model = Croston::new();
+        let err = model.fit(&ts).unwrap_err();
+        assert_eq!(err, ForecastError::MissingValues);
+    }
+
+    #[test]
+    fn test_random_walk_rejects_inf() {
+        let ts = make_inf_series();
+        let mut model = RandomWalkWithDrift::new();
+        let err = model.fit(&ts).unwrap_err();
+        assert_eq!(err, ForecastError::MissingValues);
     }
 }

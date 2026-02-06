@@ -4,7 +4,7 @@ use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
 use crate::models::arima::diff::suggest_differencing;
 use crate::models::arima::model::{ARIMA, SARIMA};
-use crate::models::Forecaster;
+use crate::models::{validate_series_complete, Forecaster};
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -606,6 +606,7 @@ impl Default for AutoARIMA {
 
 impl Forecaster for AutoARIMA {
     fn fit(&mut self, series: &TimeSeries) -> Result<()> {
+        validate_series_complete(series)?;
         let values = series.primary_values();
         let s = self.config.seasonal_period;
 

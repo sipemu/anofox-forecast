@@ -5,7 +5,7 @@
 
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
-use crate::models::Forecaster;
+use crate::models::{validate_series_complete, Forecaster};
 
 /// Method for combining forecasts from multiple models.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -155,6 +155,7 @@ impl Ensemble {
 
 impl Forecaster for Ensemble {
     fn fit(&mut self, series: &TimeSeries) -> Result<()> {
+        validate_series_complete(series)?;
         if self.models.is_empty() {
             return Err(ForecastError::ComputationError(
                 "Ensemble has no models".to_string(),

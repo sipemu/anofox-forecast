@@ -5,9 +5,11 @@
 
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
-use crate::models::Forecaster;
+use crate::models::{validate_series_complete, Forecaster};
+use crate::utils::ols::{ols_fit, ols_residuals, OLSResult};
 use crate::utils::optimization::{nelder_mead, NelderMeadConfig};
 use crate::utils::stats::quantile_normal;
+use std::collections::HashMap;
 
 /// Error component type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -389,6 +391,8 @@ pub struct ETS {
     bic: Option<f64>,
     /// Series length.
     n: usize,
+    /// OLS result for exogenous regressors.
+    exog_ols: Option<OLSResult>,
 }
 
 impl ETS {
@@ -413,6 +417,7 @@ impl ETS {
             aicc: None,
             bic: None,
             n: 0,
+            exog_ols: None,
         }
     }
 
@@ -444,6 +449,7 @@ impl ETS {
             aicc: None,
             bic: None,
             n: 0,
+            exog_ols: None,
         }
     }
 
@@ -961,6 +967,136 @@ impl ETS {
         } // initial seasonals
         count
     }
+
+    /// Internal prediction with optional exogenous regressors.
+    fn predict_internal(
+        &self,
+        horizon: usize,
+        future_regressors: Option<&HashMap<String, Vec<f64>>>,
+    ) -> Result<Forecast> {
+        let level = self.level.ok_or(ForecastError::FitRequired)?;
+        let trend = self.trend.unwrap_or(0.0);
+        let phi = self.phi.unwrap_or(1.0);
+        let period = self.seasonal_period;
+
+        if horizon == 0 {
+            return Ok(Forecast::new());
+        }
+
+        let seasonals_ref = if self.spec.has_seasonal() {
+            Some(self.seasonals.as_ref().ok_or(ForecastError::FitRequired)?)
+        } else {
+            None
+        };
+
+        // Calculate exogenous contribution if applicable
+        let exog_contribution = if let Some(ols) = &self.exog_ols {
+            let future = future_regressors.ok_or_else(|| {
+                ForecastError::InvalidParameter(
+                    "Model was fit with exogenous regressors. Future regressor values required."
+                        .into(),
+                )
+            })?;
+
+            for name in &ols.regressor_names {
+                let values = future.get(name).ok_or_else(|| {
+                    ForecastError::InvalidParameter(format!(
+                        "Missing future values for regressor '{}'",
+                        name
+                    ))
+                })?;
+                if values.len() != horizon {
+                    return Err(ForecastError::DimensionMismatch {
+                        expected: horizon,
+                        got: values.len(),
+                    });
+                }
+            }
+
+            Some(ols.predict(future)?)
+        } else {
+            if future_regressors.is_some_and(|r| !r.is_empty()) {
+                return Err(ForecastError::InvalidParameter(
+                    "Model was not fit with exogenous regressors".into(),
+                ));
+            }
+            None
+        };
+
+        let predictions: Vec<f64> = (1..=horizon)
+            .map(|h| {
+                let s = if let Some(seasonals) = seasonals_ref {
+                    seasonals[(self.n + h - 1) % period]
+                } else {
+                    1.0
+                };
+
+                let trend_component = if self.spec.has_trend() {
+                    if self.spec.is_damped() {
+                        Self::damped_sum(phi, h) * trend
+                    } else {
+                        h as f64 * trend
+                    }
+                } else {
+                    0.0
+                };
+
+                let mut pred = match self.spec.seasonal {
+                    SeasonalType::None => level + trend_component,
+                    SeasonalType::Additive => level + trend_component + s,
+                    SeasonalType::Multiplicative => (level + trend_component) * s,
+                };
+
+                if let Some(ref exog) = exog_contribution {
+                    pred += exog[h - 1];
+                }
+
+                pred
+            })
+            .collect();
+
+        Ok(Forecast::from_values(predictions))
+    }
+
+    /// Internal prediction with intervals and optional exogenous regressors.
+    fn predict_internal_with_intervals(
+        &self,
+        horizon: usize,
+        future_regressors: Option<&HashMap<String, Vec<f64>>>,
+        confidence: f64,
+    ) -> Result<Forecast> {
+        let forecast = self.predict_internal(horizon, future_regressors)?;
+        let variance = self.residual_variance.unwrap_or(0.0);
+        let period = self.seasonal_period;
+
+        if horizon == 0 {
+            return Ok(forecast);
+        }
+
+        let z = quantile_normal((1.0 + confidence) / 2.0);
+        let preds = forecast.primary();
+
+        let mut lower = Vec::with_capacity(horizon);
+        let mut upper = Vec::with_capacity(horizon);
+
+        for h in 1..=horizon {
+            let k = if self.spec.has_seasonal() {
+                ((h - 1) / period) + 1
+            } else {
+                h
+            };
+            let se = (variance * k as f64).sqrt();
+
+            lower.push(preds[h - 1] - z * se);
+            upper.push(preds[h - 1] + z * se);
+        }
+
+        Ok(Forecast::from_values_with_intervals(
+            preds.to_vec(),
+            lower,
+            upper,
+        ))
+    }
 }
 
 impl Default for ETS {
@@ -971,7 +1107,22 @@ impl Default for ETS {
 
 impl Forecaster for ETS {
     fn fit(&mut self, series: &TimeSeries) -> Result<()> {
-        let values = series.primary_values();
+        validate_series_complete(series)?;
+        let raw_values = series.primary_values();
+
+        // Handle exogenous regressors
+        let adjusted_values = if series.has_regressors() {
+            let regressors = series.all_regressors();
+            let ols_result = ols_fit(raw_values, &regressors)?;
+            let adjusted = ols_residuals(raw_values, &ols_result, &regressors)?;
+            self.exog_ols = Some(ols_result);
+            adjusted
+        } else {
+            self.exog_ols = None;
+            raw_values.to_vec()
+        };
+        let values = &adjusted_values;
+
         let min_len = if self.spec.has_seasonal() {
             2 * self.seasonal_period
         } else {
@@ -1146,114 +1297,52 @@ impl Forecaster for ETS {
     }
 
     fn predict(&self, horizon: usize) -> Result<Forecast> {
-        let level = self.level.ok_or(ForecastError::FitRequired)?;
-        let trend = self.trend.unwrap_or(0.0);
-        let phi = self.phi.unwrap_or(1.0);
-        let period = self.seasonal_period;
-
-        if horizon == 0 {
-            return Ok(Forecast::new());
+        if self.exog_ols.is_some() {
+            return Err(ForecastError::InvalidParameter(
+                "Model was fit with exogenous regressors. Use predict_with_exog() and provide future regressor values.".into()
+            ));
         }
-
-        let seasonals_ref = if self.spec.has_seasonal() {
-            Some(self.seasonals.as_ref().ok_or(ForecastError::FitRequired)?)
-        } else {
-            None
-        };
-
-        let predictions: Vec<f64> = (1..=horizon)
-            .map(|h| {
-                let s = if let Some(seasonals) = seasonals_ref {
-                    seasonals[(self.n + h - 1) % period]
-                } else {
-                    1.0
-                };
-
-                let trend_component = if self.spec.has_trend() {
-                    if self.spec.is_damped() {
-                        Self::damped_sum(phi, h) * trend
-                    } else {
-                        h as f64 * trend
-                    }
-                } else {
-                    0.0
-                };
-
-                match self.spec.seasonal {
-                    SeasonalType::None => level + trend_component,
-                    SeasonalType::Additive => level + trend_component + s,
-                    SeasonalType::Multiplicative => (level + trend_component) * s,
-                }
-            })
-            .collect();
-
-        Ok(Forecast::from_values(predictions))
+        self.predict_internal(horizon, None)
     }
 
     fn predict_with_intervals(&self, horizon: usize, confidence: f64) -> Result<Forecast> {
-        let level = self.level.ok_or(ForecastError::FitRequired)?;
-        let trend = self.trend.unwrap_or(0.0);
-        let phi = self.phi.unwrap_or(1.0);
-        let variance = self.residual_variance.unwrap_or(0.0);
-        let period = self.seasonal_period;
-
-        if horizon == 0 {
-            return Ok(Forecast::new());
+        if self.exog_ols.is_some() {
+            return Err(ForecastError::InvalidParameter(
+                "Model was fit with exogenous regressors. Use predict_with_exog_intervals() and provide future regressor values.".into()
+            ));
         }
+        self.predict_internal_with_intervals(horizon, None, confidence)
+    }
 
-        let z = quantile_normal((1.0 + confidence) / 2.0);
+    fn supports_exog(&self) -> bool {
+        true
+    }
 
-        let seasonals_ref = if self.spec.has_seasonal() {
-            Some(self.seasonals.as_ref().ok_or(ForecastError::FitRequired)?)
-        } else {
-            None
-        };
+    fn has_exog(&self) -> bool {
+        self.exog_ols.is_some()
+    }
 
-        let mut predictions = Vec::with_capacity(horizon);
-        let mut lower = Vec::with_capacity(horizon);
-        let mut upper = Vec::with_capacity(horizon);
+    fn exog_names(&self) -> Option<&[String]> {
+        self.exog_ols
+            .as_ref()
+            .map(|ols| ols.regressor_names.as_slice())
+    }
 
-        for h in 1..=horizon {
-            let s = if let Some(seasonals) = seasonals_ref {
-                seasonals[(self.n + h - 1) % period]
-            } else {
-                1.0
-            };
+    fn predict_with_exog(
+        &self,
+        horizon: usize,
+        future_regressors: &HashMap<String, Vec<f64>>,
+    ) -> Result<Forecast> {
+        self.predict_internal(horizon, Some(future_regressors))
+    }
 
-            let trend_component = if self.spec.has_trend() {
-                if self.spec.is_damped() {
-                    Self::damped_sum(phi, h) * trend
-                } else {
-                    h as f64 * trend
-                }
-            } else {
-                0.0
-            };
-
-            let pred = match self.spec.seasonal {
-                SeasonalType::None => level + trend_component,
-                SeasonalType::Additive => level + trend_component + s,
-                SeasonalType::Multiplicative => (level + trend_component) * s,
-            };
-            predictions.push(pred);
-
-            // Simplified variance calculation
-            let k = if self.spec.has_seasonal() {
-                ((h - 1) / period) + 1
-            } else {
-                h
-            };
-            let se = (variance * k as f64).sqrt();
-
-            lower.push(pred - z * se);
-            upper.push(pred + z * se);
-        }
-
-        Ok(Forecast::from_values_with_intervals(
-            predictions,
-            lower,
-            upper,
-        ))
+    fn predict_with_exog_intervals(
+        &self,
+        horizon: usize,
+        future_regressors: &HashMap<String, Vec<f64>>,
+        level: f64,
+    ) -> Result<Forecast> {
+        self.predict_internal_with_intervals(horizon, Some(future_regressors), level)
     }
 
     fn fitted_values(&self) -> Option<&[f64]> {

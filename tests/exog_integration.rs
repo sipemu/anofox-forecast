@@ -6,6 +6,9 @@
 use anofox_forecast::core::{CalendarAnnotations, TimeSeries};
 use anofox_forecast::models::arima::{AutoARIMA, ARIMA, SARIMA};
 use anofox_forecast::models::baseline::Naive;
+use anofox_forecast::models::exponential::{
+    AutoETS, ETS, ETSSeasonalType, ETSSpec, ErrorType, TrendType,
+};
 use anofox_forecast::models::mfles::MFLES;
 use anofox_forecast::models::theta::{AutoTheta, Theta};
 use anofox_forecast::models::Forecaster;
@@ -425,4 +428,249 @@ fn theta_exog_intervals_work() {
         assert!(lower[i] <= point[i]);
         assert!(point[i] <= upper[i]);
     }
+}
+
+// ===== ETS Exogenous Tests =====
+
+#[test]
+fn ets_with_exogenous_basic() {
+    let n = 100;
+    let horizon = 10;
+    let (y, x1, x2) = generate_exog_test_data(n);
+    let ts = create_ts_with_regressors(n, y, x1, x2);
+
+    let mut model = ETS::new(
+            ETSSpec::new(ErrorType::Additive, TrendType::None, ETSSeasonalType::None),
+            1,
+        );
+    model.fit(&ts).unwrap();
+
+    // Model should report it has exogenous regressors
+    assert!(model.supports_exog());
+    assert!(model.has_exog());
+    assert_eq!(model.exog_names().unwrap().len(), 2);
+
+    // predict() should fail when model has exogenous
+    assert!(model.predict(horizon).is_err());
+
+    // predict_with_exog() should work
+    let future = create_future_regressors(n, horizon, n);
+    let forecast = model.predict_with_exog(horizon, &future).unwrap();
+    assert_eq!(forecast.horizon(), horizon);
+
+    // Forecasts should be reasonable (not NaN or infinite)
+    for val in forecast.primary() {
+        assert!(val.is_finite());
+    }
+}
+
+#[test]
+fn ets_exog_requires_future_regressors() {
+    let n = 100;
+    let horizon = 10;
+    let (y, x1, x2) = generate_exog_test_data(n);
+    let ts = create_ts_with_regressors(n, y, x1, x2);
+
+    let mut model = ETS::new(
+            ETSSpec::new(ErrorType::Additive, TrendType::None, ETSSeasonalType::None),
+            1,
+        );
+    model.fit(&ts).unwrap();
+
+    // predict() should fail when model has exogenous
+    let result = model.predict(horizon);
+    assert!(result.is_err());
+}
+
+#[test]
+fn ets_exog_missing_regressor_name() {
+    let n = 100;
+    let horizon = 10;
+    let (y, x1, x2) = generate_exog_test_data(n);
+    let ts = create_ts_with_regressors(n, y, x1, x2);
+
+    let mut model = ETS::new(
+            ETSSpec::new(ErrorType::Additive, TrendType::None, ETSSeasonalType::None),
+            1,
+        );
+    model.fit(&ts).unwrap();
+
+    // Provide only x1, missing x2
+    let mut incomplete_future = HashMap::new();
+    incomplete_future.insert(
+        "x1".to_string(),
+        (0..horizon).map(|i| (i as f64).sin()).collect(),
+    );
+
+    let result = model.predict_with_exog(horizon, &incomplete_future);
+    assert!(result.is_err());
+}
+
+#[test]
+fn ets_without_exogenous_still_works() {
+    let n = 100;
+    let horizon = 10;
+    let timestamps = make_timestamps(n);
+    let values: Vec<f64> = (0..n)
+        .map(|i| 10.0 + 0.5 * i as f64 + (i as f64 * 0.3).sin())
+        .collect();
+    let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+    let mut model = ETS::new(
+            ETSSpec::new(ErrorType::Additive, TrendType::None, ETSSeasonalType::None),
+            1,
+        );
+    model.fit(&ts).unwrap();
+
+    // Model should report it supports exog but doesn't have any
+    assert!(model.supports_exog());
+    assert!(!model.has_exog());
+    assert!(model.exog_names().is_none());
+
+    // predict() should work without exog
+    let forecast = model.predict(horizon).unwrap();
+    assert_eq!(forecast.horizon(), horizon);
+}
+
+#[test]
+fn ets_exog_intervals_work() {
+    let n = 100;
+    let horizon = 10;
+    let (y, x1, x2) = generate_exog_test_data(n);
+    let ts = create_ts_with_regressors(n, y, x1, x2);
+
+    let mut model = ETS::new(
+            ETSSpec::new(ErrorType::Additive, TrendType::None, ETSSeasonalType::None),
+            1,
+        );
+    model.fit(&ts).unwrap();
+
+    let future = create_future_regressors(n, horizon, n);
+    let forecast = model
+        .predict_with_exog_intervals(horizon, &future, 0.95)
+        .unwrap();
+
+    assert_eq!(forecast.horizon(), horizon);
+    assert!(forecast.lower_series(0).is_ok());
+    assert!(forecast.upper_series(0).is_ok());
+
+    // Intervals should be valid
+    let lower = forecast.lower_series(0).unwrap();
+    let upper = forecast.upper_series(0).unwrap();
+    let point = forecast.primary();
+
+    for i in 0..horizon {
+        assert!(lower[i] <= point[i]);
+        assert!(point[i] <= upper[i]);
+    }
+}
+
+#[test]
+fn ets_exog_effect_visible() {
+    // Test that exogenous regressors actually affect the ETS forecast
+    let n = 100;
+    let horizon = 10;
+
+    let timestamps = make_timestamps(n);
+    let x1: Vec<f64> = (0..n)
+        .map(|i| (2.0 * std::f64::consts::PI * i as f64 / 7.0).sin())
+        .collect();
+    let y: Vec<f64> = x1.iter().map(|&x| 50.0 + 20.0 * x).collect();
+
+    let calendar = CalendarAnnotations::new().with_regressor("x1".to_string(), x1);
+    let mut ts = TimeSeries::univariate(timestamps, y).unwrap();
+    ts.set_calendar(calendar);
+
+    let mut model = ETS::new(
+            ETSSpec::new(ErrorType::Additive, TrendType::None, ETSSeasonalType::None),
+            1,
+        );
+    model.fit(&ts).unwrap();
+
+    let mut future_high = HashMap::new();
+    future_high.insert("x1".to_string(), vec![1.0; horizon]);
+
+    let mut future_low = HashMap::new();
+    future_low.insert("x1".to_string(), vec![-1.0; horizon]);
+
+    let forecast_high = model.predict_with_exog(horizon, &future_high).unwrap();
+    let forecast_low = model.predict_with_exog(horizon, &future_low).unwrap();
+
+    // High x1 should give higher forecasts
+    for i in 0..horizon {
+        assert!(
+            forecast_high.primary()[i] > forecast_low.primary()[i],
+            "ETS exogenous effect not visible at horizon {}",
+            i + 1
+        );
+    }
+}
+
+// ===== AutoETS Exogenous Tests =====
+
+#[test]
+fn auto_ets_with_exogenous_basic() {
+    let n = 100;
+    let horizon = 10;
+    let (y, x1, x2) = generate_exog_test_data(n);
+    let ts = create_ts_with_regressors(n, y, x1, x2);
+
+    let mut model = AutoETS::new();
+    model.fit(&ts).unwrap();
+
+    assert!(model.supports_exog());
+    assert!(model.has_exog());
+    assert_eq!(model.exog_names().unwrap().len(), 2);
+
+    // predict() should fail when model has exogenous
+    assert!(model.predict(horizon).is_err());
+
+    let future = create_future_regressors(n, horizon, n);
+    let forecast = model.predict_with_exog(horizon, &future).unwrap();
+    assert_eq!(forecast.horizon(), horizon);
+
+    for val in forecast.primary() {
+        assert!(val.is_finite());
+    }
+}
+
+#[test]
+fn auto_ets_exog_intervals_work() {
+    let n = 100;
+    let horizon = 10;
+    let (y, x1, x2) = generate_exog_test_data(n);
+    let ts = create_ts_with_regressors(n, y, x1, x2);
+
+    let mut model = AutoETS::new();
+    model.fit(&ts).unwrap();
+
+    let future = create_future_regressors(n, horizon, n);
+    let forecast = model
+        .predict_with_exog_intervals(horizon, &future, 0.95)
+        .unwrap();
+
+    assert_eq!(forecast.horizon(), horizon);
+    assert!(forecast.lower_series(0).is_ok());
+    assert!(forecast.upper_series(0).is_ok());
+}
+
+#[test]
+fn auto_ets_without_exogenous_still_works() {
+    let n = 100;
+    let horizon = 10;
+    let timestamps = make_timestamps(n);
+    let values: Vec<f64> = (0..n)
+        .map(|i| 10.0 + 0.5 * i as f64 + (i as f64 * 0.3).sin())
+        .collect();
+    let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+    let mut model = AutoETS::new();
+    model.fit(&ts).unwrap();
+
+    assert!(model.supports_exog());
+    assert!(!model.has_exog());
+    assert!(model.exog_names().is_none());
+
+    let forecast = model.predict(horizon).unwrap();
+    assert_eq!(forecast.horizon(), horizon);
 }

@@ -5,7 +5,7 @@
 
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
-use crate::models::Forecaster;
+use crate::models::{validate_series_complete, Forecaster};
 use crate::utils::optimization::{nelder_mead, NelderMeadConfig};
 
 /// Croston's method variant.
@@ -257,6 +257,7 @@ impl Default for Croston {
 
 impl Forecaster for Croston {
     fn fit(&mut self, series: &TimeSeries) -> Result<()> {
+        validate_series_complete(series)?;
         let values = series.primary_values();
         self.n = values.len();
 

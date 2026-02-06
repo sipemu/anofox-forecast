@@ -11,7 +11,7 @@
 
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
-use crate::models::Forecaster;
+use crate::models::{validate_series_complete, Forecaster};
 
 /// TSB method for intermittent demand forecasting.
 #[derive(Debug, Clone)]
@@ -108,6 +108,7 @@ impl Default for TSB {
 
 impl Forecaster for TSB {
     fn fit(&mut self, series: &TimeSeries) -> Result<()> {
+        validate_series_complete(series)?;
         let values = series.primary_values();
         self.n = values.len();
 

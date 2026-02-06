@@ -164,10 +164,20 @@ pub fn bootstrap_intervals<M: Forecaster + Clone>(
         };
 
         // Create synthetic series: fitted + resampled residuals
+        // Replace any NaN/Inf values (from initial fitted values) with the original values
+        let original_values = series.primary_values();
         let synthetic_values: Vec<f64> = fitted
             .iter()
             .zip(resampled.iter().cycle())
-            .map(|(f, r)| f + r)
+            .enumerate()
+            .map(|(i, (f, r))| {
+                let v = f + r;
+                if v.is_finite() {
+                    v
+                } else {
+                    original_values[i]
+                }
+            })
             .collect();
 
         // Create synthetic TimeSeries with same timestamps

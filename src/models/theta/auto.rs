@@ -6,7 +6,7 @@
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
 use crate::models::theta::{DecompositionType, DynamicTheta, OptimizedTheta, Theta};
-use crate::models::Forecaster;
+use crate::models::{validate_series_complete, Forecaster};
 use std::collections::HashMap;
 
 /// Type of Theta model selected by AutoTheta.
@@ -153,6 +153,7 @@ impl Default for AutoTheta {
 
 impl Forecaster for AutoTheta {
     fn fit(&mut self, series: &TimeSeries) -> Result<()> {
+        validate_series_complete(series)?;
         let values = series.primary_values();
         if values.len() < 6 {
             return Err(ForecastError::InsufficientData {

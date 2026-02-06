@@ -4,7 +4,7 @@
 
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
-use crate::models::Forecaster;
+use crate::models::{validate_series_complete, Forecaster};
 
 /// Seasonal Window Average forecaster.
 ///
@@ -56,6 +56,7 @@ impl Default for SeasonalWindowAverage {
 
 impl Forecaster for SeasonalWindowAverage {
     fn fit(&mut self, series: &TimeSeries) -> Result<()> {
+        validate_series_complete(series)?;
         let values = series.primary_values();
         if values.len() < self.period {
             return Err(ForecastError::InsufficientData {
