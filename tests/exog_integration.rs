@@ -7,7 +7,7 @@ use anofox_forecast::core::{CalendarAnnotations, TimeSeries};
 use anofox_forecast::models::arima::{AutoARIMA, ARIMA, SARIMA};
 use anofox_forecast::models::baseline::Naive;
 use anofox_forecast::models::exponential::{
-    AutoETS, ETS, ETSSeasonalType, ETSSpec, ErrorType, TrendType,
+    AutoETS, ETSSeasonalType, ETSSpec, ErrorType, TrendType, ETS,
 };
 use anofox_forecast::models::mfles::MFLES;
 use anofox_forecast::models::theta::{AutoTheta, Theta};
@@ -440,9 +440,9 @@ fn ets_with_exogenous_basic() {
     let ts = create_ts_with_regressors(n, y, x1, x2);
 
     let mut model = ETS::new(
-            ETSSpec::new(ErrorType::Additive, TrendType::None, ETSSeasonalType::None),
-            1,
-        );
+        ETSSpec::new(ErrorType::Additive, TrendType::None, ETSSeasonalType::None),
+        1,
+    );
     model.fit(&ts).unwrap();
 
     // Model should report it has exogenous regressors
@@ -472,9 +472,9 @@ fn ets_exog_requires_future_regressors() {
     let ts = create_ts_with_regressors(n, y, x1, x2);
 
     let mut model = ETS::new(
-            ETSSpec::new(ErrorType::Additive, TrendType::None, ETSSeasonalType::None),
-            1,
-        );
+        ETSSpec::new(ErrorType::Additive, TrendType::None, ETSSeasonalType::None),
+        1,
+    );
     model.fit(&ts).unwrap();
 
     // predict() should fail when model has exogenous
@@ -490,9 +490,9 @@ fn ets_exog_missing_regressor_name() {
     let ts = create_ts_with_regressors(n, y, x1, x2);
 
     let mut model = ETS::new(
-            ETSSpec::new(ErrorType::Additive, TrendType::None, ETSSeasonalType::None),
-            1,
-        );
+        ETSSpec::new(ErrorType::Additive, TrendType::None, ETSSeasonalType::None),
+        1,
+    );
     model.fit(&ts).unwrap();
 
     // Provide only x1, missing x2
@@ -517,9 +517,9 @@ fn ets_without_exogenous_still_works() {
     let ts = TimeSeries::univariate(timestamps, values).unwrap();
 
     let mut model = ETS::new(
-            ETSSpec::new(ErrorType::Additive, TrendType::None, ETSSeasonalType::None),
-            1,
-        );
+        ETSSpec::new(ErrorType::Additive, TrendType::None, ETSSeasonalType::None),
+        1,
+    );
     model.fit(&ts).unwrap();
 
     // Model should report it supports exog but doesn't have any
@@ -540,9 +540,9 @@ fn ets_exog_intervals_work() {
     let ts = create_ts_with_regressors(n, y, x1, x2);
 
     let mut model = ETS::new(
-            ETSSpec::new(ErrorType::Additive, TrendType::None, ETSSeasonalType::None),
-            1,
-        );
+        ETSSpec::new(ErrorType::Additive, TrendType::None, ETSSeasonalType::None),
+        1,
+    );
     model.fit(&ts).unwrap();
 
     let future = create_future_regressors(n, horizon, n);
@@ -582,9 +582,9 @@ fn ets_exog_effect_visible() {
     ts.set_calendar(calendar);
 
     let mut model = ETS::new(
-            ETSSpec::new(ErrorType::Additive, TrendType::None, ETSSeasonalType::None),
-            1,
-        );
+        ETSSpec::new(ErrorType::Additive, TrendType::None, ETSSeasonalType::None),
+        1,
+    );
     model.fit(&ts).unwrap();
 
     let mut future_high = HashMap::new();
