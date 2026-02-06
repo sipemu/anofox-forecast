@@ -85,6 +85,12 @@ console.log(forecast.values);  // [11, 12, 13, 14, 15] (approx)
   - QRA: Quantile Regression Averaging for ensemble combining
   - Backtesting: Rolling/expanding window evaluation with horizon-aware calibration
 
+- **Missing Value Imputation**
+  - Policy-based: Drop, Fill, ForwardFill, BackwardFill, FillMean, FillMedian, Interpolate
+  - Advanced: moving average imputation, seasonal median imputation
+  - Convenience: forward-backward fill, regressor imputation
+  - Metadata: missing mask, per-dimension missing counts
+
 - **Data Transformations**
   - Scaling: standardization, min-max, robust scaling
   - Box-Cox transformation with automatic lambda selection

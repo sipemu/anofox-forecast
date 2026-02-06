@@ -9,6 +9,10 @@ This document provides a comprehensive reference for all public APIs in the `ano
   - [TimeSeriesBuilder](#timeseriesbuilder)
   - [Forecast](#forecast)
   - [ForecastError](#forecasterror)
+- [Missing Value Imputation](#missing-value-imputation)
+  - [MissingValuePolicy](#missingvaluepolicy)
+  - [Imputation Methods](#imputation-methods)
+  - [Metadata Helpers](#metadata-helpers)
 - [Forecaster Trait](#forecaster-trait)
 - [Baseline Models](#baseline-models)
   - [Naive](#naive)
@@ -103,7 +107,14 @@ pub struct TimeSeries {
 | `primary_values()` | `&[f64]` | Get first dimension values |
 | `slice(start, end)` | `Result<TimeSeries>` | Extract subsequence |
 | `has_missing_values()` | `bool` | Check for NaN/Inf |
-| `interpolated(fill_edges)` | `TimeSeries` | Fill missing values |
+| `missing_mask()` | `Vec<bool>` | Boolean mask: true where NaN/Inf (primary dimension) |
+| `missing_count()` | `Vec<usize>` | Count of missing values per dimension |
+| `interpolated(fill_edges)` | `TimeSeries` | Linear interpolation for NaN values |
+| `sanitized(policy)` | `Result<TimeSeries>` | Apply missing value policy |
+| `imputed_forward_backward()` | `TimeSeries` | Forward-fill then backward-fill |
+| `imputed_moving_average(window)` | `Result<TimeSeries>` | Centered moving average imputation |
+| `imputed_seasonal(period)` | `Result<TimeSeries>` | Seasonal median imputation |
+| `with_imputed_regressors(policy)` | `Result<TimeSeries>` | Impute NaN in regressor vectors |
 
 [Back to top](#api-reference)
 
@@ -194,6 +205,68 @@ pub enum ForecastError {
 | `FitRequired` | Model not fitted before prediction |
 | `MissingValues` | Missing values detected |
 | `ComputationError` | Numerical computation error |
+
+[Back to top](#api-reference)
+
+---
+
+## Missing Value Imputation
+
+Tools for handling NaN/Inf values before model fitting. All models reject missing values at `fit()` time, so imputation must be applied beforehand.
+
+### MissingValuePolicy
+
+```rust
+pub enum MissingValuePolicy {
+    Drop,           // Remove observations with NaN/Inf
+    Fill(f64),      // Replace with specific value
+    ForwardFill,    // Carry last valid value forward
+    BackwardFill,   // Carry next valid value backward
+    FillMean,       // Replace with mean of finite values
+    FillMedian,     // Replace with median of finite values
+    Interpolate,    // Linear interpolation (edges filled)
+    Error,          // Return error if any missing
+}
+```
+
+**Usage:**
+```rust
+use anofox_forecast::core::{TimeSeries, MissingValuePolicy};
+
+// Apply policy via sanitized()
+let clean = ts.sanitized(MissingValuePolicy::FillMean)?;
+let clean = ts.sanitized(MissingValuePolicy::BackwardFill)?;
+let clean = ts.sanitized(MissingValuePolicy::Interpolate)?;
+```
+
+### Imputation Methods
+
+| Method | Description |
+|--------|-------------|
+| `sanitized(policy)` | Apply any `MissingValuePolicy` variant |
+| `imputed_forward_backward()` | Forward-fill then backward-fill — handles both leading and trailing NaN |
+| `imputed_moving_average(window)` | Centered window mean with multi-pass for adjacent gaps. Window must be odd. Remaining NaN filled with global mean. |
+| `imputed_seasonal(period)` | Fill NaN with median of same seasonal position across cycles. Requires at least 1 full cycle. Errors if >50% missing in any bucket. |
+| `with_imputed_regressors(policy)` | Apply fill policy to each regressor vector independently. Supports `Fill`, `ForwardFill`, `BackwardFill`, `FillMean`, `FillMedian`, `Interpolate`. |
+
+### Metadata Helpers
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `has_missing_values()` | `bool` | True if any NaN/Inf in any dimension |
+| `missing_mask()` | `Vec<bool>` | Per-observation mask for primary dimension |
+| `missing_count()` | `Vec<usize>` | Count of NaN/Inf per dimension |
+
+**Example — seasonal imputation:**
+```rust
+// Weekly data with gaps
+let clean = ts.imputed_seasonal(7)?;  // Fill using same-weekday median
+```
+
+**Example — regressor imputation:**
+```rust
+let clean = ts.with_imputed_regressors(MissingValuePolicy::FillMean)?;
+```
 
 [Back to top](#api-reference)
 

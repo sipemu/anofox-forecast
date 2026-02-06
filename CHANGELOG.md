@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Missing Value Imputation Toolbox**
+  - `MissingValuePolicy::BackwardFill` — next-observation-carried-backward
+  - `MissingValuePolicy::FillMean` — fill with mean of finite values
+  - `MissingValuePolicy::FillMedian` — fill with median of finite values
+  - `MissingValuePolicy::Interpolate` — linear interpolation via policy enum
+  - `TimeSeries::missing_mask()` — boolean mask of NaN/Inf positions (primary dimension)
+  - `TimeSeries::missing_count()` — per-dimension count of missing values
+  - `TimeSeries::imputed_forward_backward()` — forward-fill then backward-fill (handles leading + trailing NaN)
+  - `TimeSeries::imputed_moving_average(window)` — centered moving average imputation with multi-pass for adjacent gaps
+  - `TimeSeries::imputed_seasonal(period)` — seasonal median imputation using same-position values across cycles
+  - `TimeSeries::with_imputed_regressors(policy)` — apply imputation policy to regressor vectors independently
+  - `nan_mean()` / `nan_median()` — NaN-safe statistics helpers in `utils::stats`
+
+- **OLS NaN/Inf Validation**
+  - `ols_fit()` now validates `y` for NaN/Inf (returns `ForecastError::MissingValues`)
+  - `ols_fit()` now validates each regressor for NaN/Inf (returns `ForecastError::InvalidParameter`)
+
+### Changed
+
+- `MissingValuePolicy` enum has 4 new variants (breaking for exhaustive `match` — acceptable under 0.x semver)
+
 ## [0.4.1] - 2026-01-16
 
 ### Added
