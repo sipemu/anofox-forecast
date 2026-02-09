@@ -161,29 +161,9 @@ pub fn pelt_detect(series: &[f64], config: &PeltConfig) -> PeltResult {
         .collect();
 
     for t in config.min_segment_length..=n {
-        let mut best_cost = f64::INFINITY;
-        let mut best_cp = 0;
-
-        // Check all candidates
-        for &s in &candidates {
-            if t - s >= config.min_segment_length {
-                let seg_cost = compute_segment_cost_fast(
-                    s,
-                    t,
-                    &cum_sum,
-                    &cum_sum_sq,
-                    &cum_ixy,
-                    config.cost_fn,
-                    series,
-                );
-                let total = f[s] + seg_cost + config.penalty;
-
-                if total < best_cost {
-                    best_cost = total;
-                    best_cp = s;
-                }
-            }
-        }
+        let (best_cost, best_cp) = find_best_candidate(
+            &candidates, t, config, &f, &cum_sum, &cum_sum_sq, &cum_ixy, series,
+        );
 
         f[t] = best_cost;
         cp[t] = best_cp;
@@ -194,13 +174,7 @@ pub fn pelt_detect(series: &[f64], config: &PeltConfig) -> PeltResult {
                 return true;
             }
             let seg_cost = compute_segment_cost_fast(
-                s,
-                t,
-                &cum_sum,
-                &cum_sum_sq,
-                &cum_ixy,
-                config.cost_fn,
-                series,
+                s, t, &cum_sum, &cum_sum_sq, &cum_ixy, config.cost_fn, series,
             );
             f[s] + seg_cost <= f[t]
         });
@@ -208,26 +182,8 @@ pub fn pelt_detect(series: &[f64], config: &PeltConfig) -> PeltResult {
         candidates.push(t);
     }
 
-    // Backtrack to find changepoints
-    let mut changepoints = Vec::new();
-    let mut t = n;
-    while t > 0 {
-        let prev = cp[t];
-        if prev > 0 {
-            changepoints.push(prev);
-        }
-        t = prev;
-    }
-    changepoints.reverse();
-
-    // Build segments
-    let mut segments = Vec::new();
-    let mut start = 0;
-    for &cp_idx in &changepoints {
-        segments.push((start, cp_idx));
-        start = cp_idx;
-    }
-    segments.push((start, n));
+    let changepoints = backtrack_changepoints(&cp, n);
+    let segments = build_segments(&changepoints, n);
 
     // Compute total cost
     let total_cost: f64 = segments
@@ -241,6 +197,66 @@ pub fn pelt_detect(series: &[f64], config: &PeltConfig) -> PeltResult {
         segments,
         cost: total_cost,
     }
+}
+
+/// Find the best candidate changepoint for position t.
+#[inline]
+fn find_best_candidate(
+    candidates: &[usize],
+    t: usize,
+    config: &PeltConfig,
+    f: &[f64],
+    cum_sum: &[f64],
+    cum_sum_sq: &[f64],
+    cum_ixy: &[f64],
+    series: &[f64],
+) -> (f64, usize) {
+    let mut best_cost = f64::INFINITY;
+    let mut best_cp = 0;
+
+    for &s in candidates {
+        if t - s >= config.min_segment_length {
+            let seg_cost = compute_segment_cost_fast(
+                s, t, cum_sum, cum_sum_sq, cum_ixy, config.cost_fn, series,
+            );
+            let total = f[s] + seg_cost + config.penalty;
+            if total < best_cost {
+                best_cost = total;
+                best_cp = s;
+            }
+        }
+    }
+
+    (best_cost, best_cp)
+}
+
+/// Backtrack through the changepoint array to recover all changepoints.
+#[inline]
+fn backtrack_changepoints(cp: &[usize], n: usize) -> Vec<usize> {
+    let mut changepoints = Vec::new();
+    let mut t = n;
+    while t > 0 {
+        let prev = cp[t];
+        if prev > 0 {
+            changepoints.push(prev);
+        }
+        t = prev;
+    }
+    changepoints.reverse();
+    changepoints
+}
+
+/// Build segment boundaries from changepoints.
+#[inline]
+fn build_segments(changepoints: &[usize], n: usize) -> Vec<(usize, usize)> {
+    let mut segments = Vec::with_capacity(changepoints.len() + 1);
+    let mut start = 0;
+    for &cp_idx in changepoints {
+        segments.push((start, cp_idx));
+        start = cp_idx;
+    }
+    segments.push((start, n));
+    segments
 }
 
 /// Fast segment cost computation using precomputed cumulative sums.
@@ -260,71 +276,80 @@ fn compute_segment_cost_fast(
     if n == 0 {
         return 0.0;
     }
-    let n_f64 = n as f64;
 
     match cost_fn {
         CostFunction::L2 | CostFunction::Normal | CostFunction::MeanVariance => {
-            // L2 cost = sum((x - mean)^2) = sum(x^2) - n*mean^2
-            let sum_y = cum_sum[end] - cum_sum[start];
-            let sum_y2 = cum_sum_sq[end] - cum_sum_sq[start];
-            let mean = sum_y / n_f64;
-            let l2 = sum_y2 - n_f64 * mean * mean;
-
-            match cost_fn {
-                CostFunction::Normal if n >= 2 => {
-                    let var = l2 / n_f64;
-                    if var > 1e-10 {
-                        n_f64 * var.ln()
-                    } else {
-                        0.0
-                    }
-                }
-                CostFunction::MeanVariance if n >= 2 => {
-                    let var = l2 / n_f64;
-                    if var > 1e-10 {
-                        n_f64 * (1.0 + var.ln())
-                    } else {
-                        n_f64
-                    }
-                }
-                _ => l2.max(0.0),
-            }
+            compute_l2_family_cost(start, end, n, cum_sum, cum_sum_sq, cost_fn)
         }
         CostFunction::LinearTrend => {
-            // Fast linear regression using cumulative sums
-            // For segment [start, end), we fit y = a + bx where x = 0, 1, ..., n-1
-            if n < 2 {
-                return 0.0;
-            }
-
-            // sum_x = 0 + 1 + ... + (n-1) = n*(n-1)/2
-            let sum_x = n_f64 * (n_f64 - 1.0) / 2.0;
-            // sum_x2 = 0^2 + 1^2 + ... + (n-1)^2 = n*(n-1)*(2n-1)/6
-            let sum_x2 = n_f64 * (n_f64 - 1.0) * (2.0 * n_f64 - 1.0) / 6.0;
-
-            let sum_y = cum_sum[end] - cum_sum[start];
-            let sum_y2 = cum_sum_sq[end] - cum_sum_sq[start];
-
-            // sum_xy where x_i = i (relative to segment start)
-            // = sum((j - start) * series[j]) for j in [start, end)
-            // = sum(j * series[j]) - start * sum(series[j])
-            let sum_xy =
-                (cum_ixy[end] - cum_ixy[start]) - (start as f64) * (cum_sum[end] - cum_sum[start]);
-
-            // Compute SS_xx, SS_yy, SS_xy
-            let ss_xx = sum_x2 - sum_x * sum_x / n_f64;
-            let ss_yy = sum_y2 - sum_y * sum_y / n_f64;
-            let ss_xy = sum_xy - sum_x * sum_y / n_f64;
-
-            // RSS = SS_yy - SS_xy^2 / SS_xx (if SS_xx > 0)
-            if ss_xx.abs() < 1e-10 {
-                ss_yy.max(0.0)
-            } else {
-                (ss_yy - ss_xy * ss_xy / ss_xx).max(0.0)
-            }
+            compute_linear_trend_cost(start, end, n, cum_sum, cum_sum_sq, cum_ixy)
         }
-        // For L1, Poisson, Cusum, Periodicity: fall back to direct computation
         _ => segment_cost(&series[start..end], cost_fn),
+    }
+}
+
+/// Compute L2, Normal, or MeanVariance cost using cumulative sums.
+#[inline]
+fn compute_l2_family_cost(
+    start: usize,
+    end: usize,
+    n: usize,
+    cum_sum: &[f64],
+    cum_sum_sq: &[f64],
+    cost_fn: CostFunction,
+) -> f64 {
+    let n_f64 = n as f64;
+    let sum_y = cum_sum[end] - cum_sum[start];
+    let sum_y2 = cum_sum_sq[end] - cum_sum_sq[start];
+    let mean = sum_y / n_f64;
+    let l2 = sum_y2 - n_f64 * mean * mean;
+
+    if n < 2 {
+        return l2.max(0.0);
+    }
+
+    let var = l2 / n_f64;
+    match cost_fn {
+        CostFunction::Normal => {
+            if var > 1e-10 { n_f64 * var.ln() } else { 0.0 }
+        }
+        CostFunction::MeanVariance => {
+            if var > 1e-10 { n_f64 * (1.0 + var.ln()) } else { n_f64 }
+        }
+        _ => l2.max(0.0),
+    }
+}
+
+/// Compute LinearTrend cost (RSS of linear regression) using cumulative sums.
+#[inline]
+fn compute_linear_trend_cost(
+    start: usize,
+    end: usize,
+    n: usize,
+    cum_sum: &[f64],
+    cum_sum_sq: &[f64],
+    cum_ixy: &[f64],
+) -> f64 {
+    if n < 2 {
+        return 0.0;
+    }
+
+    let n_f64 = n as f64;
+    let sum_x = n_f64 * (n_f64 - 1.0) / 2.0;
+    let sum_x2 = n_f64 * (n_f64 - 1.0) * (2.0 * n_f64 - 1.0) / 6.0;
+
+    let sum_y = cum_sum[end] - cum_sum[start];
+    let sum_y2 = cum_sum_sq[end] - cum_sum_sq[start];
+    let sum_xy = (cum_ixy[end] - cum_ixy[start]) - (start as f64) * sum_y;
+
+    let ss_xx = sum_x2 - sum_x * sum_x / n_f64;
+    let ss_yy = sum_y2 - sum_y * sum_y / n_f64;
+    let ss_xy = sum_xy - sum_x * sum_y / n_f64;
+
+    if ss_xx.abs() < 1e-10 {
+        ss_yy.max(0.0)
+    } else {
+        (ss_yy - ss_xy * ss_xy / ss_xx).max(0.0)
     }
 }
 

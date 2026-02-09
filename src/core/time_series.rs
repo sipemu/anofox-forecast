@@ -1383,46 +1383,43 @@ fn generate_timestamps(
     end: DateTime<Utc>,
     frequency: &Frequency,
 ) -> Result<Vec<DateTime<Utc>>> {
+    validate_frequency_positive(frequency)?;
+
     let mut timestamps = Vec::new();
     let mut current = start;
-
-    match frequency {
-        Frequency::Duration(duration) => {
-            if duration.num_seconds() <= 0 {
-                return Err(ForecastError::InvalidParameter(
-                    "frequency duration must be positive".to_string(),
-                ));
-            }
-            while current <= end {
-                timestamps.push(current);
-                current += *duration;
-            }
-        }
-        Frequency::Months(months) => {
-            if *months <= 0 {
-                return Err(ForecastError::InvalidParameter(
-                    "frequency months must be positive".to_string(),
-                ));
-            }
-            while current <= end {
-                timestamps.push(current);
-                current = add_months(current, *months);
-            }
-        }
-        Frequency::Years(years) => {
-            if *years <= 0 {
-                return Err(ForecastError::InvalidParameter(
-                    "frequency years must be positive".to_string(),
-                ));
-            }
-            while current <= end {
-                timestamps.push(current);
-                current = add_months(current, *years * 12);
-            }
-        }
+    while current <= end {
+        timestamps.push(current);
+        current = advance_timestamp(current, frequency);
     }
 
     Ok(timestamps)
+}
+
+/// Validate that a frequency value is positive.
+#[inline]
+fn validate_frequency_positive(frequency: &Frequency) -> Result<()> {
+    let valid = match frequency {
+        Frequency::Duration(d) => d.num_seconds() > 0,
+        Frequency::Months(m) => *m > 0,
+        Frequency::Years(y) => *y > 0,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(ForecastError::InvalidParameter(
+            "frequency must be positive".to_string(),
+        ))
+    }
+}
+
+/// Advance a timestamp by one frequency step.
+#[inline]
+fn advance_timestamp(current: DateTime<Utc>, frequency: &Frequency) -> DateTime<Utc> {
+    match frequency {
+        Frequency::Duration(duration) => current + *duration,
+        Frequency::Months(months) => add_months(current, *months),
+        Frequency::Years(years) => add_months(current, *years * 12),
+    }
 }
 
 /// Add months to a DateTime, handling month-end edge cases.

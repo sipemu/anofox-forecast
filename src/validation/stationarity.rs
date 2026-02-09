@@ -238,37 +238,31 @@ fn compute_adf_statistic(diff: &[f64], level: &[f64], lag: usize) -> (f64, f64) 
 
 /// Approximate p-value for ADF test using MacKinnon regression.
 fn adf_p_value(t_stat: f64, _n: usize) -> f64 {
-    // MacKinnon (1994) regression coefficients for constant, no trend
-    // tau_c critical values
-    // Simplified approximation using normal CDF for extreme values
-
     if t_stat.is_nan() {
         return f64::NAN;
     }
 
-    // Approximate mapping from t-statistic to p-value
-    // This is a simplified approximation
-    if t_stat < -4.0 {
-        0.001
-    } else if t_stat < -3.43 {
-        0.01
-    } else if t_stat < -2.86 {
-        0.05
-    } else if t_stat < -2.57 {
-        0.10
-    } else if t_stat < -1.94 {
-        0.20
-    } else if t_stat < -1.62 {
-        0.30
-    } else if t_stat < -1.28 {
-        0.40
-    } else if t_stat < -0.84 {
-        0.50
-    } else if t_stat < 0.0 {
-        0.70
-    } else {
-        0.90 + 0.05 * (1.0 - (-t_stat).exp())
+    // Threshold/p-value lookup: (upper_bound, p_value)
+    // Sorted ascending by threshold for linear scan
+    const ADF_TABLE: [(f64, f64); 9] = [
+        (-4.00, 0.001),
+        (-3.43, 0.01),
+        (-2.86, 0.05),
+        (-2.57, 0.10),
+        (-1.94, 0.20),
+        (-1.62, 0.30),
+        (-1.28, 0.40),
+        (-0.84, 0.50),
+        (0.00, 0.70),
+    ];
+
+    for &(threshold, p) in &ADF_TABLE {
+        if t_stat < threshold {
+            return p;
+        }
     }
+
+    0.90 + 0.05 * (1.0 - (-t_stat).exp())
 }
 
 /// KPSS test for stationarity.

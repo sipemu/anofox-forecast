@@ -213,7 +213,14 @@ fn solve_symmetric(a: &[Vec<f64>], b: &[f64]) -> Option<Vec<f64>> {
         return None;
     }
 
-    // Cholesky decomposition A = L @ L'
+    let l = cholesky_decompose(a, n)?;
+    let y = forward_substitute(&l, b, n);
+    Some(backward_substitute(&l, &y, n))
+}
+
+/// Cholesky decomposition: A = L @ L'. Returns None if not positive definite.
+#[inline]
+fn cholesky_decompose(a: &[Vec<f64>], n: usize) -> Option<Vec<Vec<f64>>> {
     let mut l = vec![vec![0.0; n]; n];
 
     for i in 0..n {
@@ -225,7 +232,7 @@ fn solve_symmetric(a: &[Vec<f64>], b: &[f64]) -> Option<Vec<f64>> {
 
             if i == j {
                 if sum <= 0.0 {
-                    return None; // Not positive definite
+                    return None;
                 }
                 l[i][j] = sum.sqrt();
             } else {
@@ -234,7 +241,12 @@ fn solve_symmetric(a: &[Vec<f64>], b: &[f64]) -> Option<Vec<f64>> {
         }
     }
 
-    // Forward substitution: L @ y = b
+    Some(l)
+}
+
+/// Forward substitution: L @ y = b.
+#[inline]
+fn forward_substitute(l: &[Vec<f64>], b: &[f64], n: usize) -> Vec<f64> {
     let mut y = vec![0.0; n];
     for i in 0..n {
         let mut sum = b[i];
@@ -243,8 +255,12 @@ fn solve_symmetric(a: &[Vec<f64>], b: &[f64]) -> Option<Vec<f64>> {
         }
         y[i] = sum / l[i][i];
     }
+    y
+}
 
-    // Backward substitution: L' @ x = y
+/// Backward substitution: L' @ x = y.
+#[inline]
+fn backward_substitute(l: &[Vec<f64>], y: &[f64], n: usize) -> Vec<f64> {
     let mut x = vec![0.0; n];
     for i in (0..n).rev() {
         let mut sum = y[i];
@@ -253,8 +269,7 @@ fn solve_symmetric(a: &[Vec<f64>], b: &[f64]) -> Option<Vec<f64>> {
         }
         x[i] = sum / l[i][i];
     }
-
-    Some(x)
+    x
 }
 
 /// Compute residuals after removing OLS fit.

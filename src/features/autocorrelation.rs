@@ -52,38 +52,30 @@ pub fn partial_autocorrelation(series: &[f64], lag: usize) -> f64 {
         return f64::NAN;
     }
 
-    // Compute autocorrelations up to lag
     let acf: Vec<f64> = (0..=lag).map(|k| autocorrelation(series, k)).collect();
 
     if acf.iter().any(|x| x.is_nan()) {
         return f64::NAN;
     }
 
-    // Durbin-Levinson algorithm
-    let mut phi = vec![vec![0.0; lag + 1]; lag + 1];
+    durbin_levinson_pacf(&acf, lag)
+}
 
+/// Durbin-Levinson algorithm for partial autocorrelation.
+#[inline]
+fn durbin_levinson_pacf(acf: &[f64], lag: usize) -> f64 {
+    let mut phi = vec![vec![0.0; lag + 1]; lag + 1];
     phi[1][1] = acf[1];
 
     for k in 2..=lag {
-        // Compute numerator
-        let mut num = acf[k];
-        for j in 1..k {
-            num -= phi[k - 1][j] * acf[k - j];
-        }
-
-        // Compute denominator
-        let mut denom = 1.0;
-        for j in 1..k {
-            denom -= phi[k - 1][j] * acf[j];
-        }
+        let num: f64 = acf[k] - (1..k).map(|j| phi[k - 1][j] * acf[k - j]).sum::<f64>();
+        let denom: f64 = 1.0 - (1..k).map(|j| phi[k - 1][j] * acf[j]).sum::<f64>();
 
         if denom.abs() < 1e-10 {
             return f64::NAN;
         }
 
         phi[k][k] = num / denom;
-
-        // Update coefficients
         for j in 1..k {
             phi[k][j] = phi[k - 1][j] - phi[k][k] * phi[k - 1][k - j];
         }
@@ -115,31 +107,37 @@ pub fn agg_autocorrelation(series: &[f64], max_lag: usize, agg_func: &str) -> f6
         return f64::NAN;
     }
 
-    match agg_func {
-        "mean" => acf_values.iter().sum::<f64>() / acf_values.len() as f64,
+    aggregate_values(&acf_values, agg_func, || agg_autocorrelation(series, max_lag, "var"))
+}
+
+/// Aggregate a slice of values using named functions.
+#[inline]
+fn aggregate_values(values: &[f64], func: &str, var_fn: impl FnOnce() -> f64) -> f64 {
+    match func {
+        "mean" => values.iter().sum::<f64>() / values.len() as f64,
         "var" => {
-            if acf_values.len() < 2 {
+            if values.len() < 2 {
                 return f64::NAN;
             }
-            let m = acf_values.iter().sum::<f64>() / acf_values.len() as f64;
-            let sum_sq: f64 = acf_values.iter().map(|x| (x - m).powi(2)).sum();
-            sum_sq / (acf_values.len() - 1) as f64
+            let m = values.iter().sum::<f64>() / values.len() as f64;
+            values.iter().map(|x| (x - m).powi(2)).sum::<f64>() / (values.len() - 1) as f64
         }
-        "std" => {
-            let var = agg_autocorrelation(series, max_lag, "var");
-            var.sqrt()
-        }
-        "median" => {
-            let mut sorted = acf_values.clone();
-            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            let n = sorted.len();
-            if n % 2 == 0 {
-                (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
-            } else {
-                sorted[n / 2]
-            }
-        }
+        "std" => var_fn().sqrt(),
+        "median" => compute_median(values),
         _ => f64::NAN,
+    }
+}
+
+/// Compute median of a slice.
+#[inline]
+fn compute_median(values: &[f64]) -> f64 {
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = sorted.len();
+    if n % 2 == 0 {
+        (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
+    } else {
+        sorted[n / 2]
     }
 }
 

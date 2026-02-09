@@ -12,33 +12,9 @@
 /// * `window` - Window size
 /// * `center` - If true, center the window (default: false, trailing window)
 pub fn rolling_mean(series: &[f64], window: usize, center: bool) -> Vec<f64> {
-    if series.is_empty() || window == 0 {
-        return vec![f64::NAN; series.len()];
-    }
-
-    let n = series.len();
-    let mut result = vec![f64::NAN; n];
-
-    for i in 0..n {
-        let (start, end) = if center {
-            let half = window / 2;
-            let start = i.saturating_sub(half);
-            let end = (i + window - half).min(n);
-            (start, end)
-        } else {
-            if i + 1 < window {
-                continue;
-            }
-            (i + 1 - window, i + 1)
-        };
-
-        if end > start {
-            let sum: f64 = series[start..end].iter().sum();
-            result[i] = sum / (end - start) as f64;
-        }
-    }
-
-    result
+    rolling_apply(series, window, center, |s| {
+        s.iter().sum::<f64>() / s.len() as f64
+    })
 }
 
 /// Compute rolling standard deviation.
@@ -55,32 +31,13 @@ pub fn rolling_var(series: &[f64], window: usize, center: bool) -> Vec<f64> {
         return vec![f64::NAN; series.len()];
     }
 
-    let n = series.len();
-    let mut result = vec![f64::NAN; n];
-
-    for i in 0..n {
-        let (start, end) = if center {
-            let half = window / 2;
-            let start = i.saturating_sub(half);
-            let end = (i + window - half).min(n);
-            (start, end)
-        } else {
-            if i + 1 < window {
-                continue;
-            }
-            (i + 1 - window, i + 1)
-        };
-
-        let segment = &series[start..end];
-        if segment.len() >= 2 {
-            let mean = segment.iter().sum::<f64>() / segment.len() as f64;
-            let var = segment.iter().map(|x| (x - mean).powi(2)).sum::<f64>()
-                / (segment.len() - 1) as f64;
-            result[i] = var;
+    rolling_apply(series, window, center, |s| {
+        if s.len() < 2 {
+            return f64::NAN;
         }
-    }
-
-    result
+        let mean = s.iter().sum::<f64>() / s.len() as f64;
+        s.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (s.len() - 1) as f64
+    })
 }
 
 /// Compute rolling minimum.
@@ -116,6 +73,22 @@ pub fn rolling_median(series: &[f64], window: usize, center: bool) -> Vec<f64> {
     })
 }
 
+/// Compute window bounds for position i.
+/// Returns None if the trailing window hasn't filled yet.
+#[inline]
+fn window_bounds(i: usize, window: usize, n: usize, center: bool) -> Option<(usize, usize)> {
+    if center {
+        let half = window / 2;
+        let start = i.saturating_sub(half);
+        let end = (i + window - half).min(n);
+        Some((start, end))
+    } else if i + 1 < window {
+        None
+    } else {
+        Some((i + 1 - window, i + 1))
+    }
+}
+
 /// Generic rolling window application.
 fn rolling_apply<F>(series: &[f64], window: usize, center: bool, f: F) -> Vec<f64>
 where
@@ -129,20 +102,10 @@ where
     let mut result = vec![f64::NAN; n];
 
     for i in 0..n {
-        let (start, end) = if center {
-            let half = window / 2;
-            let start = i.saturating_sub(half);
-            let end = (i + window - half).min(n);
-            (start, end)
-        } else {
-            if i + 1 < window {
-                continue;
+        if let Some((start, end)) = window_bounds(i, window, n, center) {
+            if end > start {
+                result[i] = f(&series[start..end]);
             }
-            (i + 1 - window, i + 1)
-        };
-
-        if end > start {
-            result[i] = f(&series[start..end]);
         }
     }
 

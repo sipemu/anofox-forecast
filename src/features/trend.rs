@@ -278,83 +278,90 @@ pub fn ar_coefficient(series: &[f64], k: usize, coeff: usize) -> f64 {
         return f64::NAN;
     }
 
-    // Build design matrix X (n_obs x (k+1)) and response vector y
-    // For each t = k..n: y[t] = c + phi_1*x[t-1] + phi_2*x[t-2] + ... + phi_k*x[t-k]
-    let n_params = k + 1; // intercept + k AR coefficients
+    let (xtx, xty) = build_ar_normal_equations(series, k, n);
+    match solve_linear_system(&xtx, &xty) {
+        Some(p) if coeff < p.len() => p[coeff],
+        _ => f64::NAN,
+    }
+}
 
-    // Compute X'X matrix and X'y vector using normal equations
+/// Build X'X and X'y normal equations for AR(k) model with intercept.
+#[inline]
+fn build_ar_normal_equations(
+    series: &[f64],
+    k: usize,
+    n: usize,
+) -> (Vec<Vec<f64>>, Vec<f64>) {
+    let n_params = k + 1;
     let mut xtx = vec![vec![0.0; n_params]; n_params];
     let mut xty = vec![0.0; n_params];
 
     for t in k..n {
         let y_t = series[t];
 
-        // Build row of X: [1, x[t-1], x[t-2], ..., x[t-k]]
-        let mut x_row = vec![1.0]; // intercept
-        for j in 1..=k {
-            x_row.push(series[t - j]);
-        }
-
-        // Accumulate X'X
-        for i in 0..n_params {
-            for j in 0..n_params {
-                xtx[i][j] += x_row[i] * x_row[j];
+        // Accumulate intercept row/column
+        xtx[0][0] += 1.0;
+        xty[0] += y_t;
+        for i in 1..n_params {
+            let xi = series[t - i];
+            xtx[0][i] += xi;
+            xtx[i][0] += xi;
+            xty[i] += xi * y_t;
+            for j in 1..n_params {
+                xtx[i][j] += xi * series[t - j];
             }
         }
-
-        // Accumulate X'y
-        for i in 0..n_params {
-            xty[i] += x_row[i] * y_t;
-        }
     }
 
-    // Solve X'X * beta = X'y using Gaussian elimination
-    let params = solve_linear_system(&xtx, &xty);
-
-    match params {
-        Some(p) if coeff < p.len() => p[coeff],
-        _ => f64::NAN,
-    }
+    (xtx, xty)
 }
 
-/// Solve a linear system Ax = b using Gaussian elimination with partial pivoting
+/// Solve a linear system Ax = b using Gaussian elimination with partial pivoting.
 fn solve_linear_system(a: &[Vec<f64>], b: &[f64]) -> Option<Vec<f64>> {
     let n = b.len();
     if n == 0 || a.len() != n {
         return None;
     }
 
-    // Create augmented matrix
-    let mut aug: Vec<Vec<f64>> = a
-        .iter()
+    let mut aug = build_augmented_matrix(a, b, n);
+
+    if !gaussian_eliminate(&mut aug, n) {
+        return None;
+    }
+
+    Some(back_substitute_augmented(&aug, n))
+}
+
+/// Build augmented matrix [A | b].
+#[inline]
+fn build_augmented_matrix(a: &[Vec<f64>], b: &[f64], n: usize) -> Vec<Vec<f64>> {
+    a.iter()
         .enumerate()
         .map(|(i, row)| {
-            let mut r = row.clone();
+            let mut r = Vec::with_capacity(n + 1);
+            r.extend_from_slice(row);
             r.push(b[i]);
             r
         })
-        .collect();
+        .collect()
+}
 
-    // Gaussian elimination with partial pivoting
+/// Gaussian elimination with partial pivoting. Returns false if singular.
+#[inline]
+fn gaussian_eliminate(aug: &mut [Vec<f64>], n: usize) -> bool {
     for col in 0..n {
         // Find pivot
-        let mut max_row = col;
-        let mut max_val = aug[col][col].abs();
-        for row in (col + 1)..n {
-            if aug[row][col].abs() > max_val {
-                max_val = aug[row][col].abs();
-                max_row = row;
-            }
-        }
+        let (max_row, max_val) = (col..n).fold((col, aug[col][col].abs()), |(mr, mv), row| {
+            let v = aug[row][col].abs();
+            if v > mv { (row, v) } else { (mr, mv) }
+        });
 
         if max_val < 1e-14 {
-            return None; // Singular matrix
+            return false;
         }
 
-        // Swap rows
         aug.swap(col, max_row);
 
-        // Eliminate
         for row in (col + 1)..n {
             let factor = aug[row][col] / aug[col][col];
             for j in col..=n {
@@ -362,8 +369,12 @@ fn solve_linear_system(a: &[Vec<f64>], b: &[f64]) -> Option<Vec<f64>> {
             }
         }
     }
+    true
+}
 
-    // Back substitution
+/// Back substitution on augmented matrix.
+#[inline]
+fn back_substitute_augmented(aug: &[Vec<f64>], n: usize) -> Vec<f64> {
     let mut x = vec![0.0; n];
     for i in (0..n).rev() {
         let mut sum = aug[i][n];
@@ -372,8 +383,7 @@ fn solve_linear_system(a: &[Vec<f64>], b: &[f64]) -> Option<Vec<f64>> {
         }
         x[i] = sum / aug[i][i];
     }
-
-    Some(x)
+    x
 }
 
 /// Estimates AR coefficients using Yule-Walker equations.
@@ -388,7 +398,6 @@ pub fn ar_coefficient_yule_walker(series: &[f64], k: usize) -> f64 {
         return f64::NAN;
     }
 
-    // Compute autocorrelations up to lag k
     let mean: f64 = series.iter().sum::<f64>() / series.len() as f64;
     let var: f64 = series.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / series.len() as f64;
 
@@ -396,7 +405,14 @@ pub fn ar_coefficient_yule_walker(series: &[f64], k: usize) -> f64 {
         return 0.0;
     }
 
-    let acf: Vec<f64> = (0..=k)
+    let acf = compute_acf_for_yule_walker(series, k, mean, var);
+    durbin_levinson(&acf, k)
+}
+
+/// Compute autocorrelation function values for Yule-Walker.
+#[inline]
+fn compute_acf_for_yule_walker(series: &[f64], k: usize, mean: f64, var: f64) -> Vec<f64> {
+    (0..=k)
         .map(|lag| {
             if lag == 0 {
                 1.0
@@ -410,30 +426,25 @@ pub fn ar_coefficient_yule_walker(series: &[f64], k: usize) -> f64 {
                 cov / var
             }
         })
-        .collect();
+        .collect()
+}
 
-    // Solve Yule-Walker equations using Durbin-Levinson
+/// Durbin-Levinson algorithm: solve Yule-Walker equations.
+/// Returns the k-th AR coefficient, or NaN on degeneracy.
+#[inline]
+fn durbin_levinson(acf: &[f64], k: usize) -> f64 {
     let mut phi = vec![0.0; k + 1];
     phi[1] = acf[1];
 
     for m in 2..=k {
-        let mut num = acf[m];
-        for j in 1..m {
-            num -= phi[j] * acf[m - j];
-        }
-
-        let mut denom = 1.0;
-        for j in 1..m {
-            denom -= phi[j] * acf[j];
-        }
+        let num: f64 = acf[m] - (1..m).map(|j| phi[j] * acf[m - j]).sum::<f64>();
+        let denom: f64 = 1.0 - (1..m).map(|j| phi[j] * acf[j]).sum::<f64>();
 
         if denom.abs() < 1e-10 {
             return f64::NAN;
         }
 
         let new_phi = num / denom;
-
-        // Update coefficients
         let mut new_coeffs = vec![0.0; k + 1];
         new_coeffs[m] = new_phi;
         for j in 1..m {

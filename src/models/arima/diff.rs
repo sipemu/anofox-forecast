@@ -107,26 +107,30 @@ pub fn suggest_differencing(series: &[f64]) -> usize {
     let var_0 = variance(series);
     let diff_1 = difference(series, 1);
 
-    if diff_1.len() < 2 {
+    if !variance_decreased_significantly(var_0, &diff_1) {
         return 0;
     }
 
+    // Check if second difference helps more
     let var_1 = variance(&diff_1);
-
-    // If variance decreases significantly after differencing, difference is needed
-    if var_0 > 0.0 && var_1 / var_0 < 0.9 {
-        // Check if second difference helps more
-        let diff_2 = difference(&diff_1, 1);
-        if diff_2.len() >= 2 {
-            let var_2 = variance(&diff_2);
-            if var_2 / var_1 < 0.9 && var_2 < var_0 {
-                return 2;
-            }
+    let diff_2 = difference(&diff_1, 1);
+    if diff_2.len() >= 2 {
+        let var_2 = variance(&diff_2);
+        if var_2 / var_1 < 0.9 && var_2 < var_0 {
+            return 2;
         }
-        return 1;
     }
 
-    0
+    1
+}
+
+/// Check if differencing significantly reduces variance.
+#[inline]
+fn variance_decreased_significantly(var_original: f64, differenced: &[f64]) -> bool {
+    if differenced.len() < 2 || var_original <= 0.0 {
+        return false;
+    }
+    variance(differenced) / var_original < 0.9
 }
 
 /// Calculate variance of a series.
