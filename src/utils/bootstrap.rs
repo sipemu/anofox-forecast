@@ -155,7 +155,13 @@ pub fn bootstrap_intervals<M: Forecaster + Clone>(
 
     // Collect forecast samples for each horizon step
     let forecast_samples = collect_bootstrap_samples(
-        model, series, fitted, &valid_residuals, horizon, config, &mut rng,
+        model,
+        series,
+        fitted,
+        &valid_residuals,
+        horizon,
+        config,
+        &mut rng,
     );
 
     // Extract confidence interval bounds from samples
@@ -195,7 +201,11 @@ fn collect_bootstrap_samples<M: Forecaster + Clone>(
             .enumerate()
             .map(|(i, (f, r))| {
                 let v = f + r;
-                if v.is_finite() { v } else { original_values[i] }
+                if v.is_finite() {
+                    v
+                } else {
+                    original_values[i]
+                }
             })
             .collect();
 

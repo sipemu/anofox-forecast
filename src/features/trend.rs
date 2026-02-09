@@ -287,11 +287,7 @@ pub fn ar_coefficient(series: &[f64], k: usize, coeff: usize) -> f64 {
 
 /// Build X'X and X'y normal equations for AR(k) model with intercept.
 #[inline]
-fn build_ar_normal_equations(
-    series: &[f64],
-    k: usize,
-    n: usize,
-) -> (Vec<Vec<f64>>, Vec<f64>) {
+fn build_ar_normal_equations(series: &[f64], k: usize, n: usize) -> (Vec<Vec<f64>>, Vec<f64>) {
     let n_params = k + 1;
     let mut xtx = vec![vec![0.0; n_params]; n_params];
     let mut xty = vec![0.0; n_params];
@@ -353,7 +349,11 @@ fn gaussian_eliminate(aug: &mut [Vec<f64>], n: usize) -> bool {
         // Find pivot
         let (max_row, max_val) = (col..n).fold((col, aug[col][col].abs()), |(mr, mv), row| {
             let v = aug[row][col].abs();
-            if v > mv { (row, v) } else { (mr, mv) }
+            if v > mv {
+                (row, v)
+            } else {
+                (mr, mv)
+            }
         });
 
         if max_val < 1e-14 {

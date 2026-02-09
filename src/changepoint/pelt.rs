@@ -162,7 +162,14 @@ pub fn pelt_detect(series: &[f64], config: &PeltConfig) -> PeltResult {
 
     for t in config.min_segment_length..=n {
         let (best_cost, best_cp) = find_best_candidate(
-            &candidates, t, config, &f, &cum_sum, &cum_sum_sq, &cum_ixy, series,
+            &candidates,
+            t,
+            config,
+            &f,
+            &cum_sum,
+            &cum_sum_sq,
+            &cum_ixy,
+            series,
         );
 
         f[t] = best_cost;
@@ -174,7 +181,13 @@ pub fn pelt_detect(series: &[f64], config: &PeltConfig) -> PeltResult {
                 return true;
             }
             let seg_cost = compute_segment_cost_fast(
-                s, t, &cum_sum, &cum_sum_sq, &cum_ixy, config.cost_fn, series,
+                s,
+                t,
+                &cum_sum,
+                &cum_sum_sq,
+                &cum_ixy,
+                config.cost_fn,
+                series,
             );
             f[s] + seg_cost <= f[t]
         });
@@ -217,7 +230,13 @@ fn find_best_candidate(
     for &s in candidates {
         if t - s >= config.min_segment_length {
             let seg_cost = compute_segment_cost_fast(
-                s, t, cum_sum, cum_sum_sq, cum_ixy, config.cost_fn, series,
+                s,
+                t,
+                cum_sum,
+                cum_sum_sq,
+                cum_ixy,
+                config.cost_fn,
+                series,
             );
             let total = f[s] + seg_cost + config.penalty;
             if total < best_cost {
@@ -311,10 +330,18 @@ fn compute_l2_family_cost(
     let var = l2 / n_f64;
     match cost_fn {
         CostFunction::Normal => {
-            if var > 1e-10 { n_f64 * var.ln() } else { 0.0 }
+            if var > 1e-10 {
+                n_f64 * var.ln()
+            } else {
+                0.0
+            }
         }
         CostFunction::MeanVariance => {
-            if var > 1e-10 { n_f64 * (1.0 + var.ln()) } else { n_f64 }
+            if var > 1e-10 {
+                n_f64 * (1.0 + var.ln())
+            } else {
+                n_f64
+            }
         }
         _ => l2.max(0.0),
     }

@@ -125,11 +125,7 @@ pub fn ols_fit(y: &[f64], regressors: &HashMap<String, Vec<f64>>) -> Result<OLSR
 }
 
 /// Validate OLS inputs: check for empty data, NaN/Inf, and dimension mismatches.
-fn validate_ols_inputs(
-    y: &[f64],
-    regressors: &HashMap<String, Vec<f64>>,
-    n: usize,
-) -> Result<()> {
+fn validate_ols_inputs(y: &[f64], regressors: &HashMap<String, Vec<f64>>, n: usize) -> Result<()> {
     if n == 0 {
         return Err(ForecastError::InsufficientData { needed: 1, got: 0 });
     }

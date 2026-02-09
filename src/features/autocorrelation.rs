@@ -107,7 +107,9 @@ pub fn agg_autocorrelation(series: &[f64], max_lag: usize, agg_func: &str) -> f6
         return f64::NAN;
     }
 
-    aggregate_values(&acf_values, agg_func, || agg_autocorrelation(series, max_lag, "var"))
+    aggregate_values(&acf_values, agg_func, || {
+        agg_autocorrelation(series, max_lag, "var")
+    })
 }
 
 /// Aggregate a slice of values using named functions.

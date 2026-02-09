@@ -1488,7 +1488,11 @@ fn interpolate_series(values: &[f64], fill_edges: bool) -> Vec<f64> {
             while i < n && result[i].is_nan() {
                 i += 1;
             }
-            let left = if start > 0 { Some(result[start - 1]) } else { None };
+            let left = if start > 0 {
+                Some(result[start - 1])
+            } else {
+                None
+            };
             let right = if i < n { Some(result[i]) } else { None };
             fill_nan_segment(&mut result[start..i], left, right, fill_edges);
         } else {

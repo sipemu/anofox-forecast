@@ -314,7 +314,11 @@ impl ARIMA {
             -2.0 * ll + k * n_eff.ln()
         };
 
-        if score.is_finite() { Some(score) } else { None }
+        if score.is_finite() {
+            Some(score)
+        } else {
+            None
+        }
     }
 
     /// Calculate the conditional sum of squares for given parameters.
@@ -1063,7 +1067,11 @@ impl SARIMA {
             -2.0 * ll + k * n_eff.ln()
         };
 
-        if score.is_finite() { Some(score) } else { None }
+        if score.is_finite() {
+            Some(score)
+        } else {
+            None
+        }
     }
 
     /// Apply seasonal differencing.

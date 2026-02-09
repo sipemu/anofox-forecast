@@ -147,36 +147,60 @@ where
         let second_worst_idx = indices[n - 1];
 
         // Check convergence: value range and simplex diameter
-        if check_convergence(&simplex, &values, best_idx, worst_idx, config.tolerance, &mut centroid) {
+        if check_convergence(
+            &simplex,
+            &values,
+            best_idx,
+            worst_idx,
+            config.tolerance,
+            &mut centroid,
+        ) {
             converged = true;
             break;
         }
 
         // Try reflection/expansion; if not accepted, try contraction with the reflected value
         let reflected_value = match try_reflection_expansion(
-            &objective, &config, bounds,
-            &mut simplex, &mut values,
-            worst_idx, best_idx, second_worst_idx,
-            &centroid, &mut reflected, &mut expanded,
+            &objective,
+            &config,
+            bounds,
+            &mut simplex,
+            &mut values,
+            worst_idx,
+            best_idx,
+            second_worst_idx,
+            &centroid,
+            &mut reflected,
+            &mut expanded,
         ) {
-            None => continue,    // reflection or expansion accepted
-            Some(rv) => rv,      // pass reflected_value to contraction
+            None => continue, // reflection or expansion accepted
+            Some(rv) => rv,   // pass reflected_value to contraction
         };
 
         if try_contraction(
-            &objective, &config, bounds,
-            &mut simplex, &mut values,
-            worst_idx, &centroid, &reflected,
-            reflected_value, &mut contracted,
+            &objective,
+            &config,
+            bounds,
+            &mut simplex,
+            &mut values,
+            worst_idx,
+            &centroid,
+            &reflected,
+            reflected_value,
+            &mut contracted,
         ) {
             continue;
         }
 
         // Shrink all vertices towards the best
         shrink_simplex(
-            &objective, &config, bounds,
-            &mut simplex, &mut values,
-            best_idx, &mut temp,
+            &objective,
+            &config,
+            bounds,
+            &mut simplex,
+            &mut values,
+            best_idx,
+            &mut temp,
         );
     }
 

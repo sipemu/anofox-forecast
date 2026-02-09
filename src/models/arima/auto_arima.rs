@@ -384,11 +384,7 @@ impl AutoARIMA {
 
     /// Score-only evaluation: compute AIC/BIC from pre-computed differenced series
     /// without constructing the full model. Skips validation, storage, and calculate_fitted.
-    fn score_order_static(
-        order: ModelOrder,
-        diff_series: &[f64],
-        use_aic: bool,
-    ) -> Option<f64> {
+    fn score_order_static(order: ModelOrder, diff_series: &[f64], use_aic: bool) -> Option<f64> {
         if order.is_seasonal() {
             SARIMA::score_order(
                 order.p,
@@ -575,7 +571,10 @@ impl AutoARIMA {
         diff_series_map: &std::collections::HashMap<(usize, usize), Vec<f64>>,
         candidates: &[ModelOrder],
         n_values: usize,
-    ) -> (Vec<(ModelOrder, f64)>, Option<(SelectedModel, ModelOrder, f64)>) {
+    ) -> (
+        Vec<(ModelOrder, f64)>,
+        Option<(SelectedModel, ModelOrder, f64)>,
+    ) {
         let use_aic = self.config.use_aic;
 
         // Filter candidates by data requirements
@@ -624,9 +623,7 @@ impl AutoARIMA {
             let mut best: Option<(SelectedModel, ModelOrder, f64)> = None;
 
             for &order in &valid_candidates {
-                if let Some((model, score)) =
-                    Self::evaluate_model_static(series, order, use_aic)
-                {
+                if let Some((model, score)) = Self::evaluate_model_static(series, order, use_aic) {
                     scores.push((order, score));
                     if best.as_ref().is_none_or(|(_, _, bs)| score < *bs) {
                         best = Some((model, order, score));
@@ -750,12 +747,8 @@ impl Forecaster for AutoARIMA {
             candidates.dedup();
 
             // Evaluate all candidates
-            let (results, best) = self.evaluate_candidates_fast(
-                series,
-                &diff_series_map,
-                &candidates,
-                values.len(),
-            );
+            let (results, best) =
+                self.evaluate_candidates_fast(series, &diff_series_map, &candidates, values.len());
 
             for (order, score) in results {
                 self.model_scores.push((order, score));
