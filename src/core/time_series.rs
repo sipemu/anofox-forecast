@@ -1483,52 +1483,39 @@ fn interpolate_series(values: &[f64], fill_edges: bool) -> Vec<f64> {
     let mut result = values.to_vec();
     let n = result.len();
 
-    // Find segments of NaN values and interpolate
+    // Find and fill NaN segments
     let mut i = 0;
     while i < n {
         if result[i].is_nan() {
-            // Find start of NaN segment
             let start = i;
             while i < n && result[i].is_nan() {
                 i += 1;
             }
-            let end = i;
-
-            // Get boundary values
-            let left = if start > 0 {
-                Some(result[start - 1])
-            } else {
-                None
-            };
-            let right = if end < n { Some(result[end]) } else { None };
-
-            // Interpolate or fill edges
-            match (left, right) {
-                (Some(l), Some(r)) => {
-                    // Linear interpolation
-                    // Gap is from left boundary to right boundary: (end - start + 1) segments
-                    let segments = (end - start + 1) as f64;
-                    for (j, idx) in (start..end).enumerate() {
-                        let t = (j + 1) as f64 / segments;
-                        result[idx] = l + t * (r - l);
-                    }
-                }
-                (Some(l), None) if fill_edges => {
-                    result[start..end].fill(l);
-                }
-                (None, Some(r)) if fill_edges => {
-                    result[start..end].fill(r);
-                }
-                _ => {
-                    // Leave as NaN if can't interpolate
-                }
-            }
+            let left = if start > 0 { Some(result[start - 1]) } else { None };
+            let right = if i < n { Some(result[i]) } else { None };
+            fill_nan_segment(&mut result[start..i], left, right, fill_edges);
         } else {
             i += 1;
         }
     }
 
     result
+}
+
+/// Fill a NaN segment using linear interpolation or edge values.
+fn fill_nan_segment(segment: &mut [f64], left: Option<f64>, right: Option<f64>, fill_edges: bool) {
+    match (left, right) {
+        (Some(l), Some(r)) => {
+            let segments = (segment.len() + 1) as f64;
+            for (j, val) in segment.iter_mut().enumerate() {
+                let t = (j + 1) as f64 / segments;
+                *val = l + t * (r - l);
+            }
+        }
+        (Some(l), None) if fill_edges => segment.fill(l),
+        (None, Some(r)) if fill_edges => segment.fill(r),
+        _ => {} // Leave as NaN
+    }
 }
 
 #[cfg(test)]

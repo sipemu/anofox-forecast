@@ -140,102 +140,44 @@ where
     while iterations < config.max_iter {
         iterations += 1;
 
-        // Reset and sort indices by objective value
-        for (i, idx) in indices.iter_mut().enumerate() {
-            *idx = i;
-        }
-        indices.sort_by(|&a, &b| {
-            values[a]
-                .partial_cmp(&values[b])
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
+        // Sort vertices by objective value
+        sort_simplex_indices(&mut indices, &values);
         let best_idx = indices[0];
         let worst_idx = indices[n];
         let second_worst_idx = indices[n - 1];
 
-        // Check convergence
-        let range = values[worst_idx] - values[best_idx];
-        if range < config.tolerance {
+        // Check convergence: value range and simplex diameter
+        if check_convergence(&simplex, &values, best_idx, worst_idx, config.tolerance, &mut centroid) {
             converged = true;
             break;
         }
 
-        // Also check if simplex has collapsed
-        compute_centroid_into(&simplex, worst_idx, &mut centroid);
-        let max_dist = simplex
-            .iter()
-            .map(|v| euclidean_distance(v, &centroid))
-            .fold(0.0, f64::max);
-        if max_dist < config.tolerance {
-            converged = true;
-            break;
-        }
+        // Try reflection/expansion; if not accepted, try contraction with the reflected value
+        let reflected_value = match try_reflection_expansion(
+            &objective, &config, bounds,
+            &mut simplex, &mut values,
+            worst_idx, best_idx, second_worst_idx,
+            &centroid, &mut reflected, &mut expanded,
+        ) {
+            None => continue,    // reflection or expansion accepted
+            Some(rv) => rv,      // pass reflected_value to contraction
+        };
 
-        // Reflection
-        reflect_into(&simplex[worst_idx], &centroid, config.alpha, &mut reflected);
-        apply_bounds_in_place(&mut reflected, bounds);
-        let reflected_value = sanitize_objective(objective(&reflected));
-
-        if reflected_value < values[second_worst_idx] && reflected_value >= values[best_idx] {
-            // Accept reflection
-            simplex[worst_idx].copy_from_slice(&reflected);
-            values[worst_idx] = reflected_value;
+        if try_contraction(
+            &objective, &config, bounds,
+            &mut simplex, &mut values,
+            worst_idx, &centroid, &reflected,
+            reflected_value, &mut contracted,
+        ) {
             continue;
         }
 
-        if reflected_value < values[best_idx] {
-            // Try expansion
-            expand_into(&centroid, &reflected, config.gamma, &mut expanded);
-            apply_bounds_in_place(&mut expanded, bounds);
-            let expanded_value = sanitize_objective(objective(&expanded));
-
-            if expanded_value < reflected_value {
-                simplex[worst_idx].copy_from_slice(&expanded);
-                values[worst_idx] = expanded_value;
-            } else {
-                simplex[worst_idx].copy_from_slice(&reflected);
-                values[worst_idx] = reflected_value;
-            }
-            continue;
-        }
-
-        // Contraction
-        if reflected_value < values[worst_idx] {
-            // Outside contraction
-            contract_into(&centroid, &reflected, config.rho, &mut contracted);
-            apply_bounds_in_place(&mut contracted, bounds);
-            let contracted_value = sanitize_objective(objective(&contracted));
-
-            if contracted_value <= reflected_value {
-                simplex[worst_idx].copy_from_slice(&contracted);
-                values[worst_idx] = contracted_value;
-                continue;
-            }
-        } else {
-            // Inside contraction
-            contract_into(&centroid, &simplex[worst_idx], config.rho, &mut contracted);
-            apply_bounds_in_place(&mut contracted, bounds);
-            let contracted_value = sanitize_objective(objective(&contracted));
-
-            if contracted_value < values[worst_idx] {
-                simplex[worst_idx].copy_from_slice(&contracted);
-                values[worst_idx] = contracted_value;
-                continue;
-            }
-        }
-
-        // Shrink -- copy best vertex into temp to avoid borrow conflict
-        temp.copy_from_slice(&simplex[best_idx]);
-        for i in 0..=n {
-            if i != best_idx {
-                for j in 0..n {
-                    simplex[i][j] = temp[j] + config.sigma * (simplex[i][j] - temp[j]);
-                }
-                apply_bounds_in_place(&mut simplex[i], bounds);
-                values[i] = sanitize_objective(objective(&simplex[i]));
-            }
-        }
+        // Shrink all vertices towards the best
+        shrink_simplex(
+            &objective, &config, bounds,
+            &mut simplex, &mut values,
+            best_idx, &mut temp,
+        );
     }
 
     // Find best vertex
@@ -251,6 +193,153 @@ where
         optimal_value: values[best_idx],
         iterations,
         converged,
+    }
+}
+
+/// Sort simplex indices by objective value in ascending order.
+#[inline]
+fn sort_simplex_indices(indices: &mut [usize], values: &[f64]) {
+    for (i, idx) in indices.iter_mut().enumerate() {
+        *idx = i;
+    }
+    indices.sort_by(|&a, &b| {
+        values[a]
+            .partial_cmp(&values[b])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+}
+
+/// Check convergence by value range and simplex diameter.
+/// Returns true if converged. Writes centroid as a side effect (needed by caller).
+#[inline]
+fn check_convergence(
+    simplex: &[Vec<f64>],
+    values: &[f64],
+    best_idx: usize,
+    worst_idx: usize,
+    tolerance: f64,
+    centroid: &mut [f64],
+) -> bool {
+    let range = values[worst_idx] - values[best_idx];
+    if range < tolerance {
+        return true;
+    }
+
+    compute_centroid_into(simplex, worst_idx, centroid);
+    let max_dist = simplex
+        .iter()
+        .map(|v| euclidean_distance(v, centroid))
+        .fold(0.0, f64::max);
+    max_dist < tolerance
+}
+
+/// Compute reflection and try expansion. Returns `Some(reflected_value)` if neither
+/// reflection nor expansion was accepted (caller should try contraction), or `None`
+/// if the worst vertex was successfully replaced.
+#[inline]
+fn try_reflection_expansion<F: Fn(&[f64]) -> f64>(
+    objective: &F,
+    config: &NelderMeadConfig,
+    bounds: Option<&[(f64, f64)]>,
+    simplex: &mut [Vec<f64>],
+    values: &mut [f64],
+    worst_idx: usize,
+    best_idx: usize,
+    second_worst_idx: usize,
+    centroid: &[f64],
+    reflected: &mut [f64],
+    expanded: &mut [f64],
+) -> Option<f64> {
+    reflect_into(&simplex[worst_idx], centroid, config.alpha, reflected);
+    apply_bounds_in_place(reflected, bounds);
+    let reflected_value = sanitize_objective(objective(reflected));
+
+    if reflected_value < values[second_worst_idx] && reflected_value >= values[best_idx] {
+        simplex[worst_idx].copy_from_slice(reflected);
+        values[worst_idx] = reflected_value;
+        return None; // accepted
+    }
+
+    if reflected_value < values[best_idx] {
+        expand_into(centroid, reflected, config.gamma, expanded);
+        apply_bounds_in_place(expanded, bounds);
+        let expanded_value = sanitize_objective(objective(expanded));
+
+        if expanded_value < reflected_value {
+            simplex[worst_idx].copy_from_slice(expanded);
+            values[worst_idx] = expanded_value;
+        } else {
+            simplex[worst_idx].copy_from_slice(reflected);
+            values[worst_idx] = reflected_value;
+        }
+        return None; // accepted
+    }
+
+    Some(reflected_value) // not accepted, pass value to contraction
+}
+
+/// Try contraction step. Returns true if the worst vertex was replaced.
+#[inline]
+fn try_contraction<F: Fn(&[f64]) -> f64>(
+    objective: &F,
+    config: &NelderMeadConfig,
+    bounds: Option<&[(f64, f64)]>,
+    simplex: &mut [Vec<f64>],
+    values: &mut [f64],
+    worst_idx: usize,
+    centroid: &[f64],
+    reflected: &[f64],
+    reflected_value: f64,
+    contracted: &mut [f64],
+) -> bool {
+    if reflected_value < values[worst_idx] {
+        // Outside contraction
+        contract_into(centroid, reflected, config.rho, contracted);
+        apply_bounds_in_place(contracted, bounds);
+        let contracted_value = sanitize_objective(objective(contracted));
+
+        if contracted_value <= reflected_value {
+            simplex[worst_idx].copy_from_slice(contracted);
+            values[worst_idx] = contracted_value;
+            return true;
+        }
+    } else {
+        // Inside contraction
+        contract_into(centroid, &simplex[worst_idx], config.rho, contracted);
+        apply_bounds_in_place(contracted, bounds);
+        let contracted_value = sanitize_objective(objective(contracted));
+
+        if contracted_value < values[worst_idx] {
+            simplex[worst_idx].copy_from_slice(contracted);
+            values[worst_idx] = contracted_value;
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Shrink all vertices towards the best vertex.
+#[inline]
+fn shrink_simplex<F: Fn(&[f64]) -> f64>(
+    objective: &F,
+    config: &NelderMeadConfig,
+    bounds: Option<&[(f64, f64)]>,
+    simplex: &mut [Vec<f64>],
+    values: &mut [f64],
+    best_idx: usize,
+    temp: &mut [f64],
+) {
+    let n = temp.len();
+    temp.copy_from_slice(&simplex[best_idx]);
+    for i in 0..=n {
+        if i != best_idx {
+            for j in 0..n {
+                simplex[i][j] = temp[j] + config.sigma * (simplex[i][j] - temp[j]);
+            }
+            apply_bounds_in_place(&mut simplex[i], bounds);
+            values[i] = sanitize_objective(objective(&simplex[i]));
+        }
     }
 }
 

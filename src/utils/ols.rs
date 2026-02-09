@@ -94,27 +94,9 @@ impl OLSResult {
 pub fn ols_fit(y: &[f64], regressors: &HashMap<String, Vec<f64>>) -> Result<OLSResult> {
     let n = y.len();
 
-    if n == 0 {
-        return Err(ForecastError::InsufficientData { needed: 1, got: 0 });
-    }
-
-    // Validate y for NaN/Inf
-    if y.iter().any(|v| v.is_nan() || v.is_infinite()) {
-        return Err(ForecastError::MissingValues);
-    }
-
-    // Validate regressors for NaN/Inf
-    for (name, values) in regressors {
-        if values.iter().any(|v| v.is_nan() || v.is_infinite()) {
-            return Err(ForecastError::InvalidParameter(format!(
-                "Regressor '{}' contains NaN/Inf",
-                name
-            )));
-        }
-    }
+    validate_ols_inputs(y, regressors, n)?;
 
     if regressors.is_empty() {
-        // No regressors - just return the mean as intercept
         let intercept = y.iter().sum::<f64>() / n as f64;
         return Ok(OLSResult {
             coefficients: vec![],
@@ -123,76 +105,12 @@ pub fn ols_fit(y: &[f64], regressors: &HashMap<String, Vec<f64>>) -> Result<OLSR
         });
     }
 
-    // Collect regressor names in deterministic order
     let mut regressor_names: Vec<String> = regressors.keys().cloned().collect();
     regressor_names.sort();
 
-    let k = regressor_names.len();
+    // Build normal equations X'X and X'y, then solve via Cholesky
+    let (xtx, xty) = build_normal_equations(y, regressors, &regressor_names, n);
 
-    // Validate dimensions
-    for name in &regressor_names {
-        let values = &regressors[name];
-        if values.len() != n {
-            return Err(ForecastError::DimensionMismatch {
-                expected: n,
-                got: values.len(),
-            });
-        }
-    }
-
-    // Build design matrix X as column vectors (including intercept)
-    // We'll fit: y = β0 + β1*x1 + β2*x2 + ...
-    // Design matrix has k+1 columns: [1, x1, x2, ...]
-    let num_params = k + 1;
-
-    // Build X'X matrix and X'y vector
-    // X'X[i,j] = sum over observations of x_i * x_j
-    // X'y[i] = sum over observations of x_i * y
-
-    let mut xtx = vec![vec![0.0; num_params]; num_params];
-    let mut xty = vec![0.0; num_params];
-
-    // Collect regressor values as slices for efficient access
-    let x_cols: Vec<&[f64]> = regressor_names
-        .iter()
-        .map(|name| regressors[name].as_slice())
-        .collect();
-
-    for obs in 0..n {
-        // x_full = [1, x1[obs], x2[obs], ...]
-        let y_obs = y[obs];
-
-        // X'X contributions
-        // (0,0): 1 * 1
-        xtx[0][0] += 1.0;
-        // (0,j) and (j,0) for j>0: 1 * x_j
-        for j in 0..k {
-            let xj = x_cols[j][obs];
-            xtx[0][j + 1] += xj;
-            xtx[j + 1][0] += xj;
-        }
-        // (i,j) for i,j > 0: x_i * x_j
-        for i in 0..k {
-            let xi = x_cols[i][obs];
-            for j in 0..k {
-                let xj = x_cols[j][obs];
-                xtx[i + 1][j + 1] += xi * xj;
-            }
-        }
-
-        // X'y contributions
-        xty[0] += y_obs;
-        for i in 0..k {
-            xty[i + 1] += x_cols[i][obs] * y_obs;
-        }
-    }
-
-    // Add small regularization to diagonal for numerical stability
-    for i in 0..num_params {
-        xtx[i][i] += 1e-8;
-    }
-
-    // Solve X'X @ beta = X'y using Cholesky decomposition
     let beta = solve_symmetric(&xtx, &xty).ok_or_else(|| {
         ForecastError::InvalidParameter(
             "OLS regression failed: matrix not positive definite".into(),
@@ -204,6 +122,86 @@ pub fn ols_fit(y: &[f64], regressors: &HashMap<String, Vec<f64>>) -> Result<OLSR
         coefficients: beta[1..].to_vec(),
         regressor_names,
     })
+}
+
+/// Validate OLS inputs: check for empty data, NaN/Inf, and dimension mismatches.
+fn validate_ols_inputs(
+    y: &[f64],
+    regressors: &HashMap<String, Vec<f64>>,
+    n: usize,
+) -> Result<()> {
+    if n == 0 {
+        return Err(ForecastError::InsufficientData { needed: 1, got: 0 });
+    }
+
+    if y.iter().any(|v| v.is_nan() || v.is_infinite()) {
+        return Err(ForecastError::MissingValues);
+    }
+
+    for (name, values) in regressors {
+        if values.iter().any(|v| v.is_nan() || v.is_infinite()) {
+            return Err(ForecastError::InvalidParameter(format!(
+                "Regressor '{}' contains NaN/Inf",
+                name
+            )));
+        }
+        if values.len() != n {
+            return Err(ForecastError::DimensionMismatch {
+                expected: n,
+                got: values.len(),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+/// Build the normal equations (X'X, X'y) with intercept column and regularization.
+fn build_normal_equations(
+    y: &[f64],
+    regressors: &HashMap<String, Vec<f64>>,
+    regressor_names: &[String],
+    n: usize,
+) -> (Vec<Vec<f64>>, Vec<f64>) {
+    let k = regressor_names.len();
+    let num_params = k + 1;
+
+    let mut xtx = vec![vec![0.0; num_params]; num_params];
+    let mut xty = vec![0.0; num_params];
+
+    let x_cols: Vec<&[f64]> = regressor_names
+        .iter()
+        .map(|name| regressors[name].as_slice())
+        .collect();
+
+    for obs in 0..n {
+        let y_obs = y[obs];
+
+        xtx[0][0] += 1.0;
+        for j in 0..k {
+            let xj = x_cols[j][obs];
+            xtx[0][j + 1] += xj;
+            xtx[j + 1][0] += xj;
+        }
+        for i in 0..k {
+            let xi = x_cols[i][obs];
+            for j in 0..k {
+                xtx[i + 1][j + 1] += xi * x_cols[j][obs];
+            }
+        }
+
+        xty[0] += y_obs;
+        for i in 0..k {
+            xty[i + 1] += x_cols[i][obs] * y_obs;
+        }
+    }
+
+    // Regularization for numerical stability
+    for i in 0..num_params {
+        xtx[i][i] += 1e-8;
+    }
+
+    (xtx, xty)
 }
 
 /// Solve symmetric positive definite system using Cholesky decomposition.

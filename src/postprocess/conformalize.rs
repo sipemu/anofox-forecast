@@ -168,95 +168,14 @@ pub fn conformalize_with_config(
     }
 
     let quantiles = forecast_quantiles.to_vec();
-    let n_quantiles = quantiles.len();
     let n_calib = calib_actuals.len();
 
-    // Calculate original coverage and adjustments for each quantile
-    let mut adjustments = Vec::with_capacity(n_quantiles);
-    let mut original_coverage = Vec::with_capacity(n_quantiles);
+    // Compute conformity scores and adjustments per quantile
+    let (adjustments, original_coverage) =
+        compute_conformal_adjustments(&quantiles, calib_forecasts, calib_actuals, &config, n_calib);
 
-    for (q_idx, &tau) in quantiles.iter().enumerate() {
-        // Compute conformity scores: actual - predicted_quantile
-        let mut scores: Vec<f64> = Vec::with_capacity(n_calib);
-        let mut coverage_count = 0;
-
-        for t in 0..n_calib {
-            let predicted_q = calib_forecasts.at_time(t).unwrap()[q_idx];
-            let actual = calib_actuals[t];
-
-            if config.symmetric {
-                // For symmetric: score is absolute residual
-                scores.push((actual - predicted_q).abs());
-            } else {
-                // For asymmetric: score depends on quantile level
-                if tau < 0.5 {
-                    // Lower quantile: score is how much actual is below predicted
-                    scores.push(predicted_q - actual);
-                } else {
-                    // Upper quantile: score is how much actual is above predicted
-                    scores.push(actual - predicted_q);
-                }
-            }
-
-            // Count coverage
-            if actual <= predicted_q {
-                coverage_count += 1;
-            }
-        }
-
-        original_coverage.push(coverage_count as f64 / n_calib as f64);
-
-        // Sort scores and find the quantile
-        scores.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-        // Use conformal quantile: ceil((n+1) * coverage) / n
-        let target_coverage = if config.symmetric {
-            tau.max(1.0 - tau)
-        } else {
-            tau
-        };
-        let idx = ((n_calib as f64 + 1.0) * target_coverage).ceil() as usize;
-        let idx = idx.min(n_calib).saturating_sub(1);
-
-        let adjustment = scores[idx];
-        adjustments.push(adjustment);
-    }
-
-    // Apply adjustments to forecasts
-    let n_times = forecasts.n_times();
-    let mut new_values: Vec<Vec<f64>> = Vec::with_capacity(n_times);
-
-    for t in 0..n_times {
-        let row = forecasts.at_time(t).unwrap();
-        let mut adjusted_row = Vec::with_capacity(n_quantiles);
-
-        for (q_idx, &tau) in quantiles.iter().enumerate() {
-            let value = row[q_idx];
-            let adj = adjustments[q_idx];
-
-            let adjusted = if config.symmetric {
-                // Symmetric: expand interval
-                if tau < 0.5 {
-                    value - adj
-                } else {
-                    value + adj
-                }
-            } else {
-                // Asymmetric: direct adjustment
-                if tau < 0.5 {
-                    value - adj
-                } else {
-                    value + adj
-                }
-            };
-
-            adjusted_row.push(adjusted);
-        }
-
-        // Enforce monotonicity by sorting to prevent quantile crossing
-        adjusted_row.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        new_values.push(adjusted_row);
-    }
+    // Apply adjustments to produce recalibrated forecasts
+    let new_values = apply_conformal_adjustments(forecasts, &quantiles, &adjustments);
 
     let calibrated = QuantileForecasts::from_values(quantiles, new_values)?;
 
@@ -265,6 +184,88 @@ pub fn conformalize_with_config(
         adjustments,
         original_coverage,
     })
+}
+
+/// Compute conformity scores and conformal adjustments for each quantile level.
+fn compute_conformal_adjustments(
+    quantiles: &[f64],
+    calib_forecasts: &QuantileForecasts,
+    calib_actuals: &[f64],
+    config: &ConformalizeConfig,
+    n_calib: usize,
+) -> (Vec<f64>, Vec<f64>) {
+    let mut adjustments = Vec::with_capacity(quantiles.len());
+    let mut original_coverage = Vec::with_capacity(quantiles.len());
+
+    for (q_idx, &tau) in quantiles.iter().enumerate() {
+        let mut scores: Vec<f64> = Vec::with_capacity(n_calib);
+        let mut coverage_count = 0;
+
+        for t in 0..n_calib {
+            let predicted_q = calib_forecasts.at_time(t).unwrap()[q_idx];
+            let actual = calib_actuals[t];
+
+            let score = if config.symmetric {
+                (actual - predicted_q).abs()
+            } else if tau < 0.5 {
+                predicted_q - actual
+            } else {
+                actual - predicted_q
+            };
+            scores.push(score);
+
+            if actual <= predicted_q {
+                coverage_count += 1;
+            }
+        }
+
+        original_coverage.push(coverage_count as f64 / n_calib as f64);
+
+        scores.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+        let target_coverage = if config.symmetric {
+            tau.max(1.0 - tau)
+        } else {
+            tau
+        };
+        let idx = ((n_calib as f64 + 1.0) * target_coverage).ceil() as usize;
+        let idx = idx.min(n_calib).saturating_sub(1);
+
+        adjustments.push(scores[idx]);
+    }
+
+    (adjustments, original_coverage)
+}
+
+/// Apply conformal adjustments to forecast rows, enforcing monotonicity.
+fn apply_conformal_adjustments(
+    forecasts: &QuantileForecasts,
+    quantiles: &[f64],
+    adjustments: &[f64],
+) -> Vec<Vec<f64>> {
+    let n_times = forecasts.n_times();
+    let n_quantiles = quantiles.len();
+    let mut new_values: Vec<Vec<f64>> = Vec::with_capacity(n_times);
+
+    for t in 0..n_times {
+        let row = forecasts.at_time(t).unwrap();
+        let mut adjusted_row = Vec::with_capacity(n_quantiles);
+
+        for (q_idx, &tau) in quantiles.iter().enumerate() {
+            let adjusted = if tau < 0.5 {
+                row[q_idx] - adjustments[q_idx]
+            } else {
+                row[q_idx] + adjustments[q_idx]
+            };
+            adjusted_row.push(adjusted);
+        }
+
+        // Enforce monotonicity by sorting to prevent quantile crossing
+        adjusted_row.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        new_values.push(adjusted_row);
+    }
+
+    new_values
 }
 
 #[cfg(test)]

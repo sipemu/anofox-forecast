@@ -154,74 +154,12 @@ pub fn bootstrap_intervals<M: Forecaster + Clone>(
     };
 
     // Collect forecast samples for each horizon step
-    let mut forecast_samples: Vec<Vec<f64>> = vec![Vec::with_capacity(config.n_samples); horizon];
+    let forecast_samples = collect_bootstrap_samples(
+        model, series, fitted, &valid_residuals, horizon, config, &mut rng,
+    );
 
-    for _ in 0..config.n_samples {
-        // Resample residuals
-        let resampled = match config.block_size {
-            Some(bs) => resample_blocks(&valid_residuals, bs, &mut rng),
-            None => resample_residuals(&valid_residuals, &mut rng),
-        };
-
-        // Create synthetic series: fitted + resampled residuals
-        // Replace any NaN/Inf values (from initial fitted values) with the original values
-        let original_values = series.primary_values();
-        let synthetic_values: Vec<f64> = fitted
-            .iter()
-            .zip(resampled.iter().cycle())
-            .enumerate()
-            .map(|(i, (f, r))| {
-                let v = f + r;
-                if v.is_finite() {
-                    v
-                } else {
-                    original_values[i]
-                }
-            })
-            .collect();
-
-        // Create synthetic TimeSeries with same timestamps
-        let synthetic_ts =
-            TimeSeries::univariate(series.timestamps().to_vec(), synthetic_values.clone());
-
-        if let Ok(ts) = synthetic_ts {
-            // Fit model to synthetic series
-            let mut bootstrap_model = model.clone();
-            if bootstrap_model.fit(&ts).is_ok() {
-                // Generate forecast
-                if let Ok(forecast) = bootstrap_model.predict(horizon) {
-                    for (h, &val) in forecast.primary().iter().enumerate() {
-                        if val.is_finite() {
-                            forecast_samples[h].push(val);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Calculate quantiles for each horizon
-    let alpha = (1.0 - level) / 2.0;
-    let mut lower = Vec::with_capacity(horizon);
-    let mut upper = Vec::with_capacity(horizon);
-
-    for samples in &mut forecast_samples {
-        if samples.is_empty() {
-            // Fallback to original forecast if no samples
-            lower.push(f64::NAN);
-            upper.push(f64::NAN);
-            continue;
-        }
-
-        samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let n = samples.len();
-
-        let lower_idx = ((alpha * n as f64).floor() as usize).min(n - 1);
-        let upper_idx = (((1.0 - alpha) * n as f64).floor() as usize).min(n - 1);
-
-        lower.push(samples[lower_idx]);
-        upper.push(samples[upper_idx]);
-    }
+    // Extract confidence interval bounds from samples
+    let (lower, upper) = extract_quantile_bounds(&forecast_samples, level);
 
     Ok(BootstrapResult {
         lower,
@@ -229,6 +167,83 @@ pub fn bootstrap_intervals<M: Forecaster + Clone>(
         level,
         n_samples: config.n_samples,
     })
+}
+
+/// Generate bootstrap forecast samples by resampling residuals and re-fitting.
+fn collect_bootstrap_samples<M: Forecaster + Clone>(
+    model: &M,
+    series: &TimeSeries,
+    fitted: &[f64],
+    valid_residuals: &[f64],
+    horizon: usize,
+    config: &BootstrapConfig,
+    rng: &mut impl Rng,
+) -> Vec<Vec<f64>> {
+    let original_values = series.primary_values();
+    let timestamps = series.timestamps();
+    let mut forecast_samples: Vec<Vec<f64>> = vec![Vec::with_capacity(config.n_samples); horizon];
+
+    for _ in 0..config.n_samples {
+        let resampled = match config.block_size {
+            Some(bs) => resample_blocks(valid_residuals, bs, rng),
+            None => resample_residuals(valid_residuals, rng),
+        };
+
+        let synthetic_values: Vec<f64> = fitted
+            .iter()
+            .zip(resampled.iter().cycle())
+            .enumerate()
+            .map(|(i, (f, r))| {
+                let v = f + r;
+                if v.is_finite() { v } else { original_values[i] }
+            })
+            .collect();
+
+        let Ok(ts) = TimeSeries::univariate(timestamps.to_vec(), synthetic_values) else {
+            continue;
+        };
+        let mut bootstrap_model = model.clone();
+        if bootstrap_model.fit(&ts).is_err() {
+            continue;
+        }
+        let Ok(forecast) = bootstrap_model.predict(horizon) else {
+            continue;
+        };
+        for (h, &val) in forecast.primary().iter().enumerate() {
+            if val.is_finite() {
+                forecast_samples[h].push(val);
+            }
+        }
+    }
+
+    forecast_samples
+}
+
+/// Extract lower/upper confidence bounds from sorted forecast samples.
+fn extract_quantile_bounds(forecast_samples: &[Vec<f64>], level: f64) -> (Vec<f64>, Vec<f64>) {
+    let alpha = (1.0 - level) / 2.0;
+    let mut lower = Vec::with_capacity(forecast_samples.len());
+    let mut upper = Vec::with_capacity(forecast_samples.len());
+
+    for samples in forecast_samples {
+        if samples.is_empty() {
+            lower.push(f64::NAN);
+            upper.push(f64::NAN);
+            continue;
+        }
+
+        let mut sorted = samples.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let n = sorted.len();
+
+        let lower_idx = ((alpha * n as f64).floor() as usize).min(n - 1);
+        let upper_idx = (((1.0 - alpha) * n as f64).floor() as usize).min(n - 1);
+
+        lower.push(sorted[lower_idx]);
+        upper.push(sorted[upper_idx]);
+    }
+
+    (lower, upper)
 }
 
 /// Compute bootstrap forecast with intervals, returning a Forecast object.
