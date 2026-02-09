@@ -48,6 +48,10 @@ codegen-units = 1
 name = "simd_benchmark"
 harness = false
 
+[[bench]]
+name = "arima_benchmark"
+harness = false
+
 # Examples
 [[example]]
 name = "quickstart"

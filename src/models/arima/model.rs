@@ -216,7 +216,110 @@ impl ARIMA {
         self.bic
     }
 
+    /// Score-only evaluation: compute AIC or BIC from a pre-computed differenced series
+    /// without storing any model state. Used by AutoARIMA to avoid full model construction
+    /// during candidate search.
+    ///
+    /// Returns `Some(score)` on success, `None` if fitting fails.
+    pub(crate) fn score_order(
+        p: usize,
+        q: usize,
+        diff_series: &[f64],
+        use_aic: bool,
+    ) -> Option<f64> {
+        let start = p.max(q);
+        if diff_series.len() <= start + 2 {
+            return None;
+        }
+
+        if p == 0 && q == 0 {
+            // Just intercept model: compute variance directly
+            let mean = diff_series.iter().sum::<f64>() / diff_series.len() as f64;
+            let n_eff = (diff_series.len() - start) as f64;
+            let variance = diff_series[start..]
+                .iter()
+                .map(|v| (v - mean).powi(2))
+                .sum::<f64>()
+                / n_eff;
+            if variance <= 0.0 || !variance.is_finite() {
+                return None;
+            }
+            let k = 1.0; // just intercept
+            let ll = -0.5 * n_eff * (1.0 + variance.ln() + (2.0 * std::f64::consts::PI).ln());
+            let score = if use_aic {
+                -2.0 * ll + 2.0 * k
+            } else {
+                -2.0 * ll + k * n_eff.ln()
+            };
+            return if score.is_finite() { Some(score) } else { None };
+        }
+
+        // Set up optimization
+        let n_params = p + q + 1;
+        let mean = diff_series.iter().sum::<f64>() / diff_series.len() as f64;
+        let mut initial = vec![0.0; n_params];
+        initial[0] = mean;
+        for i in 0..p {
+            initial[1 + i] = 0.1 / (i + 1) as f64;
+        }
+        for i in 0..q {
+            initial[1 + p + i] = 0.1 / (i + 1) as f64;
+        }
+
+        let mut bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
+        for _ in 0..(p + q) {
+            bounds.push((-0.99, 0.99));
+        }
+
+        let config = NelderMeadConfig {
+            max_iter: 1000,
+            tolerance: 1e-8,
+            ..Default::default()
+        };
+
+        let residuals_buf = std::cell::RefCell::new(vec![0.0; diff_series.len()]);
+
+        let result = nelder_mead(
+            |params| {
+                let mut buf = residuals_buf.borrow_mut();
+                Self::calculate_css(
+                    diff_series,
+                    p,
+                    q,
+                    &params[1..1 + p],
+                    &params[1 + p..],
+                    params[0],
+                    &mut buf,
+                )
+            },
+            &initial,
+            Some(&bounds),
+            config,
+        );
+
+        // Compute AIC/BIC directly from CSS
+        let css = result.optimal_value;
+        if !css.is_finite() || css <= 0.0 {
+            return None;
+        }
+
+        let n_eff = (diff_series.len() - start) as f64;
+        let variance = css / n_eff;
+        let k = n_params as f64;
+        let ll = -0.5 * n_eff * (1.0 + variance.ln() + (2.0 * std::f64::consts::PI).ln());
+
+        let score = if use_aic {
+            -2.0 * ll + 2.0 * k
+        } else {
+            -2.0 * ll + k * n_eff.ln()
+        };
+
+        if score.is_finite() { Some(score) } else { None }
+    }
+
     /// Calculate the conditional sum of squares for given parameters.
+    /// Uses a pre-allocated residuals buffer to avoid allocation per call.
+    /// The buffer must be at least `diff_series.len()` elements.
     fn calculate_css(
         diff_series: &[f64],
         p: usize,
@@ -224,6 +327,7 @@ impl ARIMA {
         ar: &[f64],
         ma: &[f64],
         intercept: f64,
+        residuals: &mut [f64],
     ) -> f64 {
         let n = diff_series.len();
         let start = p.max(q);
@@ -232,7 +336,8 @@ impl ARIMA {
             return f64::MAX;
         }
 
-        let mut residuals = vec![0.0; n];
+        // Zero out the residuals buffer
+        residuals[..n].fill(0.0);
         let mut css = 0.0;
 
         for t in start..n {
@@ -301,12 +406,21 @@ impl ARIMA {
             ..Default::default()
         };
 
+        // Pre-allocate residuals buffer, shared via RefCell since nelder_mead takes Fn (not FnMut)
+        let residuals_buf = std::cell::RefCell::new(vec![0.0; diff_series.len()]);
+
         let result = nelder_mead(
             |params| {
-                let intercept = params[0];
-                let ar: Vec<f64> = params[1..1 + p].to_vec();
-                let ma: Vec<f64> = params[1 + p..].to_vec();
-                Self::calculate_css(diff_series, p, q, &ar, &ma, intercept)
+                let mut buf = residuals_buf.borrow_mut();
+                Self::calculate_css(
+                    diff_series,
+                    p,
+                    q,
+                    &params[1..1 + p],
+                    &params[1 + p..],
+                    params[0],
+                    &mut buf,
+                )
             },
             &initial,
             Some(&bounds),
@@ -817,8 +931,143 @@ impl SARIMA {
         self.bic
     }
 
+    /// Score-only evaluation: compute AIC or BIC from a pre-computed differenced series
+    /// without storing any model state. Used by AutoARIMA to avoid full model construction
+    /// during candidate search.
+    pub(crate) fn score_order(
+        p: usize,
+        q: usize,
+        cap_p: usize,
+        cap_q: usize,
+        s: usize,
+        diff_series: &[f64],
+        use_aic: bool,
+    ) -> Option<f64> {
+        let max_ar_lag = if cap_p > 0 && s > 1 {
+            p + cap_p * s
+        } else {
+            p.max(cap_p * s)
+        };
+        let max_ma_lag = if cap_q > 0 && s > 1 {
+            q + cap_q * s
+        } else {
+            q.max(cap_q * s)
+        };
+        let start = max_ar_lag.max(max_ma_lag);
+
+        if diff_series.len() <= start + 2 {
+            return None;
+        }
+
+        let n_params = 1 + p + q + cap_p + cap_q;
+
+        if p == 0 && q == 0 && cap_p == 0 && cap_q == 0 {
+            // Just intercept model
+            let mean = diff_series.iter().sum::<f64>() / diff_series.len() as f64;
+            let n_eff = (diff_series.len() - start) as f64;
+            let variance = diff_series[start..]
+                .iter()
+                .map(|v| (v - mean).powi(2))
+                .sum::<f64>()
+                / n_eff;
+            if variance <= 0.0 || !variance.is_finite() {
+                return None;
+            }
+            let k = 1.0;
+            let ll = -0.5 * n_eff * (1.0 + variance.ln() + (2.0 * std::f64::consts::PI).ln());
+            let score = if use_aic {
+                -2.0 * ll + 2.0 * k
+            } else {
+                -2.0 * ll + k * n_eff.ln()
+            };
+            return if score.is_finite() { Some(score) } else { None };
+        }
+
+        // Set up optimization
+        let mean = diff_series.iter().sum::<f64>() / diff_series.len() as f64;
+        let mut initial = vec![0.0; n_params];
+        initial[0] = mean;
+
+        let mut idx = 1;
+        for i in 0..p {
+            initial[idx + i] = 0.1 / (i + 1) as f64;
+        }
+        idx += p;
+        for i in 0..q {
+            initial[idx + i] = 0.1 / (i + 1) as f64;
+        }
+        idx += q;
+        for i in 0..cap_p {
+            initial[idx + i] = 0.1 / (i + 1) as f64;
+        }
+        idx += cap_p;
+        for i in 0..cap_q {
+            initial[idx + i] = 0.1 / (i + 1) as f64;
+        }
+
+        let mut bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
+        for _ in 0..(p + q + cap_p + cap_q) {
+            bounds.push((-0.99, 0.99));
+        }
+
+        let config = NelderMeadConfig {
+            max_iter: 2000,
+            tolerance: 1e-8,
+            ..Default::default()
+        };
+
+        let residuals_buf = std::cell::RefCell::new(vec![0.0; diff_series.len()]);
+
+        let result = nelder_mead(
+            |params| {
+                let ar_end = 1 + p;
+                let ma_end = ar_end + q;
+                let sar_end = ma_end + cap_p;
+                let sma_end = sar_end + cap_q;
+
+                let mut buf = residuals_buf.borrow_mut();
+                Self::calculate_css(
+                    diff_series,
+                    p,
+                    q,
+                    cap_p,
+                    cap_q,
+                    s,
+                    &params[1..ar_end],
+                    &params[ar_end..ma_end],
+                    &params[ma_end..sar_end],
+                    &params[sar_end..sma_end],
+                    params[0],
+                    &mut buf,
+                )
+            },
+            &initial,
+            Some(&bounds),
+            config,
+        );
+
+        // Compute AIC/BIC directly from CSS
+        let css = result.optimal_value;
+        if !css.is_finite() || css <= 0.0 {
+            return None;
+        }
+
+        let n_eff = (diff_series.len() - start) as f64;
+        let variance = css / n_eff;
+        let k = n_params as f64;
+        let ll = -0.5 * n_eff * (1.0 + variance.ln() + (2.0 * std::f64::consts::PI).ln());
+
+        let score = if use_aic {
+            -2.0 * ll + 2.0 * k
+        } else {
+            -2.0 * ll + k * n_eff.ln()
+        };
+
+        if score.is_finite() { Some(score) } else { None }
+    }
+
     /// Apply seasonal differencing.
-    fn seasonal_difference(data: &[f64], cap_d: usize, s: usize) -> Vec<f64> {
+    pub(crate) fn seasonal_difference(data: &[f64], cap_d: usize, s: usize) -> Vec<f64> {
         if cap_d == 0 || s <= 1 {
             return data.to_vec();
         }
@@ -874,6 +1123,8 @@ impl SARIMA {
     ///
     /// Uses multiplicative seasonal formulation where AR and MA polynomials
     /// are multiplied, creating interaction terms at lag (i+1) + (j+1)*s.
+    /// Uses a pre-allocated residuals buffer to avoid allocation per call.
+    /// The buffer must be at least `diff_series.len()` elements.
     fn calculate_css(
         diff_series: &[f64],
         p: usize,
@@ -886,9 +1137,9 @@ impl SARIMA {
         sar: &[f64],
         sma: &[f64],
         intercept: f64,
+        residuals: &mut [f64],
     ) -> f64 {
         let n = diff_series.len();
-        // Account for interaction terms: max lag is (p) + (P)*s for AR, (q) + (Q)*s for MA
         let max_ar_lag = if cap_p > 0 && s > 1 {
             p + cap_p * s
         } else {
@@ -905,7 +1156,8 @@ impl SARIMA {
             return f64::MAX;
         }
 
-        let mut residuals = vec![0.0; n];
+        // Zero out the residuals buffer
+        residuals[..n].fill(0.0);
         let mut css = 0.0;
 
         for t in start..n {
@@ -914,55 +1166,40 @@ impl SARIMA {
             // Non-seasonal AR terms
             for i in 0..p {
                 let lag = i + 1;
-                if t >= lag {
-                    pred += ar[i] * diff_series[t - lag];
-                }
+                pred += ar[i] * diff_series[t - lag];
             }
 
             // Seasonal AR terms
             for j in 0..cap_p {
                 let lag = (j + 1) * s;
-                if t >= lag {
-                    pred += sar[j] * diff_series[t - lag];
-                }
+                pred += sar[j] * diff_series[t - lag];
             }
 
             // AR interaction terms (multiplicative seasonal)
-            // In multiplicative form: (1 - φB)(1 - ΦB^s) has term +φΦB^(1+s)
-            // With statsforecast convention where ar = -φ, the interaction is -ar*sar
             for i in 0..p {
                 for j in 0..cap_p {
                     let lag = (i + 1) + (j + 1) * s;
-                    if t >= lag {
-                        pred -= ar[i] * sar[j] * diff_series[t - lag];
-                    }
+                    pred -= ar[i] * sar[j] * diff_series[t - lag];
                 }
             }
 
             // Non-seasonal MA terms
             for i in 0..q {
                 let lag = i + 1;
-                if t >= lag {
-                    pred += ma[i] * residuals[t - lag];
-                }
+                pred += ma[i] * residuals[t - lag];
             }
 
             // Seasonal MA terms
             for j in 0..cap_q {
                 let lag = (j + 1) * s;
-                if t >= lag {
-                    pred += sma[j] * residuals[t - lag];
-                }
+                pred += sma[j] * residuals[t - lag];
             }
 
             // MA interaction terms (multiplicative seasonal)
-            // In multiplicative form: (1 + θB)(1 + ΘB^s) has term +θΘB^(1+s)
             for i in 0..q {
                 for j in 0..cap_q {
                     let lag = (i + 1) + (j + 1) * s;
-                    if t >= lag {
-                        pred += ma[i] * sma[j] * residuals[t - lag];
-                    }
+                    pred += ma[i] * sma[j] * residuals[t - lag];
                 }
             }
 
@@ -1024,18 +1261,17 @@ impl SARIMA {
             ..Default::default()
         };
 
+        // Pre-allocate residuals buffer, shared via RefCell since nelder_mead takes Fn (not FnMut)
+        let residuals_buf = std::cell::RefCell::new(vec![0.0; diff_series.len()]);
+
         let result = nelder_mead(
             |params| {
-                let intercept = params[0];
-                let mut idx = 1;
-                let ar: Vec<f64> = params[idx..idx + p].to_vec();
-                idx += p;
-                let ma: Vec<f64> = params[idx..idx + q].to_vec();
-                idx += q;
-                let sar: Vec<f64> = params[idx..idx + cap_p].to_vec();
-                idx += cap_p;
-                let sma: Vec<f64> = params[idx..idx + cap_q].to_vec();
+                let ar_end = 1 + p;
+                let ma_end = ar_end + q;
+                let sar_end = ma_end + cap_p;
+                let sma_end = sar_end + cap_q;
 
+                let mut buf = residuals_buf.borrow_mut();
                 Self::calculate_css(
                     diff_series,
                     p,
@@ -1043,11 +1279,12 @@ impl SARIMA {
                     cap_p,
                     cap_q,
                     s,
-                    &ar,
-                    &ma,
-                    &sar,
-                    &sma,
-                    intercept,
+                    &params[1..ar_end],
+                    &params[ar_end..ma_end],
+                    &params[ma_end..sar_end],
+                    &params[sar_end..sma_end],
+                    params[0],
+                    &mut buf,
                 )
             },
             &initial,

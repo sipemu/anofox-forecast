@@ -341,14 +341,13 @@ impl AutoARIMA {
         candidates
     }
 
-    /// Fit and evaluate a model with given order.
+    /// Fit and evaluate a model with given order (full model returned for prediction).
     fn evaluate_model_static(
         series: &TimeSeries,
         order: ModelOrder,
         use_aic: bool,
     ) -> Option<(SelectedModel, f64)> {
         if order.is_seasonal() {
-            // Fit SARIMA
             let mut model = SARIMA::new(
                 order.p,
                 order.d,
@@ -368,7 +367,6 @@ impl AutoARIMA {
                 }
             }
         } else {
-            // Fit ARIMA
             let mut model = ARIMA::new(order.p, order.d, order.q);
 
             if model.fit(series).is_ok() {
@@ -382,6 +380,28 @@ impl AutoARIMA {
         }
 
         None
+    }
+
+    /// Score-only evaluation: compute AIC/BIC from pre-computed differenced series
+    /// without constructing the full model. Skips validation, storage, and calculate_fitted.
+    fn score_order_static(
+        order: ModelOrder,
+        diff_series: &[f64],
+        use_aic: bool,
+    ) -> Option<f64> {
+        if order.is_seasonal() {
+            SARIMA::score_order(
+                order.p,
+                order.q,
+                order.cap_p,
+                order.cap_q,
+                order.s,
+                diff_series,
+                use_aic,
+            )
+        } else {
+            ARIMA::score_order(order.p, order.q, diff_series, use_aic)
+        }
     }
 
     /// Generate neighbors of a given order (for true stepwise search).
@@ -448,12 +468,13 @@ impl AutoARIMA {
 
     /// True stepwise search using neighbor-based hill climbing.
     /// Starts from a baseline model and iteratively moves to the best neighbor.
+    /// Uses score-only evaluation with pre-computed differenced series.
     fn true_stepwise_search(
         &mut self,
-        series: &TimeSeries,
+        diff_series: &[f64],
         d: usize,
         cap_d: usize,
-    ) -> Option<(ModelOrder, SelectedModel, f64)> {
+    ) -> Option<(ModelOrder, f64)> {
         let s = self.config.seasonal_period;
         let use_aic = self.config.use_aic;
 
@@ -490,15 +511,13 @@ impl AutoARIMA {
 
         // Find best starting point
         let mut best_order: Option<ModelOrder> = None;
-        let mut best_model: Option<SelectedModel> = None;
         let mut best_score = f64::INFINITY;
 
         for order in initial_orders {
-            if let Some((model, score)) = Self::evaluate_model_static(series, order, use_aic) {
+            if let Some(score) = Self::score_order_static(order, diff_series, use_aic) {
                 self.model_scores.push((order, score));
                 if score < best_score {
                     best_score = score;
-                    best_model = Some(model);
                     best_order = Some(order);
                 }
             }
@@ -506,7 +525,6 @@ impl AutoARIMA {
 
         let mut current_order = best_order?;
         let mut current_score = best_score;
-        let mut current_model = best_model?;
 
         // Hill climbing: keep moving to best neighbor until no improvement
         let mut visited = std::collections::HashSet::new();
@@ -528,13 +546,11 @@ impl AutoARIMA {
                 }
                 visited.insert(key);
 
-                if let Some((model, score)) = Self::evaluate_model_static(series, neighbor, use_aic)
-                {
+                if let Some(score) = Self::score_order_static(neighbor, diff_series, use_aic) {
                     self.model_scores.push((neighbor, score));
 
                     if score < current_score {
                         current_score = score;
-                        current_model = model;
                         current_order = neighbor;
                         improved = true;
                     }
@@ -546,16 +562,20 @@ impl AutoARIMA {
             }
         }
 
-        Some((current_order, current_model, current_score))
+        Some((current_order, current_score))
     }
 
     /// Evaluate candidates - uses parallel processing when 'parallel' feature is enabled.
-    fn evaluate_candidates(
+    /// Parallel path uses score-only with pre-computed diffs then re-fits winner.
+    /// Sequential path keeps the best full model to avoid redundant re-fit.
+    fn evaluate_candidates_fast(
         &self,
         series: &TimeSeries,
+        #[cfg_attr(not(feature = "parallel"), allow(unused_variables))]
+        diff_series_map: &std::collections::HashMap<(usize, usize), Vec<f64>>,
         candidates: &[ModelOrder],
-    ) -> Vec<(ModelOrder, SelectedModel, f64)> {
-        let values = series.primary_values();
+        n_values: usize,
+    ) -> (Vec<(ModelOrder, f64)>, Option<(SelectedModel, ModelOrder, f64)>) {
         let use_aic = self.config.use_aic;
 
         // Filter candidates by data requirements
@@ -569,31 +589,52 @@ impl AutoARIMA {
                         .max(order.q)
                         .max(order.cap_p.max(order.cap_q) * order.s.max(1))
                     + 5;
-                values.len() >= min_len
+                n_values >= min_len
             })
             .copied()
             .collect();
 
         #[cfg(feature = "parallel")]
         {
-            valid_candidates
+            // Parallel: score-only with pre-computed diffs, then re-fit winner
+            let scores: Vec<(ModelOrder, f64)> = valid_candidates
                 .par_iter()
                 .filter_map(|&order| {
-                    Self::evaluate_model_static(series, order, use_aic)
-                        .map(|(model, score)| (order, model, score))
+                    let diff_series = diff_series_map.get(&(order.d, order.cap_d))?;
+                    Self::score_order_static(order, diff_series, use_aic)
+                        .map(|score| (order, score))
                 })
-                .collect()
+                .collect();
+
+            let best = scores
+                .iter()
+                .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+                .and_then(|&(order, score)| {
+                    Self::evaluate_model_static(series, order, use_aic)
+                        .map(|(model, _)| (model, order, score))
+                });
+
+            (scores, best)
         }
 
         #[cfg(not(feature = "parallel"))]
         {
-            valid_candidates
-                .iter()
-                .filter_map(|&order| {
+            // Sequential: full fit, keep best model directly (no re-fit overhead)
+            let mut scores = Vec::with_capacity(valid_candidates.len());
+            let mut best: Option<(SelectedModel, ModelOrder, f64)> = None;
+
+            for &order in &valid_candidates {
+                if let Some((model, score)) =
                     Self::evaluate_model_static(series, order, use_aic)
-                        .map(|(model, score)| (order, model, score))
-                })
-                .collect()
+                {
+                    scores.push((order, score));
+                    if best.as_ref().is_none_or(|(_, _, bs)| score < *bs) {
+                        best = Some((model, order, score));
+                    }
+                }
+            }
+
+            (scores, best)
         }
     }
 }
@@ -653,21 +694,37 @@ impl Forecaster for AutoARIMA {
             vec![0]
         };
 
+        // Pre-compute differenced series for each (d, D) combination
+        use crate::models::arima::diff::difference;
+        let mut diff_series_map = std::collections::HashMap::new();
+        for &d in &d_range {
+            for &cap_d in &cap_d_range {
+                let nonseasonal_diff = difference(values, d);
+                let diff_series = if s > 1 && cap_d > 0 {
+                    SARIMA::seasonal_difference(&nonseasonal_diff, cap_d, s)
+                } else {
+                    nonseasonal_diff
+                };
+                diff_series_map.insert((d, cap_d), diff_series);
+            }
+        }
+
         self.model_scores.clear();
-        let mut best_model: Option<SelectedModel> = None;
         let mut best_order: Option<ModelOrder> = None;
         let mut best_score = f64::INFINITY;
 
-        // Use true stepwise search if enabled (neighbor-based hill climbing)
+        // Phase 1: Score-only evaluation to find the best order
         if self.config.stepwise && self.config.true_stepwise {
             for &d in &d_range {
                 for &cap_d in &cap_d_range {
-                    if let Some((order, model, score)) = self.true_stepwise_search(series, d, cap_d)
-                    {
-                        if score < best_score {
-                            best_score = score;
-                            best_model = Some(model);
-                            best_order = Some(order);
+                    if let Some(diff_series) = diff_series_map.get(&(d, cap_d)) {
+                        if let Some((order, score)) =
+                            self.true_stepwise_search(diff_series, d, cap_d)
+                        {
+                            if score < best_score {
+                                best_score = score;
+                                best_order = Some(order);
+                            }
                         }
                     }
                 }
@@ -692,17 +749,21 @@ impl Forecaster for AutoARIMA {
             });
             candidates.dedup();
 
-            // Evaluate all candidates (parallel when feature enabled)
-            let results = self.evaluate_candidates(series, &candidates);
+            // Evaluate all candidates
+            let (results, best) = self.evaluate_candidates_fast(
+                series,
+                &diff_series_map,
+                &candidates,
+                values.len(),
+            );
 
-            for (order, model, score) in results {
+            for (order, score) in results {
                 self.model_scores.push((order, score));
+            }
 
-                if score < best_score {
-                    best_score = score;
-                    best_model = Some(model);
-                    best_order = Some(order);
-                }
+            if let Some((model, order, _score)) = best {
+                best_order = Some(order);
+                self.selected_model = Some(model);
             }
         }
 
@@ -710,7 +771,17 @@ impl Forecaster for AutoARIMA {
         self.model_scores
             .sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        self.selected_model = best_model;
+        // For true_stepwise path, do final full fit
+        if self.selected_model.is_none() {
+            if let Some(order) = best_order {
+                if let Some((model, _)) =
+                    Self::evaluate_model_static(series, order, self.config.use_aic)
+                {
+                    self.selected_model = Some(model);
+                }
+            }
+        }
+
         self.selected_order = best_order;
 
         if self.selected_model.is_none() {
