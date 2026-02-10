@@ -10,6 +10,9 @@ use crate::models::Forecaster;
 use rand::prelude::*;
 use rand::SeedableRng;
 
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+
 /// Configuration for bootstrap interval estimation.
 #[derive(Debug, Clone)]
 pub struct BootstrapConfig {
@@ -123,13 +126,16 @@ fn resample_blocks(residuals: &[f64], block_size: usize, rng: &mut impl Rng) -> 
 /// let config = BootstrapConfig::new(500).with_seed(42);
 /// let result = bootstrap_intervals(&model, &series, 10, 0.95, &config).unwrap();
 /// ```
-pub fn bootstrap_intervals<M: Forecaster + Clone>(
+pub fn bootstrap_intervals<M>(
     model: &M,
     series: &TimeSeries,
     horizon: usize,
     level: f64,
     config: &BootstrapConfig,
-) -> Result<BootstrapResult> {
+) -> Result<BootstrapResult>
+where
+    M: Forecaster + Clone + Send + Sync,
+{
     let residuals = model
         .residuals()
         .ok_or(crate::error::ForecastError::FitRequired)?;
@@ -175,8 +181,52 @@ pub fn bootstrap_intervals<M: Forecaster + Clone>(
     })
 }
 
+/// Run a single bootstrap sample: resample, fit, predict.
+fn run_bootstrap_sample<M: Forecaster + Clone>(
+    model: &M,
+    fitted: &[f64],
+    original_values: &[f64],
+    valid_residuals: &[f64],
+    timestamps: &[chrono::DateTime<chrono::Utc>],
+    horizon: usize,
+    block_size: Option<usize>,
+    rng: &mut impl Rng,
+) -> Option<Vec<f64>> {
+    let resampled = match block_size {
+        Some(bs) => resample_blocks(valid_residuals, bs, rng),
+        None => resample_residuals(valid_residuals, rng),
+    };
+
+    let synthetic_values: Vec<f64> = fitted
+        .iter()
+        .zip(resampled.iter().cycle())
+        .enumerate()
+        .map(|(i, (f, r))| {
+            let v = f + r;
+            if v.is_finite() {
+                v
+            } else {
+                original_values[i]
+            }
+        })
+        .collect();
+
+    let ts = TimeSeries::univariate(timestamps.to_vec(), synthetic_values).ok()?;
+    let mut bootstrap_model = model.clone();
+    bootstrap_model.fit(&ts).ok()?;
+    let forecast = bootstrap_model.predict(horizon).ok()?;
+    let values: Vec<f64> = forecast.primary().to_vec();
+    if values.iter().all(|v| v.is_finite()) {
+        Some(values)
+    } else {
+        // Filter to only finite values per step in the caller
+        Some(values)
+    }
+}
+
 /// Generate bootstrap forecast samples by resampling residuals and re-fitting.
-fn collect_bootstrap_samples<M: Forecaster + Clone>(
+#[cfg(not(feature = "parallel"))]
+fn collect_bootstrap_samples<M: Forecaster + Clone + Send + Sync>(
     model: &M,
     series: &TimeSeries,
     fitted: &[f64],
@@ -190,36 +240,64 @@ fn collect_bootstrap_samples<M: Forecaster + Clone>(
     let mut forecast_samples: Vec<Vec<f64>> = vec![Vec::with_capacity(config.n_samples); horizon];
 
     for _ in 0..config.n_samples {
-        let resampled = match config.block_size {
-            Some(bs) => resample_blocks(valid_residuals, bs, rng),
-            None => resample_residuals(valid_residuals, rng),
-        };
-
-        let synthetic_values: Vec<f64> = fitted
-            .iter()
-            .zip(resampled.iter().cycle())
-            .enumerate()
-            .map(|(i, (f, r))| {
-                let v = f + r;
-                if v.is_finite() {
-                    v
-                } else {
-                    original_values[i]
+        if let Some(values) = run_bootstrap_sample(
+            model,
+            fitted,
+            original_values,
+            valid_residuals,
+            timestamps,
+            horizon,
+            config.block_size,
+            rng,
+        ) {
+            for (h, &val) in values.iter().enumerate() {
+                if val.is_finite() {
+                    forecast_samples[h].push(val);
                 }
-            })
-            .collect();
-
-        let Ok(ts) = TimeSeries::univariate(timestamps.to_vec(), synthetic_values) else {
-            continue;
-        };
-        let mut bootstrap_model = model.clone();
-        if bootstrap_model.fit(&ts).is_err() {
-            continue;
+            }
         }
-        let Ok(forecast) = bootstrap_model.predict(horizon) else {
-            continue;
-        };
-        for (h, &val) in forecast.primary().iter().enumerate() {
+    }
+
+    forecast_samples
+}
+
+/// Generate bootstrap forecast samples in parallel.
+#[cfg(feature = "parallel")]
+fn collect_bootstrap_samples<M: Forecaster + Clone + Send + Sync>(
+    model: &M,
+    series: &TimeSeries,
+    fitted: &[f64],
+    valid_residuals: &[f64],
+    horizon: usize,
+    config: &BootstrapConfig,
+    _rng: &mut impl Rng,
+) -> Vec<Vec<f64>> {
+    let original_values = series.primary_values();
+    let timestamps = series.timestamps();
+    let base_seed = config.seed.unwrap_or(0);
+
+    // Each sample gets its own deterministic RNG
+    let sample_results: Vec<Option<Vec<f64>>> = (0..config.n_samples)
+        .into_par_iter()
+        .map(|i| {
+            let mut rng = StdRng::seed_from_u64(base_seed.wrapping_add(i as u64));
+            run_bootstrap_sample(
+                model,
+                fitted,
+                original_values,
+                valid_residuals,
+                timestamps,
+                horizon,
+                config.block_size,
+                &mut rng,
+            )
+        })
+        .collect();
+
+    // Gather results into per-horizon vectors
+    let mut forecast_samples: Vec<Vec<f64>> = vec![Vec::with_capacity(config.n_samples); horizon];
+    for values in sample_results.into_iter().flatten() {
+        for (h, &val) in values.iter().enumerate() {
             if val.is_finite() {
                 forecast_samples[h].push(val);
             }
@@ -259,13 +337,16 @@ fn extract_quantile_bounds(forecast_samples: &[Vec<f64>], level: f64) -> (Vec<f6
 /// Compute bootstrap forecast with intervals, returning a Forecast object.
 ///
 /// Combines the point forecast from the original model with bootstrap intervals.
-pub fn bootstrap_forecast<M: Forecaster + Clone>(
+pub fn bootstrap_forecast<M>(
     model: &M,
     series: &TimeSeries,
     horizon: usize,
     level: f64,
     config: &BootstrapConfig,
-) -> Result<Forecast> {
+) -> Result<Forecast>
+where
+    M: Forecaster + Clone + Send + Sync,
+{
     let point_forecast = model.predict(horizon)?;
     let bootstrap_result = bootstrap_intervals(model, series, horizon, level, config)?;
 

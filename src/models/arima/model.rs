@@ -540,9 +540,12 @@ impl ARIMA {
         let p = self.spec.p;
         let q = self.spec.q;
 
-        // Forecast on differenced scale
-        let mut extended_diff = diff_series.clone();
-        let mut extended_residuals = residuals.clone();
+        // Forecast on differenced scale — clone then reserve to avoid reallocation
+        let diff_len = diff_series.len();
+        let mut extended_diff = diff_series.to_vec();
+        extended_diff.reserve(horizon);
+        let mut extended_residuals = residuals.to_vec();
+        extended_residuals.reserve(horizon);
 
         for _ in 0..horizon {
             let t = extended_diff.len();
@@ -567,7 +570,7 @@ impl ARIMA {
         }
 
         // Extract forecast on differenced scale
-        let forecast_diff: Vec<f64> = extended_diff[diff_series.len()..].to_vec();
+        let forecast_diff: Vec<f64> = extended_diff[diff_len..].to_vec();
 
         // Integrate back to original scale
         let mut predictions = if self.spec.d > 0 {
@@ -1492,13 +1495,16 @@ impl SARIMA {
         let d = self.spec.d;
         let cap_d = self.spec.cap_d;
 
-        // Forecast on differenced scale
-        let mut extended_diff = diff_series.clone();
+        // Forecast on differenced scale — clone then reserve to avoid reallocation
+        let diff_len = diff_series.len();
+        let mut extended_diff = diff_series.to_vec();
+        extended_diff.reserve(horizon);
         let mut extended_residuals = if cap_q > 0 && s > 1 {
             self.seasonal_last_residuals.clone()
         } else {
             self.last_residuals.clone()
         };
+        extended_residuals.reserve(horizon);
 
         // Ensure we have enough history
         if let Some(residuals) = &self.residuals {
@@ -1580,7 +1586,7 @@ impl SARIMA {
         }
 
         // Extract forecast on differenced scale
-        let forecast_diff: Vec<f64> = extended_diff[diff_series.len()..].to_vec();
+        let forecast_diff: Vec<f64> = extended_diff[diff_len..].to_vec();
 
         // Apply integration (seasonal first, then non-seasonal - reverse of differencing)
         let mut result = forecast_diff;

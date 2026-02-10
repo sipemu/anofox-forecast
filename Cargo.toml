@@ -52,6 +52,22 @@ harness = false
 name = "arima_benchmark"
 harness = false
 
+[[bench]]
+name = "ets_benchmark"
+harness = false
+
+[[bench]]
+name = "prediction_benchmark"
+harness = false
+
+[[bench]]
+name = "stl_benchmark"
+harness = false
+
+[[bench]]
+name = "bootstrap_benchmark"
+harness = false
+
 # Examples
 [[example]]
 name = "quickstart"

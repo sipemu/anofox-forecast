@@ -147,6 +147,13 @@ impl STL {
         let mut deseasonalized = vec![0.0; n];
         let mut remainder = vec![0.0; n];
 
+        // Pre-allocate scratch buffers for low-pass filter and smoothing
+        let mut lp_buf_a = vec![0.0; n];
+        let mut lp_buf_b = vec![0.0; n];
+        let mut low_pass = vec![0.0; n];
+        let unit_weights = vec![1.0; n];
+        let mut cycle_subseries = vec![0.0; n];
+
         // Outer loop (robustness)
         let outer_iters = if self.robust {
             self.outer_iterations.max(1)
@@ -163,10 +170,16 @@ impl STL {
                 }
 
                 // Step 2: Cycle-subseries smoothing
-                let cycle_subseries = self.smooth_cycle_subseries(&detrended, &weights);
+                self.smooth_cycle_subseries_into(&detrended, &weights, &mut cycle_subseries);
 
                 // Step 3: Low-pass filter of smoothed cycle-subseries
-                let low_pass = self.low_pass_filter(&cycle_subseries);
+                self.low_pass_filter_into(
+                    &cycle_subseries,
+                    &mut lp_buf_a,
+                    &mut lp_buf_b,
+                    &mut low_pass,
+                    &unit_weights,
+                );
 
                 // Step 4: Detrending of smoothed cycle-subseries
                 for i in 0..n {
@@ -182,7 +195,12 @@ impl STL {
                 }
 
                 // Step 6: Trend smoothing
-                trend = self.loess_smooth(&deseasonalized, self.trend_smoothness, &weights);
+                Self::loess_smooth_into(
+                    &deseasonalized,
+                    self.trend_smoothness,
+                    &weights,
+                    &mut trend,
+                );
             }
 
             // Update robustness weights
@@ -214,17 +232,17 @@ impl STL {
         })
     }
 
-    /// Smooth cycle-subseries (seasonal component estimation).
-    fn smooth_cycle_subseries(&self, detrended: &[f64], weights: &[f64]) -> Vec<f64> {
+    /// Smooth cycle-subseries into pre-allocated result buffer.
+    fn smooth_cycle_subseries_into(&self, detrended: &[f64], weights: &[f64], result: &mut [f64]) {
         let n = detrended.len();
         let period = self.seasonal_period;
-        let mut result = vec![0.0; n];
 
         // Pre-allocate subseries buffers with max possible length
         let max_subseries_len = n.div_ceil(period);
         let mut subseries_values = Vec::with_capacity(max_subseries_len);
         let mut subseries_weights = Vec::with_capacity(max_subseries_len);
         let mut subseries_indices = Vec::with_capacity(max_subseries_len);
+        let mut smoothed = Vec::with_capacity(max_subseries_len);
 
         // Process each cycle-subseries (one for each position in the seasonal cycle)
         for cycle_pos in 0..period {
@@ -241,11 +259,12 @@ impl STL {
                 }
             }
 
-            // Smooth the subseries
-            let smoothed = self.loess_smooth_subseries(
+            // Smooth the subseries into reusable buffer
+            Self::loess_smooth_into(
                 &subseries_values,
                 self.seasonal_smoothness,
                 &subseries_weights,
+                &mut smoothed,
             );
 
             // Put smoothed values back
@@ -253,73 +272,33 @@ impl STL {
                 result[idx] = smooth_val;
             }
         }
-
-        result
     }
 
-    /// LOESS smoothing for a subseries.
-    fn loess_smooth_subseries(&self, values: &[f64], span: usize, weights: &[f64]) -> Vec<f64> {
-        let n = values.len();
-        if n == 0 {
-            return Vec::new();
-        }
-
-        let half_span = span / 2;
-        let mut result = vec![0.0; n];
-
-        for i in 0..n {
-            // Determine window
-            let start = i.saturating_sub(half_span);
-            let end = (i + half_span + 1).min(n);
-
-            // Compute weighted average (simplified LOESS)
-            let mut sum_weights = 0.0;
-            let mut sum_values = 0.0;
-
-            for j in start..end {
-                let dist = (i as f64 - j as f64).abs();
-                let max_dist = half_span as f64 + 1.0;
-                let u = dist / max_dist;
-                let tricube = if u < 1.0 {
-                    (1.0 - u.powi(3)).powi(3)
-                } else {
-                    0.0
-                };
-                let w = tricube * weights[j];
-                sum_weights += w;
-                sum_values += w * values[j];
-            }
-
-            result[i] = if sum_weights > 0.0 {
-                sum_values / sum_weights
-            } else {
-                values[i]
-            };
-        }
-
-        result
-    }
-
-    /// Low-pass filter using moving averages.
-    fn low_pass_filter(&self, series: &[f64]) -> Vec<f64> {
-        let n = series.len();
+    /// Low-pass filter using moving averages, reusing scratch buffers.
+    fn low_pass_filter_into(
+        &self,
+        series: &[f64],
+        buf_a: &mut Vec<f64>,
+        buf_b: &mut Vec<f64>,
+        result: &mut Vec<f64>,
+        unit_weights: &[f64],
+    ) {
         let period = self.seasonal_period;
 
         // Apply three moving averages: MA(period), MA(period), MA(3)
-        let ma1 = self.moving_average(series, period);
-        let ma2 = self.moving_average(&ma1, period);
-        let ma3 = self.moving_average(&ma2, 3);
+        Self::moving_average_into(series, period, buf_a);
+        Self::moving_average_into(buf_a, period, buf_b);
+        Self::moving_average_into(buf_b, 3, buf_a);
 
         // Apply LOESS to the result
-        let weights = vec![1.0; n];
-        self.loess_smooth(&ma3, self.low_pass_smoothness, &weights)
+        Self::loess_smooth_into(buf_a, self.low_pass_smoothness, unit_weights, result);
     }
 
-    /// Simple centered moving average.
-    fn moving_average(&self, series: &[f64], window: usize) -> Vec<f64> {
+    /// Simple centered moving average, writing into pre-allocated buffer.
+    fn moving_average_into(series: &[f64], window: usize, result: &mut Vec<f64>) {
         let n = series.len();
         let half = window / 2;
-        let mut result = vec![0.0; n];
+        result.resize(n, 0.0);
 
         for (i, res) in result.iter_mut().enumerate() {
             let start = i.saturating_sub(half);
@@ -327,19 +306,17 @@ impl STL {
             let sum: f64 = series[start..end].iter().sum();
             *res = sum / (end - start) as f64;
         }
-
-        result
     }
 
-    /// LOESS smoothing.
-    fn loess_smooth(&self, values: &[f64], span: usize, weights: &[f64]) -> Vec<f64> {
+    /// LOESS smoothing, writing into pre-allocated buffer.
+    fn loess_smooth_into(values: &[f64], span: usize, weights: &[f64], result: &mut Vec<f64>) {
         let n = values.len();
+        result.resize(n, 0.0);
         if n == 0 {
-            return Vec::new();
+            return;
         }
 
         let half_span = span / 2;
-        let mut result = vec![0.0; n];
 
         for i in 0..n {
             // Determine window
@@ -370,17 +347,14 @@ impl STL {
                 values[i]
             };
         }
-
-        result
     }
 
     /// Compute robustness weights based on remainder.
     fn compute_robustness_weights(&self, remainder: &[f64]) -> Vec<f64> {
         let n = remainder.len();
-        let abs_remainder: Vec<f64> = remainder.iter().map(|r| r.abs()).collect();
 
-        // Compute median absolute deviation
-        let mut sorted = abs_remainder.clone();
+        // Compute median absolute deviation — sort in-place, no extra clone
+        let mut sorted: Vec<f64> = remainder.iter().map(|r| r.abs()).collect();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let median = if n % 2 == 0 {
             (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0

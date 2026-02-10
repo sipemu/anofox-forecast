@@ -121,7 +121,7 @@ fn rolling_interval_evaluation<M: Forecaster + Clone>(
 }
 
 /// Run rolling interval evaluation using bootstrap intervals.
-fn rolling_bootstrap_evaluation<M: Forecaster + Clone>(
+fn rolling_bootstrap_evaluation<M: Forecaster + Clone + Send + Sync>(
     model_factory: impl Fn() -> M,
     series: &TimeSeries,
     horizon: usize,

@@ -13,6 +13,9 @@ use crate::error::{ForecastError, Result};
 use crate::models::Forecaster;
 use crate::utils::metrics::{calculate_metrics, AccuracyMetrics};
 
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+
 /// Cross-validation strategy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CVStrategy {
@@ -550,6 +553,25 @@ pub fn train_test_split_at(series: &TimeSeries, index: usize) -> Result<(TimeSer
     Ok((train, test))
 }
 
+/// Evaluate a single CV fold: slice, fit, predict, compute metrics.
+fn evaluate_fold<F: Forecaster>(
+    series: &TimeSeries,
+    fold: &Fold,
+    model_factory: &dyn Fn() -> F,
+    seasonal_period: Option<usize>,
+) -> Result<(AccuracyMetrics, Vec<f64>, Vec<f64>)> {
+    let train_series = series.slice(fold.train_start, fold.train_end)?;
+    let mut model = model_factory();
+    model.fit(&train_series)?;
+    let forecast = model.predict(fold.test_size())?;
+    let predicted: Vec<f64> = forecast.primary().to_vec();
+    let actual: Vec<f64> = (fold.test_start..fold.test_end)
+        .map(|i| series.primary_values()[i])
+        .collect();
+    let metrics = calculate_metrics(&actual, &predicted, seasonal_period)?;
+    Ok((metrics, actual, predicted))
+}
+
 /// Perform time series cross-validation.
 ///
 /// # Arguments
@@ -585,8 +607,8 @@ pub fn cross_validate<F, Factory>(
     model_factory: Factory,
 ) -> Result<CVResults>
 where
-    F: Forecaster,
-    Factory: Fn() -> F,
+    F: Forecaster + Send,
+    Factory: Fn() -> F + Sync,
 {
     let generator = config.to_fold_generator();
     let folds = generator.generate(series.len());
@@ -609,34 +631,30 @@ where
         });
     }
 
+    let seasonal_period = config.seasonal_period;
+
+    // Evaluate each fold (parallel when feature enabled)
+    #[cfg(feature = "parallel")]
+    let fold_results: Vec<Result<(AccuracyMetrics, Vec<f64>, Vec<f64>)>> = folds
+        .par_iter()
+        .map(|fold| evaluate_fold(series, fold, &model_factory, seasonal_period))
+        .collect();
+
+    #[cfg(not(feature = "parallel"))]
+    let fold_results: Vec<Result<(AccuracyMetrics, Vec<f64>, Vec<f64>)>> = folds
+        .iter()
+        .map(|fold| evaluate_fold(series, fold, &model_factory, seasonal_period))
+        .collect();
+
     let mut fold_metrics = Vec::with_capacity(folds.len());
     let mut all_actual = Vec::new();
     let mut all_predicted = Vec::new();
 
-    for fold in &folds {
-        // Create training subset
-        let train_series = series.slice(fold.train_start, fold.train_end)?;
-
-        // Create and fit model
-        let mut model = model_factory();
-        model.fit(&train_series)?;
-
-        // Generate forecast
-        let forecast = model.predict(fold.test_size())?;
-        let predictions = forecast.primary();
-
-        // Get actual values for this fold
-        let actual: Vec<f64> = (fold.test_start..fold.test_end)
-            .map(|i| series.primary_values()[i])
-            .collect();
-
-        // Calculate metrics for this fold
-        let metrics = calculate_metrics(&actual, predictions, config.seasonal_period)?;
+    for result in fold_results {
+        let (metrics, actual, predicted) = result?;
         fold_metrics.push(metrics);
-
-        // Store values for overall metrics
         all_actual.extend_from_slice(&actual);
-        all_predicted.extend_from_slice(predictions);
+        all_predicted.extend_from_slice(&predicted);
     }
 
     let n_folds = fold_metrics.len();
@@ -743,8 +761,8 @@ pub fn grouped_cross_validate<F, Factory, I>(
     model_factory: Factory,
 ) -> Result<GroupedCVResults>
 where
-    F: Forecaster,
-    Factory: Fn() -> F,
+    F: Forecaster + Send,
+    Factory: Fn() -> F + Sync,
     I: IntoIterator<Item = (String, TimeSeries)>,
 {
     let series_vec: Vec<(String, TimeSeries)> = series_map.into_iter().collect();
