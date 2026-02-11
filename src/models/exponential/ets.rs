@@ -549,7 +549,13 @@ impl ETS {
                 SeasonalType::Multiplicative => values
                     .iter()
                     .take(period)
-                    .map(|y| if level.abs() > 1e-10 { y / level } else { 1.0 })
+                    .map(|y| {
+                        if level.abs() > 1e-10 {
+                            (y / level).clamp(0.01, 100.0)
+                        } else {
+                            1.0
+                        }
+                    })
                     .collect(),
                 SeasonalType::None => vec![],
             }
@@ -622,6 +628,10 @@ impl ETS {
                 }
             };
 
+            if !forecast.is_finite() {
+                return f64::MAX;
+            }
+
             let error = y - forecast;
 
             // For multiplicative errors, we'd use relative error
@@ -633,6 +643,9 @@ impl ETS {
                 };
 
             sum_sq_errors += scaled_error * scaled_error;
+            if !sum_sq_errors.is_finite() {
+                return f64::MAX;
+            }
 
             if self.spec.error == ErrorType::Multiplicative {
                 sum_log_y += y.abs().ln();
