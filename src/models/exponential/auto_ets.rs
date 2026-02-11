@@ -704,9 +704,9 @@ mod tests {
     fn auto_ets_intermittent_demand_no_multiplicative() {
         // Intermittent demand: many zeros with occasional small values
         let raw = vec![
-            0.0, 0.0, 5.0, 0.0, 0.0, 12.0, 0.0, 0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 0.0, 8.0, 0.0,
-            0.0, 0.0, 1.0, 0.0, 0.0, 50.0, 0.0, 0.0, 0.0, 0.0, 7.0, 0.0, 0.0, 0.0, 0.0, 2.0,
-            0.0, 0.0, 15.0, 0.0,
+            0.0, 0.0, 5.0, 0.0, 0.0, 12.0, 0.0, 0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 0.0, 8.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0, 50.0, 0.0, 0.0, 0.0, 0.0, 7.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0,
+            15.0, 0.0,
         ];
         let timestamps = make_timestamps(raw.len());
         let ts = TimeSeries::univariate(timestamps, raw.clone()).unwrap();
