@@ -149,10 +149,22 @@ impl AutoETS {
     }
 
     /// Generate candidate model specifications.
-    fn generate_candidates(&self, has_seasonal: bool) -> Vec<ETSSpec> {
+    ///
+    /// When `restrict_multiplicative` is true (non-positive data detected),
+    /// multiplicative error and seasonal types are excluded because they require
+    /// division by observed values (y/level, y/s) which is undefined at zero.
+    /// This matches R's forecast::ets() and Theta::determine_decomposition().
+    fn generate_candidates(
+        &self,
+        has_seasonal: bool,
+        restrict_multiplicative: bool,
+    ) -> Vec<ETSSpec> {
         let mut candidates = Vec::new();
 
-        let error_types = if self.config.additive_only || !self.config.allow_multiplicative_error {
+        let error_types = if self.config.additive_only
+            || !self.config.allow_multiplicative_error
+            || restrict_multiplicative
+        {
             vec![ErrorType::Additive]
         } else {
             vec![ErrorType::Additive, ErrorType::Multiplicative]
@@ -170,7 +182,10 @@ impl AutoETS {
 
         let seasonal_types = if !has_seasonal {
             vec![SeasonalType::None]
-        } else if self.config.additive_only || !self.config.allow_multiplicative_seasonal {
+        } else if self.config.additive_only
+            || !self.config.allow_multiplicative_seasonal
+            || restrict_multiplicative
+        {
             vec![SeasonalType::None, SeasonalType::Additive]
         } else {
             vec![
@@ -268,12 +283,16 @@ impl Forecaster for AutoETS {
 
         let values = eval_series.primary_values();
 
+        // Multiplicative models require all positive values (y/level, y/s undefined at zero)
+        // Matches Theta::determine_decomposition() and R's forecast::ets()
+        let has_non_positive = values.iter().any(|&v| v <= 0.0);
+
         // Determine seasonal period
         let seasonal_period = self.config.seasonal_period.unwrap_or(1);
         let has_seasonal = seasonal_period > 1 && values.len() >= 2 * seasonal_period;
 
         // Generate candidate models
-        let candidates = self.generate_candidates(has_seasonal);
+        let candidates = self.generate_candidates(has_seasonal, has_non_positive);
         self.model_scores.clear();
 
         let criterion = self.config.criterion;
@@ -676,5 +695,106 @@ mod tests {
         let model = AutoETS::default();
         assert!(model.selected_model.is_none());
         assert!(model.selected_spec.is_none());
+    }
+
+    /// Reproduction case from issue #10: intermittent demand with zeros
+    /// should never select multiplicative components, and forecasts must
+    /// be bounded (not catastrophically large).
+    #[test]
+    fn auto_ets_intermittent_demand_no_multiplicative() {
+        // Intermittent demand: many zeros with occasional small values
+        let raw = vec![
+            0.0, 0.0, 5.0, 0.0, 0.0, 12.0, 0.0, 0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 0.0, 8.0, 0.0,
+            0.0, 0.0, 1.0, 0.0, 0.0, 50.0, 0.0, 0.0, 0.0, 0.0, 7.0, 0.0, 0.0, 0.0, 0.0, 2.0,
+            0.0, 0.0, 15.0, 0.0,
+        ];
+        let timestamps = make_timestamps(raw.len());
+        let ts = TimeSeries::univariate(timestamps, raw.clone()).unwrap();
+
+        let mut model = AutoETS::with_period(6);
+        model.fit(&ts).unwrap();
+
+        let spec = model.selected_spec().unwrap();
+        // Must not select multiplicative error or seasonal
+        assert_eq!(
+            spec.error,
+            ErrorType::Additive,
+            "Intermittent data must use additive errors, got {}",
+            spec.short_name()
+        );
+        if spec.has_seasonal() {
+            assert_eq!(
+                spec.seasonal,
+                SeasonalType::Additive,
+                "Intermittent data must use additive seasonality, got {}",
+                spec.short_name()
+            );
+        }
+
+        // Forecasts must be bounded within 10x max observed value
+        let max_val = raw.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let forecast = model.predict(12).unwrap();
+        for (h, &pred) in forecast.primary().iter().enumerate() {
+            assert!(
+                pred.abs() < 10.0 * max_val,
+                "Forecast h={} is {} but max observed is {} — catastrophic forecast",
+                h + 1,
+                pred,
+                max_val
+            );
+        }
+    }
+
+    /// All-positive seasonal data should still allow multiplicative candidates.
+    #[test]
+    fn auto_ets_positive_data_allows_multiplicative() {
+        let model = AutoETS::with_config(AutoETSConfig::with_period(12));
+        // Verify multiplicative candidates are generated for positive data
+        let candidates = model.generate_candidates(true, false);
+        let has_mult = candidates.iter().any(|s| {
+            s.error == ErrorType::Multiplicative || s.seasonal == SeasonalType::Multiplicative
+        });
+        assert!(
+            has_mult,
+            "Positive data should allow multiplicative candidates"
+        );
+
+        // Verify non-positive data restricts to additive-only
+        let restricted = model.generate_candidates(true, true);
+        let has_mult_restricted = restricted.iter().any(|s| {
+            s.error == ErrorType::Multiplicative || s.seasonal == SeasonalType::Multiplicative
+        });
+        assert!(
+            !has_mult_restricted,
+            "Non-positive data should restrict multiplicative candidates"
+        );
+    }
+
+    /// A single zero value in the series should restrict to additive-only.
+    #[test]
+    fn auto_ets_single_zero_restricts_multiplicative() {
+        let mut values: Vec<f64> = (1..=36).map(|i| 10.0 + (i as f64)).collect();
+        values[17] = 0.0; // one zero
+        let timestamps = make_timestamps(values.len());
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = AutoETS::with_period(6);
+        model.fit(&ts).unwrap();
+
+        let spec = model.selected_spec().unwrap();
+        assert_eq!(
+            spec.error,
+            ErrorType::Additive,
+            "Single zero should force additive error, got {}",
+            spec.short_name()
+        );
+        if spec.has_seasonal() {
+            assert_ne!(
+                spec.seasonal,
+                SeasonalType::Multiplicative,
+                "Single zero should prevent multiplicative seasonality, got {}",
+                spec.short_name()
+            );
+        }
     }
 }
