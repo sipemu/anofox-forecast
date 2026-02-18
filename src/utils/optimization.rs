@@ -46,6 +46,37 @@ impl Default for NelderMeadConfig {
     }
 }
 
+/// Contiguous simplex buffer: `(n+1)` vertices of dimension `n` stored flat.
+/// Eliminates `n+2` heap allocations and pointer-chasing of `Vec<Vec<f64>>`.
+struct Simplex {
+    data: Vec<f64>,
+    dim: usize,
+}
+
+impl Simplex {
+    fn new(dim: usize) -> Self {
+        Self {
+            data: vec![0.0; (dim + 1) * dim],
+            dim,
+        }
+    }
+
+    #[inline]
+    fn vertex(&self, i: usize) -> &[f64] {
+        &self.data[i * self.dim..(i + 1) * self.dim]
+    }
+
+    #[inline]
+    fn vertex_mut(&mut self, i: usize) -> &mut [f64] {
+        &mut self.data[i * self.dim..(i + 1) * self.dim]
+    }
+
+    #[inline]
+    fn n_vertices(&self) -> usize {
+        self.dim + 1
+    }
+}
+
 /// Sanitize objective value: replace NaN/Inf with MAX to prevent silent propagation.
 #[inline]
 fn sanitize_objective(value: f64) -> f64 {
@@ -102,28 +133,29 @@ where
         };
     }
 
-    // Initialize simplex with n+1 vertices
-    let mut simplex: Vec<Vec<f64>> = Vec::with_capacity(n + 1);
-    let mut first = initial.to_vec();
-    apply_bounds_in_place(&mut first, bounds);
-    simplex.push(first);
+    // Initialize simplex with n+1 vertices in contiguous buffer
+    let mut simplex = Simplex::new(n);
+    {
+        let v0 = simplex.vertex_mut(0);
+        v0.copy_from_slice(initial);
+        apply_bounds_in_place(v0, bounds);
+    }
 
     for i in 0..n {
-        let mut vertex = initial.to_vec();
+        let vi = simplex.vertex_mut(i + 1);
+        vi.copy_from_slice(initial);
         let step = if initial[i].abs() > 1e-10 {
             config.initial_step * initial[i].abs()
         } else {
             config.initial_step
         };
-        vertex[i] += step;
-        apply_bounds_in_place(&mut vertex, bounds);
-        simplex.push(vertex);
+        vi[i] += step;
+        apply_bounds_in_place(vi, bounds);
     }
 
     // Evaluate objective at all vertices
-    let mut values: Vec<f64> = simplex
-        .iter()
-        .map(|v| sanitize_objective(objective(v)))
+    let mut values: Vec<f64> = (0..simplex.n_vertices())
+        .map(|i| sanitize_objective(objective(simplex.vertex(i))))
         .collect();
 
     // Pre-allocate scratch buffers
@@ -213,7 +245,7 @@ where
         .unwrap_or(0);
 
     NelderMeadResult {
-        optimal_point: simplex[best_idx].clone(),
+        optimal_point: simplex.vertex(best_idx).to_vec(),
         optimal_value: values[best_idx],
         iterations,
         converged,
@@ -233,11 +265,11 @@ fn sort_simplex_indices(indices: &mut [usize], values: &[f64]) {
     });
 }
 
-/// Check convergence by value range and simplex diameter.
+/// Check convergence by value range and simplex diameter (squared distance).
 /// Returns true if converged. Writes centroid as a side effect (needed by caller).
 #[inline]
 fn check_convergence(
-    simplex: &[Vec<f64>],
+    simplex: &Simplex,
     values: &[f64],
     best_idx: usize,
     worst_idx: usize,
@@ -250,11 +282,9 @@ fn check_convergence(
     }
 
     compute_centroid_into(simplex, worst_idx, centroid);
-    let max_dist = simplex
-        .iter()
-        .map(|v| euclidean_distance(v, centroid))
-        .fold(0.0, f64::max);
-    max_dist < tolerance
+    let tol_sq = tolerance * tolerance;
+    // any() short-circuits: stops at first vertex exceeding tolerance
+    !(0..simplex.n_vertices()).any(|i| distance_sq(simplex.vertex(i), centroid) >= tol_sq)
 }
 
 /// Compute reflection and try expansion. Returns `Some(reflected_value)` if neither
@@ -265,7 +295,7 @@ fn try_reflection_expansion<F: Fn(&[f64]) -> f64>(
     objective: &F,
     config: &NelderMeadConfig,
     bounds: Option<&[(f64, f64)]>,
-    simplex: &mut [Vec<f64>],
+    simplex: &mut Simplex,
     values: &mut [f64],
     worst_idx: usize,
     best_idx: usize,
@@ -274,12 +304,12 @@ fn try_reflection_expansion<F: Fn(&[f64]) -> f64>(
     reflected: &mut [f64],
     expanded: &mut [f64],
 ) -> Option<f64> {
-    reflect_into(&simplex[worst_idx], centroid, config.alpha, reflected);
+    reflect_into(simplex.vertex(worst_idx), centroid, config.alpha, reflected);
     apply_bounds_in_place(reflected, bounds);
     let reflected_value = sanitize_objective(objective(reflected));
 
     if reflected_value < values[second_worst_idx] && reflected_value >= values[best_idx] {
-        simplex[worst_idx].copy_from_slice(reflected);
+        simplex.vertex_mut(worst_idx).copy_from_slice(reflected);
         values[worst_idx] = reflected_value;
         return None; // accepted
     }
@@ -290,10 +320,10 @@ fn try_reflection_expansion<F: Fn(&[f64]) -> f64>(
         let expanded_value = sanitize_objective(objective(expanded));
 
         if expanded_value < reflected_value {
-            simplex[worst_idx].copy_from_slice(expanded);
+            simplex.vertex_mut(worst_idx).copy_from_slice(expanded);
             values[worst_idx] = expanded_value;
         } else {
-            simplex[worst_idx].copy_from_slice(reflected);
+            simplex.vertex_mut(worst_idx).copy_from_slice(reflected);
             values[worst_idx] = reflected_value;
         }
         return None; // accepted
@@ -308,7 +338,7 @@ fn try_contraction<F: Fn(&[f64]) -> f64>(
     objective: &F,
     config: &NelderMeadConfig,
     bounds: Option<&[(f64, f64)]>,
-    simplex: &mut [Vec<f64>],
+    simplex: &mut Simplex,
     values: &mut [f64],
     worst_idx: usize,
     centroid: &[f64],
@@ -323,18 +353,18 @@ fn try_contraction<F: Fn(&[f64]) -> f64>(
         let contracted_value = sanitize_objective(objective(contracted));
 
         if contracted_value <= reflected_value {
-            simplex[worst_idx].copy_from_slice(contracted);
+            simplex.vertex_mut(worst_idx).copy_from_slice(contracted);
             values[worst_idx] = contracted_value;
             return true;
         }
     } else {
         // Inside contraction
-        contract_into(centroid, &simplex[worst_idx], config.rho, contracted);
+        contract_into(centroid, simplex.vertex(worst_idx), config.rho, contracted);
         apply_bounds_in_place(contracted, bounds);
         let contracted_value = sanitize_objective(objective(contracted));
 
         if contracted_value < values[worst_idx] {
-            simplex[worst_idx].copy_from_slice(contracted);
+            simplex.vertex_mut(worst_idx).copy_from_slice(contracted);
             values[worst_idx] = contracted_value;
             return true;
         }
@@ -349,34 +379,36 @@ fn shrink_simplex<F: Fn(&[f64]) -> f64>(
     objective: &F,
     config: &NelderMeadConfig,
     bounds: Option<&[(f64, f64)]>,
-    simplex: &mut [Vec<f64>],
+    simplex: &mut Simplex,
     values: &mut [f64],
     best_idx: usize,
     temp: &mut [f64],
 ) {
     let n = temp.len();
-    temp.copy_from_slice(&simplex[best_idx]);
+    temp.copy_from_slice(simplex.vertex(best_idx));
     for i in 0..=n {
         if i != best_idx {
+            let vi = simplex.vertex_mut(i);
             for j in 0..n {
-                simplex[i][j] = temp[j] + config.sigma * (simplex[i][j] - temp[j]);
+                vi[j] = temp[j] + config.sigma * (vi[j] - temp[j]);
             }
-            apply_bounds_in_place(&mut simplex[i], bounds);
-            values[i] = sanitize_objective(objective(&simplex[i]));
+            apply_bounds_in_place(vi, bounds);
+            values[i] = sanitize_objective(objective(simplex.vertex(i)));
         }
     }
 }
 
 /// Compute centroid of simplex excluding one vertex, writing into `out`.
-fn compute_centroid_into(simplex: &[Vec<f64>], exclude_idx: usize, out: &mut [f64]) {
-    let count = simplex.len() - 1;
+fn compute_centroid_into(simplex: &Simplex, exclude_idx: usize, out: &mut [f64]) {
+    let count = simplex.n_vertices() - 1;
     for o in out.iter_mut() {
         *o = 0.0;
     }
 
-    for (i, vertex) in simplex.iter().enumerate() {
+    for i in 0..simplex.n_vertices() {
         if i != exclude_idx {
-            for (o, v) in out.iter_mut().zip(vertex.iter()) {
+            let vertex = simplex.vertex(i);
+            for (o, &v) in out.iter_mut().zip(vertex.iter()) {
                 *o += v;
             }
         }
@@ -420,13 +452,16 @@ fn apply_bounds_in_place(point: &mut [f64], bounds: Option<&[(f64, f64)]>) {
     }
 }
 
-/// Euclidean distance between two points.
-fn euclidean_distance(a: &[f64], b: &[f64]) -> f64 {
+/// Squared distance between two points (avoids sqrt; uses `d*d` instead of `powi(2)`).
+#[inline]
+fn distance_sq(a: &[f64], b: &[f64]) -> f64 {
     a.iter()
         .zip(b.iter())
-        .map(|(x, y)| (x - y).powi(2))
-        .sum::<f64>()
-        .sqrt()
+        .map(|(&x, &y)| {
+            let d = x - y;
+            d * d
+        })
+        .sum()
 }
 
 #[cfg(test)]

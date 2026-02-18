@@ -8,6 +8,7 @@ use crate::error::{ForecastError, Result};
 use crate::models::exponential::ets::{ETSSpec, ErrorType, SeasonalType, TrendType, ETS};
 use crate::models::{validate_series_complete, Forecaster};
 use crate::utils::ols::{ols_fit, ols_residuals, OLSResult};
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 #[cfg(feature = "parallel")]
@@ -268,17 +269,20 @@ impl Forecaster for AutoETS {
             });
         }
 
-        // Handle exogenous regressors
-        let eval_series = if series.has_regressors() {
+        // Handle exogenous regressors (Cow avoids cloning when no regressors)
+        let eval_series: Cow<'_, TimeSeries> = if series.has_regressors() {
             let regressors = series.all_regressors();
             let ols_result = ols_fit(raw_values, &regressors)?;
             let adjusted = ols_residuals(raw_values, &ols_result, &regressors)?;
             self.exog_ols = Some(ols_result);
             // Create adjusted series without regressors for candidate evaluation
-            TimeSeries::univariate(series.timestamps().to_vec(), adjusted)?
+            Cow::Owned(TimeSeries::univariate(
+                series.timestamps().to_vec(),
+                adjusted,
+            )?)
         } else {
             self.exog_ols = None;
-            series.clone()
+            Cow::Borrowed(series)
         };
 
         let values = eval_series.primary_values();
@@ -796,5 +800,63 @@ mod tests {
                 spec.short_name()
             );
         }
+    }
+
+    /// Issue #12: AutoETS should select seasonal components on monthly data
+    /// with clear seasonal patterns when seasonal_period is provided.
+    /// Tests with 36 observations (3 years monthly) — the scenario from the bug report.
+    #[test]
+    fn auto_ets_selects_seasonal_on_monthly_data() {
+        // Realistic monthly demand: level=100, trend=0.5/month, seasonal amplitude=20
+        let values: Vec<f64> = (0..36)
+            .map(|i| {
+                let level = 100.0 + 0.5 * i as f64;
+                let seasonal = 20.0 * (2.0 * std::f64::consts::PI * i as f64 / 12.0).sin();
+                level + seasonal
+            })
+            .collect();
+        let timestamps = make_timestamps(36);
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = AutoETS::with_period(12);
+        model.fit(&ts).unwrap();
+
+        let spec = model.selected_spec().unwrap();
+        assert!(
+            spec.has_seasonal(),
+            "Should select seasonal model on data with clear seasonality, got {}",
+            spec.short_name()
+        );
+    }
+
+    /// Issue #12: Verify seasonal selection on 48-obs data with moderate noise.
+    #[test]
+    fn auto_ets_seasonal_with_noise() {
+        // Use a deterministic pseudo-random noise pattern
+        let noise = [
+            1.2, -0.8, 0.5, -1.1, 0.3, 0.9, -0.6, 1.5, -0.2, 0.7, -1.3, 0.4, -0.9, 1.1, -0.3, 0.8,
+            -0.5, 1.0, -0.7, 0.6, -1.2, 0.2, 0.9, -0.4, 1.3, -0.6, 0.1, -1.0, 0.5, 0.8, -0.3, 1.4,
+            -0.8, 0.7, -0.2, 1.1, -0.5, 0.3, -1.1, 0.9, 0.6, -0.7, 1.2, -0.4, 0.8, -1.0, 0.2, 0.5,
+        ];
+        let values: Vec<f64> = (0..48)
+            .map(|i| {
+                let level = 50.0 + 0.3 * i as f64;
+                let seasonal = 15.0 * (2.0 * std::f64::consts::PI * i as f64 / 12.0).sin()
+                    + 5.0 * (4.0 * std::f64::consts::PI * i as f64 / 12.0).cos();
+                level + seasonal + noise[i] * 3.0
+            })
+            .collect();
+        let timestamps = make_timestamps(48);
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = AutoETS::with_period(12);
+        model.fit(&ts).unwrap();
+
+        let spec = model.selected_spec().unwrap();
+        assert!(
+            spec.has_seasonal(),
+            "Should select seasonal model on noisy seasonal data, got {}",
+            spec.short_name()
+        );
     }
 }
