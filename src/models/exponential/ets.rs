@@ -1023,7 +1023,7 @@ impl ETS {
         if has_seasonal && !init_seasonals.is_empty() {
             let period = self.seasonal_period;
             let seasonal_config = NelderMeadConfig {
-                max_iter: 3000 + 200 * period,
+                max_iter: 5000 + 500 * period,
                 tolerance: 1e-10,
                 ..Default::default()
             };
@@ -1036,9 +1036,16 @@ impl ETS {
                     vec![(-2.0 * y_range, 2.0 * y_range); period]
                 };
 
-            // Multi-start: try different alpha starting points to avoid local minima.
-            // Gamma is less sensitive; a single start suffices given good seasonal init.
-            let alpha_starts = [0.1, 0.3, 0.8];
+            // Multi-start: try different (alpha, gamma) starting points to avoid local minima.
+            // Varying gamma is crucial for seasonal capture.
+            let ag_starts: [(f64, f64); 6] = [
+                (0.1, 0.05),
+                (0.1, 0.3),
+                (0.3, 0.1),
+                (0.3, 0.3),
+                (0.5, 0.1),
+                (0.8, 0.01),
+            ];
 
             let mut best_value = f64::MAX;
             let mut best_result: Option<Vec<f64>> = None;
@@ -1055,10 +1062,10 @@ impl ETS {
 
                     let seasonal_buf = RefCell::new(vec![0.0; period]);
                     let mut start = Vec::with_capacity(n_params);
-                    for &alpha_init in &alpha_starts {
+                    for &(alpha_init, gamma_init) in &ag_starts {
                         start.clear();
                         start.push(alpha_init);
-                        start.push(0.1); // gamma
+                        start.push(gamma_init);
                         start.push(init_level);
                         start.extend_from_slice(&init_seasonals);
 
@@ -1113,11 +1120,11 @@ impl ETS {
 
                     let seasonal_buf = RefCell::new(vec![0.0; period]);
                     let mut start = Vec::with_capacity(n_params);
-                    for &alpha_init in &alpha_starts {
+                    for &(alpha_init, gamma_init) in &ag_starts {
                         start.clear();
                         start.push(alpha_init);
                         start.push(0.1); // beta
-                        start.push(0.1); // gamma
+                        start.push(gamma_init);
                         start.push(init_level);
                         start.push(init_trend);
                         start.extend_from_slice(&init_seasonals);
@@ -1174,11 +1181,11 @@ impl ETS {
 
                     let seasonal_buf = RefCell::new(vec![0.0; period]);
                     let mut start = Vec::with_capacity(n_params);
-                    for &alpha_init in &alpha_starts {
+                    for &(alpha_init, gamma_init) in &ag_starts {
                         start.clear();
                         start.push(alpha_init);
                         start.push(0.1); // beta
-                        start.push(0.1); // gamma
+                        start.push(gamma_init);
                         start.push(0.98); // phi
                         start.push(init_level);
                         start.push(init_trend);
@@ -1317,6 +1324,7 @@ impl ETS {
             // mean-to-one for multiplicative), so one is determined by the rest.
             count += self.seasonal_period - 1;
         }
+        count += 1; // sigma^2 (matches statsforecast parameter counting)
         count
     }
 
@@ -1630,15 +1638,16 @@ impl Forecaster for ETS {
         self.fitted = Some(fitted);
 
         // Calculate residual variance and information criteria
-        // Use full sample size for AIC calculation (statsforecast compatible)
+        // Use actual residual count for AIC calculation (statsforecast compatible)
         let valid_slice = &residuals[start_idx..];
         if !valid_slice.is_empty() {
             let variance = crate::simd::sum_of_squares(valid_slice) / valid_slice.len() as f64;
             self.residual_variance = Some(variance);
 
-            // Calculate information criteria using full sample size
-            // This ensures fair comparison between seasonal and non-seasonal models
-            let n = values.len() as f64;
+            // Use actual number of residuals for log-likelihood, not full sample size.
+            // This ensures seasonal models (which skip the first period of residuals)
+            // are not systematically penalized relative to non-seasonal models.
+            let n = valid_slice.len() as f64;
             let k = self.num_params() as f64;
             let ll = -0.5 * n * (1.0 + variance.ln() + (2.0 * std::f64::consts::PI).ln());
 

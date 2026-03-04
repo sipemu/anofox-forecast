@@ -57,13 +57,27 @@ SERIES_TYPES = [
     "trend",
     "seasonal",
     "trend_seasonal",
-    "seasonal_negative",       # Has negative values - tests fallback to additive
-    "multiplicative_seasonal", # True multiplicative seasonality
-    "intermittent",            # Sparse demand data with zeros
-    "high_frequency",          # Multiple seasonalities (MSTL test)
-    "structural_break",        # Level shift (robustness test)
-    "long_memory",             # ARFIMA-like slow decay
-    "noisy_seasonal",          # High noise-to-signal ratio
+    "seasonal_negative",
+    "multiplicative_seasonal",
+    "intermittent",
+    "high_frequency",
+    "structural_break",
+    "long_memory",
+    "noisy_seasonal",
+    "exponential_trend",
+    "damped_trend",
+    "strong_seasonal",
+    "quarterly_seasonal",
+    "multiplicative_trend_seasonal",
+    "heteroscedastic",
+    "random_walk",
+    "ar1",
+    "outlier_series",
+    "step_seasonal",
+    "bimodal_seasonal",
+    "asymmetric_seasonal",
+    "seasonal_trend_break",
+    "low_count",
 ]
 
 

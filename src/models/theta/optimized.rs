@@ -240,10 +240,12 @@ impl OptimizedTheta {
         let stat = ((1.0 + 2.0 * r_sq_sum) / series.len() as f64).sqrt();
         let r_m = r[r.len() - 1];
 
+        // Use z_90 (1.2816) instead of z_95 (1.6449) since this test is only
+        // called when the user explicitly provides a seasonal_period.
         let normal = Normal::new(0.0, 1.0).unwrap();
-        let z_95 = normal.inverse_cdf(0.95);
+        let z_90 = normal.inverse_cdf(0.90);
 
-        (r_m.abs() / stat) > z_95
+        (r_m.abs() / stat) > z_90
     }
 
     /// Calculate seasonal component using classical decomposition.

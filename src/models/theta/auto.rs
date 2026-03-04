@@ -201,7 +201,14 @@ impl Forecaster for AutoTheta {
 
         // Try DSTM (Dynamic Standard Theta Model)
         {
-            let mut model = DynamicTheta::new(0.1);
+            let mut model = if self.seasonal_period > 0 {
+                DynamicTheta::seasonal_with_decomposition(
+                    self.seasonal_period,
+                    self.decomposition_type,
+                )
+            } else {
+                DynamicTheta::new(0.1)
+            };
             if model.fit(series).is_ok() {
                 if let Some(residuals) = model.residuals() {
                     let mse = Self::calculate_mse(residuals);
@@ -212,7 +219,14 @@ impl Forecaster for AutoTheta {
 
         // Try DOTM (Dynamic Optimized Theta Model)
         {
-            let mut model = DynamicTheta::optimized();
+            let mut model = if self.seasonal_period > 0 {
+                DynamicTheta::seasonal_optimized_with_decomposition(
+                    self.seasonal_period,
+                    self.decomposition_type,
+                )
+            } else {
+                DynamicTheta::optimized()
+            };
             if model.fit(series).is_ok() {
                 if let Some(residuals) = model.residuals() {
                     let mse = Self::calculate_mse(residuals);

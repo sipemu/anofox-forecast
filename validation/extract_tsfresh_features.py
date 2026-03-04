@@ -27,6 +27,20 @@ SERIES_TYPES = [
     "structural_break",
     "long_memory",
     "noisy_seasonal",
+    "exponential_trend",
+    "damped_trend",
+    "strong_seasonal",
+    "quarterly_seasonal",
+    "multiplicative_trend_seasonal",
+    "heteroscedastic",
+    "random_walk",
+    "ar1",
+    "outlier_series",
+    "step_seasonal",
+    "bimodal_seasonal",
+    "asymmetric_seasonal",
+    "seasonal_trend_break",
+    "low_count",
 ]
 
 # Feature configuration matching Rust features module
