@@ -46,27 +46,27 @@ const SERIES_TYPES: [&str; 25] = [
     "trend",
     "seasonal",
     "trend_seasonal",
-    "seasonal_negative",              // Has negative values - tests fallback to additive
-    "multiplicative_seasonal",        // True multiplicative seasonality
-    "intermittent",                   // Sparse demand data with zeros
-    "high_frequency",                 // Multiple seasonalities (MSTL test)
-    "structural_break",               // Level shift (robustness test)
-    "long_memory",                    // ARFIMA-like slow decay
-    "noisy_seasonal",                 // High noise-to-signal ratio
-    "exponential_trend",              // Nonlinear exponential growth
-    "damped_trend",                   // Trend that levels off
-    "strong_seasonal",                // High amplitude, low noise seasonal
-    "quarterly_seasonal",             // Period=4 seasonal
-    "multiplicative_trend_seasonal",  // Multiplicative trend + seasonal
-    "heteroscedastic",                // Increasing variance over time
-    "random_walk",                    // Pure unit root
-    "ar1",                            // AR(1) process
-    "outlier_series",                 // Occasional large outliers
-    "step_seasonal",                  // Square-wave seasonal
-    "bimodal_seasonal",               // Two peaks per cycle
-    "asymmetric_seasonal",            // Rapid rise, slow fall
-    "seasonal_trend_break",           // Seasonal + mid-series trend change
-    "low_count",                      // Small positive integer counts
+    "seasonal_negative",       // Has negative values - tests fallback to additive
+    "multiplicative_seasonal", // True multiplicative seasonality
+    "intermittent",            // Sparse demand data with zeros
+    "high_frequency",          // Multiple seasonalities (MSTL test)
+    "structural_break",        // Level shift (robustness test)
+    "long_memory",             // ARFIMA-like slow decay
+    "noisy_seasonal",          // High noise-to-signal ratio
+    "exponential_trend",       // Nonlinear exponential growth
+    "damped_trend",            // Trend that levels off
+    "strong_seasonal",         // High amplitude, low noise seasonal
+    "quarterly_seasonal",      // Period=4 seasonal
+    "multiplicative_trend_seasonal", // Multiplicative trend + seasonal
+    "heteroscedastic",         // Increasing variance over time
+    "random_walk",             // Pure unit root
+    "ar1",                     // AR(1) process
+    "outlier_series",          // Occasional large outliers
+    "step_seasonal",           // Square-wave seasonal
+    "bimodal_seasonal",        // Two peaks per cycle
+    "asymmetric_seasonal",     // Rapid rise, slow fall
+    "seasonal_trend_break",    // Seasonal + mid-series trend change
+    "low_count",               // Small positive integer counts
 ];
 
 /// Read a CSV file and return timestamps and values
