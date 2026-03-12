@@ -133,7 +133,11 @@ impl NormalPredictor {
         }
 
         if n < 2 {
-            return Err(ForecastError::InsufficientData { needed: 2, got: n });
+            return Err(ForecastError::InsufficientData {
+                needed: 2,
+                got: n,
+                hint: None,
+            });
         }
 
         // Compute errors (actual - forecast)

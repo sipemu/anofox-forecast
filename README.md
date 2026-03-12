@@ -12,7 +12,7 @@
 
 Time series forecasting library for Rust.
 
-Provides 35+ forecasting models, 76+ statistical features, seasonality decomposition, changepoint detection, anomaly detection, and bootstrap confidence intervals.
+Provides 35+ forecasting models, 76+ statistical features, automatic model selection, ensemble methods, seasonality decomposition, changepoint detection, anomaly detection, and model serialization.
 
 ## Use Cases
 
@@ -25,27 +25,48 @@ npm install @sipemu/anofox-forecast
 ```
 
 ```javascript
-import init, { TimeSeries, NaiveForecaster, AutoETSForecaster } from '@sipemu/anofox-forecast';
+import init, { TimeSeries, AutoForecaster, AutoEnsembleForecaster } from '@sipemu/anofox-forecast';
 
 await init();
 
 const ts = new TimeSeries([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
-const model = new AutoETSForecaster();
+const model = new AutoForecaster();
 model.fit(ts);
 const forecast = model.predict(5);
-console.log(forecast.values);  // [11, 12, 13, 14, 15] (approx)
+console.log(forecast.values);
 ```
 
 ## Features
 
 - **Forecasting Models (35+)**
-  - ARIMA and AutoARIMA with automatic order selection
-  - Exponential Smoothing: Simple (SES), Holt's Linear, Holt-Winters
+  - ARIMA, SARIMA, and AutoARIMA with automatic order selection
+  - Exponential Smoothing: SES, Holt's Linear, Holt-Winters, SeasonalES
   - ETS (Error-Trend-Seasonal) state-space framework with AutoETS
-  - Baseline methods: Naive, Seasonal Naive, Random Walk with Drift, Simple Moving Average
-  - Theta method for forecasting
-  - Intermittent demand models: Croston, ADIDA, TSB
-  - Ensemble methods with multiple combination strategies
+  - Baseline methods: Naive, Seasonal Naive, Random Walk with Drift, SMA, Window Average
+  - Theta family: Theta, Optimized Theta, Dynamic Theta, AutoTheta
+  - Intermittent demand: Croston, ADIDA, TSB, IMAPA
+  - TBATS/AutoTBATS for complex seasonality
+  - MFLES (Multiple Frequency Locally Estimated Scatterplot)
+  - MSTL-based forecasting with configurable trend/seasonal methods
+  - GARCH for volatility modeling
+  - Exogenous regressor support across model families
+
+- **Automatic Model Selection**
+  - `AutoForecast`: Unified selection across ARIMA, ETS, and Theta families
+  - `AutoEnsemble`: Automatic ensemble of top-K best models
+  - Selection by in-sample MSE or cross-validation error
+
+- **Ensemble Methods**
+  - Mean, Median, Weighted MSE, and Custom weight combination strategies
+  - Automatic ensemble construction from model registry
+
+- **Model Comparison & Evaluation**
+  - `compare_models()`: Side-by-side model evaluation with timing
+  - `compare_registry()`: Compare all registered models at once
+  - Accuracy metrics: MAE, MSE, RMSE, MAPE, sMAPE, MASE, and more
+  - Time series cross-validation with configurable strategies
+  - Residual diagnostics: Ljung-Box, Durbin-Watson, Jarque-Bera, Box-Pierce
+  - `diagnose_residuals()`: Unified residual diagnostic report
 
 - **Time Series Feature Extraction (76+ features)**
   - Basic statistics (mean, variance, quantiles, energy, etc.)
@@ -54,6 +75,7 @@ console.log(forecast.values);  // [11, 12, 13, 14, 15] (approx)
   - Entropy features (approximate, sample, permutation, binned, Fourier)
   - Complexity measures (C3, CID, Lempel-Ziv)
   - Trend analysis and stationarity tests (ADF, KPSS)
+  - Automated feature selection (variance threshold, correlation filter, top-K)
 
 - **Seasonality & Decomposition**
   - STL (Seasonal-Trend decomposition using LOESS)
@@ -85,6 +107,11 @@ console.log(forecast.values);  // [11, 12, 13, 14, 15] (approx)
   - QRA: Quantile Regression Averaging for ensemble combining
   - Backtesting: Rolling/expanding window evaluation with horizon-aware calibration
 
+- **Model Serialization** (optional `serde` feature)
+  - Save/load models to JSON with `to_json()`/`from_json()`
+  - File persistence with `save_to_file()`/`load_from_file()`
+  - Round-trip serialization for all major model families
+
 - **Missing Value Imputation**
   - Policy-based: Drop, Fill, ForwardFill, BackwardFill, FillMean, FillMedian, Interpolate
   - Advanced: moving average imputation, seasonal median imputation
@@ -97,11 +124,6 @@ console.log(forecast.values);  // [11, 12, 13, 14, 15] (approx)
   - Window functions: rolling mean, std, min, max, median
   - Exponential weighted moving averages
 
-- **Model Evaluation & Validation**
-  - Accuracy metrics: MAE, MSE, RMSE, MAPE, and more
-  - Time series cross-validation
-  - Residual testing and diagnostics
-
 ## Installation
 
 Add this to your `Cargo.toml`:
@@ -111,11 +133,25 @@ Add this to your `Cargo.toml`:
 anofox-forecast = "0.4"
 ```
 
-For parallel AutoARIMA (4-8x speedup):
+### Optional Features
+
 ```toml
 [dependencies]
-anofox-forecast = { version = "0.3", features = ["parallel"] }
+# Parallel AutoARIMA (4-8x speedup via rayon, opt-in for embedding contexts like DuckDB)
+anofox-forecast = { version = "0.4", features = ["parallel"] }
+
+# Model serialization (save/load to JSON)
+anofox-forecast = { version = "0.4", features = ["serde"] }
+
+# Probabilistic postprocessing (conformal, IDR, QRA — enabled by default)
+anofox-forecast = { version = "0.4", default-features = false }  # to disable
 ```
+
+| Feature | Default | Description |
+|---------|---------|-------------|
+| `postprocess` | Yes | Conformal prediction, IDR, QRA, historical simulation |
+| `parallel` | No | Rayon-based parallelism for AutoARIMA (not available on WASM) |
+| `serde` | No | JSON serialization/deserialization for models |
 
 ## Quick Start
 
@@ -140,22 +176,36 @@ let ts = TimeSeries::builder()
     .build()?;
 ```
 
+### Automatic Model Selection
+
+```rust
+use anofox_forecast::prelude::*;
+use anofox_forecast::models::auto_forecast::AutoForecast;
+
+// Automatically selects the best model across ARIMA, ETS, and Theta
+let mut model = AutoForecast::new();
+model.fit(&ts)?;
+
+let forecast = model.predict(12)?;
+println!("Best model: {}", model.name());
+```
+
 ### ARIMA Forecasting
 
 ```rust
 use anofox_forecast::prelude::*;
-use anofox_forecast::models::arima::Arima;
+use anofox_forecast::models::arima::ARIMA;
 
 // Create and fit an ARIMA(1,1,1) model
-let mut model = Arima::new(1, 1, 1)?;
+let mut model = ARIMA::new(1, 1, 1);
 model.fit(&ts)?;
 
 // Generate forecasts with 95% confidence intervals
 let forecast = model.predict_with_intervals(12, 0.95)?;
 
-println!("Point forecasts: {:?}", forecast.values());
-println!("Lower bounds: {:?}", forecast.lower());
-println!("Upper bounds: {:?}", forecast.upper());
+println!("Point forecasts: {:?}", forecast.primary());
+println!("Lower bounds: {:?}", forecast.lower_series(0));
+println!("Upper bounds: {:?}", forecast.upper_series(0));
 ```
 
 ### Holt-Winters Forecasting
@@ -164,10 +214,22 @@ println!("Upper bounds: {:?}", forecast.upper());
 use anofox_forecast::models::exponential::HoltWinters;
 
 // Create Holt-Winters with additive seasonality (period = 12)
-let mut model = HoltWinters::additive(12)?;
+let mut model = HoltWinters::additive(12);
 model.fit(&ts)?;
 
 let forecast = model.predict(24)?;
+```
+
+### Model Comparison
+
+```rust
+use anofox_forecast::models::{BoxedForecaster, ModelRegistry};
+use anofox_forecast::utils::comparison::{compare_registry, ComparisonConfig};
+
+// Compare all registered models side-by-side
+let config = ComparisonConfig::default();
+let table = compare_registry(&ts, &config)?;
+println!("{}", table);
 ```
 
 ### Feature Extraction
@@ -266,24 +328,34 @@ println!("Upper: {:?}", intervals.upper());
 |------|-------------|
 | `TimeSeries` | Main data structure for univariate/multivariate time series |
 | `Forecast` | Prediction results with optional confidence intervals |
-| `CalendarAnnotations` | Holiday and regressor management |
+| `Forecaster` | Trait implemented by all forecasting models |
 | `AccuracyMetrics` | Model evaluation metrics (MAE, MSE, RMSE, MAPE, etc.) |
 
 ### Forecasting Models
 
-| Model | Description |
-|-------|-------------|
-| `Arima` | ARIMA(p,d,q) model |
-| `AutoArima` | Automatic ARIMA order selection |
-| `Ses` | Simple Exponential Smoothing |
-| `Holt` | Holt's Linear Trend method |
-| `HoltWinters` | Holt-Winters with seasonal components |
-| `Ets` | ETS state-space model |
-| `AutoEts` | Automatic ETS model selection |
-| `Naive` | Naive forecasting |
-| `SeasonalNaive` | Seasonal naive forecasting |
-| `Theta` | Theta method |
-| `Croston` | Croston's method for intermittent demand |
+| Family | Models |
+|--------|--------|
+| **Auto Selection** | `AutoForecast`, `AutoEnsemble` |
+| **ARIMA** | `ARIMA`, `SARIMA`, `AutoARIMA` |
+| **Exponential Smoothing** | `SES`, `Holt`, `HoltWinters`, `SeasonalES`, `ETS`, `AutoETS` |
+| **Theta** | `Theta`, `OptimizedTheta`, `DynamicTheta`, `AutoTheta` |
+| **Baseline** | `Naive`, `Mean`, `SeasonalNaive`, `RandomWalkWithDrift`, `SMA`, `WindowAverage`, `SeasonalWindowAverage` |
+| **Intermittent** | `Croston`, `TSB`, `ADIDA`, `IMAPA` |
+| **Complex Seasonality** | `TBATS`, `AutoTBATS`, `MFLES`, `MSTLForecaster` |
+| **Volatility** | `GARCH` |
+| **Ensemble** | `Ensemble` (Mean, Median, Weighted MSE, Custom) |
+
+### Utilities
+
+| Function / Type | Description |
+|-----------------|-------------|
+| `compare_models()` | Compare forecasters on the same data with timing |
+| `compare_registry()` | Compare all registered models at once |
+| `cross_validate()` | Time series cross-validation |
+| `bootstrap_forecast()` | Bootstrap confidence intervals for any model |
+| `diagnose_residuals()` | Unified residual diagnostics (Ljung-Box, DW, Jarque-Bera) |
+| `select_features()` | Automated feature selection (variance, correlation, top-K) |
+| `to_json()` / `from_json()` | Model serialization (requires `serde` feature) |
 
 ### Feature Categories
 
@@ -295,17 +367,13 @@ println!("Upper: {:?}", intervals.upper());
 | Entropy | `approximate_entropy`, `sample_entropy`, `permutation_entropy` |
 | Complexity | `c3`, `cid_ce`, `lempel_ziv_complexity` |
 | Trend | `linear_trend`, `adf_test`, `ar_coefficient` |
+| Selection | `select_features`, `rank_features` |
 
 ### Postprocessing Types
 
 | Type | Description |
 |------|-------------|
 | `PostProcessor` | Unified API for all postprocessing methods |
-| `PointForecasts` | Wrapper for point forecast values |
-| `QuantileForecasts` | Multi-quantile forecast container |
-| `PredictionIntervals` | Lower/upper bound intervals |
-| `BacktestConfig` | Configuration for rolling/expanding backtests |
-| `BacktestResult` | Backtest metrics with per-horizon analysis |
 | `ConformalPredictor` | Distribution-free prediction intervals |
 | `HistoricalSimulator` | Empirical error distribution |
 | `IDRPredictor` | Isotonic Distributional Regression |
@@ -314,7 +382,7 @@ println!("Upper: {:?}", intervals.upper());
 ## Dependencies
 
 - [chrono](https://crates.io/crates/chrono) - Date and time handling
-- [faer](https://crates.io/crates/faer) - Linear algebra operations
+- [trueno](https://crates.io/crates/trueno) - Linear algebra operations
 - [statrs](https://crates.io/crates/statrs) - Statistical distributions and functions
 - [thiserror](https://crates.io/crates/thiserror) - Error handling
 - [rand](https://crates.io/crates/rand) - Random number generation

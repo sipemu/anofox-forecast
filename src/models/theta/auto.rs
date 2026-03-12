@@ -159,6 +159,9 @@ impl Forecaster for AutoTheta {
             return Err(ForecastError::InsufficientData {
                 needed: 6,
                 got: values.len(),
+                hint: Some(
+                    "AutoTheta requires at least 6 observations for model comparison".into(),
+                ),
             });
         }
 

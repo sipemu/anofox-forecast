@@ -543,6 +543,9 @@ impl Forecaster for OptimizedTheta {
             return Err(ForecastError::InsufficientData {
                 needed: 6,
                 got: raw_values.len(),
+                hint: Some(
+                    "OptimizedTheta requires at least 6 observations for trend estimation".into(),
+                ),
             });
         }
 

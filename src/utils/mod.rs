@@ -1,10 +1,13 @@
 //! Utility functions for forecasting models.
 
 pub mod bootstrap;
+pub mod comparison;
 pub mod cross_validation;
 pub mod metrics;
 pub mod ols;
 pub mod optimization;
+#[cfg(feature = "serde")]
+pub mod persistence;
 pub mod stats;
 
 pub use bootstrap::{bootstrap_forecast, bootstrap_intervals, BootstrapConfig, BootstrapResult};
@@ -16,4 +19,5 @@ pub use cross_validation::{
 pub use metrics::{calculate_metrics, AccuracyMetrics};
 pub use ols::{ols_fit, ols_residuals, OLSResult};
 pub use optimization::{nelder_mead, NelderMeadConfig, NelderMeadResult};
+pub use comparison::{compare_models, compare_registry, ComparisonConfig, ComparisonResult, ComparisonTable};
 pub use stats::quantile_normal;

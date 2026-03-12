@@ -960,6 +960,7 @@ impl TimeSeries {
             return Err(ForecastError::InsufficientData {
                 needed: period,
                 got: self.len(),
+                hint: None,
             });
         }
 
@@ -1144,6 +1145,7 @@ impl TimeSeries {
             return Err(ForecastError::InsufficientData {
                 needed: 2,
                 got: self.len(),
+                hint: None,
             });
         }
 
@@ -1187,6 +1189,7 @@ impl TimeSeries {
             return Err(ForecastError::InsufficientData {
                 needed: 2,
                 got: self.len(),
+                hint: None,
             });
         }
 
@@ -1204,6 +1207,7 @@ impl TimeSeries {
             return Err(ForecastError::InsufficientData {
                 needed: 2,
                 got: business_timestamps.len(),
+                hint: None,
             });
         }
 

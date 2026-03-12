@@ -3,6 +3,7 @@
 mod traits;
 
 pub mod arima;
+pub mod auto_forecast;
 pub mod baseline;
 pub mod ensemble;
 pub mod exponential;

@@ -27,6 +27,7 @@ pub mod complexity;
 pub mod counting;
 pub mod distribution;
 pub mod entropy;
+pub mod selection;
 pub mod trend;
 
 // Re-export commonly used items

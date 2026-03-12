@@ -34,6 +34,7 @@ use crate::utils::stats::quantile_normal;
 /// assert_eq!(forecast.horizon(), 3);
 /// ```
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SimpleExponentialSmoothing {
     /// Smoothing parameter (0 < alpha < 1).
     alpha: Option<f64>,
@@ -42,8 +43,10 @@ pub struct SimpleExponentialSmoothing {
     /// Current level state.
     level: Option<f64>,
     /// Fitted values.
+    #[cfg_attr(feature = "serde", serde(with = "crate::utils::persistence::nan_vec"))]
     fitted: Option<Vec<f64>>,
     /// Residuals.
+    #[cfg_attr(feature = "serde", serde(with = "crate::utils::persistence::nan_vec"))]
     residuals: Option<Vec<f64>>,
     /// Residual variance for prediction intervals.
     residual_variance: Option<f64>,

@@ -20,6 +20,7 @@ use crate::utils::stats::quantile_normal;
 /// - Trend: `b_t = β × (l_t - l_{t-1}) + (1-β) × φ × b_{t-1}`
 /// - Forecast: `ŷ_{t+h} = l_t + (φ + φ² + ... + φ^h) × b_t`
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct HoltLinearTrend {
     /// Level smoothing parameter (0 < alpha < 1).
     alpha: Option<f64>,
@@ -34,8 +35,10 @@ pub struct HoltLinearTrend {
     /// Current trend state.
     trend: Option<f64>,
     /// Fitted values.
+    #[cfg_attr(feature = "serde", serde(with = "crate::utils::persistence::nan_vec"))]
     fitted: Option<Vec<f64>>,
     /// Residuals.
+    #[cfg_attr(feature = "serde", serde(with = "crate::utils::persistence::nan_vec"))]
     residuals: Option<Vec<f64>>,
     /// Residual variance.
     residual_variance: Option<f64>,
@@ -243,6 +246,7 @@ impl Forecaster for HoltLinearTrend {
             return Err(ForecastError::InsufficientData {
                 needed: 2,
                 got: values.len(),
+                hint: None,
             });
         }
 
@@ -540,7 +544,11 @@ mod tests {
         let mut model = HoltLinearTrend::new(0.3, 0.1);
         assert!(matches!(
             model.fit(&ts),
-            Err(ForecastError::InsufficientData { needed: 2, got: 1 })
+            Err(ForecastError::InsufficientData {
+                needed: 2,
+                got: 1,
+                hint: None
+            })
         ));
     }
 

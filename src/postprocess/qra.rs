@@ -232,6 +232,7 @@ impl QRAPredictor {
             return Err(ForecastError::InsufficientData {
                 needed: n_forecasters + 1,
                 got: n,
+                hint: None,
             });
         }
 

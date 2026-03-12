@@ -205,6 +205,7 @@ impl Forecaster for IMAPA {
             return Err(ForecastError::InsufficientData {
                 needed: 4,
                 got: values.len(),
+                hint: Some("IMAPA requires at least 4 observations for multi-aggregation demand estimation".into()),
             });
         }
 

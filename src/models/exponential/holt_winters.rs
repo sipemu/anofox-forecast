@@ -11,6 +11,7 @@ use crate::utils::stats::quantile_normal;
 
 /// Type of seasonal component.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum SeasonalType {
     /// Additive seasonality: y_t = l_t + b_t + s_t + e_t
     #[default]
@@ -33,6 +34,7 @@ pub enum SeasonalType {
 /// - Seasonal: `s_t = γ(y_t / l_t) + (1-γ)s_{t-m}`
 /// - Forecast: `ŷ_{t+h} = (l_t + h*b_t) * s_{t+h-m}`
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct HoltWinters {
     /// Level smoothing parameter (0 < alpha < 1).
     alpha: Option<f64>,
@@ -53,8 +55,10 @@ pub struct HoltWinters {
     /// Seasonal indices.
     seasonals: Option<Vec<f64>>,
     /// Fitted values.
+    #[cfg_attr(feature = "serde", serde(with = "crate::utils::persistence::nan_vec"))]
     fitted: Option<Vec<f64>>,
     /// Residuals.
+    #[cfg_attr(feature = "serde", serde(with = "crate::utils::persistence::nan_vec"))]
     residuals: Option<Vec<f64>>,
     /// Residual variance.
     residual_variance: Option<f64>,
@@ -332,6 +336,10 @@ impl Forecaster for HoltWinters {
             return Err(ForecastError::InsufficientData {
                 needed: 2 * self.seasonal_period,
                 got: values.len(),
+                hint: Some(format!(
+                    "Holt-Winters requires at least 2 * period = {} observations for seasonal initialization",
+                    2 * self.seasonal_period
+                )),
             });
         }
 
@@ -652,7 +660,8 @@ mod tests {
             model.fit(&ts),
             Err(ForecastError::InsufficientData {
                 needed: 16,
-                got: 10
+                got: 10,
+                ..
             })
         ));
     }

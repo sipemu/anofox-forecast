@@ -28,6 +28,7 @@ use std::collections::HashMap;
 
 /// ARIMA model specification (non-seasonal).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ARIMASpec {
     /// AR order (p)
     pub p: usize,
@@ -57,6 +58,7 @@ impl Default for ARIMASpec {
 
 /// SARIMA model specification (seasonal ARIMA).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SARIMASpec {
     /// Non-seasonal AR order (p)
     pub p: usize,
@@ -122,6 +124,7 @@ impl Default for SARIMASpec {
 ///
 /// Supports exogenous regressors (ARIMAX) via TimeSeries.regressors.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ARIMA {
     /// Model specification.
     spec: ARIMASpec,
@@ -136,8 +139,10 @@ pub struct ARIMA {
     /// Differenced series.
     differenced: Option<Vec<f64>>,
     /// Fitted values on differenced scale.
+    #[cfg_attr(feature = "serde", serde(with = "crate::utils::persistence::nan_vec"))]
     fitted_diff: Option<Vec<f64>>,
     /// Residuals.
+    #[cfg_attr(feature = "serde", serde(with = "crate::utils::persistence::nan_vec"))]
     residuals: Option<Vec<f64>>,
     /// Residual variance.
     residual_variance: Option<f64>,
@@ -148,6 +153,7 @@ pub struct ARIMA {
     /// Series length.
     n: usize,
     /// OLS result for exogenous regressors (if any).
+    #[cfg_attr(feature = "serde", serde(skip))]
     exog_ols: Option<OLSResult>,
 }
 
@@ -606,6 +612,10 @@ impl Forecaster for ARIMA {
             return Err(ForecastError::InsufficientData {
                 needed: min_len,
                 got: values.len(),
+                hint: Some(format!(
+                    "ARIMA({},{},{}) requires d + max(p,q) + 2 = {} observations",
+                    self.spec.p, self.spec.d, self.spec.q, min_len
+                )),
             });
         }
 
@@ -810,6 +820,7 @@ impl Forecaster for ARIMA {
 /// let forecast = model.predict(12).unwrap();
 /// ```
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SARIMA {
     /// Model specification.
     spec: SARIMASpec,
@@ -832,6 +843,7 @@ pub struct SARIMA {
     /// Last values for seasonal integration (from non-seasonally differenced series).
     seasonal_last_values: Vec<f64>,
     /// Residuals.
+    #[cfg_attr(feature = "serde", serde(with = "crate::utils::persistence::nan_vec"))]
     residuals: Option<Vec<f64>>,
     /// Last residuals for MA forecasting.
     last_residuals: Vec<f64>,
@@ -846,6 +858,7 @@ pub struct SARIMA {
     /// Series length.
     n: usize,
     /// OLS result for exogenous regressors (if any).
+    #[cfg_attr(feature = "serde", serde(skip))]
     exog_ols: Option<OLSResult>,
 }
 
@@ -1634,6 +1647,10 @@ impl Forecaster for SARIMA {
             return Err(ForecastError::InsufficientData {
                 needed: min_len,
                 got: values.len(),
+                hint: Some(format!(
+                    "SARIMA({},{},{})({},{},{})_{} requires at least {} observations",
+                    p, d, q, cap_p, cap_d, cap_q, s, min_len
+                )),
             });
         }
 
@@ -1692,6 +1709,7 @@ impl Forecaster for SARIMA {
             return Err(ForecastError::InsufficientData {
                 needed: min_len,
                 got: values.len(),
+                hint: Some("series too short after seasonal differencing".into()),
             });
         }
 

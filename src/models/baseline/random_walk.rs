@@ -11,10 +11,13 @@ use crate::models::{validate_series_complete, Forecaster};
 /// The forecast is: y_hat\[t+h\] = y\[t\] + h * drift
 /// where drift is the average change in the series.
 #[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RandomWalkWithDrift {
     last_value: Option<f64>,
     drift: Option<f64>,
+    #[cfg_attr(feature = "serde", serde(with = "crate::utils::persistence::nan_vec"))]
     fitted: Option<Vec<f64>>,
+    #[cfg_attr(feature = "serde", serde(with = "crate::utils::persistence::nan_vec"))]
     residuals: Option<Vec<f64>>,
     residual_variance: Option<f64>,
 }
@@ -38,6 +41,7 @@ impl Forecaster for RandomWalkWithDrift {
             return Err(ForecastError::InsufficientData {
                 needed: 2,
                 got: values.len(),
+                hint: None,
             });
         }
 
@@ -319,7 +323,11 @@ mod tests {
         let mut model = RandomWalkWithDrift::new();
         assert!(matches!(
             model.fit(&ts),
-            Err(ForecastError::InsufficientData { needed: 2, got: 1 })
+            Err(ForecastError::InsufficientData {
+                needed: 2,
+                got: 1,
+                hint: None
+            })
         ));
     }
 

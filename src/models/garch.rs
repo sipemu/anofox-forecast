@@ -45,6 +45,7 @@ use crate::utils::optimization::{nelder_mead, NelderMeadConfig};
 /// let variance_forecast = model.forecast_variance(10).unwrap();
 /// ```
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct GARCH {
     /// GARCH order p (number of lagged squared residuals).
     p: usize,
@@ -59,6 +60,7 @@ pub struct GARCH {
     /// Mean of the series.
     mean: Option<f64>,
     /// Residuals (y - mean).
+    #[cfg_attr(feature = "serde", serde(with = "crate::utils::persistence::nan_vec"))]
     residuals: Option<Vec<f64>>,
     /// Conditional variance series.
     conditional_variance: Option<Vec<f64>>,
@@ -411,6 +413,10 @@ impl Forecaster for GARCH {
             return Err(ForecastError::InsufficientData {
                 needed: min_obs,
                 got: values.len(),
+                hint: Some(format!(
+                    "GARCH({},{}) requires at least p+q+10={} observations",
+                    self.p, self.q, min_obs
+                )),
             });
         }
 

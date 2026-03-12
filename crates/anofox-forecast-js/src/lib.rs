@@ -5,11 +5,26 @@
 
 use wasm_bindgen::prelude::*;
 
+pub mod auto_models;
+pub mod bootstrap;
+pub mod changepoint;
+pub mod cross_validation;
+pub mod decomposition;
+pub mod features;
 pub mod forecaster;
 pub mod time_series;
+pub mod validation;
 
+// Re-export all public items for flat WASM module access.
+pub use auto_models::{AutoEnsembleForecaster, AutoForecaster};
+pub use bootstrap::bootstrap_forecast_js;
+pub use changepoint::{detect_changepoints, detect_changepoints_bic};
+pub use cross_validation::cross_validate_js;
+pub use decomposition::{mstl_decompose, stl_decompose};
+pub use features::*;
 pub use forecaster::*;
 pub use time_series::*;
+pub use validation::*;
 
 /// Initialize the WASM module.
 ///

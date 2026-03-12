@@ -139,7 +139,11 @@ impl IDRPredictor {
         }
 
         if n < 2 {
-            return Err(ForecastError::InsufficientData { needed: 2, got: n });
+            return Err(ForecastError::InsufficientData {
+                needed: 2,
+                got: n,
+                hint: None,
+            });
         }
 
         // Create sorted unique grid of forecast values

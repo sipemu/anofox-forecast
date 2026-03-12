@@ -188,6 +188,7 @@ impl Forecaster for ADIDA {
             return Err(ForecastError::InsufficientData {
                 needed: 4,
                 got: values.len(),
+                hint: Some("ADIDA requires at least 4 observations for demand estimation".into()),
             });
         }
 

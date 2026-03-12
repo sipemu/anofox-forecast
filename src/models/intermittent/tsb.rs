@@ -15,6 +15,7 @@ use crate::models::{validate_series_complete, Forecaster};
 
 /// TSB method for intermittent demand forecasting.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TSB {
     /// Smoothing parameter for demand size.
     alpha_d: f64,
@@ -25,8 +26,10 @@ pub struct TSB {
     /// Estimated demand probability (SES on 0/1 probability series).
     probability: Option<f64>,
     /// Fitted values.
+    #[cfg_attr(feature = "serde", serde(with = "crate::utils::persistence::nan_vec"))]
     fitted: Option<Vec<f64>>,
     /// Residuals.
+    #[cfg_attr(feature = "serde", serde(with = "crate::utils::persistence::nan_vec"))]
     residuals: Option<Vec<f64>>,
     /// Original series length.
     n: usize,
@@ -116,6 +119,7 @@ impl Forecaster for TSB {
             return Err(ForecastError::InsufficientData {
                 needed: 2,
                 got: values.len(),
+                hint: Some("TSB requires at least 2 observations for demand estimation".into()),
             });
         }
 

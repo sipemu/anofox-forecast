@@ -266,6 +266,7 @@ impl Forecaster for AutoETS {
             return Err(ForecastError::InsufficientData {
                 needed: 4,
                 got: raw_values.len(),
+                hint: Some("AutoETS requires at least 4 observations for model selection".into()),
             });
         }
 

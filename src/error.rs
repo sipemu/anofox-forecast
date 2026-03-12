@@ -13,8 +13,12 @@ pub enum ForecastError {
     EmptyData,
 
     /// Insufficient data points for the operation.
-    #[error("insufficient data: need at least {needed}, got {got}")]
-    InsufficientData { needed: usize, got: usize },
+    #[error("insufficient data: need at least {needed}, got {got}{}", .hint.as_deref().map(|h| format!(" ({})", h)).unwrap_or_default())]
+    InsufficientData {
+        needed: usize,
+        got: usize,
+        hint: Option<String>,
+    },
 
     /// Invalid parameter value.
     #[error("invalid parameter: {0}")]
@@ -58,10 +62,24 @@ mod tests {
         let err = ForecastError::EmptyData;
         assert_eq!(err.to_string(), "empty input data");
 
-        let err = ForecastError::InsufficientData { needed: 10, got: 5 };
+        let err = ForecastError::InsufficientData {
+            needed: 10,
+            got: 5,
+            hint: None,
+        };
         assert_eq!(
             err.to_string(),
             "insufficient data: need at least 10, got 5"
+        );
+
+        let err = ForecastError::InsufficientData {
+            needed: 10,
+            got: 5,
+            hint: Some("test hint".into()),
+        };
+        assert_eq!(
+            err.to_string(),
+            "insufficient data: need at least 10, got 5 (test hint)"
         );
 
         let err = ForecastError::InvalidParameter("window must be positive".to_string());

@@ -358,6 +358,7 @@ impl PostProcessor {
             return Err(ForecastError::InsufficientData {
                 needed: config.initial_window + config.horizon,
                 got: n,
+                hint: None,
             });
         }
 

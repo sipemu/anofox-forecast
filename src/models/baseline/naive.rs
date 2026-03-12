@@ -14,12 +14,16 @@ use std::collections::HashMap;
 ///
 /// Supports exogenous regressors via TimeSeries.regressors.
 #[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Naive {
     last_value: Option<f64>,
+    #[cfg_attr(feature = "serde", serde(with = "crate::utils::persistence::nan_vec"))]
     fitted: Option<Vec<f64>>,
+    #[cfg_attr(feature = "serde", serde(with = "crate::utils::persistence::nan_vec"))]
     residuals: Option<Vec<f64>>,
     history: Option<Vec<f64>>,
     /// OLS result for exogenous regressors (if any).
+    #[cfg_attr(feature = "serde", serde(skip))]
     exog_ols: Option<OLSResult>,
 }
 

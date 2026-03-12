@@ -14,6 +14,7 @@ use std::collections::HashMap;
 
 /// Error component type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ErrorType {
     /// Additive errors
     #[default]
@@ -24,6 +25,7 @@ pub enum ErrorType {
 
 /// Trend component type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum TrendType {
     /// No trend
     #[default]
@@ -36,6 +38,7 @@ pub enum TrendType {
 
 /// Seasonal component type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum SeasonalType {
     /// No seasonality
     #[default]
@@ -48,6 +51,7 @@ pub enum SeasonalType {
 
 /// ETS model specification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ETSSpec {
     pub error: ErrorType,
     pub trend: TrendType,
@@ -418,6 +422,7 @@ macro_rules! ets_likelihood_loop {
 
 /// ETS state-space model.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ETS {
     /// Model specification.
     spec: ETSSpec,
@@ -440,8 +445,10 @@ pub struct ETS {
     /// Seasonal states.
     seasonals: Option<Vec<f64>>,
     /// Fitted values.
+    #[cfg_attr(feature = "serde", serde(with = "crate::utils::persistence::nan_vec"))]
     fitted: Option<Vec<f64>>,
     /// Residuals.
+    #[cfg_attr(feature = "serde", serde(with = "crate::utils::persistence::nan_vec"))]
     residuals: Option<Vec<f64>>,
     /// Residual variance.
     residual_variance: Option<f64>,
@@ -456,6 +463,7 @@ pub struct ETS {
     /// Series length.
     n: usize,
     /// OLS result for exogenous regressors.
+    #[cfg_attr(feature = "serde", serde(skip))]
     exog_ols: Option<OLSResult>,
 }
 
@@ -1493,6 +1501,14 @@ impl Forecaster for ETS {
             return Err(ForecastError::InsufficientData {
                 needed: min_len,
                 got: values.len(),
+                hint: Some(if self.spec.has_seasonal() {
+                    format!(
+                        "ETS with seasonality requires at least 2 * period = {} observations",
+                        min_len
+                    )
+                } else {
+                    "ETS requires at least 2 observations".into()
+                }),
             });
         }
 

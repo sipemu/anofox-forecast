@@ -194,6 +194,7 @@ impl ConformalPredictor {
             return Err(ForecastError::InsufficientData {
                 needed: 1,
                 got: cal_size,
+                hint: None,
             });
         }
 
@@ -243,6 +244,7 @@ impl ConformalPredictor {
             return Err(ForecastError::InsufficientData {
                 needed: n_folds,
                 got: n,
+                hint: None,
             });
         }
 
@@ -275,7 +277,11 @@ impl ConformalPredictor {
         let n = forecasts.len();
 
         if n < 2 {
-            return Err(ForecastError::InsufficientData { needed: 2, got: n });
+            return Err(ForecastError::InsufficientData {
+                needed: 2,
+                got: n,
+                hint: None,
+            });
         }
 
         // Jackknife+ uses leave-one-out residuals

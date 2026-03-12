@@ -87,13 +87,16 @@ impl Ensemble {
             return Vec::new();
         }
 
-        let horizon = values[0].len();
+        let horizon = values.iter().map(|v| v.len()).min().unwrap_or(0);
+        if horizon == 0 {
+            return Vec::new();
+        }
         let mut combined = vec![0.0; horizon];
 
         match self.method {
             CombinationMethod::Mean => {
                 for h in 0..horizon {
-                    let sum: f64 = values.iter().map(|v| v[h]).sum();
+                    let sum: f64 = values.iter().filter(|v| h < v.len()).map(|v| v[h]).sum();
                     combined[h] = sum / values.len() as f64;
                 }
             }
@@ -162,8 +165,11 @@ impl Forecaster for Ensemble {
             ));
         }
 
-        // Fit all models
+        // Fit all models (skip already-fitted ones from AutoEnsemble)
         for model in &mut self.models {
+            if model.is_fitted() {
+                continue;
+            }
             model.fit(series)?;
         }
 

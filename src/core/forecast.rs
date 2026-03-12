@@ -215,7 +215,8 @@ mod tests {
         assert_eq!(forecast.primary(), &[1.0]);
 
         // Dimension 1 exists but is empty
-        assert_eq!(forecast.series(1).unwrap(), &[]);
+        let empty: &[f64] = &[];
+        assert_eq!(forecast.series(1).unwrap(), empty);
     }
 
     #[test]

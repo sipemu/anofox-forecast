@@ -307,6 +307,10 @@ impl Forecaster for MSTLForecaster {
             return Err(ForecastError::InsufficientData {
                 needed: 2 * max_period,
                 got: values.len(),
+                hint: Some(format!(
+                    "MSTL requires at least 2 * max_period = {} observations for seasonal decomposition",
+                    2 * max_period
+                )),
             });
         }
 

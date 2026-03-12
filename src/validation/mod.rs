@@ -29,7 +29,8 @@ pub mod stationarity;
 
 // Re-export from residual_tests
 pub use residual_tests::{
-    box_pierce, durbin_watson, ljung_box, AutocorrelationType, DurbinWatsonResult, LjungBoxResult,
+    box_pierce, diagnose_residuals, durbin_watson, jarque_bera, ljung_box, AutocorrelationType,
+    DurbinWatsonResult, JarqueBeraResult, LjungBoxResult, ResidualDiagnostics,
 };
 
 // Re-export from stationarity

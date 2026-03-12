@@ -371,6 +371,132 @@ fn erfc(x: f64) -> f64 {
     }
 }
 
+/// Jarque-Bera normality test result.
+#[derive(Debug, Clone)]
+pub struct JarqueBeraResult {
+    /// Test statistic.
+    pub statistic: f64,
+    /// P-value (approximate, from chi-squared with df=2).
+    pub p_value: f64,
+    /// Sample skewness.
+    pub skewness: f64,
+    /// Sample excess kurtosis.
+    pub excess_kurtosis: f64,
+}
+
+impl JarqueBeraResult {
+    /// Check if residuals pass normality test at given significance level.
+    pub fn is_normal(&self, alpha: f64) -> bool {
+        self.p_value > alpha
+    }
+}
+
+/// Perform Jarque-Bera test for normality of residuals.
+pub fn jarque_bera(residuals: &[f64]) -> JarqueBeraResult {
+    let n = residuals.len() as f64;
+    if residuals.len() < 3 {
+        return JarqueBeraResult {
+            statistic: f64::NAN,
+            p_value: f64::NAN,
+            skewness: f64::NAN,
+            excess_kurtosis: f64::NAN,
+        };
+    }
+    let mean = residuals.iter().sum::<f64>() / n;
+    let m2: f64 = residuals.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / n;
+    let m3: f64 = residuals.iter().map(|r| (r - mean).powi(3)).sum::<f64>() / n;
+    let m4: f64 = residuals.iter().map(|r| (r - mean).powi(4)).sum::<f64>() / n;
+    if m2 == 0.0 {
+        return JarqueBeraResult {
+            statistic: 0.0,
+            p_value: 1.0,
+            skewness: 0.0,
+            excess_kurtosis: 0.0,
+        };
+    }
+    let skewness = m3 / m2.powf(1.5);
+    let kurtosis = m4 / m2.powi(2);
+    let excess_kurtosis = kurtosis - 3.0;
+    let jb = n / 6.0 * (skewness.powi(2) + excess_kurtosis.powi(2) / 4.0);
+    let p_value = chi_squared_sf(jb, 2);
+    JarqueBeraResult {
+        statistic: jb,
+        p_value,
+        skewness,
+        excess_kurtosis,
+    }
+}
+
+/// Unified residual diagnostics combining multiple tests.
+#[derive(Debug, Clone)]
+pub struct ResidualDiagnostics {
+    pub ljung_box: LjungBoxResult,
+    pub durbin_watson: DurbinWatsonResult,
+    pub jarque_bera: JarqueBeraResult,
+    pub mean: f64,
+    pub variance: f64,
+    pub n: usize,
+}
+
+impl ResidualDiagnostics {
+    /// Check if residuals are adequate (pass Ljung-Box at given alpha).
+    pub fn is_adequate(&self, alpha: f64) -> bool {
+        self.ljung_box.is_white_noise(alpha)
+    }
+}
+
+impl std::fmt::Display for ResidualDiagnostics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Residual Diagnostics (n={})", self.n)?;
+        writeln!(
+            f,
+            "  Mean: {:.6}, Variance: {:.6}",
+            self.mean, self.variance
+        )?;
+        writeln!(
+            f,
+            "  Ljung-Box: Q={:.4}, p={:.4}",
+            self.ljung_box.statistic, self.ljung_box.p_value
+        )?;
+        writeln!(
+            f,
+            "  Durbin-Watson: d={:.4} ({:?})",
+            self.durbin_watson.statistic, self.durbin_watson.interpretation
+        )?;
+        write!(
+            f,
+            "  Jarque-Bera: JB={:.4}, p={:.4} (skew={:.4}, kurt={:.4})",
+            self.jarque_bera.statistic,
+            self.jarque_bera.p_value,
+            self.jarque_bera.skewness,
+            self.jarque_bera.excess_kurtosis
+        )
+    }
+}
+
+/// Run all residual diagnostics in one call.
+pub fn diagnose_residuals(residuals: &[f64], fitted_params: usize) -> ResidualDiagnostics {
+    let n = residuals.len();
+    let mean = if n > 0 {
+        residuals.iter().sum::<f64>() / n as f64
+    } else {
+        0.0
+    };
+    let variance = if n > 1 {
+        residuals.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / (n - 1) as f64
+    } else {
+        0.0
+    };
+    ResidualDiagnostics {
+        ljung_box: ljung_box(residuals, None, fitted_params),
+        durbin_watson: durbin_watson(residuals),
+        jarque_bera: jarque_bera(residuals),
+        mean,
+        variance,
+        n,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

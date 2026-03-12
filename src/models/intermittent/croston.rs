@@ -10,6 +10,7 @@ use crate::utils::optimization::{nelder_mead, NelderMeadConfig};
 
 /// Croston's method variant.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum CrostonVariant {
     /// Classic Croston method.
     Classic,
@@ -21,6 +22,7 @@ pub enum CrostonVariant {
 
 /// Croston's method for intermittent demand forecasting.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Croston {
     /// Smoothing parameter (0.0 to 1.0).
     alpha: f64,
@@ -33,8 +35,10 @@ pub struct Croston {
     /// Estimated interval level.
     interval_level: Option<f64>,
     /// Fitted values.
+    #[cfg_attr(feature = "serde", serde(with = "crate::utils::persistence::nan_vec"))]
     fitted: Option<Vec<f64>>,
     /// Residuals.
+    #[cfg_attr(feature = "serde", serde(with = "crate::utils::persistence::nan_vec"))]
     residuals: Option<Vec<f64>>,
     /// Original series length.
     n: usize,
@@ -265,6 +269,7 @@ impl Forecaster for Croston {
             return Err(ForecastError::InsufficientData {
                 needed: 4,
                 got: values.len(),
+                hint: Some("Croston requires at least 4 observations for demand estimation".into()),
             });
         }
 

@@ -11,10 +11,13 @@ use crate::models::{validate_series_complete, Forecaster};
 /// Each forecast is equal to the observation from the same season
 /// in the previous year (or previous seasonal period).
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SeasonalNaive {
     period: usize,
     history: Option<Vec<f64>>,
+    #[cfg_attr(feature = "serde", serde(with = "crate::utils::persistence::nan_vec"))]
     fitted: Option<Vec<f64>>,
+    #[cfg_attr(feature = "serde", serde(with = "crate::utils::persistence::nan_vec"))]
     residuals: Option<Vec<f64>>,
     residual_variance: Option<f64>,
 }
@@ -51,6 +54,7 @@ impl Forecaster for SeasonalNaive {
             return Err(ForecastError::InsufficientData {
                 needed: self.period,
                 got: values.len(),
+                hint: None,
             });
         }
 
@@ -284,7 +288,11 @@ mod tests {
         let mut model = SeasonalNaive::new(4);
         assert!(matches!(
             model.fit(&ts),
-            Err(ForecastError::InsufficientData { needed: 4, got: 3 })
+            Err(ForecastError::InsufficientData {
+                needed: 4,
+                got: 3,
+                hint: None
+            })
         ));
     }
 

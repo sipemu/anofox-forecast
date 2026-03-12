@@ -666,6 +666,9 @@ impl Forecaster for DynamicTheta {
             return Err(ForecastError::InsufficientData {
                 needed: 4,
                 got: raw_values.len(),
+                hint: Some(
+                    "DynamicTheta requires at least 4 observations for trend estimation".into(),
+                ),
             });
         }
 

@@ -186,7 +186,7 @@ Error types for forecasting operations.
 ```rust
 pub enum ForecastError {
     EmptyData,
-    InsufficientData { needed: usize, got: usize },
+    InsufficientData { needed: usize, got: usize, hint: Option<String> },
     InvalidParameter(String),
     DimensionMismatch { expected: usize, got: usize },
     FitRequired,

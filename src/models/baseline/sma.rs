@@ -14,10 +14,13 @@ use crate::models::{validate_series_complete, Forecaster};
 /// Predicts future values as the mean of the last `window` observations.
 /// If window is 0, uses the mean of all historical data.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SimpleMovingAverage {
     window: usize, // 0 means use all data
     last_mean: Option<f64>,
+    #[cfg_attr(feature = "serde", serde(with = "crate::utils::persistence::nan_vec"))]
     fitted: Option<Vec<f64>>,
+    #[cfg_attr(feature = "serde", serde(with = "crate::utils::persistence::nan_vec"))]
     residuals: Option<Vec<f64>>,
     residual_variance: Option<f64>,
 }
@@ -110,6 +113,7 @@ impl Forecaster for SimpleMovingAverage {
             return Err(ForecastError::InsufficientData {
                 needed: self.window,
                 got: values.len(),
+                hint: None,
             });
         }
 
@@ -294,6 +298,7 @@ fn quantile_normal(p: f64) -> f64 {
 /// // All predictions will be 5.5 (mean of 1..10)
 /// ```
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct HistoricAverage {
     inner: SimpleMovingAverage,
 }
@@ -371,6 +376,7 @@ impl Forecaster for HistoricAverage {
 /// // All predictions will be 9.0 (mean of 8, 9, 10)
 /// ```
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct WindowAverage {
     inner: SimpleMovingAverage,
 }
@@ -458,7 +464,11 @@ mod tests {
         let mut model = SimpleMovingAverage::new(3);
         assert!(matches!(
             model.fit(&ts),
-            Err(ForecastError::InsufficientData { needed: 3, got: 2 })
+            Err(ForecastError::InsufficientData {
+                needed: 3,
+                got: 2,
+                hint: None
+            })
         ));
 
         // Unfitted model can't predict

@@ -702,7 +702,14 @@ impl Forecaster for MFLES {
         self.n = n;
 
         if n < 4 {
-            return Err(ForecastError::InsufficientData { needed: 4, got: n });
+            return Err(ForecastError::InsufficientData {
+                needed: 4,
+                got: n,
+                hint: Some(
+                    "MFLES requires at least 4 observations for trend and seasonal estimation"
+                        .into(),
+                ),
+            });
         }
 
         // Check for exogenous regressors

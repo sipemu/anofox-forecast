@@ -62,6 +62,7 @@ impl Forecaster for SeasonalWindowAverage {
             return Err(ForecastError::InsufficientData {
                 needed: self.period,
                 got: values.len(),
+                hint: None,
             });
         }
 

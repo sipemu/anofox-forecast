@@ -659,6 +659,14 @@ impl Forecaster for AutoARIMA {
             return Err(ForecastError::InsufficientData {
                 needed: min_required,
                 got: values.len(),
+                hint: Some(if s > 1 {
+                    format!(
+                        "AutoARIMA needs at least 3 seasonal cycles (3*{}={})",
+                        s, min_required
+                    )
+                } else {
+                    "AutoARIMA needs at least 10 observations for model selection".into()
+                }),
             });
         }
 

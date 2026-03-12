@@ -1298,6 +1298,50 @@ impl TBATSForecaster {
         }
     }
 
+    /// Create a TBATSForecaster with specified seasonal periods.
+    ///
+    /// @param periods - Array of seasonal periods
+    /// @returns A new TBATSForecaster
+    #[wasm_bindgen(js_name = withSeasonalPeriods)]
+    pub fn with_seasonal_periods(periods: Vec<usize>) -> Self {
+        Self {
+            model: TBATS::new(periods),
+        }
+    }
+
+    /// Enable Box-Cox transformation.
+    ///
+    /// @param lambda - Box-Cox parameter (0 = log, 1 = identity)
+    #[wasm_bindgen(js_name = setBoxCox)]
+    pub fn set_box_cox(&mut self, lambda: f64) {
+        self.model = std::mem::replace(&mut self.model, TBATS::new(vec![])).with_box_cox(lambda);
+    }
+
+    /// Enable damped trend.
+    ///
+    /// @param phi - Damping parameter (typically 0.8-0.99)
+    #[wasm_bindgen(js_name = setDampedTrend)]
+    pub fn set_damped_trend(&mut self, phi: f64) {
+        self.model = std::mem::replace(&mut self.model, TBATS::new(vec![])).with_damped_trend(phi);
+    }
+
+    /// Set ARMA error orders.
+    ///
+    /// @param p - AR order
+    /// @param q - MA order
+    #[wasm_bindgen(js_name = setArma)]
+    pub fn set_arma(&mut self, p: usize, q: usize) {
+        self.model = std::mem::replace(&mut self.model, TBATS::new(vec![])).with_arma(p, q);
+    }
+
+    /// Set Fourier K (number of harmonics) for each seasonal period.
+    ///
+    /// @param k - Array of K values (one per seasonal period)
+    #[wasm_bindgen(js_name = setFourierK)]
+    pub fn set_fourier_k(&mut self, k: Vec<usize>) {
+        self.model = std::mem::replace(&mut self.model, TBATS::new(vec![])).with_fourier_k(k);
+    }
+
     pub fn fit(&mut self, series: &TimeSeries) -> Result<(), JsError> {
         self.model
             .fit(series.inner())
@@ -1307,6 +1351,18 @@ impl TBATSForecaster {
     pub fn predict(&self, horizon: usize) -> Result<Forecast, JsError> {
         self.model
             .predict(horizon)
+            .map(Forecast::from_inner)
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// Predict with prediction intervals.
+    ///
+    /// @param horizon - Number of steps to forecast
+    /// @param level - Confidence level (e.g., 0.95 for 95% intervals)
+    #[wasm_bindgen(js_name = predictWithIntervals)]
+    pub fn predict_with_intervals(&self, horizon: usize, level: f64) -> Result<Forecast, JsError> {
+        self.model
+            .predict_with_intervals(horizon, level)
             .map(Forecast::from_inner)
             .map_err(|e| JsError::new(&e.to_string()))
     }
@@ -1452,6 +1508,142 @@ impl GARCHForecaster {
             .map_err(|e| JsError::new(&e.to_string()))
     }
 
+    #[wasm_bindgen(getter)]
+    pub fn name(&self) -> String {
+        self.model.name().to_string()
+    }
+}
+
+// =============================================================================
+// ENSEMBLE
+// =============================================================================
+
+/// Ensemble forecaster that combines multiple models.
+///
+/// Supports mean, median, weighted MSE, and custom-weight combination.
+/// Models are specified by name strings (e.g., "naive", "sma5", "ses").
+#[wasm_bindgen]
+pub struct EnsembleForecaster {
+    model: anofox_forecast::models::ensemble::Ensemble,
+}
+
+/// Create a boxed forecaster from a model name string.
+fn model_from_name(name: &str) -> Result<Box<dyn ForecasterTrait>, JsError> {
+    match name.to_lowercase().as_str() {
+        "naive" => Ok(Box::new(Naive::new())),
+        "mean" | "historicaverage" => Ok(Box::new(HistoricAverage::new())),
+        "rwdrift" | "randomwalkwithdrift" => Ok(Box::new(RandomWalkWithDrift::new())),
+        "ses" | "simpleexponentialsmoothing" => Ok(Box::new(SimpleExponentialSmoothing::auto())),
+        "holt" | "holtlineartrend" => Ok(Box::new(HoltLinearTrend::auto())),
+        "autoarima" => Ok(Box::new(AutoARIMA::new())),
+        "autoets" => Ok(Box::new(AutoETS::new())),
+        "autotheta" => Ok(Box::new(AutoTheta::new())),
+        s if s.starts_with("sma") => {
+            let window: usize = s[3..].parse().unwrap_or(5);
+            Ok(Box::new(SimpleMovingAverage::new(window)))
+        }
+        s if s.starts_with("wa") && s.len() > 2 => {
+            let window: usize = s[2..].parse().unwrap_or(5);
+            Ok(Box::new(WindowAverage::new(window)))
+        }
+        other => Err(JsError::new(&format!(
+            "Unknown model '{}'. Use: naive, mean, rwdrift, ses, holt, autoarima, autoets, autotheta, sma<N>, wa<N>",
+            other
+        ))),
+    }
+}
+
+#[wasm_bindgen]
+impl EnsembleForecaster {
+    /// Create an ensemble from an array of model name strings.
+    ///
+    /// Supported names: "naive", "mean", "rwdrift", "ses", "holt",
+    /// "autoarima", "autoets", "autotheta", "sma5", "wa10", etc.
+    ///
+    /// @param modelNames - Array of model name strings
+    #[wasm_bindgen(constructor)]
+    pub fn new(model_names: Vec<String>) -> Result<EnsembleForecaster, JsError> {
+        let models: Result<Vec<Box<dyn ForecasterTrait>>, JsError> =
+            model_names.iter().map(|n| model_from_name(n)).collect();
+        Ok(Self {
+            model: anofox_forecast::models::ensemble::Ensemble::new(models?),
+        })
+    }
+
+    /// Set custom combination weights.
+    ///
+    /// Weights are normalized to sum to 1. Length must match number of models.
+    ///
+    /// @param weights - Array of combination weights
+    #[wasm_bindgen(js_name = setWeights)]
+    pub fn set_weights(&mut self, weights: Vec<f64>) {
+        self.model = std::mem::replace(
+            &mut self.model,
+            anofox_forecast::models::ensemble::Ensemble::new(vec![]),
+        )
+        .with_weights(weights);
+    }
+
+    /// Set the combination method to median.
+    #[wasm_bindgen(js_name = setMedian)]
+    pub fn set_median(&mut self) {
+        self.model = std::mem::replace(
+            &mut self.model,
+            anofox_forecast::models::ensemble::Ensemble::new(vec![]),
+        )
+        .with_method(anofox_forecast::models::ensemble::CombinationMethod::Median);
+    }
+
+    /// Set the combination method to weighted MSE.
+    #[wasm_bindgen(js_name = setWeightedMse)]
+    pub fn set_weighted_mse(&mut self) {
+        self.model = std::mem::replace(
+            &mut self.model,
+            anofox_forecast::models::ensemble::Ensemble::new(vec![]),
+        )
+        .with_method(anofox_forecast::models::ensemble::CombinationMethod::WeightedMSE);
+    }
+
+    /// Fit all models in the ensemble.
+    ///
+    /// @param series - TimeSeries to fit
+    pub fn fit(&mut self, series: &TimeSeries) -> Result<(), JsError> {
+        self.model
+            .fit(series.inner())
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// Predict future values using the combined ensemble.
+    ///
+    /// @param horizon - Number of steps to forecast
+    /// @returns Forecast with combined point predictions
+    pub fn predict(&self, horizon: usize) -> Result<Forecast, JsError> {
+        self.model
+            .predict(horizon)
+            .map(Forecast::from_inner)
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// Predict with prediction intervals.
+    ///
+    /// @param horizon - Number of steps to forecast
+    /// @param level - Confidence level (e.g., 0.95 for 95% intervals)
+    /// @returns Forecast with combined predictions and intervals
+    #[wasm_bindgen(js_name = predictWithIntervals)]
+    pub fn predict_with_intervals(&self, horizon: usize, level: f64) -> Result<Forecast, JsError> {
+        self.model
+            .predict_with_intervals(horizon, level)
+            .map(Forecast::from_inner)
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// Get the number of models in the ensemble.
+    #[wasm_bindgen(js_name = modelCount)]
+    pub fn model_count(&self) -> usize {
+        self.model.model_count()
+    }
+
+    /// Get the model name.
     #[wasm_bindgen(getter)]
     pub fn name(&self) -> String {
         self.model.name().to_string()
@@ -2515,5 +2707,97 @@ mod tests {
         // Should handle small values without underflow
         assert_eq!(forecast.values().len(), 5);
         assert!(forecast.values()[0] > 0.0);
+    }
+
+    // =========================================================================
+    // TBATS BUILDER METHODS
+    // =========================================================================
+
+    #[wasm_bindgen_test]
+    fn test_tbats_with_seasonal_periods() {
+        let ts = create_seasonal_series(48, 12);
+        let mut model = TBATSForecaster::with_seasonal_periods(vec![12]);
+
+        model.fit(&ts).unwrap();
+        assert_eq!(model.name(), "TBATS");
+
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.values().len(), 5);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_tbats_set_box_cox() {
+        let ts = create_seasonal_series(48, 12);
+        let mut model = TBATSForecaster::new(vec![12]);
+        model.set_box_cox(0.5);
+
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.values().len(), 5);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_tbats_predict_with_intervals() {
+        let ts = create_seasonal_series(48, 12);
+        let mut model = TBATSForecaster::new(vec![12]);
+
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict_with_intervals(5, 0.95).unwrap();
+        assert_eq!(forecast.horizon(), 5);
+    }
+
+    // =========================================================================
+    // ENSEMBLE MODELS
+    // =========================================================================
+
+    #[wasm_bindgen_test]
+    fn test_ensemble_basic() {
+        let ts = create_test_series(30);
+        let mut model =
+            EnsembleForecaster::new(vec!["naive".to_string(), "sma5".to_string()]).unwrap();
+
+        model.fit(&ts).unwrap();
+        assert_eq!(model.model_count(), 2);
+
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.values().len(), 5);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_ensemble_set_weights() {
+        let ts = create_test_series(30);
+        let mut model =
+            EnsembleForecaster::new(vec!["naive".to_string(), "sma5".to_string()]).unwrap();
+        model.set_weights(vec![0.7, 0.3]);
+
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.values().len(), 5);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_ensemble_set_median() {
+        let ts = create_test_series(30);
+        let mut model = EnsembleForecaster::new(vec![
+            "naive".to_string(),
+            "sma5".to_string(),
+            "mean".to_string(),
+        ])
+        .unwrap();
+        model.set_median();
+
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.values().len(), 5);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_ensemble_invalid_model() {
+        let result = EnsembleForecaster::new(vec!["nonexistent".to_string()]);
+        assert!(result.is_err());
     }
 }

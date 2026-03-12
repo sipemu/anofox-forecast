@@ -18,6 +18,7 @@ use std::collections::HashMap;
 /// Controls how seasonal components are extracted and reapplied.
 /// Default is `Multiplicative` to match NIXTLA statsforecast behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum DecompositionType {
     /// Additive decomposition: y = trend + seasonal + remainder
     ///
@@ -41,6 +42,7 @@ pub enum DecompositionType {
 /// For seasonal data, supports both additive and multiplicative decomposition.
 /// Default is multiplicative to match NIXTLA statsforecast behavior.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Theta {
     /// Theta parameter (default: 2.0 for STM).
     theta: f64,
@@ -64,14 +66,17 @@ pub struct Theta {
     /// This matches statsforecast's seasonal_naive behavior.
     seasonal_forecast: Option<Vec<f64>>,
     /// Fitted values.
+    #[cfg_attr(feature = "serde", serde(with = "crate::utils::persistence::nan_vec"))]
     fitted: Option<Vec<f64>>,
     /// Residuals.
+    #[cfg_attr(feature = "serde", serde(with = "crate::utils::persistence::nan_vec"))]
     residuals: Option<Vec<f64>>,
     /// Residual variance.
     residual_variance: Option<f64>,
     /// Series length.
     n: usize,
     /// OLS result for exogenous regressors (if any).
+    #[cfg_attr(feature = "serde", serde(skip))]
     exog_ols: Option<OLSResult>,
 }
 
@@ -638,6 +643,7 @@ impl Forecaster for Theta {
             return Err(ForecastError::InsufficientData {
                 needed: 4,
                 got: raw_values.len(),
+                hint: Some("Theta requires at least 4 observations for trend estimation".into()),
             });
         }
 

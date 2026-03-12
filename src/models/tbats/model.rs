@@ -795,6 +795,10 @@ impl Forecaster for TBATS {
             return Err(ForecastError::InsufficientData {
                 needed: min_required,
                 got: values.len(),
+                hint: Some(format!(
+                    "TBATS requires at least max(max_period, 10) = {} observations for seasonal estimation",
+                    min_required
+                )),
             });
         }
 

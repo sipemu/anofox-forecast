@@ -251,6 +251,10 @@ impl Forecaster for SeasonalES {
             return Err(ForecastError::InsufficientData {
                 needed: self.period,
                 got: n,
+                hint: Some(format!(
+                    "Seasonal exponential smoothing requires at least period = {} observations",
+                    self.period
+                )),
             });
         }
 
