@@ -68,19 +68,23 @@ console.log(forecast.values);
   - Bootstrap sampling uses `par_iter` when `parallel` is enabled
 
 - **Ensemble Methods**
-  - Mean, Median, Weighted MSE, and Custom weight combination strategies
+  - Mean, Median, Weighted MSE, InverseAIC, Stacking, HorizonAdaptive combination strategies
   - Widest-envelope interval combination for ensemble prediction intervals
   - Automatic ensemble construction from model registry
+  - `ensemble_best_k()`: Auto-select top-k models by holdout performance
 
 - **Model Comparison & Evaluation**
   - `compare_models()`: Side-by-side model evaluation with timing
   - `compare_registry()`: Compare all registered models at once
-  - Accuracy metrics: MAE, MSE, RMSE, MAPE, sMAPE, MASE, and more
-  - Time series cross-validation with configurable strategies
+  - `fit_all_and_compare()`: Fit all registry models, rank by holdout accuracy
+  - `cross_validate_all()`: CV all registry models at once with aggregated metrics
+  - Accuracy metrics: MAE, MSE, RMSE, MAPE, sMAPE, MASE, WAPE, MDA, Theil's U, MSIS, coverage, skill scores
+  - `ForecastMetrics::compute()`: All 10 core metrics in a single call
+  - Time series cross-validation with configurable strategies and embargo
   - `rolling_forecast()`: Walk-forward evaluation with rolling/expanding windows
   - Streaming CV aggregation with early stopping (`cross_validate_early_stop()`)
-  - Residual diagnostics: Ljung-Box, Durbin-Watson, Jarque-Bera, Box-Pierce
-  - `diagnose_residuals()`: Unified residual diagnostic report
+  - `ModelDiagnostics`: Ljung-Box, Jarque-Bera, Breusch-Pagan residual diagnostics
+  - `IntermittentDiagnostics`: Syntetos-Boylan demand classification (Smooth/Erratic/Intermittent/Lumpy)
 
 - **Time Series Feature Extraction (76+ features)**
   - Basic statistics (mean, variance, quantiles, energy, etc.)
@@ -100,10 +104,11 @@ console.log(forecast.values);
   - MSTL (Multiple Seasonal-Trend decomposition) for complex seasonality
   - Prophet-style Fourier seasonality (`FourierSeasonality`) with flexible harmonic modeling
   - `TimeSeries::seasonal_strength()` / `trend_strength()` — quick strength assessment
+  - Convenience: `deseasonalize()`, `detrend()`, `seasonal_adjust()`, `recompose()`
 
 - **Hierarchical Forecasting**
   - `HierarchyTree`: Define parent-children structure for grouped series
-  - Bottom-up, top-down, and MinTrace OLS reconciliation methods
+  - Bottom-up, top-down, MiddleOut, MinTrace OLS, and MinTrace Shrink (Ledoit-Wolf) reconciliation
   - Ensures coherent forecasts across hierarchical levels
 
 - **Changepoint Detection**
@@ -115,6 +120,29 @@ console.log(forecast.values);
   - Statistical methods (IQR, z-score, modified z-score)
   - Automatic threshold selection
   - `TimeSeries::with_outliers_replaced()` — automatic outlier replacement with local median
+
+- **Forecast Constraints**
+  - `NonNegative`, `LowerBound`, `UpperBound`, `Bounds`, `IntegerRound`, `Custom`
+  - Convenience methods: `forecast.non_negative()`, `.clamp(lo, hi)`, `.round_to_integer()`
+  - Constraints apply to point forecasts and prediction intervals
+
+- **Model Warm-Starting**
+  - `ETS::with_initial_states()` — start from pre-fitted level/trend/seasonal states
+  - `SES::with_alpha()` — use pre-fitted smoothing parameter
+  - `ARIMA::with_coefficients()` — use pre-fitted AR/MA coefficients
+  - `Theta::with_theta_value()` — use specified theta parameter
+  - `Forecaster::fitted_params()` — extract fitted parameters for transfer
+
+- **Forecast Explainability**
+  - `Explainable` trait with `ForecastExplanation` (level, trend, seasonal, residual, named components)
+  - Implemented for ETS, Theta, and MSTL models
+  - Components sum to forecast values for verification
+
+- **TimeSeries Temporal Aggregation**
+  - `aggregate(period, method)` — Sum, Mean, Median, First, Last, Min, Max
+  - `downsample(factor)` — decimation with timestamp preservation
+  - `upsample(factor, method)` — Linear, ForwardFill, BackwardFill, Zero interpolation
+  - `sliding_window_aggregate(window, step, method)` — configurable sliding windows
 
 - **Bootstrap Confidence Intervals**
   - Residual bootstrap and block bootstrap methods
@@ -368,8 +396,8 @@ println!("Upper: {:?}", intervals.upper());
 | **Volatility** | `GARCH` |
 | **Multivariate** | `VAR` (Vector Autoregression) |
 | **State-Space** | `KalmanFilter`, `StateSpaceModel` (local level, local linear trend) |
-| **Ensemble** | `Ensemble` (Mean, Median, Weighted MSE, Custom) |
-| **Hierarchical** | `HierarchyTree` (BottomUp, TopDown, MinTraceOls reconciliation) |
+| **Ensemble** | `Ensemble` (Mean, Median, Weighted MSE, InverseAIC, Stacking, HorizonAdaptive) |
+| **Hierarchical** | `HierarchyTree` (BottomUp, TopDown, MiddleOut, MinTraceOls, MinTraceShrink) |
 
 ### Utilities
 
@@ -384,6 +412,13 @@ println!("Upper: {:?}", intervals.upper());
 | `fit_predict_many()` | Batch fit-predict across multiple series |
 | `bootstrap_forecast()` | Bootstrap confidence intervals for any model |
 | `diagnose_residuals()` | Unified residual diagnostics (Ljung-Box, DW, Jarque-Bera) |
+| `ModelDiagnostics` | Comprehensive diagnostics: Ljung-Box, Jarque-Bera, Breusch-Pagan |
+| `IntermittentDiagnostics` | Syntetos-Boylan demand classification with model recommendations |
+| `ForecastMetrics::compute()` | All 10 metrics in one call (MAE through Theil's U) |
+| `fit_all_and_compare()` | Fit all registry models, rank by holdout accuracy |
+| `cross_validate_all()` | CV all registry models with aggregated metrics |
+| `ensemble_best_k()` | Auto-select top-k models into an ensemble |
+| `deseasonalize()` / `seasonal_adjust()` | Remove seasonal component from data or TimeSeries |
 | `select_features()` | Automated feature selection (variance, correlation, top-K) |
 | `to_json()` / `from_json()` | Serialization for models, `Forecast`, and `TimeSeries` (requires `serde` feature) |
 | `to_bincode()` / `from_bincode()` | Binary serialization (requires `serde` feature) |

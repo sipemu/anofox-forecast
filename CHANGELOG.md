@@ -169,7 +169,110 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Persistence Module Tests**
   - 27 tests (from 6): JSON/bincode round-trips, file I/O, error cases, helper modules
 
+- **Advanced Forecasting Metrics**
+  - `wape()` — Weighted Absolute Percentage Error
+  - `mda()` — Mean Directional Accuracy (direction-of-change)
+  - `theils_u1()` / `theils_u2()` — Theil's U statistics (absolute and relative to naive)
+  - `msis()` — Mean Scaled Interval Score for probabilistic forecast evaluation
+  - `coverage()` — Empirical coverage rate for prediction intervals
+  - `skill_score()` — Relative improvement over a baseline model
+  - `ForecastMetrics::compute()` — all 10 metrics (MAE, MSE, RMSE, MAPE, SMAPE, MASE, WAPE, MDA, U1, U2) in one call
+
+- **Model Warm-Starting**
+  - `ETS::with_initial_states(spec, period, level, trend, seasonal_values)` — pre-set ETS states
+  - `SES::with_alpha(alpha, level)` — pre-fitted SES (predict without fit)
+  - `ARIMA::with_coefficients(p, d, q, ar, ma, intercept)` — pre-fitted ARIMA coefficients
+  - `Theta::with_theta_value(theta, alpha, level, b)` — pre-fitted Theta state
+  - `Forecaster::fitted_params()` — extract `FittedParams` from any fitted model
+
+- **Forecast Constraints**
+  - `ForecastConstraint` enum: `NonNegative`, `LowerBound`, `UpperBound`, `Bounds`, `IntegerRound`, `Custom`
+  - `ConstrainedForecast::apply()` — apply constraints to point forecasts and intervals
+  - `Forecast::non_negative()`, `.clamp(lo, hi)`, `.round_to_integer()` convenience methods
+
+- **Forecast Combination Convenience**
+  - `fit_all_and_compare()` — fit all models in registry, rank by holdout MAE/RMSE/MAPE
+  - `cross_validate_all()` — cross-validate all registry models with aggregated metrics
+  - `ensemble_best_k()` — auto-select top-k models by performance into an ensemble
+  - `ModelComparison` / `CVComparison` with `Display` formatted tables
+
+- **STL Convenience Functions** (`seasonality::convenience` module)
+  - `deseasonalize()`, `detrend()`, `seasonal_component()`, `trend_component()`, `remainder_component()`
+  - `recompose()` — reconstruct series from trend + seasonal + remainder
+  - `seasonal_adjust()` — return new TimeSeries with seasonal component removed
+  - `STLResult::deseasonalized()`, `.detrended()`, `.recompose()` methods
+
+- **Intermittent Demand Diagnostics**
+  - `IntermittentDiagnostics` — Syntetos-Boylan (2005) demand classification framework
+  - `DemandClassification`: Smooth, Erratic, Intermittent, Lumpy (ADI/CV² thresholds)
+  - ADI (Average Demand Interval), CV² of non-zero demands, zero fraction
+  - `recommended_model()` — suggest Croston/TSB/SES based on classification
+  - Coverage rate, bias, and Periods-in-Stock (PIS) metrics
+
+- **Model Diagnostics Pipeline**
+  - `ModelDiagnostics::from_residuals()` — Ljung-Box, Jarque-Bera, Breusch-Pagan tests
+  - `ModelDiagnostics::from_forecaster()` — extract residuals and run all diagnostics
+  - ACF/PACF of residuals, residual mean/std, `passes_all` flag
+
+- **Forecast Explainability**
+  - `ForecastExplanation` struct: level, trend, seasonal, residual, named components
+  - `Explainable` trait implemented for ETS, Theta, MSTLForecaster
+  - Components sum to forecast values
+
+- **TimeSeries Temporal Aggregation**
+  - `aggregate(period, method)` — Sum, Mean, Median, First, Last, Min, Max
+  - `downsample(factor)` — decimation with timestamp preservation
+  - `upsample(factor, method)` — Linear, ForwardFill, BackwardFill, Zero interpolation
+  - `sliding_window_aggregate(window, step, method)` — configurable sliding windows
+
+- **Hierarchy Reconciliation Methods**
+  - `ReconciliationMethod::MiddleOut { middle_level }` — reconcile from a chosen depth
+  - `ReconciliationMethod::MinTraceShrink` — MinT with Ledoit-Wolf shrinkage covariance
+
+- **Ensemble Combination Methods**
+  - `CombinationMethod::InverseAIC` — Akaike weights from estimated AIC
+  - `CombinationMethod::Stacking { folds }` — non-negative constrained linear combiner
+  - `CombinationMethod::HorizonAdaptive` — per-horizon weights from rolling-origin evaluation
+
+- **Error Context**
+  - `ForecastError::SubModelError` — wraps sub-model failures with model name context
+  - `ForecastError::FitRequired` now carries optional model name
+
+- **Forecaster Trait Adapters**
+  - `VARForecaster` — adapts multivariate VAR for univariate Forecaster interface
+  - `KalmanForecaster` — adapts Kalman filter with local_level/local_linear_trend constructors
+
+- **CV Embargo**
+  - `CvFoldGenerator::embargo(n)` — exclude observations after test sets (financial ML)
+  - `CVConfig::with_embargo(n)` — embargo for config-based CV
+
+- **WASM/JS Enhancements**
+  - `AutoForecastBuilder` — fluent builder for AutoForecast in JS
+  - `EnsembleForecaster.setInverseAic()` / `.setStacking()` / `.setHorizonAdaptive()` / `.setMethod(name)`
+  - `Forecast.nonNegative()`, `.clamp()`, `.roundToInteger()` — constraint methods in JS
+  - `JsModelDiagnostics.fromResiduals()` — diagnostics in JS with all property accessors
+  - `VARForecaster`, `KalmanForecaster` — multivariate and state-space models in JS
+
+- **Benchmarks**
+  - STL scratch reuse comparison, MSTL multi-period
+  - ARIMA/SARIMA fitting at multiple series lengths
+  - Periodicity detection (autocorrelation, Welch periodogram)
+  - Model comparison (Naive, SES, Theta, ETS, ARIMA)
+  - Hot paths (SIMD ops, forecast construction, TimeSeries slicing)
+
+- **Integration Tests**
+  - VAR: 13 tests (coefficient recovery, Granger causality, forecast accuracy)
+  - Persistence: 16 tests (JSON/bincode round-trips for all model types)
+  - Pipeline: 12 tests (ensemble+constraints+postprocessing, STL+recompose, CV+select)
+
+- **Prediction Interval Improvements**
+  - RandomWalkWithDrift: proper drift SE + variance scaling formula
+  - SMA/WindowAverage: (1 + 1/w) factor for mean estimation uncertainty
+
 ### Changed
+
+- Kalman filter uses flat `DenseMatrix` layout with in-place operations and pre-allocated scratch buffers
+- Ensemble supports InverseAIC, Stacking, and HorizonAdaptive combination methods
 
 - `parallel` feature now covers AutoForecast, batch processing, model comparison, bootstrap, cross-validation folds, and rolling forecast windows (previously only AutoARIMA)
 - `serde` feature now includes bincode for binary serialization alongside JSON
@@ -180,7 +283,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ETS uses `Cow<[f64]>` to avoid cloning series values when no regressors are present
 - Cross-validation uses direct slice references to avoid intermediate allocations per fold
 - Ensemble `predict_with_intervals()` produces widest-envelope combined intervals
-- Test coverage increased to 1,970+ tests
+- Test coverage increased to 2,000+ tests
 - `MissingValuePolicy` enum has 4 new variants (breaking for exhaustive `match` — acceptable under 0.x semver)
 
 ## [0.4.1] - 2026-01-16
