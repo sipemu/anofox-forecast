@@ -37,7 +37,7 @@ use crate::utils::optimization::{nelder_mead, NelderMeadConfig};
 /// let forecast = model.predict(24).unwrap();
 /// ```
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TBATS {
     /// Seasonal periods.
     seasonal_periods: Vec<usize>,
@@ -63,9 +63,11 @@ pub struct TBATS {
     gamma_one: Vec<f64>,
     /// Gamma two (sine component smoothing) for each period.
     gamma_two: Vec<f64>,
-    /// AR coefficients.
+    /// AR coefficients (reserved for future ARMA error support).
+    #[allow(dead_code)]
     ar_coeffs: Vec<f64>,
-    /// MA coefficients.
+    /// MA coefficients (reserved for future ARMA error support).
+    #[allow(dead_code)]
     ma_coeffs: Vec<f64>,
     /// State vector: [level, trend, s1_cos, s1_sin, s2_cos, s2_sin, ...].
     state: Vec<f64>,
@@ -391,106 +393,6 @@ impl TBATS {
     fn state_dim(&self) -> usize {
         let base = if self.use_trend { 2 } else { 1 };
         base + self.tau()
-    }
-
-    /// Build observation vector w (only level, trend if damped, and cosine components).
-    #[allow(dead_code)]
-    fn build_w(&self) -> Vec<f64> {
-        let dim = self.state_dim();
-        let mut w = vec![0.0; dim];
-
-        // Level coefficient = 1
-        w[0] = 1.0;
-
-        // Trend coefficient = phi (or 1 if not damped)
-        if self.use_trend {
-            w[1] = self.phi;
-        }
-
-        // Only cosine coefficients contribute to observation (w = [1, phi, 1, 0, 1, 0, ...])
-        let base = if self.use_trend { 2 } else { 1 };
-        let mut pos = base;
-        for &k in &self.fourier_k {
-            for j in 0..k {
-                w[pos + 2 * j] = 1.0; // cos coefficient
-                                      // w[pos + 2*j + 1] = 0.0; // sin coefficient (already 0)
-            }
-            pos += 2 * k;
-        }
-
-        w
-    }
-
-    /// Build g vector (smoothing gains).
-    #[allow(dead_code)]
-    fn build_g(&self) -> Vec<f64> {
-        let dim = self.state_dim();
-        let mut g = vec![0.0; dim];
-
-        // Level gain = alpha
-        g[0] = self.alpha;
-
-        // Trend gain = beta
-        if self.use_trend {
-            g[1] = self.beta;
-        }
-
-        // Seasonal gains: gamma_one for cos, gamma_two for sin
-        let base = if self.use_trend { 2 } else { 1 };
-        let mut pos = base;
-        for (period_idx, &k) in self.fourier_k.iter().enumerate() {
-            let g1 = self.gamma_one.get(period_idx).copied().unwrap_or(0.0);
-            let g2 = self.gamma_two.get(period_idx).copied().unwrap_or(0.0);
-            for j in 0..k {
-                g[pos + 2 * j] = g1; // cos gain
-                g[pos + 2 * j + 1] = g2; // sin gain
-            }
-            pos += 2 * k;
-        }
-
-        g
-    }
-
-    /// Build F matrix (state transition).
-    #[allow(dead_code)]
-    fn build_f(&self) -> Vec<Vec<f64>> {
-        let dim = self.state_dim();
-        let mut f = vec![vec![0.0; dim]; dim];
-        let base = if self.use_trend { 2 } else { 1 };
-
-        // Level row: level_{t+1} = level_t + phi * trend_t
-        f[0][0] = 1.0;
-        if self.use_trend {
-            f[0][1] = self.phi;
-        }
-
-        // Trend row: trend_{t+1} = phi * trend_t
-        if self.use_trend {
-            f[1][1] = self.phi;
-        }
-
-        // Seasonal rotation blocks
-        let mut pos = base;
-        for (period_idx, &k) in self.fourier_k.iter().enumerate() {
-            let period = self.seasonal_periods[period_idx];
-            for j in 0..k {
-                let freq = 2.0 * std::f64::consts::PI * (j + 1) as f64 / period as f64;
-                let cos_freq = freq.cos();
-                let sin_freq = freq.sin();
-
-                let idx_cos = pos + 2 * j;
-                let idx_sin = pos + 2 * j + 1;
-
-                // Rotation: [cos', sin'] = [[cos, sin], [-sin, cos]] @ [cos, sin]
-                f[idx_cos][idx_cos] = cos_freq;
-                f[idx_cos][idx_sin] = sin_freq;
-                f[idx_sin][idx_cos] = -sin_freq;
-                f[idx_sin][idx_sin] = cos_freq;
-            }
-            pos += 2 * k;
-        }
-
-        f
     }
 
     /// Initialize state vector from data.

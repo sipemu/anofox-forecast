@@ -37,7 +37,7 @@ pub use super::model::DecompositionType;
 /// - Bn: Slope of dynamic linear fit
 /// - mu: Current forecast
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DynamicTheta {
     /// Smoothing parameter.
     alpha: f64,

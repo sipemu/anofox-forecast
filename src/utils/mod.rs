@@ -15,9 +15,10 @@ pub use comparison::{
     compare_models, compare_registry, ComparisonConfig, ComparisonResult, ComparisonTable,
 };
 pub use cross_validation::{
-    cross_validate, grouped_cross_validate, train_test_split, train_test_split_at,
-    AggregatedMetrics, CVConfig, CVResults, CVStrategy, ConstantFill, CvFoldGenerator,
-    FillStrategy, Fold, GroupedCVResults, LastValueFill, MeanFill, MedianFill, ModeFill, ZeroFill,
+    cross_validate, grouped_cross_validate, rolling_forecast, train_test_split,
+    train_test_split_at, AggregatedMetrics, CVConfig, CVResults, CVStrategy, ConstantFill,
+    CvFoldGenerator, FillStrategy, Fold, GroupedCVResults, LastValueFill, MeanFill, MedianFill,
+    ModeFill, RollingForecastConfig, RollingForecastResult, RollingForecastWindow, ZeroFill,
 };
 pub use metrics::{calculate_metrics, AccuracyMetrics};
 pub use ols::{ols_fit, ols_residuals, OLSResult};

@@ -9,6 +9,7 @@ use crate::models::{validate_series_complete, Forecaster};
 
 /// ADIDA method for intermittent demand forecasting.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ADIDA {
     /// Smoothing parameter for SES (if None, will be optimized).
     alpha: Option<f64>,
@@ -524,6 +525,151 @@ mod tests {
         let forecast = model.predict(5).unwrap();
         for &v in forecast.primary() {
             assert!(v > 0.0, "Forecast should be positive for demand data");
+        }
+    }
+
+    // ==================== Edge cases ====================
+
+    #[test]
+    fn adida_all_zero_demand() {
+        let timestamps = make_timestamps(20);
+        let values = vec![0.0; 20];
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = ADIDA::new();
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(5).unwrap();
+        for &v in forecast.primary() {
+            assert!((v - 0.0).abs() < 1e-10, "All-zero should forecast zero");
+        }
+        assert_eq!(model.aggregation_level(), Some(1));
+    }
+
+    #[test]
+    fn adida_single_nonzero_demand() {
+        // Only one non-zero value
+        let timestamps = make_timestamps(10);
+        let mut values = vec![0.0; 10];
+        values[5] = 10.0;
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = ADIDA::new();
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(5).unwrap();
+        for &v in forecast.primary() {
+            assert!(v.is_finite());
+        }
+    }
+
+    #[test]
+    fn adida_very_sparse_data() {
+        // >90% zeros
+        let timestamps = make_timestamps(50);
+        let mut values = vec![0.0; 50];
+        values[0] = 5.0;
+        values[25] = 3.0;
+        values[49] = 7.0;
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = ADIDA::new();
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(5).unwrap();
+        for &v in forecast.primary() {
+            assert!(
+                v > 0.0,
+                "Forecast should be positive for sparse demand data"
+            );
+            assert!(v.is_finite());
+        }
+        // Aggregation level should be high for sparse data
+        let level = model.aggregation_level().unwrap();
+        assert!(level >= 1);
+    }
+
+    #[test]
+    fn adida_negative_values() {
+        // Negative values are treated as non-zero for interval computation
+        let timestamps = make_timestamps(10);
+        let values = vec![5.0, -1.0, 0.0, 3.0, -2.0, 0.0, 4.0, 0.0, 2.0, -1.0];
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = ADIDA::new();
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(5).unwrap();
+        for &v in forecast.primary() {
+            assert!(v.is_finite());
+        }
+    }
+
+    #[test]
+    fn adida_very_long_inter_demand_intervals() {
+        let timestamps = make_timestamps(40);
+        let mut values = vec![0.0; 40];
+        values[0] = 10.0;
+        values[39] = 10.0;
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = ADIDA::new();
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(5).unwrap();
+        for &v in forecast.primary() {
+            assert!(
+                v.is_finite(),
+                "Forecast should be finite with long intervals"
+            );
+        }
+        // Aggregation level should be high
+        let level = model.aggregation_level().unwrap();
+        assert!(level >= 1);
+    }
+
+    #[test]
+    fn adida_aggregation_level_1() {
+        // Force aggregation level 1 (no aggregation)
+        let ts = make_intermittent_series();
+        let mut model = ADIDA::new().with_aggregation_level(1);
+        model.fit(&ts).unwrap();
+
+        assert_eq!(model.aggregation_level(), Some(1));
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.horizon(), 5);
+    }
+
+    #[test]
+    fn adida_large_aggregation_level() {
+        // Force a large aggregation level
+        let ts = make_intermittent_series();
+        let mut model = ADIDA::new().with_aggregation_level(10);
+        model.fit(&ts).unwrap();
+
+        assert_eq!(model.aggregation_level(), Some(10));
+        let forecast = model.predict(5).unwrap();
+        for &v in forecast.primary() {
+            assert!(v.is_finite());
+        }
+    }
+
+    #[test]
+    fn adida_consecutive_demands() {
+        // All non-zero values (no intermittency)
+        let timestamps = make_timestamps(10);
+        let values = vec![5.0, 3.0, 4.0, 6.0, 2.0, 5.0, 3.0, 4.0, 6.0, 2.0];
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = ADIDA::new();
+        model.fit(&ts).unwrap();
+
+        // Aggregation level should be 1 (mean interval = 1)
+        assert_eq!(model.aggregation_level(), Some(1));
+
+        let forecast = model.predict(5).unwrap();
+        for &v in forecast.primary() {
+            assert!(v > 0.0);
         }
     }
 }

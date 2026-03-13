@@ -13,6 +13,7 @@ pub mod cross_validation;
 pub mod decomposition;
 pub mod features;
 pub mod forecaster;
+pub mod postprocess;
 pub mod time_series;
 pub mod validation;
 
@@ -25,6 +26,7 @@ pub use cross_validation::cross_validate_js;
 pub use decomposition::{mstl_decompose, stl_decompose};
 pub use features::*;
 pub use forecaster::*;
+pub use postprocess::*;
 pub use time_series::*;
 pub use validation::*;
 

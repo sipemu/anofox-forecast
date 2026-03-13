@@ -8,6 +8,7 @@ use std::collections::HashMap;
 
 /// OLS regression coefficients and intercept.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct OLSResult {
     /// Regression coefficients (one per regressor).
     pub coefficients: Vec<f64>,

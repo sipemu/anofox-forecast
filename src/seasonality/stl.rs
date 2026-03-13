@@ -56,6 +56,67 @@ impl STLResult {
     }
 }
 
+/// Pre-allocated scratch buffers for STL decomposition.
+///
+/// Reusing this struct across multiple `decompose_with_scratch` calls avoids
+/// repeated heap allocation. Buffers are automatically resized as needed.
+#[derive(Debug, Clone, Default)]
+pub struct StlScratch {
+    seasonal: Vec<f64>,
+    trend: Vec<f64>,
+    weights: Vec<f64>,
+    detrended: Vec<f64>,
+    deseasonalized: Vec<f64>,
+    remainder: Vec<f64>,
+    lp_buf_a: Vec<f64>,
+    lp_buf_b: Vec<f64>,
+    low_pass: Vec<f64>,
+    unit_weights: Vec<f64>,
+    cycle_subseries: Vec<f64>,
+    // Subseries buffers used inside smooth_cycle_subseries_into
+    subseries_values: Vec<f64>,
+    subseries_weights: Vec<f64>,
+    subseries_indices: Vec<usize>,
+    smoothed: Vec<f64>,
+}
+
+impl StlScratch {
+    /// Create a new empty scratch buffer set.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Resize all length-n buffers and zero them out.
+    fn prepare(&mut self, n: usize, period: usize) {
+        self.seasonal.resize(n, 0.0);
+        self.seasonal.fill(0.0);
+        self.trend.resize(n, 0.0);
+        self.trend.fill(0.0);
+        self.weights.resize(n, 0.0);
+        self.weights.fill(1.0);
+        self.detrended.resize(n, 0.0);
+        self.deseasonalized.resize(n, 0.0);
+        self.remainder.resize(n, 0.0);
+        self.lp_buf_a.resize(n, 0.0);
+        self.lp_buf_b.resize(n, 0.0);
+        self.low_pass.resize(n, 0.0);
+        self.unit_weights.resize(n, 0.0);
+        self.unit_weights.fill(1.0);
+        self.cycle_subseries.resize(n, 0.0);
+
+        // Subseries buffers: max possible length per subseries
+        let max_subseries_len = n.div_ceil(period);
+        self.subseries_values
+            .reserve(max_subseries_len.saturating_sub(self.subseries_values.capacity()));
+        self.subseries_weights
+            .reserve(max_subseries_len.saturating_sub(self.subseries_weights.capacity()));
+        self.subseries_indices
+            .reserve(max_subseries_len.saturating_sub(self.subseries_indices.capacity()));
+        self.smoothed
+            .reserve(max_subseries_len.saturating_sub(self.smoothed.capacity()));
+    }
+}
+
 /// STL decomposition configuration and algorithm.
 #[derive(Debug, Clone)]
 pub struct STL {
@@ -132,27 +193,27 @@ impl STL {
 
     /// Decompose the time series.
     pub fn decompose(&self, series: &[f64]) -> Option<STLResult> {
+        let mut scratch = StlScratch::new();
+        self.decompose_with_scratch(series, &mut scratch)
+    }
+
+    /// Decompose the time series, reusing pre-allocated scratch buffers.
+    ///
+    /// This avoids heap allocation when called repeatedly (e.g., across
+    /// multiple series of similar length). Pass the same `StlScratch`
+    /// instance to successive calls.
+    pub fn decompose_with_scratch(
+        &self,
+        series: &[f64],
+        scratch: &mut StlScratch,
+    ) -> Option<STLResult> {
         let n = series.len();
         if n < 2 * self.seasonal_period {
             return None;
         }
 
-        // Initialize components
-        let mut seasonal = vec![0.0; n];
-        let mut trend = vec![0.0; n];
-        let mut weights = vec![1.0; n];
-
-        // Pre-allocate inner-loop buffers
-        let mut detrended = vec![0.0; n];
-        let mut deseasonalized = vec![0.0; n];
-        let mut remainder = vec![0.0; n];
-
-        // Pre-allocate scratch buffers for low-pass filter and smoothing
-        let mut lp_buf_a = vec![0.0; n];
-        let mut lp_buf_b = vec![0.0; n];
-        let mut low_pass = vec![0.0; n];
-        let unit_weights = vec![1.0; n];
-        let mut cycle_subseries = vec![0.0; n];
+        let period = self.seasonal_period;
+        scratch.prepare(n, period);
 
         // Outer loop (robustness)
         let outer_iters = if self.robust {
@@ -165,111 +226,114 @@ impl STL {
             // Inner loop
             for _ in 0..self.inner_iterations {
                 // Step 1: Detrending
-                for (d, (y, t)) in detrended.iter_mut().zip(series.iter().zip(trend.iter())) {
+                for (d, (y, t)) in scratch
+                    .detrended
+                    .iter_mut()
+                    .zip(series.iter().zip(scratch.trend.iter()))
+                {
                     *d = y - t;
                 }
 
                 // Step 2: Cycle-subseries smoothing
-                self.smooth_cycle_subseries_into(&detrended, &weights, &mut cycle_subseries);
+                self.smooth_cycle_subseries_into_scratch(scratch);
 
                 // Step 3: Low-pass filter of smoothed cycle-subseries
                 self.low_pass_filter_into(
-                    &cycle_subseries,
-                    &mut lp_buf_a,
-                    &mut lp_buf_b,
-                    &mut low_pass,
-                    &unit_weights,
+                    &scratch.cycle_subseries,
+                    &mut scratch.lp_buf_a,
+                    &mut scratch.lp_buf_b,
+                    &mut scratch.low_pass,
+                    &scratch.unit_weights,
                 );
 
                 // Step 4: Detrending of smoothed cycle-subseries
                 for i in 0..n {
-                    seasonal[i] = cycle_subseries[i] - low_pass[i];
+                    scratch.seasonal[i] = scratch.cycle_subseries[i] - scratch.low_pass[i];
                 }
 
                 // Step 5: Deseasonalizing
-                for (d, (y, s)) in deseasonalized
+                for (d, (y, s)) in scratch
+                    .deseasonalized
                     .iter_mut()
-                    .zip(series.iter().zip(seasonal.iter()))
+                    .zip(series.iter().zip(scratch.seasonal.iter()))
                 {
                     *d = y - s;
                 }
 
                 // Step 6: Trend smoothing
                 Self::loess_smooth_into(
-                    &deseasonalized,
+                    &scratch.deseasonalized,
                     self.trend_smoothness,
-                    &weights,
-                    &mut trend,
+                    &scratch.weights,
+                    &mut scratch.trend,
                 );
             }
 
             // Update robustness weights
             if self.robust {
-                for ((r, (y, s)), t) in remainder
+                for ((r, (y, s)), t) in scratch
+                    .remainder
                     .iter_mut()
-                    .zip(series.iter().zip(seasonal.iter()))
-                    .zip(trend.iter())
+                    .zip(series.iter().zip(scratch.seasonal.iter()))
+                    .zip(scratch.trend.iter())
                 {
                     *r = y - s - t;
                 }
-                weights = self.compute_robustness_weights(&remainder);
+                scratch.weights = self.compute_robustness_weights(&scratch.remainder);
             }
         }
 
         // Compute final remainder
-        for ((r, (y, s)), t) in remainder
+        for ((r, (y, s)), t) in scratch
+            .remainder
             .iter_mut()
-            .zip(series.iter().zip(seasonal.iter()))
-            .zip(trend.iter())
+            .zip(series.iter().zip(scratch.seasonal.iter()))
+            .zip(scratch.trend.iter())
         {
             *r = y - s - t;
         }
 
+        // Move results out of scratch (replace with empty vecs to allow reuse)
         Some(STLResult {
-            trend,
-            seasonal,
-            remainder,
+            trend: std::mem::take(&mut scratch.trend),
+            seasonal: std::mem::take(&mut scratch.seasonal),
+            remainder: std::mem::take(&mut scratch.remainder),
         })
     }
 
-    /// Smooth cycle-subseries into pre-allocated result buffer.
-    fn smooth_cycle_subseries_into(&self, detrended: &[f64], weights: &[f64], result: &mut [f64]) {
-        let n = detrended.len();
+    /// Smooth cycle-subseries using scratch buffers from StlScratch.
+    fn smooth_cycle_subseries_into_scratch(&self, scratch: &mut StlScratch) {
+        let n = scratch.detrended.len();
         let period = self.seasonal_period;
-
-        // Pre-allocate subseries buffers with max possible length
-        let max_subseries_len = n.div_ceil(period);
-        let mut subseries_values = Vec::with_capacity(max_subseries_len);
-        let mut subseries_weights = Vec::with_capacity(max_subseries_len);
-        let mut subseries_indices = Vec::with_capacity(max_subseries_len);
-        let mut smoothed = Vec::with_capacity(max_subseries_len);
 
         // Process each cycle-subseries (one for each position in the seasonal cycle)
         for cycle_pos in 0..period {
-            // Clear and reuse buffers
-            subseries_values.clear();
-            subseries_weights.clear();
-            subseries_indices.clear();
+            // Clear and reuse scratch subseries buffers
+            scratch.subseries_values.clear();
+            scratch.subseries_weights.clear();
+            scratch.subseries_indices.clear();
 
-            for (i, (&val, &w)) in detrended.iter().zip(weights.iter()).enumerate() {
-                if i % period == cycle_pos {
-                    subseries_values.push(val);
-                    subseries_weights.push(w);
-                    subseries_indices.push(i);
-                }
+            for i in (cycle_pos..n).step_by(period) {
+                scratch.subseries_values.push(scratch.detrended[i]);
+                scratch.subseries_weights.push(scratch.weights[i]);
+                scratch.subseries_indices.push(i);
             }
 
             // Smooth the subseries into reusable buffer
             Self::loess_smooth_into(
-                &subseries_values,
+                &scratch.subseries_values,
                 self.seasonal_smoothness,
-                &subseries_weights,
-                &mut smoothed,
+                &scratch.subseries_weights,
+                &mut scratch.smoothed,
             );
 
             // Put smoothed values back
-            for (&idx, &smooth_val) in subseries_indices.iter().zip(smoothed.iter()) {
-                result[idx] = smooth_val;
+            for (&idx, &smooth_val) in scratch
+                .subseries_indices
+                .iter()
+                .zip(scratch.smoothed.iter())
+            {
+                scratch.cycle_subseries[idx] = smooth_val;
             }
         }
     }
@@ -415,6 +479,7 @@ impl Default for STL {
 #[derive(Debug, Clone)]
 pub struct StlBuilder {
     stl: STL,
+    scratch: StlScratch,
 }
 
 impl StlBuilder {
@@ -422,6 +487,7 @@ impl StlBuilder {
     pub fn new(period: usize) -> Self {
         Self {
             stl: STL::new(period),
+            scratch: StlScratch::new(),
         }
     }
 
@@ -461,8 +527,21 @@ impl StlBuilder {
     }
 
     /// Run STL decomposition on the given series.
+    ///
+    /// This allocates fresh scratch buffers. For repeated calls on
+    /// series of similar length, use [`decompose_reuse`](Self::decompose_reuse)
+    /// which caches buffers across calls.
     pub fn decompose(&self, series: &[f64]) -> Option<STLResult> {
         self.stl.decompose(series)
+    }
+
+    /// Run STL decomposition, reusing cached scratch buffers.
+    ///
+    /// More efficient than [`decompose`](Self::decompose) when called
+    /// repeatedly (e.g., decomposing many series of similar length),
+    /// because heap allocations are amortized across calls.
+    pub fn decompose_reuse(&mut self, series: &[f64]) -> Option<STLResult> {
+        self.stl.decompose_with_scratch(series, &mut self.scratch)
     }
 
     /// Get a reference to the underlying STL configuration.
@@ -815,5 +894,85 @@ mod tests {
         let config = builder.config();
         // Just verify we can access the underlying config without panic
         let _ = format!("{:?}", config);
+    }
+
+    // ==================== StlScratch / buffer reuse tests ====================
+
+    #[test]
+    fn stl_decompose_with_scratch_matches_decompose() {
+        let period = 12;
+        let series = generate_seasonal_series(120, period);
+
+        let stl = STL::new(period);
+        let result_alloc = stl.decompose(&series).unwrap();
+
+        let mut scratch = StlScratch::new();
+        let result_scratch = stl.decompose_with_scratch(&series, &mut scratch).unwrap();
+
+        for i in 0..series.len() {
+            assert!(
+                (result_alloc.trend[i] - result_scratch.trend[i]).abs() < 1e-10,
+                "Scratch decompose trend should match at index {}",
+                i,
+            );
+            assert!(
+                (result_alloc.seasonal[i] - result_scratch.seasonal[i]).abs() < 1e-10,
+                "Scratch decompose seasonal should match at index {}",
+                i,
+            );
+            assert!(
+                (result_alloc.remainder[i] - result_scratch.remainder[i]).abs() < 1e-10,
+                "Scratch decompose remainder should match at index {}",
+                i,
+            );
+        }
+    }
+
+    #[test]
+    fn stl_scratch_reuse_across_calls() {
+        let period = 12;
+        let series_a = generate_seasonal_series(120, period);
+        let series_b = generate_seasonal_series(96, period);
+
+        let stl = STL::new(period);
+        let mut scratch = StlScratch::new();
+
+        // First call
+        let result_a = stl.decompose_with_scratch(&series_a, &mut scratch).unwrap();
+        assert_eq!(result_a.trend.len(), 120);
+
+        // Second call reuses scratch (different length series)
+        let result_b = stl.decompose_with_scratch(&series_b, &mut scratch).unwrap();
+        assert_eq!(result_b.trend.len(), 96);
+
+        // Verify correctness of second call against fresh decompose
+        let reference = stl.decompose(&series_b).unwrap();
+        for i in 0..96 {
+            assert!(
+                (result_b.trend[i] - reference.trend[i]).abs() < 1e-10,
+                "Reused scratch should produce correct results at index {}",
+                i,
+            );
+        }
+    }
+
+    #[test]
+    fn stl_builder_decompose_reuse() {
+        let period = 12;
+        let series = generate_seasonal_series(120, period);
+
+        let mut builder = StlBuilder::new(period).seasonal_window(7).trend_window(15);
+
+        // decompose_reuse should produce the same results as decompose
+        let result_alloc = builder.decompose(&series).unwrap();
+        let result_reuse = builder.decompose_reuse(&series).unwrap();
+
+        for i in 0..series.len() {
+            assert!(
+                (result_alloc.trend[i] - result_reuse.trend[i]).abs() < 1e-10,
+                "Builder decompose_reuse trend should match at index {}",
+                i,
+            );
+        }
     }
 }

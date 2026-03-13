@@ -126,7 +126,90 @@ pub struct AutoForecast {
     scores: Vec<(String, f64)>,
 }
 
+/// Builder for constructing an [`AutoForecast`] model with custom parameters.
+///
+/// # Example
+/// ```
+/// use anofox_forecast::models::auto_forecast::AutoForecast;
+///
+/// let model = AutoForecast::builder()
+///     .seasonal_period(12)
+///     .include_arima(true)
+///     .include_ets(true)
+///     .include_theta(false)
+///     .build();
+/// ```
+#[derive(Debug, Clone)]
+pub struct AutoForecastBuilder {
+    seasonal_period: Option<usize>,
+    include_arima: Option<bool>,
+    include_ets: Option<bool>,
+    include_theta: Option<bool>,
+    selection: Option<SelectionStrategy>,
+}
+
+impl AutoForecastBuilder {
+    /// Create a new builder with all defaults.
+    fn new() -> Self {
+        Self {
+            seasonal_period: None,
+            include_arima: None,
+            include_ets: None,
+            include_theta: None,
+            selection: None,
+        }
+    }
+
+    /// Set the seasonal period.
+    pub fn seasonal_period(mut self, period: usize) -> Self {
+        self.seasonal_period = Some(period);
+        self
+    }
+
+    /// Include or exclude AutoARIMA from the candidate set.
+    pub fn include_arima(mut self, include: bool) -> Self {
+        self.include_arima = Some(include);
+        self
+    }
+
+    /// Include or exclude AutoETS from the candidate set.
+    pub fn include_ets(mut self, include: bool) -> Self {
+        self.include_ets = Some(include);
+        self
+    }
+
+    /// Include or exclude AutoTheta from the candidate set.
+    pub fn include_theta(mut self, include: bool) -> Self {
+        self.include_theta = Some(include);
+        self
+    }
+
+    /// Set the model selection strategy.
+    pub fn selection(mut self, strategy: SelectionStrategy) -> Self {
+        self.selection = Some(strategy);
+        self
+    }
+
+    /// Build the AutoForecast model.
+    pub fn build(self) -> AutoForecast {
+        let config = AutoForecastConfig {
+            seasonal_period: self.seasonal_period,
+            include_arima: self.include_arima.unwrap_or(true),
+            include_ets: self.include_ets.unwrap_or(true),
+            include_theta: self.include_theta.unwrap_or(true),
+            selection: self.selection.unwrap_or_default(),
+        };
+
+        AutoForecast::with_config(config)
+    }
+}
+
 impl AutoForecast {
+    /// Create a builder for constructing an AutoForecast model.
+    pub fn builder() -> AutoForecastBuilder {
+        AutoForecastBuilder::new()
+    }
+
     /// Create a new AutoForecast with default configuration.
     pub fn new() -> Self {
         Self {
@@ -815,5 +898,85 @@ mod tests {
             model.fit(&ts),
             Err(ForecastError::ConvergenceFailure(_))
         ));
+    }
+
+    #[test]
+    fn auto_forecast_builder_defaults() {
+        let model = AutoForecast::builder().build();
+        assert!(model.selected_model_name().is_none());
+        assert_eq!(model.name(), "AutoForecast");
+    }
+
+    #[test]
+    fn auto_forecast_builder_custom() {
+        let model = AutoForecast::builder()
+            .seasonal_period(12)
+            .include_arima(true)
+            .include_ets(true)
+            .include_theta(false)
+            .build();
+
+        let ts = make_seasonal_series(100, 12);
+        let mut model = model;
+        model.fit(&ts).unwrap();
+
+        assert!(model.selected_model_name().is_some());
+        let scores = model.all_scores();
+        // Theta was excluded, so should have at most 2 candidates
+        assert!(scores.len() <= 2);
+        for (name, _) in scores {
+            assert!(!name.contains("AutoTheta"));
+        }
+    }
+
+    #[test]
+    fn auto_forecast_builder_fit_predict() {
+        let ts = make_trend_series(100);
+        let mut model = AutoForecast::builder()
+            .include_arima(true)
+            .include_ets(true)
+            .build();
+
+        model.fit(&ts).unwrap();
+        assert!(model.selected_model_name().is_some());
+
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.horizon(), 5);
+    }
+
+    #[test]
+    fn auto_forecast_builder_arima_only() {
+        let ts = make_trend_series(100);
+        let mut model = AutoForecast::builder()
+            .include_arima(true)
+            .include_ets(false)
+            .include_theta(false)
+            .build();
+
+        model.fit(&ts).unwrap();
+        let scores = model.all_scores();
+        assert_eq!(scores.len(), 1);
+        assert!(scores[0].0.contains("AutoARIMA"));
+    }
+
+    #[test]
+    fn auto_forecast_builder_with_selection() {
+        let model = AutoForecast::builder()
+            .selection(SelectionStrategy::CrossValidation)
+            .build();
+        // Just verify it builds without error
+        assert_eq!(model.name(), "AutoForecast");
+    }
+
+    #[test]
+    fn auto_forecast_builder_seasonal() {
+        let ts = make_seasonal_series(100, 12);
+        let mut model = AutoForecast::builder().seasonal_period(12).build();
+
+        model.fit(&ts).unwrap();
+        assert!(model.selected_model_name().is_some());
+
+        let forecast = model.predict(12).unwrap();
+        assert_eq!(forecast.horizon(), 12);
     }
 }

@@ -9,6 +9,7 @@ use crate::models::{validate_series_complete, Forecaster};
 use crate::utils::ols::{ols_fit, ols_residuals, OLSResult};
 use crate::utils::optimization::{nelder_mead, NelderMeadConfig};
 use crate::utils::stats::quantile_normal;
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
@@ -1478,18 +1479,19 @@ impl Forecaster for ETS {
         validate_series_complete(series)?;
         let raw_values = series.primary_values();
 
-        // Handle exogenous regressors
-        let adjusted_values = if series.has_regressors() {
+        // Handle exogenous regressors.
+        // Use Cow to avoid cloning raw_values when no regressors are present.
+        let adjusted_values: Cow<'_, [f64]> = if series.has_regressors() {
             let regressors = series.all_regressors();
             let ols_result = ols_fit(raw_values, &regressors)?;
             let adjusted = ols_residuals(raw_values, &ols_result, &regressors)?;
             self.exog_ols = Some(ols_result);
-            adjusted
+            Cow::Owned(adjusted)
         } else {
             self.exog_ols = None;
-            raw_values.to_vec()
+            Cow::Borrowed(raw_values)
         };
-        let values = &adjusted_values;
+        let values = &*adjusted_values;
 
         let min_len = if self.spec.has_seasonal() {
             2 * self.seasonal_period

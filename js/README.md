@@ -1,6 +1,6 @@
 # @sipemu/anofox-forecast
 
-WebAssembly bindings for [anofox-forecast](https://crates.io/crates/anofox-forecast), a comprehensive time series forecasting library.
+WebAssembly bindings for [anofox-forecast](https://crates.io/crates/anofox-forecast), a comprehensive time series forecasting library with 40+ models, automatic model selection, probabilistic postprocessing, and more.
 
 ## Installation
 
@@ -109,9 +109,16 @@ const ts = TimeSeries.withTimestamps(
 | `MSTLForecasterWrapper` | MSTL decomposition | `seasonal_periods[]` |
 | `GARCHForecaster` | GARCH volatility model | `p`, `q` |
 
+### Auto Selection
+
+| Forecaster | Description | Parameters |
+|------------|-------------|------------|
+| `AutoForecaster` | Best of ARIMA, ETS, Theta | - |
+| `AutoEnsembleForecaster` | Ensemble of top-K models | - |
+
 ## Prediction Intervals
 
-Some models support prediction intervals:
+Most models support prediction intervals:
 
 ```javascript
 import { NaiveForecaster } from '@sipemu/anofox-forecast';
@@ -189,6 +196,48 @@ You can check validity before creating:
 ETSForecaster.isValidSpec("A", "A", "A");  // true
 ETSForecaster.isValidSpec("M", "A", "M");  // true
 ETSForecaster.isValidSpec("M", "A", "A");  // false (unstable)
+```
+
+## Probabilistic Postprocessing
+
+Generate calibrated prediction intervals using conformal prediction, historical simulation, or normal approximation:
+
+```javascript
+import { JsConformalPredictor, JsPointForecasts, JsPostProcessor } from '@sipemu/anofox-forecast';
+
+// Conformal prediction intervals (distribution-free)
+const predictor = new JsConformalPredictor(0.9); // 90% coverage
+predictor.calibrate(forecasts, actuals);
+const intervals = predictor.predictIntervals(newForecasts);
+console.log('Lower:', intervals.lower);
+console.log('Upper:', intervals.upper);
+
+// Unified PostProcessor API
+const processor = JsPostProcessor.conformal(0.95);
+const trained = processor.train(forecasts, actuals);
+const pi = processor.predictIntervals(trained, newForecasts);
+```
+
+### Available Methods
+- `JsConformalPredictor` — distribution-free intervals (split, cross-val, jackknife+)
+- `JsNormalPredictor` — Gaussian error assumption baseline
+- `JsHistoricalSimulator` — non-parametric empirical error distribution
+- `JsPostProcessor` — unified API wrapping all methods
+- `JsBacktestConfig` / `JsBacktestResult` — rolling/expanding window backtesting
+
+## Calendar Annotations
+
+Add holidays and named regressors for models that support exogenous variables:
+
+```javascript
+import { CalendarAnnotations } from '@sipemu/anofox-forecast';
+
+const calendar = new CalendarAnnotations();
+calendar.addHoliday(Date.parse('2024-12-25'));
+calendar.addRegressor('temperature', new Float64Array([20, 22, 25, 23]));
+
+ts.setCalendar(calendar);
+model.fit(ts); // ARIMA, MFLES, etc. will automatically use the regressors
 ```
 
 ## Browser Usage

@@ -164,7 +164,7 @@ impl IDRPredictor {
         // Then we compute empirical quantiles of the residual distribution
         let iso = IsotonicRegressor::new();
         let fitted = iso.fit_1d(&x_col, &y_col).map_err(|e| {
-            ForecastError::ComputationError(format!("Isotonic regression failed: {:?}", e))
+            ForecastError::ConvergenceFailure(format!("Isotonic regression failed: {:?}", e))
         })?;
 
         // Compute residuals

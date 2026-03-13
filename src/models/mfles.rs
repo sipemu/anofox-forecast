@@ -26,6 +26,7 @@ use std::collections::HashMap;
 ///
 /// By default, uses multiplicative mode (log transform) for positive series.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MFLES {
     /// Seasonal period.
     season_length: usize,
@@ -75,7 +76,141 @@ pub struct MFLES {
     exog_ols: Option<OLSResult>,
 }
 
+/// Builder for constructing an [`MFLES`] model with custom parameters.
+///
+/// # Example
+/// ```
+/// use anofox_forecast::models::mfles::MFLES;
+///
+/// let model = MFLES::builder()
+///     .seasonal_period(12)
+///     .num_rounds(5)
+///     .learning_rate(0.1)
+///     .build();
+/// ```
+#[derive(Debug, Clone)]
+pub struct MFLESBuilder {
+    seasonal_period: Option<usize>,
+    num_rounds: Option<usize>,
+    learning_rate: Option<f64>,
+    trend_lr: Option<f64>,
+    rs_lr: Option<f64>,
+    robust: Option<bool>,
+    multiplicative: Option<bool>,
+    trend_penalty: Option<bool>,
+    fourier_order: Option<usize>,
+}
+
+impl MFLESBuilder {
+    /// Create a new builder with all defaults.
+    fn new() -> Self {
+        Self {
+            seasonal_period: None,
+            num_rounds: None,
+            learning_rate: None,
+            trend_lr: None,
+            rs_lr: None,
+            robust: None,
+            multiplicative: None,
+            trend_penalty: None,
+            fourier_order: None,
+        }
+    }
+
+    /// Set the seasonal period.
+    pub fn seasonal_period(mut self, period: usize) -> Self {
+        self.seasonal_period = Some(period);
+        self
+    }
+
+    /// Set the maximum number of boosting rounds.
+    pub fn num_rounds(mut self, rounds: usize) -> Self {
+        self.num_rounds = Some(rounds);
+        self
+    }
+
+    /// Set the seasonal component learning rate (shrinkage factor).
+    pub fn learning_rate(mut self, lr: f64) -> Self {
+        self.learning_rate = Some(lr);
+        self
+    }
+
+    /// Set the trend component learning rate.
+    pub fn trend_lr(mut self, lr: f64) -> Self {
+        self.trend_lr = Some(lr);
+        self
+    }
+
+    /// Set the residual smoothing learning rate.
+    pub fn rs_lr(mut self, lr: f64) -> Self {
+        self.rs_lr = Some(lr);
+        self
+    }
+
+    /// Enable or disable robust mode (Siegel repeated medians).
+    pub fn robust(mut self, robust: bool) -> Self {
+        self.robust = Some(robust);
+        self
+    }
+
+    /// Force multiplicative or additive mode.
+    pub fn multiplicative(mut self, value: bool) -> Self {
+        self.multiplicative = Some(value);
+        self
+    }
+
+    /// Enable or disable trend penalty.
+    pub fn trend_penalty(mut self, value: bool) -> Self {
+        self.trend_penalty = Some(value);
+        self
+    }
+
+    /// Set the Fourier order for seasonality.
+    pub fn fourier_order(mut self, order: usize) -> Self {
+        self.fourier_order = Some(order);
+        self
+    }
+
+    /// Build the MFLES model.
+    pub fn build(self) -> MFLES {
+        let period = self.seasonal_period.unwrap_or(12);
+        let mut model = MFLES::new(vec![period]);
+
+        if let Some(rounds) = self.num_rounds {
+            model.max_rounds = rounds.max(1);
+        }
+        if let Some(lr) = self.learning_rate {
+            model.seasonal_lr = lr.clamp(0.01, 1.0);
+        }
+        if let Some(lr) = self.trend_lr {
+            model.trend_lr = lr.clamp(0.01, 1.0);
+        }
+        if let Some(lr) = self.rs_lr {
+            model.rs_lr = lr.clamp(0.01, 1.0);
+        }
+        if let Some(robust) = self.robust {
+            model.robust = robust;
+        }
+        if let Some(mult) = self.multiplicative {
+            model.multiplicative = Some(mult);
+        }
+        if let Some(penalty) = self.trend_penalty {
+            model.trend_penalty = penalty;
+        }
+        if let Some(order) = self.fourier_order {
+            model.fourier_order = Some(order);
+        }
+
+        model
+    }
+}
+
 impl MFLES {
+    /// Create a builder for constructing an MFLES model.
+    pub fn builder() -> MFLESBuilder {
+        MFLESBuilder::new()
+    }
+
     /// Create a new MFLES model with given seasonal period.
     pub fn new(seasonal_periods: Vec<usize>) -> Self {
         let season_length = seasonal_periods.first().copied().unwrap_or(12);
@@ -337,12 +472,6 @@ impl MFLES {
         (fitted, coeffs)
     }
 
-    /// OLS fit: X @ (X'X)^-1 @ X' @ y (fitted values only)
-    #[allow(dead_code)]
-    fn ols(x: &[Vec<f64>], y: &[f64]) -> Vec<f64> {
-        Self::ols_with_coeffs(x, y).0
-    }
-
     /// Solve symmetric positive definite system using Cholesky decomposition.
     fn solve_symmetric(a: &[Vec<f64>], b: &[f64]) -> Option<Vec<f64>> {
         let n = b.len();
@@ -574,15 +703,6 @@ impl MFLES {
         } else {
             1.0 - ss_res / ss_tot
         }
-    }
-
-    /// Resize/tile a vector to target length.
-    #[allow(dead_code)]
-    fn resize_vec(v: &[f64], target_len: usize) -> Vec<f64> {
-        if v.is_empty() {
-            return vec![0.0; target_len];
-        }
-        (0..target_len).map(|i| v[i % v.len()]).collect()
     }
 }
 
@@ -1780,21 +1900,6 @@ mod tests {
     }
 
     #[test]
-    fn mfles_resize_vec() {
-        // Empty
-        let resized = MFLES::resize_vec(&[], 5);
-        assert_eq!(resized, vec![0.0; 5]);
-
-        // Resize smaller to larger (tile)
-        let resized = MFLES::resize_vec(&[1.0, 2.0, 3.0], 7);
-        assert_eq!(resized, vec![1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0]);
-
-        // Resize to exact multiple
-        let resized = MFLES::resize_vec(&[1.0, 2.0], 4);
-        assert_eq!(resized, vec![1.0, 2.0, 1.0, 2.0]);
-    }
-
-    #[test]
     fn mfles_empty_seasonal_periods() {
         let ts = make_seasonal_series(100, 12);
         // Empty seasonal periods should default to 12
@@ -1853,5 +1958,70 @@ mod tests {
         let rsq = MFLES::calc_rsq(&[5.0, 5.0, 5.0], &[5.0, 5.0, 5.0]);
         // When ss_tot < 1e-10, returns 0.0
         assert_eq!(rsq, 0.0);
+    }
+
+    #[test]
+    fn mfles_builder_defaults() {
+        let model = MFLES::builder().build();
+        // Default seasonal period is 12
+        let ts = make_seasonal_series(100, 12);
+        let mut model = model;
+        model.fit(&ts).unwrap();
+        let forecast = model.predict(12).unwrap();
+        assert_eq!(forecast.horizon(), 12);
+    }
+
+    #[test]
+    fn mfles_builder_custom() {
+        let model = MFLES::builder()
+            .seasonal_period(12)
+            .num_rounds(5)
+            .learning_rate(0.1)
+            .build();
+
+        let ts = make_seasonal_series(100, 12);
+        let mut model = model;
+        model.fit(&ts).unwrap();
+        let forecast = model.predict(12).unwrap();
+        assert_eq!(forecast.horizon(), 12);
+    }
+
+    #[test]
+    fn mfles_builder_all_options() {
+        let model = MFLES::builder()
+            .seasonal_period(6)
+            .num_rounds(10)
+            .learning_rate(0.5)
+            .trend_lr(0.8)
+            .rs_lr(0.9)
+            .robust(true)
+            .multiplicative(false)
+            .trend_penalty(false)
+            .fourier_order(3)
+            .build();
+
+        let ts = make_seasonal_series(100, 6);
+        let mut model = model;
+        model.fit(&ts).unwrap();
+        let forecast = model.predict(6).unwrap();
+        assert_eq!(forecast.horizon(), 6);
+    }
+
+    #[test]
+    fn mfles_builder_fit_predict() {
+        let ts = make_seasonal_series(100, 12);
+        let mut model = MFLES::builder()
+            .seasonal_period(12)
+            .num_rounds(5)
+            .learning_rate(0.1)
+            .build();
+
+        model.fit(&ts).unwrap();
+        let forecast = model.predict(24).unwrap();
+        assert_eq!(forecast.horizon(), 24);
+
+        // Should have fitted values and residuals
+        assert!(model.fitted_values().is_some());
+        assert!(model.residuals().is_some());
     }
 }

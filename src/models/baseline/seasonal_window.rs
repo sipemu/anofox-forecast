@@ -11,6 +11,7 @@ use crate::models::{validate_series_complete, Forecaster};
 /// Forecasts are computed as the average of observations from the same
 /// season over a specified number of previous cycles (window).
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SeasonalWindowAverage {
     period: usize,
     window: usize, // Number of seasonal cycles to average

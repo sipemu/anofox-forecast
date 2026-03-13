@@ -250,7 +250,7 @@ impl QRAPredictor {
                 .build();
 
             let fitted = qr.fit(&x, &y).map_err(|e| {
-                ForecastError::ComputationError(format!("Quantile regression failed: {:?}", e))
+                ForecastError::ConvergenceFailure(format!("Quantile regression failed: {:?}", e))
             })?;
 
             fitted_models.push(fitted);

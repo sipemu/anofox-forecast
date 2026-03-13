@@ -7,6 +7,7 @@ use super::stl::STL;
 
 /// Result of MSTL decomposition.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MSTLResult {
     /// Trend component.
     pub trend: Vec<f64>,
@@ -137,13 +138,16 @@ impl MSTL {
         let mut seasonal_components: Vec<Vec<f64>> = vec![vec![0.0; n]; num_seasonals];
         let mut trend = vec![0.0; n];
 
+        // Reusable buffer for deseasonalized/adjusted data (avoids allocations per iteration)
+        let mut buf = vec![0.0_f64; n];
+
         // Iterative decomposition
         for _ in 0..self.iterations {
-            // Deseasonalize by removing all seasonal components
-            let mut deseasonalized: Vec<f64> = series.to_vec();
+            // Deseasonalize: buf = series - sum(all seasonal components)
+            buf.copy_from_slice(series);
             for seasonal in &seasonal_components {
                 for i in 0..n {
-                    deseasonalized[i] -= seasonal[i];
+                    buf[i] -= seasonal[i];
                 }
             }
 
@@ -154,19 +158,26 @@ impl MSTL {
                 STL::new(max_period)
             };
 
-            if let Some(trend_result) = stl_trend.decompose(&deseasonalized) {
+            if let Some(trend_result) = stl_trend.decompose(&buf) {
                 trend = trend_result.trend;
             }
 
             // Extract each seasonal component
-            for (s_idx, &period) in self.seasonal_periods.iter().enumerate() {
-                // Remove trend and other seasonal components
-                let mut adjusted: Vec<f64> = series.to_vec();
+            for s_idx in 0..num_seasonals {
+                let period = self.seasonal_periods[s_idx];
+
+                // adjusted = series - trend - sum(other seasonal components)
+                // Equivalent to: series - trend - sum(all seasonals) + seasonal[s_idx]
+                // Which is: deseasonalized - trend + seasonal[s_idx]
+                // But we rebuild from series to avoid error accumulation.
+                buf.copy_from_slice(series);
                 for i in 0..n {
-                    adjusted[i] -= trend[i];
-                    for (other_idx, other_seasonal) in seasonal_components.iter().enumerate() {
-                        if other_idx != s_idx {
-                            adjusted[i] -= other_seasonal[i];
+                    buf[i] -= trend[i];
+                }
+                for (other_idx, other_seasonal) in seasonal_components.iter().enumerate() {
+                    if other_idx != s_idx {
+                        for i in 0..n {
+                            buf[i] -= other_seasonal[i];
                         }
                     }
                 }
@@ -178,19 +189,20 @@ impl MSTL {
                     STL::new(period)
                 };
 
-                if let Some(seasonal_result) = stl_seasonal.decompose(&adjusted) {
+                if let Some(seasonal_result) = stl_seasonal.decompose(&buf) {
                     seasonal_components[s_idx] = seasonal_result.seasonal;
                 }
             }
         }
 
-        // Compute remainder
-        let mut remainder: Vec<f64> = series.to_vec();
+        // Compute remainder: series - trend - sum(all seasonal components)
+        let mut remainder = vec![0.0_f64; n];
         for i in 0..n {
-            remainder[i] -= trend[i];
+            let mut seasonal_sum = 0.0;
             for seasonal in &seasonal_components {
-                remainder[i] -= seasonal[i];
+                seasonal_sum += seasonal[i];
             }
+            remainder[i] = series[i] - trend[i] - seasonal_sum;
         }
 
         Some(MSTLResult {

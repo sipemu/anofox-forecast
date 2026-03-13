@@ -1045,6 +1045,15 @@ export class SESForecaster {
    */
   predict(horizon: number): Forecast;
 
+  /**
+   * Predict with prediction intervals.
+   * @param horizon - Number of steps to forecast
+   * @param level - Confidence level (e.g., 0.95 for 95% intervals)
+   * @returns Forecast with point predictions and intervals
+   * @throws Error if the model has not been fitted
+   */
+  predictWithIntervals(horizon: number, level: number): Forecast;
+
   /** The model name. */
   readonly name: string;
 
@@ -1076,6 +1085,15 @@ export class HoltForecaster {
    * @throws Error if the model has not been fitted
    */
   predict(horizon: number): Forecast;
+
+  /**
+   * Predict with prediction intervals.
+   * @param horizon - Number of steps to forecast
+   * @param level - Confidence level (e.g., 0.95 for 95% intervals)
+   * @returns Forecast with point predictions and intervals
+   * @throws Error if the model has not been fitted
+   */
+  predictWithIntervals(horizon: number, level: number): Forecast;
 
   /** The model name. */
   readonly name: string;
@@ -1142,6 +1160,15 @@ export class HoltWintersForecaster {
    * @throws Error if the model has not been fitted
    */
   predict(horizon: number): Forecast;
+
+  /**
+   * Predict with prediction intervals.
+   * @param horizon - Number of steps to forecast
+   * @param level - Confidence level (e.g., 0.95 for 95% intervals)
+   * @returns Forecast with point predictions and intervals
+   * @throws Error if the model has not been fitted
+   */
+  predictWithIntervals(horizon: number, level: number): Forecast;
 
   /** The model name. */
   readonly name: string;
@@ -1644,6 +1671,15 @@ export class CrostonForecaster {
    */
   predict(horizon: number): Forecast;
 
+  /**
+   * Predict with prediction intervals.
+   * @param horizon - Number of steps to forecast
+   * @param level - Confidence level (e.g., 0.95 for 95% intervals)
+   * @returns Forecast with point predictions and intervals
+   * @throws Error if the model has not been fitted
+   */
+  predictWithIntervals(horizon: number, level: number): Forecast;
+
   /** The model name. */
   readonly name: string;
 
@@ -1674,6 +1710,15 @@ export class TSBForecaster {
    * @throws Error if the model has not been fitted
    */
   predict(horizon: number): Forecast;
+
+  /**
+   * Predict with prediction intervals.
+   * @param horizon - Number of steps to forecast
+   * @param level - Confidence level (e.g., 0.95 for 95% intervals)
+   * @returns Forecast with point predictions and intervals
+   * @throws Error if the model has not been fitted
+   */
+  predictWithIntervals(horizon: number, level: number): Forecast;
 
   /** The model name. */
   readonly name: string;
@@ -1706,6 +1751,15 @@ export class ADIDAForecaster {
    */
   predict(horizon: number): Forecast;
 
+  /**
+   * Predict with prediction intervals.
+   * @param horizon - Number of steps to forecast
+   * @param level - Confidence level (e.g., 0.95 for 95% intervals)
+   * @returns Forecast with point predictions and intervals
+   * @throws Error if the model has not been fitted
+   */
+  predictWithIntervals(horizon: number, level: number): Forecast;
+
   /** The model name. */
   readonly name: string;
 
@@ -1736,6 +1790,15 @@ export class IMAPAForecaster {
    * @throws Error if the model has not been fitted
    */
   predict(horizon: number): Forecast;
+
+  /**
+   * Predict with prediction intervals.
+   * @param horizon - Number of steps to forecast
+   * @param level - Confidence level (e.g., 0.95 for 95% intervals)
+   * @returns Forecast with point predictions and intervals
+   * @throws Error if the model has not been fitted
+   */
+  predictWithIntervals(horizon: number, level: number): Forecast;
 
   /** The model name. */
   readonly name: string;
@@ -1883,6 +1946,15 @@ export class MFLESForecaster {
    */
   predict(horizon: number): Forecast;
 
+  /**
+   * Predict with prediction intervals.
+   * @param horizon - Number of steps to forecast
+   * @param level - Confidence level (e.g., 0.95 for 95% intervals)
+   * @returns Forecast with point predictions and intervals
+   * @throws Error if the model has not been fitted
+   */
+  predictWithIntervals(horizon: number, level: number): Forecast;
+
   /** The model name. */
   readonly name: string;
 
@@ -1948,6 +2020,15 @@ export class GARCHForecaster {
    * @throws Error if the model has not been fitted
    */
   predict(horizon: number): Forecast;
+
+  /**
+   * Predict with prediction intervals.
+   * @param horizon - Number of steps to forecast
+   * @param level - Confidence level (e.g., 0.95 for 95% intervals)
+   * @returns Forecast with point predictions and intervals
+   * @throws Error if the model has not been fitted
+   */
+  predictWithIntervals(horizon: number, level: number): Forecast;
 
   /** The model name. */
   readonly name: string;
@@ -2233,6 +2314,372 @@ export class AutoEnsembleForecaster {
   /** Release WASM memory associated with this object. */
   free(): void;
 }
+
+// =============================================================================
+// PostProcessing — Prediction Intervals & Calibration
+// =============================================================================
+
+/**
+ * Point forecasts used as input for postprocessing methods.
+ */
+export class JsPointForecasts {
+  /**
+   * Create point forecasts from an array of values.
+   * @param values - Array of forecast values
+   */
+  constructor(values: Float64Array | number[]);
+
+  /** The number of forecast points. */
+  readonly length: number;
+
+  /** The forecast values. */
+  readonly values: Float64Array;
+
+  /** Check if empty. */
+  isEmpty(): boolean;
+
+  /** Release WASM memory associated with this object. */
+  free(): void;
+}
+
+/**
+ * Prediction intervals with lower/upper bounds and a coverage level.
+ */
+export class JsPredictionIntervals {
+  /** Lower bounds of intervals. */
+  readonly lower: Float64Array;
+
+  /** Upper bounds of intervals. */
+  readonly upper: Float64Array;
+
+  /** The coverage level (e.g., 0.90). */
+  readonly coverage: number;
+
+  /** The number of intervals. */
+  readonly length: number;
+
+  /** Get the interval widths. */
+  widths(): Float64Array;
+
+  /** Get the interval midpoints. */
+  midpoints(): Float64Array;
+
+  /**
+   * Compute empirical coverage given actual values.
+   * @param actuals - Actual observed values
+   * @returns Fraction of actuals within the intervals, or undefined if lengths mismatch
+   */
+  empiricalCoverage(actuals: Float64Array | number[]): number | undefined;
+
+  /** Release WASM memory associated with this object. */
+  free(): void;
+}
+
+/**
+ * Conformal prediction result storing calibration data.
+ */
+export class JsConformalResult {
+  /** The quantile value (interval half-width). */
+  quantileValue(): number;
+
+  /** The coverage level. */
+  readonly coverage: number;
+
+  /** The nonconformity scores. */
+  scores(): Float64Array;
+
+  /** Release WASM memory associated with this object. */
+  free(): void;
+}
+
+/**
+ * Conformal predictor for distribution-free prediction intervals.
+ *
+ * Provides coverage-guaranteed intervals without distributional assumptions.
+ */
+export class JsConformalPredictor {
+  /**
+   * Create a split conformal predictor.
+   * @param coverage - Target coverage level in (0, 1), e.g. 0.90
+   */
+  constructor(coverage: number);
+
+  /**
+   * Create with the cross-validation method.
+   * @param coverage - Target coverage level in (0, 1)
+   * @param nFolds - Number of cross-validation folds
+   */
+  static crossVal(coverage: number, nFolds: number): JsConformalPredictor;
+
+  /**
+   * Create with the Jackknife+ method.
+   * @param coverage - Target coverage level in (0, 1)
+   */
+  static jackknifePlus(coverage: number): JsConformalPredictor;
+
+  /**
+   * Calibrate the predictor on historical forecasts and actuals.
+   * @param forecasts - Historical point forecast values
+   * @param actuals - Corresponding actual observed values
+   * @throws Error if lengths mismatch or insufficient data
+   */
+  calibrate(
+    forecasts: Float64Array | number[],
+    actuals: Float64Array | number[],
+  ): JsConformalResult;
+
+  /**
+   * Generate prediction intervals for new point forecasts.
+   * @param result - Fitted result from calibrate()
+   * @param pointForecasts - New point forecast values
+   */
+  predictIntervals(
+    result: JsConformalResult,
+    pointForecasts: Float64Array | number[],
+  ): JsPredictionIntervals;
+
+  /** Release WASM memory associated with this object. */
+  free(): void;
+}
+
+/**
+ * Normal prediction result storing Gaussian fit parameters.
+ */
+export class JsNormalResult {
+  /** Mean error (bias). */
+  readonly mean: number;
+
+  /** Standard deviation of errors. */
+  stdDev(): number;
+
+  /** Release WASM memory associated with this object. */
+  free(): void;
+}
+
+/**
+ * Normal predictor assuming Gaussian forecast errors.
+ *
+ * Generates quantile-based prediction intervals.
+ */
+export class JsNormalPredictor {
+  /**
+   * Create a new normal predictor.
+   * @param quantiles - Sorted quantile levels in (0, 1), e.g. [0.1, 0.5, 0.9]
+   */
+  constructor(quantiles: Float64Array | number[]);
+
+  /**
+   * Fit the predictor on historical forecasts and actuals.
+   * @param forecasts - Historical point forecast values
+   * @param actuals - Corresponding actual observed values
+   * @throws Error if lengths mismatch or insufficient data
+   */
+  fit(
+    forecasts: Float64Array | number[],
+    actuals: Float64Array | number[],
+  ): JsNormalResult;
+
+  /**
+   * Generate prediction intervals for new point forecasts.
+   * @param result - Fitted result from fit()
+   * @param pointForecasts - New point forecast values
+   * @throws Error if fewer than 2 quantiles were specified
+   */
+  predictIntervals(
+    result: JsNormalResult,
+    pointForecasts: Float64Array | number[],
+  ): JsPredictionIntervals;
+
+  /** Release WASM memory associated with this object. */
+  free(): void;
+}
+
+/**
+ * Historical simulation result storing the empirical error distribution.
+ */
+export class JsHistoricalSimResult {
+  /** The sorted errors. */
+  errors(): Float64Array;
+
+  /** The quantile values. */
+  quantileValues(): Float64Array;
+
+  /** Release WASM memory associated with this object. */
+  free(): void;
+}
+
+/**
+ * Historical simulator for non-parametric prediction intervals.
+ *
+ * Uses the empirical error distribution to generate intervals.
+ */
+export class JsHistoricalSimulator {
+  /**
+   * Create a new historical simulator.
+   * @param quantiles - Sorted quantile levels in (0, 1), e.g. [0.1, 0.5, 0.9]
+   */
+  constructor(quantiles: Float64Array | number[]);
+
+  /**
+   * Create a simulator with a rolling window.
+   * @param quantiles - Sorted quantile levels in (0, 1)
+   * @param window - Number of recent observations to use
+   */
+  static withWindow(
+    quantiles: Float64Array | number[],
+    window: number,
+  ): JsHistoricalSimulator;
+
+  /**
+   * Fit the simulator on historical forecasts and actuals.
+   * @param forecasts - Historical point forecast values
+   * @param actuals - Corresponding actual observed values
+   * @throws Error if lengths mismatch or data is empty
+   */
+  simulate(
+    forecasts: Float64Array | number[],
+    actuals: Float64Array | number[],
+  ): JsHistoricalSimResult;
+
+  /**
+   * Generate prediction intervals for new point forecasts.
+   * @param result - Fitted result from simulate()
+   * @param pointForecasts - New point forecast values
+   * @throws Error if fewer than 2 quantiles were specified
+   */
+  predictIntervals(
+    result: JsHistoricalSimResult,
+    pointForecasts: Float64Array | number[],
+  ): JsPredictionIntervals;
+
+  /** Release WASM memory associated with this object. */
+  free(): void;
+}
+
+/**
+ * Opaque handle to a trained postprocessing model.
+ *
+ * Returned by JsPostProcessor.train() and consumed by predictIntervals().
+ */
+export class JsTrainedModel {
+  /** Release WASM memory associated with this object. */
+  free(): void;
+}
+
+/**
+ * Unified postprocessor wrapping conformal, normal, and historical simulation
+ * methods behind a single API.
+ */
+export class JsPostProcessor {
+  /**
+   * Create a conformal prediction postprocessor.
+   * @param coverage - Target coverage level in (0, 1), e.g. 0.90
+   */
+  static conformal(coverage: number): JsPostProcessor;
+
+  /**
+   * Create a normal prediction postprocessor.
+   * @param quantiles - Sorted quantile levels in (0, 1)
+   */
+  static normal(quantiles: Float64Array | number[]): JsPostProcessor;
+
+  /**
+   * Create a historical simulation postprocessor.
+   * @param quantiles - Sorted quantile levels in (0, 1)
+   */
+  static historicalSim(quantiles: Float64Array | number[]): JsPostProcessor;
+
+  /**
+   * Train the postprocessor on historical data.
+   * @param forecasts - JsPointForecasts with historical predictions
+   * @param actuals - Corresponding actual observed values
+   * @throws Error if training fails
+   */
+  train(
+    forecasts: JsPointForecasts,
+    actuals: Float64Array | number[],
+  ): JsTrainedModel;
+
+  /**
+   * Generate prediction intervals from a trained model.
+   * @param trained - A JsTrainedModel from train()
+   * @param forecasts - New point forecasts
+   * @throws Error if prediction fails
+   */
+  predictIntervals(
+    trained: JsTrainedModel,
+    forecasts: JsPointForecasts,
+  ): JsPredictionIntervals;
+
+  /** Release WASM memory associated with this object. */
+  free(): void;
+}
+
+/**
+ * Configuration for backtesting a postprocessor.
+ */
+export class JsBacktestConfig {
+  /**
+   * Create a new backtest configuration with default settings.
+   *
+   * Defaults: initialWindow=50, step=1, horizon=1, expanding=true.
+   */
+  constructor();
+
+  /** Set the initial training window size. Returns self for chaining. */
+  initialWindow(size: number): JsBacktestConfig;
+
+  /** Set the step size between folds. Returns self for chaining. */
+  step(step: number): JsBacktestConfig;
+
+  /** Set the forecast horizon. Returns self for chaining. */
+  horizon(horizon: number): JsBacktestConfig;
+
+  /** Set whether to use expanding (true) or rolling (false) window. Returns self for chaining. */
+  expanding(expanding: boolean): JsBacktestConfig;
+
+  /** Release WASM memory associated with this object. */
+  free(): void;
+}
+
+/**
+ * Results from backtesting a postprocessor.
+ */
+export class JsBacktestResult {
+  /** Get the number of backtest folds. */
+  numFolds(): number;
+
+  /** Overall coverage across all folds. */
+  readonly coverage: number;
+
+  /** Get average interval width across all folds. */
+  intervalWidths(): number;
+
+  /**
+   * Get calibration error (absolute deviation from target coverage).
+   * @param targetCoverage - The target coverage to compare against
+   */
+  calibrationError(targetCoverage: number): number;
+
+  /** Release WASM memory associated with this object. */
+  free(): void;
+}
+
+/**
+ * Run a backtest on a postprocessor.
+ *
+ * @param processor - The postprocessor to evaluate
+ * @param forecasts - All historical point forecasts
+ * @param actuals - All historical actual values
+ * @param config - Backtest configuration
+ * @throws Error if backtesting fails (e.g., insufficient data)
+ */
+export function backtestPostProcessor(
+  processor: JsPostProcessor,
+  forecasts: JsPointForecasts,
+  actuals: Float64Array | number[],
+  config: JsBacktestConfig,
+): JsBacktestResult;
 
 // =============================================================================
 // WASM Initialization

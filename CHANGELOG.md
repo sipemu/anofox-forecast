@@ -82,12 +82,105 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `ols_fit()` now validates `y` for NaN/Inf (returns `ForecastError::MissingValues`)
   - `ols_fit()` now validates each regressor for NaN/Inf (returns `ForecastError::InvalidParameter`)
 
+- **Hierarchical Forecasting** (`hierarchy` module)
+  - `HierarchyTree` — define parent→children structure for grouped forecasts
+  - `ReconciliationMethod::BottomUp` — aggregate leaf forecasts upward
+  - `ReconciliationMethod::TopDown` — disaggregate top-level using historical proportions
+  - `ReconciliationMethod::MinTraceOls` — optimal combination via MinT OLS projection
+  - 15 tests covering tree construction, all methods, coherence, and error handling
+
+- **Prophet-style Fourier Seasonality** (`seasonality::fourier` module)
+  - `FourierSeasonality` — flexible seasonal modeling using Fourier basis functions
+  - `fourier_terms()` — generate sin/cos basis vectors for arbitrary period and order
+  - Preset constructors: `daily()`, `weekly()`, `yearly()`
+  - Fit via normal equations with Cholesky decomposition (no external dependencies)
+  - 25 tests covering recovery, orthogonality, periodicity, edge cases
+
+- **Core Type Improvements**
+  - `Serialize`/`Deserialize` for `Forecast`, `TimeSeries`, `CalendarAnnotations` (behind `serde` feature)
+  - `Display` impls for `Forecast` and `TimeSeries` with preview summaries
+  - `PartialEq` for `Forecast` (epsilon-based) and `CalendarAnnotations`
+
+- **WASM Model Parity**
+  - Added JS/WASM bindings: `HoltWintersForecaster`, `SESForecaster`, `CrostonForecaster`, `ADIDAForecaster`, `IMAPAForecaster`, `TSBForecaster`, `GARCHForecaster`
+  - TypeScript definitions for all new forecaster classes
+
+- **Validation & Stationarity Tests**
+  - 14 new residual diagnostic tests (edge cases, NaN, constant, short series)
+  - 9 new stationarity test cases (ADF, KPSS, edge cases)
+
+- **Intermittent Model & GARCH Edge Case Tests**
+  - Croston: 6 new tests (all zeros, single demand, negative values, very long gaps, single observation)
+  - ADIDA: 6 new tests (same pattern)
+  - IMAPA: 6 new tests (same pattern)
+  - TSB: 5 new tests (same pattern)
+  - GARCH: 10 new tests (constant data, extreme volatility, trending data, NaN handling, short series)
+
+- **VAR (Vector Autoregression)** (`models::var` module)
+  - `VAR::new(order)` — VAR(p) model for multivariate time series
+  - Equation-by-equation OLS estimation
+  - Multi-step forecasting across all variables
+  - `granger_causality_test(cause, effect)` — F-statistic for Granger causality
+  - 18 tests covering coefficient recovery, dimensions, edge cases
+
+- **Kalman Filter Framework** (`models::kalman` module)
+  - `KalmanFilter` — forward filtering and Rauch-Tung-Striebel smoothing
+  - `StateSpaceModel` — linear Gaussian state-space specification
+  - Convenience constructors: `local_level()`, `local_linear_trend()`
+  - `filter()`, `smooth()`, `predict()`, `log_likelihood()` methods
+  - Internal dense matrix algebra (no external dependencies)
+  - 14 tests covering filtering, smoothing, prediction, edge cases
+
+- **Builder Patterns for Models**
+  - `GARCH::builder().p(1).q(1).max_iterations(500).build()`
+  - `MFLES::builder().seasonal_period(12).num_rounds(5).learning_rate(0.1).build()`
+  - `AutoForecast::builder().seasonal_period(12).include_arima(true).build()`
+
+- **Rolling/Expanding Window Forecast**
+  - `rolling_forecast()` — walk-forward evaluation with per-window metrics
+  - `RollingForecastConfig` — builder for initial train size, horizon, step size, expanding/rolling mode
+  - `RollingForecastResult` — per-window predictions, actuals, and aggregated metrics
+  - Parallel window evaluation when `parallel` feature enabled
+
+- **Ensemble Prediction Interval Combination**
+  - Widest-envelope interval combination: takes min of lower bounds, max of upper bounds
+  - `predict_with_intervals()` now produces meaningful combined intervals
+
+- **STL Buffer Caching**
+  - `StlScratch` — pre-allocated scratch buffers for zero-allocation repeated decompositions
+  - `STL::decompose_with_scratch()` — decompose with reusable buffers
+  - `StlBuilder::decompose_reuse()` — amortized allocation across repeated calls
+
+- **TimeSeries Convenience Methods**
+  - `seasonal_strength(period)` — seasonal strength via STL decomposition (0 to 1)
+  - `trend_strength(period)` — trend strength via STL decomposition (0 to 1)
+  - `with_outliers_replaced(config, window)` — replace outliers with local median
+  - `to_json()` / `from_json()` — JSON serialization (requires `serde` feature)
+  - `Forecast::to_json()` / `Forecast::from_json()` — forecast serialization
+
+- **WASM PostProcessor Bindings**
+  - `JsConformalPredictor`, `JsNormalPredictor`, `JsHistoricalSimulator` — probabilistic intervals in JS
+  - `JsPostProcessor` — unified API with `conformal()`, `normal()`, `historicalSim()`
+  - `JsBacktestConfig` / `JsBacktestResult` — backtesting support
+  - `JsPredictionIntervals` — coverage, widths, midpoints, empirical coverage
+  - `MFLESForecaster.predictWithIntervals()` — added to WASM bindings
+  - TypeScript definitions for all postprocess types
+
+- **Persistence Module Tests**
+  - 27 tests (from 6): JSON/bincode round-trips, file I/O, error cases, helper modules
+
 ### Changed
 
-- `parallel` feature now covers AutoForecast, batch processing, model comparison, bootstrap, and cross-validation (previously only AutoARIMA)
+- `parallel` feature now covers AutoForecast, batch processing, model comparison, bootstrap, cross-validation folds, and rolling forecast windows (previously only AutoARIMA)
 - `serde` feature now includes bincode for binary serialization alongside JSON
 - Several `ComputationError` uses migrated to specific error variants (`ConvergenceFailure`, `SingularMatrix`)
-- Test coverage increased to 1,565+ tests
+- Removed dead code in `mfles.rs` and `tbats/model.rs`
+- MSTL uses in-place decomposition for reduced allocations
+- STL decomposition supports buffer reuse via `StlScratch`
+- ETS uses `Cow<[f64]>` to avoid cloning series values when no regressors are present
+- Cross-validation uses direct slice references to avoid intermediate allocations per fold
+- Ensemble `predict_with_intervals()` produces widest-envelope combined intervals
+- Test coverage increased to 1,970+ tests
 - `MissingValuePolicy` enum has 4 new variants (breaking for exhaustive `match` — acceptable under 0.x semver)
 
 ## [0.4.1] - 2026-01-16

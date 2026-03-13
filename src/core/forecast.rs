@@ -1,9 +1,11 @@
 //! Forecast result structure for holding predictions.
 
 use crate::error::{ForecastError, Result};
+use std::fmt;
 
 /// A forecast result containing point predictions and optional intervals.
 #[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Forecast {
     /// Point predictions: point[dimension][step]
     point: Vec<Vec<f64>>,
@@ -186,6 +188,95 @@ impl Forecast {
     }
 }
 
+#[cfg(feature = "serde")]
+impl Forecast {
+    /// Serialize this forecast to a JSON string.
+    pub fn to_json(&self) -> crate::error::Result<String> {
+        serde_json::to_string_pretty(self)
+            .map_err(|e| ForecastError::SerializationError(format!("serialization failed: {}", e)))
+    }
+
+    /// Deserialize a forecast from a JSON string.
+    pub fn from_json(json: &str) -> crate::error::Result<Self> {
+        serde_json::from_str(json).map_err(|e| {
+            ForecastError::SerializationError(format!("deserialization failed: {}", e))
+        })
+    }
+}
+
+/// Epsilon-based equality for floating-point forecast data.
+impl PartialEq for Forecast {
+    fn eq(&self, other: &Self) -> bool {
+        const EPS: f64 = 1e-12;
+
+        let vecs_eq = |a: &[Vec<f64>], b: &[Vec<f64>]| -> bool {
+            a.len() == b.len()
+                && a.iter().zip(b.iter()).all(|(va, vb)| {
+                    va.len() == vb.len()
+                        && va.iter().zip(vb.iter()).all(|(x, y)| (x - y).abs() < EPS)
+                })
+        };
+
+        if !vecs_eq(&self.point, &other.point) {
+            return false;
+        }
+
+        match (&self.lower, &other.lower) {
+            (Some(a), Some(b)) => {
+                if !vecs_eq(a, b) {
+                    return false;
+                }
+            }
+            (None, None) => {}
+            _ => return false,
+        }
+
+        match (&self.upper, &other.upper) {
+            (Some(a), Some(b)) => {
+                if !vecs_eq(a, b) {
+                    return false;
+                }
+            }
+            (None, None) => {}
+            _ => return false,
+        }
+
+        true
+    }
+}
+
+impl fmt::Display for Forecast {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let dims = self.dimensions();
+        let h = self.horizon();
+        let intervals = match (self.has_lower(), self.has_upper()) {
+            (true, true) => "lower+upper",
+            (true, false) => "lower only",
+            (false, true) => "upper only",
+            (false, false) => "none",
+        };
+
+        write!(
+            f,
+            "Forecast(horizon={}, dims={}, intervals={}",
+            h, dims, intervals
+        )?;
+
+        if h > 0 {
+            let primary = self.primary();
+            let preview: Vec<String> = primary
+                .iter()
+                .take(5)
+                .map(|v| format!("{:.4}", v))
+                .collect();
+            let suffix = if h > 5 { ", ..." } else { "" };
+            write!(f, ", values=[{}{}]", preview.join(", "), suffix)?;
+        }
+
+        write!(f, ")")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -283,5 +374,72 @@ mod tests {
         assert_eq!(forecast.primary(), &[2.0, 3.0]);
         assert_eq!(forecast.lower_series(0).unwrap(), &[1.0, 2.0]);
         assert_eq!(forecast.upper_series(0).unwrap(), &[3.0, 4.0]);
+    }
+}
+
+#[cfg(all(test, feature = "serde"))]
+mod serde_tests {
+    use super::*;
+
+    #[test]
+    fn forecast_json_round_trip_point_only() {
+        let forecast = Forecast::from_values(vec![1.0, 2.5, 3.7, 4.2]);
+
+        let json = forecast.to_json().unwrap();
+        let restored = Forecast::from_json(&json).unwrap();
+
+        assert_eq!(forecast, restored);
+    }
+
+    #[test]
+    fn forecast_json_round_trip_with_intervals() {
+        let forecast = Forecast::from_values_with_intervals(
+            vec![10.0, 20.0, 30.0],
+            vec![8.0, 18.0, 28.0],
+            vec![12.0, 22.0, 32.0],
+        );
+
+        let json = forecast.to_json().unwrap();
+        let restored = Forecast::from_json(&json).unwrap();
+
+        assert_eq!(forecast, restored);
+    }
+
+    #[test]
+    fn forecast_json_round_trip_empty() {
+        let forecast = Forecast::new();
+
+        let json = forecast.to_json().unwrap();
+        let restored = Forecast::from_json(&json).unwrap();
+
+        assert!(restored.is_empty());
+        assert_eq!(restored.dimensions(), 0);
+    }
+
+    #[test]
+    fn forecast_json_round_trip_multivariate() {
+        let mut forecast = Forecast::with_dimensions(3);
+        forecast.series_mut(0).extend([1.0, 2.0]);
+        forecast.series_mut(1).extend([3.0, 4.0]);
+        forecast.series_mut(2).extend([5.0, 6.0]);
+
+        let json = forecast.to_json().unwrap();
+        let restored = Forecast::from_json(&json).unwrap();
+
+        assert_eq!(forecast, restored);
+        assert_eq!(restored.dimensions(), 3);
+        assert!(restored.is_multivariate());
+    }
+
+    #[test]
+    fn forecast_from_json_rejects_invalid_json() {
+        let result = Forecast::from_json("not valid json");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, ForecastError::SerializationError(_)),
+            "expected SerializationError, got {:?}",
+            err
+        );
     }
 }

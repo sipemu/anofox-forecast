@@ -33,6 +33,7 @@ pub mod core;
 pub mod detection;
 pub mod error;
 pub mod features;
+pub mod hierarchy;
 pub mod models;
 #[cfg(feature = "postprocess")]
 pub mod postprocess;

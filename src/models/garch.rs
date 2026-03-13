@@ -72,9 +72,127 @@ pub struct GARCH {
     y_vals: Vec<f64>,
     /// Last q sigma² values for forecasting - matches statsforecast sigma2_vals.
     sigma2_vals: Vec<f64>,
+    /// Optional override for max optimization iterations.
+    max_iterations: Option<usize>,
+    /// Optional override for optimization convergence tolerance.
+    tolerance: Option<f64>,
+}
+
+/// Builder for constructing a [`GARCH`] model with custom parameters.
+///
+/// # Example
+/// ```
+/// use anofox_forecast::models::garch::GARCH;
+///
+/// let model = GARCH::builder()
+///     .p(1)
+///     .q(1)
+///     .max_iterations(500)
+///     .tolerance(1e-6)
+///     .build();
+/// ```
+#[derive(Debug, Clone)]
+pub struct GARCHBuilder {
+    p: Option<usize>,
+    q: Option<usize>,
+    omega: Option<f64>,
+    alpha: Option<Vec<f64>>,
+    beta: Option<Vec<f64>>,
+    max_iterations: Option<usize>,
+    tolerance: Option<f64>,
+}
+
+impl GARCHBuilder {
+    /// Create a new builder with all defaults.
+    fn new() -> Self {
+        Self {
+            p: None,
+            q: None,
+            omega: None,
+            alpha: None,
+            beta: None,
+            max_iterations: None,
+            tolerance: None,
+        }
+    }
+
+    /// Set the GARCH order p (number of lagged squared residuals).
+    pub fn p(mut self, p: usize) -> Self {
+        self.p = Some(p);
+        self
+    }
+
+    /// Set the GARCH order q (number of lagged variances).
+    pub fn q(mut self, q: usize) -> Self {
+        self.q = Some(q);
+        self
+    }
+
+    /// Set the omega (constant) parameter.
+    pub fn omega(mut self, omega: f64) -> Self {
+        self.omega = Some(omega);
+        self
+    }
+
+    /// Set the alpha parameters (for squared residuals).
+    pub fn alpha(mut self, alpha: Vec<f64>) -> Self {
+        self.alpha = Some(alpha);
+        self
+    }
+
+    /// Set the beta parameters (for lagged variances).
+    pub fn beta(mut self, beta: Vec<f64>) -> Self {
+        self.beta = Some(beta);
+        self
+    }
+
+    /// Set the maximum number of optimization iterations.
+    pub fn max_iterations(mut self, max_iterations: usize) -> Self {
+        self.max_iterations = Some(max_iterations);
+        self
+    }
+
+    /// Set the convergence tolerance for optimization.
+    pub fn tolerance(mut self, tolerance: f64) -> Self {
+        self.tolerance = Some(tolerance);
+        self
+    }
+
+    /// Build the GARCH model.
+    pub fn build(self) -> GARCH {
+        let p = self.p.unwrap_or(1).max(1);
+        let q = self.q.unwrap_or(1).max(1);
+
+        let mut model = GARCH::new(p, q);
+
+        if let Some(omega) = self.omega {
+            model.omega = omega.max(0.0001);
+        }
+        if let Some(alpha) = self.alpha {
+            model.p = alpha.len().max(1);
+            model.alpha = alpha.into_iter().map(|a| a.max(0.0)).collect();
+        }
+        if let Some(beta) = self.beta {
+            model.q = beta.len().max(1);
+            model.beta = beta.into_iter().map(|b| b.max(0.0)).collect();
+        }
+        if let Some(max_iter) = self.max_iterations {
+            model.max_iterations = Some(max_iter);
+        }
+        if let Some(tol) = self.tolerance {
+            model.tolerance = Some(tol);
+        }
+
+        model
+    }
 }
 
 impl GARCH {
+    /// Create a builder for constructing a GARCH model.
+    pub fn builder() -> GARCHBuilder {
+        GARCHBuilder::new()
+    }
+
     /// Create a new GARCH(p,q) model with default parameters.
     ///
     /// Default: omega=0.01, alpha=[0.1], beta=[0.85]
@@ -99,6 +217,8 @@ impl GARCH {
             n: 0,
             y_vals: Vec::new(),
             sigma2_vals: Vec::new(),
+            max_iterations: None,
+            tolerance: None,
         }
     }
 
@@ -280,8 +400,8 @@ impl GARCH {
         };
 
         let config = NelderMeadConfig {
-            max_iter: 1000,
-            tolerance: 1e-10,
+            max_iter: self.max_iterations.unwrap_or(1000),
+            tolerance: self.tolerance.unwrap_or(1e-10),
             ..Default::default()
         };
 
@@ -627,6 +747,7 @@ impl Forecaster for GARCH {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use approx::assert_relative_eq;
     use chrono::{Duration, TimeZone, Utc};
 
     fn make_timestamps(n: usize) -> Vec<chrono::DateTime<Utc>> {
@@ -949,5 +1070,350 @@ mod tests {
                 vf
             );
         }
+    }
+
+    // ==================== Edge cases ====================
+
+    #[test]
+    fn garch_constant_variance_series() {
+        // Series with roughly constant variance (no volatility clustering)
+        let timestamps = make_timestamps(100);
+        let values: Vec<f64> = (0..100)
+            .map(|i| {
+                let x = ((i * 17 + 13) % 97) as f64 / 97.0 - 0.5;
+                x * 0.5 // Small, constant-scale noise
+            })
+            .collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = GARCH::new(1, 1);
+        model.fit(&ts).unwrap();
+
+        // Model should still fit and produce valid forecasts
+        assert!(model.is_stationary());
+        let var_forecast = model.forecast_variance(10).unwrap();
+        for &v in &var_forecast {
+            assert!(v > 0.0, "Variance should be positive");
+            assert!(v.is_finite(), "Variance should be finite");
+        }
+    }
+
+    #[test]
+    fn garch_high_volatility_clustering() {
+        // Series with strong volatility clustering
+        let timestamps = make_timestamps(200);
+        let mut rng_state = 7u64;
+        let values: Vec<f64> = (0..200)
+            .map(|i| {
+                rng_state = rng_state.wrapping_mul(1103515245).wrapping_add(12345);
+                let rand = ((rng_state >> 16) & 0x7FFF) as f64 / 32768.0 - 0.5;
+                // Strong regime changes: quiet -> volatile -> quiet
+                let regime = match (i / 40) % 3 {
+                    0 => 0.1,
+                    1 => 5.0,
+                    _ => 0.3,
+                };
+                rand * regime
+            })
+            .collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = GARCH::new(1, 1);
+        model.fit(&ts).unwrap();
+
+        assert!(model.is_stationary());
+
+        let var_forecast = model.forecast_variance(20).unwrap();
+        for &v in &var_forecast {
+            assert!(v > 0.0);
+            assert!(v.is_finite());
+        }
+
+        // Unconditional variance should be positive
+        let uncond = model.unconditional_variance().unwrap();
+        assert!(uncond > 0.0);
+    }
+
+    #[test]
+    fn garch_very_short_series() {
+        // Just above minimum observations for GARCH(1,1): p+q+10 = 12
+        let timestamps = make_timestamps(12);
+        let values: Vec<f64> = (0..12)
+            .map(|i| {
+                let x = ((i * 17 + 13) % 11) as f64 / 11.0 - 0.5;
+                x * 2.0
+            })
+            .collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = GARCH::new(1, 1);
+        model.fit(&ts).unwrap();
+
+        let var_forecast = model.forecast_variance(5).unwrap();
+        assert_eq!(var_forecast.len(), 5);
+        for &v in &var_forecast {
+            assert!(v > 0.0);
+            assert!(v.is_finite());
+        }
+    }
+
+    #[test]
+    fn garch_below_minimum_series() {
+        // Below minimum for GARCH(1,1)
+        let ts = make_volatility_series(11);
+        let mut model = GARCH::new(1, 1);
+        assert!(matches!(
+            model.fit(&ts),
+            Err(ForecastError::InsufficientData { .. })
+        ));
+    }
+
+    #[test]
+    fn garch_below_minimum_higher_order() {
+        // GARCH(2,2) needs p+q+10 = 14 minimum
+        let ts = make_volatility_series(13);
+        let mut model = GARCH::new(2, 2);
+        assert!(matches!(
+            model.fit(&ts),
+            Err(ForecastError::InsufficientData { .. })
+        ));
+    }
+
+    #[test]
+    fn garch_convergence_different_initial_params() {
+        // Test that optimization finds similar parameters regardless of initial values
+        let ts = make_volatility_series(200);
+
+        let mut model1 = GARCH::new(1, 1)
+            .with_omega(0.01)
+            .with_alpha(vec![0.05])
+            .with_beta(vec![0.90]);
+        model1.fit(&ts).unwrap();
+
+        let mut model2 = GARCH::new(1, 1)
+            .with_omega(0.5)
+            .with_alpha(vec![0.3])
+            .with_beta(vec![0.5]);
+        model2.fit(&ts).unwrap();
+
+        // Both should converge to valid stationary parameters
+        assert!(model1.is_stationary());
+        assert!(model2.is_stationary());
+
+        // Both should produce positive omega
+        assert!(model1.omega() > 0.0);
+        assert!(model2.omega() > 0.0);
+    }
+
+    #[test]
+    fn garch_large_values_series() {
+        // Series with very large values (tests numerical stability)
+        let timestamps = make_timestamps(100);
+        let values: Vec<f64> = (0..100)
+            .map(|i| {
+                let x = ((i * 17 + 13) % 97) as f64 / 97.0 - 0.5;
+                x * 1000.0
+            })
+            .collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = GARCH::new(1, 1);
+        model.fit(&ts).unwrap();
+
+        let var_forecast = model.forecast_variance(5).unwrap();
+        for &v in &var_forecast {
+            assert!(v > 0.0);
+            assert!(v.is_finite());
+        }
+    }
+
+    #[test]
+    fn garch_small_values_series() {
+        // Series with very small values
+        let timestamps = make_timestamps(100);
+        let values: Vec<f64> = (0..100)
+            .map(|i| {
+                let x = ((i * 17 + 13) % 97) as f64 / 97.0 - 0.5;
+                x * 0.001
+            })
+            .collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = GARCH::new(1, 1);
+        model.fit(&ts).unwrap();
+
+        let var_forecast = model.forecast_variance(5).unwrap();
+        for &v in &var_forecast {
+            assert!(v > 0.0);
+            assert!(v.is_finite());
+        }
+    }
+
+    #[test]
+    fn garch_stationarity_check_boundary() {
+        // alpha + beta exactly at boundary
+        let model = GARCH::new(1, 1).with_alpha(vec![0.5]).with_beta(vec![0.5]);
+        // sum = 1.0, not strictly less than 1
+        assert!(!model.is_stationary());
+
+        // Just below boundary
+        let model = GARCH::new(1, 1).with_alpha(vec![0.49]).with_beta(vec![0.5]);
+        assert!(model.is_stationary());
+    }
+
+    #[test]
+    fn garch_unconditional_variance_stationary() {
+        let model = GARCH::new(1, 1)
+            .with_omega(0.01)
+            .with_alpha(vec![0.1])
+            .with_beta(vec![0.85]);
+
+        let uncond = model.calculate_unconditional_variance();
+        // omega / (1 - alpha - beta) = 0.01 / (1 - 0.1 - 0.85) = 0.01 / 0.05 = 0.2
+        assert_relative_eq!(uncond, 0.2, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn garch_unconditional_variance_nonstationary() {
+        let model = GARCH::new(1, 1)
+            .with_omega(0.01)
+            .with_alpha(vec![0.5])
+            .with_beta(vec![0.6]);
+
+        let uncond = model.calculate_unconditional_variance();
+        // Non-stationary fallback: omega * 10
+        assert_relative_eq!(uncond, 0.1, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn garch_predict_zero_horizon() {
+        let ts = make_volatility_series(100);
+        let mut model = GARCH::garch_1_1();
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(0).unwrap();
+        assert_eq!(forecast.primary().len(), 0);
+    }
+
+    #[test]
+    fn garch_predict_requires_fit() {
+        let model = GARCH::new(1, 1);
+        assert!(matches!(model.predict(5), Err(ForecastError::FitRequired)));
+    }
+
+    #[test]
+    fn garch_conditional_variance_length() {
+        let ts = make_volatility_series(100);
+        let mut model = GARCH::garch_1_1();
+        model.fit(&ts).unwrap();
+
+        let cond_var = model.conditional_variance().unwrap();
+        assert_eq!(cond_var.len(), 100);
+    }
+
+    #[test]
+    fn garch_long_horizon_forecast() {
+        // Test that very long horizon forecasts don't blow up
+        let ts = make_volatility_series(100);
+        let mut model = GARCH::garch_1_1();
+        model.fit(&ts).unwrap();
+
+        let var_forecast = model.forecast_variance(500).unwrap();
+        assert_eq!(var_forecast.len(), 500);
+
+        // All should be finite and positive
+        for &v in &var_forecast {
+            assert!(v > 0.0, "Variance should remain positive at long horizon");
+            assert!(
+                v.is_finite(),
+                "Variance should remain finite at long horizon"
+            );
+        }
+    }
+
+    #[test]
+    fn garch_param_bounds() {
+        // Omega is clamped to min 0.0001
+        let model = GARCH::new(1, 1).with_omega(-1.0);
+        assert!(model.omega() >= 0.0001);
+
+        // Alpha clamped to min 0.0
+        let model = GARCH::new(1, 1).with_alpha(vec![-0.5]);
+        assert!(model.alpha_params()[0] >= 0.0);
+
+        // Beta clamped to min 0.0
+        let model = GARCH::new(1, 1).with_beta(vec![-0.5]);
+        assert!(model.beta_params()[0] >= 0.0);
+    }
+
+    #[test]
+    fn garch_builder_defaults() {
+        let model = GARCH::builder().build();
+        // Defaults: p=1, q=1
+        assert_eq!(model.alpha_params().len(), 1);
+        assert_eq!(model.beta_params().len(), 1);
+        assert!(model.omega() > 0.0);
+    }
+
+    #[test]
+    fn garch_builder_custom() {
+        let model = GARCH::builder()
+            .p(2)
+            .q(1)
+            .omega(0.05)
+            .max_iterations(500)
+            .tolerance(1e-6)
+            .build();
+
+        assert_eq!(model.alpha_params().len(), 2);
+        assert_eq!(model.beta_params().len(), 1);
+        assert_relative_eq!(model.omega(), 0.05, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn garch_builder_with_alpha_beta() {
+        let model = GARCH::builder()
+            .alpha(vec![0.05, 0.03])
+            .beta(vec![0.9])
+            .build();
+
+        assert_eq!(model.alpha_params().len(), 2);
+        assert_eq!(model.beta_params().len(), 1);
+        assert_relative_eq!(model.alpha_params()[0], 0.05, epsilon = 1e-10);
+        assert_relative_eq!(model.alpha_params()[1], 0.03, epsilon = 1e-10);
+        assert_relative_eq!(model.beta_params()[0], 0.9, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn garch_builder_fit_predict() {
+        let ts = make_volatility_series(100);
+        let mut model = GARCH::builder()
+            .p(1)
+            .q(1)
+            .max_iterations(500)
+            .tolerance(1e-6)
+            .build();
+
+        model.fit(&ts).unwrap();
+        let var_forecast = model.forecast_variance(10).unwrap();
+        assert_eq!(var_forecast.len(), 10);
+        for &v in &var_forecast {
+            assert!(v > 0.0);
+        }
+    }
+
+    #[test]
+    fn garch_builder_clamping() {
+        // Omega is clamped to min 0.0001
+        let model = GARCH::builder().omega(-1.0).build();
+        assert!(model.omega() >= 0.0001);
+
+        // Alpha clamped to min 0.0
+        let model = GARCH::builder().alpha(vec![-0.5]).build();
+        assert!(model.alpha_params()[0] >= 0.0);
+
+        // Beta clamped to min 0.0
+        let model = GARCH::builder().beta(vec![-0.5]).build();
+        assert!(model.beta_params()[0] >= 0.0);
     }
 }

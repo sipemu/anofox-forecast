@@ -735,4 +735,305 @@ mod tests {
         // Should be around 0.5 when x = df
         assert!(p > 0.3 && p < 0.7);
     }
+
+    // ==================== jarque_bera ====================
+
+    #[test]
+    fn jarque_bera_normal_data() {
+        // Pseudo-normal residuals (symmetric, mesokurtic) should pass
+        let residuals: Vec<f64> = (0..200)
+            .map(|i| {
+                let x = ((i * 17 + 13) % 97) as f64 / 97.0;
+                let y = ((i * 31 + 7) % 89) as f64 / 89.0;
+                // Box-Muller-ish transform for approximate normality
+                (x - 0.5) + (y - 0.5)
+            })
+            .collect();
+
+        let result = jarque_bera(&residuals);
+
+        assert!(result.statistic >= 0.0);
+        assert!(result.p_value >= 0.0 && result.p_value <= 1.0);
+        // Skewness should be near zero for symmetric data
+        assert!(result.skewness.abs() < 1.0);
+    }
+
+    #[test]
+    fn jarque_bera_skewed_data() {
+        // Highly skewed data should fail normality test
+        let mut residuals = vec![0.1; 100];
+        residuals.extend(vec![10.0; 5]); // Add outliers to create skew
+
+        let result = jarque_bera(&residuals);
+
+        assert!(result.statistic > 0.0);
+        assert!(result.skewness.abs() > 0.5, "Data should be skewed");
+    }
+
+    #[test]
+    fn jarque_bera_constant_data() {
+        let residuals = vec![3.0; 50];
+        let result = jarque_bera(&residuals);
+
+        assert_relative_eq!(result.statistic, 0.0, epsilon = 1e-10);
+        assert_relative_eq!(result.p_value, 1.0, epsilon = 1e-10);
+        assert_relative_eq!(result.skewness, 0.0, epsilon = 1e-10);
+        assert_relative_eq!(result.excess_kurtosis, 0.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn jarque_bera_too_short() {
+        let residuals = vec![1.0, 2.0];
+        let result = jarque_bera(&residuals);
+
+        assert!(result.statistic.is_nan());
+        assert!(result.p_value.is_nan());
+        assert!(result.skewness.is_nan());
+        assert!(result.excess_kurtosis.is_nan());
+    }
+
+    #[test]
+    fn jarque_bera_is_normal() {
+        let result = JarqueBeraResult {
+            statistic: 1.0,
+            p_value: 0.60,
+            skewness: 0.1,
+            excess_kurtosis: 0.05,
+        };
+        assert!(result.is_normal(0.05));
+        assert!(!result.is_normal(0.99));
+    }
+
+    #[test]
+    fn jarque_bera_single_value() {
+        let residuals = vec![42.0];
+        let result = jarque_bera(&residuals);
+        assert!(result.statistic.is_nan());
+    }
+
+    #[test]
+    fn jarque_bera_empty() {
+        let result = jarque_bera(&[]);
+        assert!(result.statistic.is_nan());
+    }
+
+    // ==================== diagnose_residuals ====================
+
+    #[test]
+    fn diagnose_residuals_basic() {
+        let residuals: Vec<f64> = (0..100)
+            .map(|i| ((i * 17 + 13) % 97) as f64 / 50.0 - 1.0)
+            .collect();
+
+        let diag = diagnose_residuals(&residuals, 0);
+
+        assert_eq!(diag.n, 100);
+        assert!(!diag.mean.is_nan());
+        assert!(diag.variance >= 0.0);
+        assert!(!diag.ljung_box.statistic.is_nan());
+        assert!(!diag.durbin_watson.statistic.is_nan());
+        assert!(!diag.jarque_bera.statistic.is_nan());
+    }
+
+    #[test]
+    fn diagnose_residuals_empty() {
+        let diag = diagnose_residuals(&[], 0);
+
+        assert_eq!(diag.n, 0);
+        assert_relative_eq!(diag.mean, 0.0, epsilon = 1e-10);
+        assert_relative_eq!(diag.variance, 0.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn diagnose_residuals_single_value() {
+        let diag = diagnose_residuals(&[5.0], 0);
+
+        assert_eq!(diag.n, 1);
+        assert_relative_eq!(diag.mean, 5.0, epsilon = 1e-10);
+        assert_relative_eq!(diag.variance, 0.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn diagnose_residuals_constant() {
+        let residuals = vec![2.0; 50];
+        let diag = diagnose_residuals(&residuals, 0);
+
+        assert_eq!(diag.n, 50);
+        assert_relative_eq!(diag.mean, 2.0, epsilon = 1e-10);
+        assert_relative_eq!(diag.variance, 0.0, epsilon = 1e-10);
+        // Constant residuals should pass Ljung-Box (no autocorrelation)
+        assert!(diag.ljung_box.is_white_noise(0.05));
+    }
+
+    #[test]
+    fn diagnose_residuals_is_adequate() {
+        let residuals: Vec<f64> = (0..100)
+            .map(|i| ((i * 17 + 13) % 97) as f64 / 50.0 - 1.0)
+            .collect();
+
+        let diag = diagnose_residuals(&residuals, 0);
+
+        // is_adequate delegates to ljung_box.is_white_noise
+        assert_eq!(diag.is_adequate(0.05), diag.ljung_box.is_white_noise(0.05));
+    }
+
+    #[test]
+    fn diagnose_residuals_display() {
+        let residuals: Vec<f64> = (0..50)
+            .map(|i| ((i * 17 + 13) % 97) as f64 / 50.0 - 1.0)
+            .collect();
+
+        let diag = diagnose_residuals(&residuals, 0);
+        let display = format!("{}", diag);
+
+        assert!(display.contains("Residual Diagnostics"));
+        assert!(display.contains("Ljung-Box"));
+        assert!(display.contains("Durbin-Watson"));
+        assert!(display.contains("Jarque-Bera"));
+    }
+
+    #[test]
+    fn diagnose_residuals_with_fitted_params() {
+        let residuals: Vec<f64> = (0..100)
+            .map(|i| ((i * 17 + 13) % 97) as f64 / 50.0 - 1.0)
+            .collect();
+
+        let diag0 = diagnose_residuals(&residuals, 0);
+        let diag3 = diagnose_residuals(&residuals, 3);
+
+        // Same statistic, different degrees of freedom
+        assert_relative_eq!(
+            diag0.ljung_box.statistic,
+            diag3.ljung_box.statistic,
+            epsilon = 1e-10
+        );
+        assert!(diag0.ljung_box.df > diag3.ljung_box.df);
+    }
+
+    // ==================== ljung_box edge cases ====================
+
+    #[test]
+    fn ljung_box_default_lags() {
+        let residuals: Vec<f64> = (0..100)
+            .map(|i| ((i * 17 + 13) % 97) as f64 / 50.0 - 1.0)
+            .collect();
+
+        // None lags should use default: min(10, n/5)
+        let result = ljung_box(&residuals, None, 0);
+        assert_eq!(result.lags, 10); // min(10, 100/5) = 10
+    }
+
+    #[test]
+    fn ljung_box_lags_clamped_to_n_minus_1() {
+        let residuals = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        // Request more lags than n-1
+        let result = ljung_box(&residuals, Some(100), 0);
+        assert_eq!(result.lags, 4); // clamped to n - 1 = 4
+    }
+
+    #[test]
+    fn ljung_box_three_values() {
+        // Exactly 3 values, the minimum for non-NaN
+        let residuals = vec![1.0, -1.0, 0.5];
+        let result = ljung_box(&residuals, Some(1), 0);
+        assert!(!result.statistic.is_nan());
+        assert!(result.statistic >= 0.0);
+    }
+
+    // ==================== durbin_watson edge cases ====================
+
+    #[test]
+    fn durbin_watson_two_values() {
+        let result = durbin_watson(&[1.0, 2.0]);
+        assert!(!result.statistic.is_nan());
+        assert!(result.statistic >= 0.0 && result.statistic <= 4.0);
+    }
+
+    #[test]
+    fn durbin_watson_empty() {
+        let result = durbin_watson(&[]);
+        assert!(result.statistic.is_nan());
+        assert_eq!(result.interpretation, AutocorrelationType::None);
+    }
+
+    #[test]
+    fn durbin_watson_all_interpretation_ranges() {
+        // PositiveStrong: DW < 0.5
+        // Highly correlated: each value close to previous
+        let mut strong_pos = vec![0.0; 100];
+        strong_pos[0] = 10.0;
+        for i in 1..100 {
+            strong_pos[i] = strong_pos[i - 1] * 0.999;
+        }
+        let result = durbin_watson(&strong_pos);
+        assert!(result.statistic < 0.5);
+        assert_eq!(result.interpretation, AutocorrelationType::PositiveStrong);
+
+        // None: DW near 2
+        let result_none = DurbinWatsonResult {
+            statistic: 2.0,
+            interpretation: AutocorrelationType::None,
+        };
+        assert_eq!(result_none.interpretation, AutocorrelationType::None);
+
+        // NegativeStrong: DW >= 3.5
+        let alt: Vec<f64> = (0..100)
+            .map(|i| if i % 2 == 0 { 100.0 } else { -100.0 })
+            .collect();
+        let result = durbin_watson(&alt);
+        assert!(result.statistic > 3.5);
+        assert_eq!(result.interpretation, AutocorrelationType::NegativeStrong);
+    }
+
+    // ==================== box_pierce edge cases ====================
+
+    #[test]
+    fn box_pierce_empty() {
+        let result = box_pierce(&[], Some(5));
+        assert!(result.statistic.is_nan());
+    }
+
+    #[test]
+    fn box_pierce_default_lags() {
+        let residuals: Vec<f64> = (0..50)
+            .map(|i| ((i * 17 + 13) % 97) as f64 / 50.0 - 1.0)
+            .collect();
+
+        let result = box_pierce(&residuals, None);
+        assert_eq!(result.lags, 10); // min(10, 50/5)
+    }
+
+    // ==================== NaN handling ====================
+
+    #[test]
+    fn ljung_box_with_nan_values() {
+        // NaN in residuals propagates through computation
+        let mut residuals: Vec<f64> = (0..50)
+            .map(|i| ((i * 17 + 13) % 97) as f64 / 50.0 - 1.0)
+            .collect();
+        residuals[10] = f64::NAN;
+
+        let result = ljung_box(&residuals, Some(5), 0);
+        // Result should be NaN because NaN propagates
+        assert!(result.statistic.is_nan());
+    }
+
+    #[test]
+    fn durbin_watson_with_nan() {
+        let residuals = vec![1.0, f64::NAN, 3.0, 4.0];
+        let result = durbin_watson(&residuals);
+        // NaN should propagate
+        assert!(result.statistic.is_nan());
+    }
+
+    #[test]
+    fn jarque_bera_with_nan() {
+        let mut residuals: Vec<f64> = (0..50)
+            .map(|i| ((i * 17 + 13) % 97) as f64 / 50.0 - 1.0)
+            .collect();
+        residuals[5] = f64::NAN;
+
+        let result = jarque_bera(&residuals);
+        assert!(result.statistic.is_nan());
+    }
 }

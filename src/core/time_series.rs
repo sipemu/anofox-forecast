@@ -4,6 +4,7 @@ use crate::error::{ForecastError, Result};
 use crate::utils::stats::{nan_mean, nan_median};
 use chrono::{DateTime, Datelike, Duration, Utc};
 use std::collections::HashMap;
+use std::fmt;
 
 /// Layout of multivariate data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -115,7 +116,8 @@ pub enum MissingValuePolicy {
 }
 
 /// Calendar annotations for holidays and regressors.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct CalendarAnnotations {
     /// Holiday dates.
     holidays: Vec<DateTime<Utc>>,
@@ -170,6 +172,7 @@ impl CalendarAnnotations {
 
 /// A time series with timestamps and values.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TimeSeries {
     timestamps: Vec<DateTime<Utc>>,
     /// Values stored in column-major format: values[dimension][observation]
@@ -178,6 +181,10 @@ pub struct TimeSeries {
     metadata: HashMap<String, String>,
     dimension_metadata: Vec<HashMap<String, String>>,
     timezone: Option<String>,
+    #[cfg_attr(
+        feature = "serde",
+        serde(with = "crate::utils::persistence::opt_duration_secs")
+    )]
     frequency: Option<Duration>,
     calendar: Option<CalendarAnnotations>,
 }
@@ -1379,6 +1386,148 @@ impl TimeSeries {
         let freq = Frequency::parse(frequency)?;
         self.fill_gaps(freq)
     }
+
+    /// Compute the seasonal strength of the primary dimension via STL decomposition.
+    ///
+    /// Returns a value between 0 and 1, where values close to 1 indicate
+    /// strong seasonality. Requires `period >= 2` and series length `>= 2 * period`.
+    ///
+    /// This is a convenience wrapper around STL decomposition — if you need both
+    /// seasonal and trend strength, call [`STL::decompose`](crate::seasonality::STL)
+    /// once and use `STLResult::seasonal_strength()` / `STLResult::trend_strength()`.
+    pub fn seasonal_strength(&self, period: usize) -> Result<f64> {
+        use crate::seasonality::STL;
+
+        if period < 2 {
+            return Err(ForecastError::InvalidParameter(
+                "period must be at least 2".into(),
+            ));
+        }
+        let vals = self.primary_values();
+        if vals.len() < 2 * period {
+            return Err(ForecastError::InsufficientData {
+                needed: 2 * period,
+                got: vals.len(),
+                hint: Some("need at least 2 full seasonal cycles".into()),
+            });
+        }
+        let stl = STL::new(period);
+        let result = stl.decompose(vals).ok_or(ForecastError::ComputationError(
+            "STL decomposition failed".into(),
+        ))?;
+        Ok(result.seasonal_strength())
+    }
+
+    /// Compute the trend strength of the primary dimension via STL decomposition.
+    ///
+    /// Returns a value between 0 and 1, where values close to 1 indicate
+    /// a strong trend component. Requires `period >= 2` and series length `>= 2 * period`.
+    pub fn trend_strength(&self, period: usize) -> Result<f64> {
+        use crate::seasonality::STL;
+
+        if period < 2 {
+            return Err(ForecastError::InvalidParameter(
+                "period must be at least 2".into(),
+            ));
+        }
+        let vals = self.primary_values();
+        if vals.len() < 2 * period {
+            return Err(ForecastError::InsufficientData {
+                needed: 2 * period,
+                got: vals.len(),
+                hint: Some("need at least 2 full seasonal cycles".into()),
+            });
+        }
+        let stl = STL::new(period);
+        let result = stl.decompose(vals).ok_or(ForecastError::ComputationError(
+            "STL decomposition failed".into(),
+        ))?;
+        Ok(result.trend_strength())
+    }
+
+    /// Detect outliers in the primary dimension and return a sanitized copy.
+    ///
+    /// Outlier values are replaced with the local median within a window of
+    /// `window_size` around each outlier. The original series is unchanged.
+    ///
+    /// Uses the specified [`OutlierConfig`](crate::detection::OutlierConfig)
+    /// for detection (IQR, Z-score, or Modified Z-score).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use anofox_forecast::core::TimeSeries;
+    /// use anofox_forecast::detection::OutlierConfig;
+    /// use chrono::{TimeZone, Utc};
+    ///
+    /// let timestamps: Vec<_> = (0..50)
+    ///     .map(|i| Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap()
+    ///         + chrono::Duration::hours(i))
+    ///     .collect();
+    /// let mut values: Vec<f64> = (0..50).map(|i| 10.0 + 0.1 * i as f64).collect();
+    /// values[25] = 1000.0; // inject outlier
+    ///
+    /// let ts = TimeSeries::univariate(timestamps, values).unwrap();
+    /// let clean = ts.with_outliers_replaced(&OutlierConfig::default(), 5).unwrap();
+    ///
+    /// // The outlier at index 25 has been replaced
+    /// assert!((clean.primary_values()[25] - 1000.0).abs() > 1.0);
+    /// ```
+    pub fn with_outliers_replaced(
+        &self,
+        config: &crate::detection::OutlierConfig,
+        window_size: usize,
+    ) -> Result<TimeSeries> {
+        let vals = self.primary_values();
+        let outlier_result = crate::detection::detect_outliers(vals, config);
+
+        if outlier_result.outlier_indices.is_empty() {
+            return Ok(self.clone());
+        }
+
+        let n = vals.len();
+        let mut cleaned = vals.to_vec();
+        let half = window_size / 2;
+
+        for &idx in &outlier_result.outlier_indices {
+            // Collect non-outlier neighbors within the window
+            let start = idx.saturating_sub(half);
+            let end = (idx + half + 1).min(n);
+
+            let mut neighbors: Vec<f64> = (start..end)
+                .filter(|&i| i != idx && !outlier_result.outlier_indices.contains(&i))
+                .map(|i| cleaned[i])
+                .filter(|v| v.is_finite())
+                .collect();
+
+            if neighbors.is_empty() {
+                // Fallback: use overall median
+                let mut all: Vec<f64> = vals.iter().copied().filter(|v| v.is_finite()).collect();
+                all.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                if !all.is_empty() {
+                    cleaned[idx] = all[all.len() / 2];
+                }
+            } else {
+                neighbors.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                cleaned[idx] = neighbors[neighbors.len() / 2];
+            }
+        }
+
+        // Rebuild TimeSeries with cleaned values
+        let mut new_values = self.values.clone();
+        new_values[0] = cleaned;
+
+        Ok(TimeSeries {
+            timestamps: self.timestamps.clone(),
+            values: new_values,
+            labels: self.labels.clone(),
+            metadata: self.metadata.clone(),
+            dimension_metadata: self.dimension_metadata.clone(),
+            timezone: self.timezone.clone(),
+            frequency: self.frequency,
+            calendar: self.calendar.clone(),
+        })
+    }
 }
 
 /// Generate a sequence of timestamps from start to end (inclusive) with the given frequency.
@@ -1520,6 +1669,48 @@ fn fill_nan_segment(segment: &mut [f64], left: Option<f64>, right: Option<f64>, 
         (Some(l), None) if fill_edges => segment.fill(l),
         (None, Some(r)) if fill_edges => segment.fill(r),
         _ => {} // Leave as NaN
+    }
+}
+
+#[cfg(feature = "serde")]
+impl TimeSeries {
+    /// Serialize this time series to a JSON string.
+    pub fn to_json(&self) -> crate::error::Result<String> {
+        serde_json::to_string_pretty(self)
+            .map_err(|e| ForecastError::SerializationError(format!("serialization failed: {}", e)))
+    }
+
+    /// Deserialize a time series from a JSON string.
+    pub fn from_json(json: &str) -> crate::error::Result<Self> {
+        serde_json::from_str(json).map_err(|e| {
+            ForecastError::SerializationError(format!("deserialization failed: {}", e))
+        })
+    }
+}
+
+impl fmt::Display for TimeSeries {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let len = self.len();
+        let dims = self.dimensions();
+
+        write!(f, "TimeSeries(len={}, dims={}", len, dims)?;
+
+        if let Some(freq) = self.frequency {
+            write!(f, ", freq={}s", freq.num_seconds())?;
+        }
+
+        if len > 0 {
+            let first = self.timestamps.first().unwrap();
+            let last = self.timestamps.last().unwrap();
+            write!(
+                f,
+                ", range=[{} .. {}]",
+                first.format("%Y-%m-%d %H:%M:%S"),
+                last.format("%Y-%m-%d %H:%M:%S")
+            )?;
+        }
+
+        write!(f, ")")
     }
 }
 
@@ -2606,5 +2797,221 @@ mod tests {
         assert!(ts
             .with_imputed_regressors(MissingValuePolicy::Drop)
             .is_err());
+    }
+}
+
+#[cfg(all(test, feature = "serde"))]
+mod serde_tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn make_timestamps(n: usize) -> Vec<DateTime<Utc>> {
+        (0..n)
+            .map(|i| Utc.with_ymd_and_hms(2024, 1, 1, i as u32, 0, 0).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn time_series_json_round_trip() {
+        let timestamps = make_timestamps(5);
+        let values = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let ts = TimeSeries::univariate(timestamps.clone(), values.clone()).unwrap();
+
+        let json = ts.to_json().unwrap();
+        let restored = TimeSeries::from_json(&json).unwrap();
+
+        assert_eq!(restored.len(), 5);
+        assert_eq!(restored.dimensions(), 1);
+        assert_eq!(restored.primary_values(), &values);
+        assert_eq!(restored.timestamps(), &timestamps);
+    }
+
+    #[test]
+    fn time_series_json_round_trip_with_frequency() {
+        let timestamps = make_timestamps(3);
+        let values = vec![10.0, 20.0, 30.0];
+        let mut ts = TimeSeries::univariate(timestamps, values).unwrap();
+        ts.set_frequency(Duration::hours(1));
+
+        let json = ts.to_json().unwrap();
+        let restored = TimeSeries::from_json(&json).unwrap();
+
+        assert_eq!(restored.frequency(), Some(Duration::hours(1)));
+    }
+
+    #[test]
+    fn time_series_json_round_trip_with_metadata() {
+        let timestamps = make_timestamps(3);
+        let values = vec![1.0, 2.0, 3.0];
+        let mut ts = TimeSeries::univariate(timestamps, values).unwrap();
+        ts.set_metadata("source".to_string(), "test".to_string());
+
+        let json = ts.to_json().unwrap();
+        let restored = TimeSeries::from_json(&json).unwrap();
+
+        assert_eq!(restored.metadata().get("source"), Some(&"test".to_string()));
+    }
+
+    #[test]
+    fn time_series_from_json_rejects_invalid_json() {
+        let result = TimeSeries::from_json("{invalid}");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, ForecastError::SerializationError(_)),
+            "expected SerializationError, got {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn time_series_from_json_rejects_wrong_structure() {
+        let result = TimeSeries::from_json(r#"{"point": [[1.0, 2.0]]}"#);
+        assert!(result.is_err());
+    }
+
+    // ── Seasonal/trend strength tests ─────────────────────────────────
+
+    #[test]
+    fn seasonal_strength_detects_strong_seasonality() {
+        let n = 120;
+        let period = 12;
+        let timestamps = make_daily_timestamps(n);
+        let values: Vec<f64> = (0..n)
+            .map(|i| {
+                let seasonal = 10.0 * (2.0 * std::f64::consts::PI * i as f64 / period as f64).sin();
+                seasonal + 0.1 * i as f64 // weak trend
+            })
+            .collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let strength = ts.seasonal_strength(period).unwrap();
+        assert!(
+            strength > 0.5,
+            "expected strong seasonality, got {}",
+            strength
+        );
+    }
+
+    #[test]
+    fn seasonal_strength_weak_for_trend_only() {
+        let n = 120;
+        let period = 12;
+        let timestamps = make_daily_timestamps(n);
+        let values: Vec<f64> = (0..n).map(|i| 5.0 * i as f64).collect(); // pure trend
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let strength = ts.seasonal_strength(period).unwrap();
+        assert!(
+            strength < 0.5,
+            "expected weak seasonality for trend-only, got {}",
+            strength
+        );
+    }
+
+    #[test]
+    fn trend_strength_detects_strong_trend() {
+        let n = 120;
+        let period = 12;
+        let timestamps = make_daily_timestamps(n);
+        let values: Vec<f64> = (0..n).map(|i| 3.0 * i as f64).collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let strength = ts.trend_strength(period).unwrap();
+        assert!(strength > 0.8, "expected strong trend, got {}", strength);
+    }
+
+    #[test]
+    fn seasonal_strength_insufficient_data() {
+        let timestamps = make_timestamps(10);
+        let values: Vec<f64> = (0..10).map(|i| i as f64).collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let err = ts.seasonal_strength(12).unwrap_err();
+        assert!(matches!(err, ForecastError::InsufficientData { .. }));
+    }
+
+    #[test]
+    fn seasonal_strength_invalid_period() {
+        let timestamps = make_timestamps(20);
+        let values: Vec<f64> = (0..20).map(|i| i as f64).collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        assert!(ts.seasonal_strength(1).is_err());
+        assert!(ts.seasonal_strength(0).is_err());
+    }
+
+    fn make_daily_timestamps(n: usize) -> Vec<DateTime<Utc>> {
+        (0..n)
+            .map(|i| Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap() + Duration::days(i as i64))
+            .collect()
+    }
+
+    // ── Outlier replacement tests ─────────────────────────────────────
+
+    #[test]
+    fn with_outliers_replaced_fixes_outlier() {
+        let n = 50;
+        let timestamps = make_daily_timestamps(n);
+        let mut values: Vec<f64> = vec![10.0; n];
+        values[25] = 1000.0; // inject outlier
+
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+        let config = crate::detection::OutlierConfig::iqr(1.5);
+        let clean = ts.with_outliers_replaced(&config, 5).unwrap();
+
+        // The outlier should be replaced with a neighbor median (~10.0)
+        assert!(
+            (clean.primary_values()[25] - 10.0).abs() < 1.0,
+            "expected ~10.0, got {}",
+            clean.primary_values()[25]
+        );
+    }
+
+    #[test]
+    fn with_outliers_replaced_no_change_when_clean() {
+        let n = 50;
+        let timestamps = make_daily_timestamps(n);
+        let values: Vec<f64> = (0..n).map(|i| 10.0 + 0.01 * i as f64).collect();
+
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+        let config = crate::detection::OutlierConfig::z_score(3.0);
+        let clean = ts.with_outliers_replaced(&config, 5).unwrap();
+
+        // Should be identical when no outliers
+        assert_eq!(clean.primary_values(), ts.primary_values());
+    }
+
+    #[test]
+    fn with_outliers_replaced_multiple_outliers() {
+        let n = 100;
+        let timestamps = make_daily_timestamps(n);
+        let mut values: Vec<f64> = vec![10.0; n];
+        values[10] = 500.0;
+        values[50] = -500.0;
+        values[90] = 1000.0;
+
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+        let config = crate::detection::OutlierConfig::default();
+        let clean = ts.with_outliers_replaced(&config, 7).unwrap();
+
+        // All outliers should be close to 10.0
+        assert!((clean.primary_values()[10] - 10.0).abs() < 1.0);
+        assert!((clean.primary_values()[50] - 10.0).abs() < 1.0);
+        assert!((clean.primary_values()[90] - 10.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn with_outliers_replaced_preserves_length() {
+        let n = 50;
+        let timestamps = make_daily_timestamps(n);
+        let mut values: Vec<f64> = vec![10.0; n];
+        values[25] = 1000.0;
+
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+        let config = crate::detection::OutlierConfig::default();
+        let clean = ts.with_outliers_replaced(&config, 5).unwrap();
+
+        assert_eq!(clean.len(), ts.len());
     }
 }

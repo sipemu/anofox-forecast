@@ -365,9 +365,23 @@ impl SESForecaster {
             .map_err(|e| JsError::new(&e.to_string()))
     }
 
+    #[wasm_bindgen(js_name = predictWithIntervals)]
+    pub fn predict_with_intervals(&self, horizon: usize, level: f64) -> Result<Forecast, JsError> {
+        self.model
+            .predict_with_intervals(horizon, level)
+            .map(Forecast::from_inner)
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
     #[wasm_bindgen(getter)]
     pub fn name(&self) -> String {
         self.model.name().to_string()
+    }
+}
+
+impl SESForecaster {
+    pub(crate) fn inner(&self) -> &SimpleExponentialSmoothing {
+        &self.model
     }
 }
 
@@ -401,9 +415,23 @@ impl HoltForecaster {
             .map_err(|e| JsError::new(&e.to_string()))
     }
 
+    #[wasm_bindgen(js_name = predictWithIntervals)]
+    pub fn predict_with_intervals(&self, horizon: usize, level: f64) -> Result<Forecast, JsError> {
+        self.model
+            .predict_with_intervals(horizon, level)
+            .map(Forecast::from_inner)
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
     #[wasm_bindgen(getter)]
     pub fn name(&self) -> String {
         self.model.name().to_string()
+    }
+}
+
+impl HoltForecaster {
+    pub(crate) fn inner(&self) -> &HoltLinearTrend {
+        &self.model
     }
 }
 
@@ -470,9 +498,23 @@ impl HoltWintersForecaster {
             .map_err(|e| JsError::new(&e.to_string()))
     }
 
+    #[wasm_bindgen(js_name = predictWithIntervals)]
+    pub fn predict_with_intervals(&self, horizon: usize, level: f64) -> Result<Forecast, JsError> {
+        self.model
+            .predict_with_intervals(horizon, level)
+            .map(Forecast::from_inner)
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
     #[wasm_bindgen(getter)]
     pub fn name(&self) -> String {
         self.model.name().to_string()
+    }
+}
+
+impl HoltWintersForecaster {
+    pub(crate) fn inner(&self) -> &HoltWinters {
+        &self.model
     }
 }
 
@@ -1148,9 +1190,23 @@ impl CrostonForecaster {
             .map_err(|e| JsError::new(&e.to_string()))
     }
 
+    #[wasm_bindgen(js_name = predictWithIntervals)]
+    pub fn predict_with_intervals(&self, horizon: usize, level: f64) -> Result<Forecast, JsError> {
+        self.model
+            .predict_with_intervals(horizon, level)
+            .map(Forecast::from_inner)
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
     #[wasm_bindgen(getter)]
     pub fn name(&self) -> String {
         self.model.name().to_string()
+    }
+}
+
+impl CrostonForecaster {
+    pub(crate) fn inner(&self) -> &Croston {
+        &self.model
     }
 }
 
@@ -1186,9 +1242,23 @@ impl TSBForecaster {
             .map_err(|e| JsError::new(&e.to_string()))
     }
 
+    #[wasm_bindgen(js_name = predictWithIntervals)]
+    pub fn predict_with_intervals(&self, horizon: usize, level: f64) -> Result<Forecast, JsError> {
+        self.model
+            .predict_with_intervals(horizon, level)
+            .map(Forecast::from_inner)
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
     #[wasm_bindgen(getter)]
     pub fn name(&self) -> String {
         self.model.name().to_string()
+    }
+}
+
+impl TSBForecaster {
+    pub(crate) fn inner(&self) -> &TSB {
+        &self.model
     }
 }
 
@@ -1226,9 +1296,23 @@ impl ADIDAForecaster {
             .map_err(|e| JsError::new(&e.to_string()))
     }
 
+    #[wasm_bindgen(js_name = predictWithIntervals)]
+    pub fn predict_with_intervals(&self, horizon: usize, level: f64) -> Result<Forecast, JsError> {
+        self.model
+            .predict_with_intervals(horizon, level)
+            .map(Forecast::from_inner)
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
     #[wasm_bindgen(getter)]
     pub fn name(&self) -> String {
         self.model.name().to_string()
+    }
+}
+
+impl ADIDAForecaster {
+    pub(crate) fn inner(&self) -> &ADIDA {
+        &self.model
     }
 }
 
@@ -1266,9 +1350,23 @@ impl IMAPAForecaster {
             .map_err(|e| JsError::new(&e.to_string()))
     }
 
+    #[wasm_bindgen(js_name = predictWithIntervals)]
+    pub fn predict_with_intervals(&self, horizon: usize, level: f64) -> Result<Forecast, JsError> {
+        self.model
+            .predict_with_intervals(horizon, level)
+            .map(Forecast::from_inner)
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
     #[wasm_bindgen(getter)]
     pub fn name(&self) -> String {
         self.model.name().to_string()
+    }
+}
+
+impl IMAPAForecaster {
+    pub(crate) fn inner(&self) -> &IMAPA {
+        &self.model
     }
 }
 
@@ -1437,6 +1535,14 @@ impl MFLESForecaster {
             .map_err(|e| JsError::new(&e.to_string()))
     }
 
+    #[wasm_bindgen(js_name = predictWithIntervals)]
+    pub fn predict_with_intervals(&self, horizon: usize, level: f64) -> Result<Forecast, JsError> {
+        self.model
+            .predict_with_intervals(horizon, level)
+            .map(Forecast::from_inner)
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
     #[wasm_bindgen(getter)]
     pub fn name(&self) -> String {
         self.model.name().to_string()
@@ -1508,9 +1614,23 @@ impl GARCHForecaster {
             .map_err(|e| JsError::new(&e.to_string()))
     }
 
+    #[wasm_bindgen(js_name = predictWithIntervals)]
+    pub fn predict_with_intervals(&self, horizon: usize, level: f64) -> Result<Forecast, JsError> {
+        self.model
+            .predict_with_intervals(horizon, level)
+            .map(Forecast::from_inner)
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
     #[wasm_bindgen(getter)]
     pub fn name(&self) -> String {
         self.model.name().to_string()
+    }
+}
+
+impl GARCHForecaster {
+    pub(crate) fn inner(&self) -> &GARCH {
+        &self.model
     }
 }
 

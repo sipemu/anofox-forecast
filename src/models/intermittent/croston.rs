@@ -640,4 +640,155 @@ mod tests {
         let model = Croston::new().with_alpha(-0.5);
         assert!(model.alpha() >= 0.01);
     }
+
+    // ==================== Edge cases ====================
+
+    #[test]
+    fn croston_all_zero_demand() {
+        // All zeros should error (insufficient demand occurrences)
+        let timestamps = make_timestamps(20);
+        let values = vec![0.0; 20];
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = Croston::new();
+        assert!(model.fit(&ts).is_err());
+    }
+
+    #[test]
+    fn croston_single_nonzero_demand() {
+        // Only one non-zero demand -> insufficient demand occurrences
+        let timestamps = make_timestamps(10);
+        let mut values = vec![0.0; 10];
+        values[5] = 10.0;
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = Croston::new();
+        assert!(model.fit(&ts).is_err());
+    }
+
+    #[test]
+    fn croston_very_sparse_data() {
+        // >90% zeros with demand at beginning and end
+        let timestamps = make_timestamps(30);
+        let mut values = vec![0.0; 30];
+        values[0] = 5.0;
+        values[15] = 3.0;
+        values[29] = 7.0;
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = Croston::new();
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(5).unwrap();
+        for &v in forecast.primary() {
+            assert!(
+                v > 0.0,
+                "Forecast should be positive even for very sparse data"
+            );
+            assert!(v.is_finite(), "Forecast should be finite");
+        }
+    }
+
+    #[test]
+    fn croston_negative_values_ignored() {
+        // Croston extracts positive demands only (v > 0.0)
+        // Negative values are treated like zeros
+        let timestamps = make_timestamps(20);
+        let values = vec![
+            5.0, -1.0, 0.0, 3.0, -2.0, 0.0, 0.0, 4.0, 0.0, 2.0, 0.0, 0.0, -3.0, 0.0, 6.0, 0.0, 0.0,
+            3.0, 0.0, -1.0,
+        ];
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = Croston::new();
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(5).unwrap();
+        for &v in forecast.primary() {
+            assert!(v > 0.0);
+        }
+    }
+
+    #[test]
+    fn croston_very_long_inter_demand_intervals() {
+        // Two demands separated by a very long zero interval
+        let timestamps = make_timestamps(50);
+        let mut values = vec![0.0; 50];
+        values[0] = 10.0;
+        values[49] = 10.0;
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = Croston::new();
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(5).unwrap();
+        for &v in forecast.primary() {
+            assert!(v > 0.0, "Forecast should be positive");
+            assert!(v.is_finite(), "Forecast should be finite");
+            // With long interval, forecast rate should be small
+            assert!(
+                v < 10.0,
+                "Forecast should be smaller than demand size due to long interval"
+            );
+        }
+    }
+
+    #[test]
+    fn croston_two_demands_minimum() {
+        // Exactly two non-zero demands (minimum for fit)
+        let timestamps = make_timestamps(10);
+        let mut values = vec![0.0; 10];
+        values[0] = 5.0;
+        values[5] = 3.0;
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = Croston::new();
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.horizon(), 5);
+        for &v in forecast.primary() {
+            assert!(v > 0.0);
+        }
+    }
+
+    #[test]
+    fn croston_consecutive_demands() {
+        // All non-zero (no intermittency)
+        let timestamps = make_timestamps(10);
+        let values = vec![5.0, 3.0, 4.0, 6.0, 2.0, 5.0, 3.0, 4.0, 6.0, 2.0];
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = Croston::new();
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(5).unwrap();
+        for &v in forecast.primary() {
+            assert!(v > 0.0);
+        }
+        // With all demands consecutive, interval ≈ 1, forecast ≈ demand level
+        assert!(forecast.primary()[0] > 1.0);
+    }
+
+    #[test]
+    fn croston_sba_sparse_with_different_alphas() {
+        let timestamps = make_timestamps(30);
+        let mut values = vec![0.0; 30];
+        values[0] = 5.0;
+        values[10] = 3.0;
+        values[20] = 7.0;
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model_low = Croston::new().with_alpha(0.05).sba();
+        model_low.fit(&ts).unwrap();
+        let f_low = model_low.predict(1).unwrap();
+
+        let mut model_high = Croston::new().with_alpha(0.5).sba();
+        model_high.fit(&ts).unwrap();
+        let f_high = model_high.predict(1).unwrap();
+
+        // Both should be positive and finite
+        assert!(f_low.primary()[0] > 0.0 && f_low.primary()[0].is_finite());
+        assert!(f_high.primary()[0] > 0.0 && f_high.primary()[0].is_finite());
+    }
 }

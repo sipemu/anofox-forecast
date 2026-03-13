@@ -9,6 +9,7 @@ use crate::models::{validate_series_complete, Forecaster};
 
 /// Method for combining forecasts from multiple models.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum CombinationMethod {
     /// Simple average of all forecasts.
     Mean,
@@ -79,6 +80,35 @@ impl Ensemble {
     /// Get the number of models in the ensemble.
     pub fn model_count(&self) -> usize {
         self.models.len()
+    }
+
+    /// Combine prediction interval bounds from multiple models.
+    ///
+    /// For lower bounds, takes the minimum across models at each step
+    /// (widest interval). For upper bounds, takes the maximum.
+    /// Falls back to `combine_values` averaging when `widest` is false.
+    fn combine_interval_bounds(&self, bounds: &[Vec<f64>], take_min: bool) -> Vec<f64> {
+        if bounds.is_empty() {
+            return Vec::new();
+        }
+
+        let horizon = bounds.iter().map(|v| v.len()).min().unwrap_or(0);
+        if horizon == 0 {
+            return Vec::new();
+        }
+
+        let mut combined = vec![0.0; horizon];
+        for h in 0..horizon {
+            combined[h] = if take_min {
+                bounds.iter().map(|v| v[h]).fold(f64::INFINITY, f64::min)
+            } else {
+                bounds
+                    .iter()
+                    .map(|v| v[h])
+                    .fold(f64::NEG_INFINITY, f64::max)
+            };
+        }
+        combined
     }
 
     /// Combine values using the specified method.
@@ -160,7 +190,7 @@ impl Forecaster for Ensemble {
     fn fit(&mut self, series: &TimeSeries) -> Result<()> {
         validate_series_complete(series)?;
         if self.models.is_empty() {
-            return Err(ForecastError::ComputationError(
+            return Err(ForecastError::InvalidParameter(
                 "Ensemble has no models".to_string(),
             ));
         }
@@ -181,11 +211,10 @@ impl Forecaster for Ensemble {
         } else if self.method == CombinationMethod::Custom {
             if let Some(ref custom) = self.custom_weights {
                 if custom.len() != self.models.len() {
-                    return Err(ForecastError::ComputationError(format!(
-                        "Custom weights length ({}) doesn't match model count ({})",
-                        custom.len(),
-                        self.models.len()
-                    )));
+                    return Err(ForecastError::DimensionMismatch {
+                        expected: self.models.len(),
+                        got: custom.len(),
+                    });
                 }
                 // Normalize weights
                 let sum: f64 = custom.iter().sum();
@@ -249,7 +278,7 @@ impl Forecaster for Ensemble {
             return Ok(point_forecast);
         }
 
-        // Get all forecasts with intervals
+        // Get all forecasts with intervals from component models
         let all_forecasts: Vec<Forecast> = self
             .models
             .iter()
@@ -260,26 +289,29 @@ impl Forecaster for Ensemble {
             return Ok(point_forecast);
         }
 
-        // Combine lower bounds
+        // Collect lower and upper bounds from models that produced intervals
         let all_lowers: Vec<Vec<f64>> = all_forecasts
             .iter()
             .filter_map(|f| f.lower_series(0).ok().map(|l| l.to_vec()))
             .collect();
 
-        // Combine upper bounds
         let all_uppers: Vec<Vec<f64>> = all_forecasts
             .iter()
             .filter_map(|f| f.upper_series(0).ok().map(|u| u.to_vec()))
             .collect();
 
+        // Combine intervals using widest-envelope: take the minimum of all
+        // lower bounds and the maximum of all upper bounds at each step.
+        // This produces a conservative combined interval that covers the
+        // uncertainty from all component models.
         let lower = if !all_lowers.is_empty() {
-            self.combine_values(&all_lowers)
+            self.combine_interval_bounds(&all_lowers, true)
         } else {
             point_forecast.primary().to_vec()
         };
 
         let upper = if !all_uppers.is_empty() {
-            self.combine_values(&all_uppers)
+            self.combine_interval_bounds(&all_uppers, false)
         } else {
             point_forecast.primary().to_vec()
         };
@@ -472,6 +504,61 @@ mod tests {
         let forecast = ensemble.predict_with_intervals(5, 0.95).unwrap();
         assert!(forecast.has_lower());
         assert!(forecast.has_upper());
+    }
+
+    #[test]
+    fn ensemble_intervals_use_widest_envelope() {
+        let ts = make_series();
+
+        // Get individual model intervals
+        let mut naive = Naive::new();
+        naive.fit(&ts).unwrap();
+        let naive_fc = naive.predict_with_intervals(5, 0.95).unwrap();
+
+        let mut sma = SimpleMovingAverage::new(5);
+        sma.fit(&ts).unwrap();
+        let sma_fc = sma.predict_with_intervals(5, 0.95).unwrap();
+
+        // Get ensemble intervals
+        let models: Vec<Box<dyn Forecaster>> = vec![
+            Box::new(Naive::new()),
+            Box::new(SimpleMovingAverage::new(5)),
+        ];
+        let mut ensemble = Ensemble::new(models);
+        ensemble.fit(&ts).unwrap();
+        let ensemble_fc = ensemble.predict_with_intervals(5, 0.95).unwrap();
+
+        // If both models produced intervals, the ensemble should use the
+        // widest envelope (min of lowers, max of uppers)
+        if let (Ok(naive_lower), Ok(sma_lower)) = (naive_fc.lower_series(0), sma_fc.lower_series(0))
+        {
+            let ensemble_lower = ensemble_fc.lower_series(0).unwrap();
+            for i in 0..5 {
+                let widest_lower = naive_lower[i].min(sma_lower[i]);
+                assert!(
+                    (ensemble_lower[i] - widest_lower).abs() < 1e-10,
+                    "Ensemble lower[{}] = {} should equal widest lower {}",
+                    i,
+                    ensemble_lower[i],
+                    widest_lower,
+                );
+            }
+        }
+
+        if let (Ok(naive_upper), Ok(sma_upper)) = (naive_fc.upper_series(0), sma_fc.upper_series(0))
+        {
+            let ensemble_upper = ensemble_fc.upper_series(0).unwrap();
+            for i in 0..5 {
+                let widest_upper = naive_upper[i].max(sma_upper[i]);
+                assert!(
+                    (ensemble_upper[i] - widest_upper).abs() < 1e-10,
+                    "Ensemble upper[{}] = {} should equal widest upper {}",
+                    i,
+                    ensemble_upper[i],
+                    widest_upper,
+                );
+            }
+        }
     }
 
     #[test]

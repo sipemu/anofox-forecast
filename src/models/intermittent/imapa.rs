@@ -35,6 +35,7 @@ use crate::models::{validate_series_complete, Forecaster};
 /// let forecast = model.predict(5).unwrap();
 /// ```
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct IMAPA {
     /// Maximum aggregation level to consider.
     max_aggregation: Option<usize>,
@@ -546,5 +547,158 @@ mod tests {
         for &v in forecast.primary() {
             assert!(v > 0.0, "Forecast should be positive for demand data");
         }
+    }
+
+    // ==================== Edge cases ====================
+
+    #[test]
+    fn imapa_all_zero_demand() {
+        let timestamps = make_timestamps(20);
+        let values = vec![0.0; 20];
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = IMAPA::new();
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(5).unwrap();
+        for &v in forecast.primary() {
+            assert!((v - 0.0).abs() < 1e-10, "All-zero should forecast zero");
+        }
+        // Should have a single level forecast of zero
+        let level_forecasts = model.level_forecasts().unwrap();
+        assert_eq!(level_forecasts.len(), 1);
+        assert!((level_forecasts[0].1 - 0.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn imapa_single_nonzero_demand() {
+        let timestamps = make_timestamps(10);
+        let mut values = vec![0.0; 10];
+        values[5] = 10.0;
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = IMAPA::new();
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(5).unwrap();
+        for &v in forecast.primary() {
+            assert!(v.is_finite());
+        }
+    }
+
+    #[test]
+    fn imapa_very_sparse_data() {
+        // >90% zeros
+        let timestamps = make_timestamps(50);
+        let mut values = vec![0.0; 50];
+        values[0] = 5.0;
+        values[25] = 3.0;
+        values[49] = 7.0;
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = IMAPA::new();
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(5).unwrap();
+        for &v in forecast.primary() {
+            assert!(
+                v > 0.0,
+                "Forecast should be positive for sparse demand data"
+            );
+            assert!(v.is_finite());
+        }
+        // Should have multiple aggregation levels
+        let level_forecasts = model.level_forecasts().unwrap();
+        assert!(!level_forecasts.is_empty());
+    }
+
+    #[test]
+    fn imapa_negative_values() {
+        let timestamps = make_timestamps(10);
+        let values = vec![5.0, -1.0, 0.0, 3.0, -2.0, 0.0, 4.0, 0.0, 2.0, -1.0];
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = IMAPA::new();
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(5).unwrap();
+        for &v in forecast.primary() {
+            assert!(v.is_finite());
+        }
+    }
+
+    #[test]
+    fn imapa_very_long_inter_demand_intervals() {
+        let timestamps = make_timestamps(40);
+        let mut values = vec![0.0; 40];
+        values[0] = 10.0;
+        values[39] = 10.0;
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = IMAPA::new();
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(5).unwrap();
+        for &v in forecast.primary() {
+            assert!(
+                v.is_finite(),
+                "Forecast should be finite with long intervals"
+            );
+        }
+        // Max aggregation should be high
+        let max_agg = model.max_aggregation().unwrap();
+        assert!(max_agg >= 1);
+    }
+
+    #[test]
+    fn imapa_consecutive_demands() {
+        // All non-zero values (no intermittency)
+        let timestamps = make_timestamps(10);
+        let values = vec![5.0, 3.0, 4.0, 6.0, 2.0, 5.0, 3.0, 4.0, 6.0, 2.0];
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = IMAPA::new();
+        model.fit(&ts).unwrap();
+
+        // Max aggregation should be 1 (mean interval = 1)
+        assert_eq!(model.max_aggregation(), Some(1));
+
+        let level_forecasts = model.level_forecasts().unwrap();
+        assert_eq!(level_forecasts.len(), 1);
+
+        let forecast = model.predict(5).unwrap();
+        for &v in forecast.primary() {
+            assert!(v > 0.0);
+        }
+    }
+
+    #[test]
+    fn imapa_forecast_is_average_of_levels() {
+        let ts = make_intermittent_series();
+        let mut model = IMAPA::new();
+        model.fit(&ts).unwrap();
+
+        let level_forecasts = model.level_forecasts().unwrap();
+        if level_forecasts.len() > 1 {
+            let expected_avg: f64 =
+                level_forecasts.iter().map(|(_, f)| f).sum::<f64>() / level_forecasts.len() as f64;
+            let actual = model.forecast_level().unwrap();
+            assert!(
+                (actual - expected_avg).abs() < 1e-10,
+                "Forecast should be average of level forecasts"
+            );
+        }
+    }
+
+    #[test]
+    fn imapa_with_max_aggregation_1() {
+        // Force single aggregation level
+        let ts = make_intermittent_series();
+        let mut model = IMAPA::new().with_max_aggregation(1);
+        model.fit(&ts).unwrap();
+
+        let level_forecasts = model.level_forecasts().unwrap();
+        assert_eq!(level_forecasts.len(), 1);
+        assert_eq!(level_forecasts[0].0, 1); // aggregation level 1
     }
 }

@@ -15,6 +15,7 @@ use crate::seasonality::{MSTLResult, MSTL};
 
 /// Method for forecasting the deseasonalized (trend + remainder) component.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum TrendForecastMethod {
     /// Use AutoETS for trend forecasting (default, most accurate).
     #[default]
@@ -29,6 +30,7 @@ pub enum TrendForecastMethod {
 
 /// Method for forecasting seasonal components.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum SeasonalForecastMethod {
     /// Repeat the last seasonal cycle (default, matches statsforecast).
     #[default]

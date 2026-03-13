@@ -40,6 +40,7 @@ use std::collections::HashMap;
 /// println!("Optimized alpha: {:.4}, theta: {:.4}", model.alpha().unwrap(), model.theta().unwrap());
 /// ```
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct OptimizedTheta {
     /// Optimized smoothing parameter.
     alpha: Option<f64>,

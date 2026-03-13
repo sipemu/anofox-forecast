@@ -581,4 +581,220 @@ mod tests {
         assert!(adf.statistic.is_nan());
         assert!(kpss.statistic.is_nan());
     }
+
+    // ==================== adf_test edge cases ====================
+
+    #[test]
+    fn adf_constant_series() {
+        // Constant series has zero variance in differences
+        let series = vec![5.0; 100];
+        let result = adf_test(&series, Some(1));
+
+        // Constant series -> all diffs zero -> NaN or degenerate
+        assert!(result.statistic.is_nan() || result.statistic.is_finite());
+    }
+
+    #[test]
+    fn adf_single_value() {
+        let result = adf_test(&[42.0], None);
+        assert!(result.statistic.is_nan());
+        assert!(!result.is_stationary);
+    }
+
+    #[test]
+    fn adf_two_values() {
+        let result = adf_test(&[1.0, 2.0], None);
+        assert!(result.statistic.is_nan());
+    }
+
+    #[test]
+    fn adf_four_values_minimum() {
+        // Exactly 4 values is the minimum for non-NaN
+        let series = vec![1.0, 3.0, 2.0, 4.0];
+        let result = adf_test(&series, Some(1));
+        // Should produce some result (may or may not be NaN depending on regression)
+        assert!(result.lags >= 1);
+    }
+
+    #[test]
+    fn adf_large_lag_clamped() {
+        let series: Vec<f64> = (0..20).map(|i| i as f64).collect();
+        let result = adf_test(&series, Some(100));
+        // max_lags should be clamped to n/2 - 1
+        assert!(result.lags <= 9);
+    }
+
+    #[test]
+    fn adf_p_value_range() {
+        let series: Vec<f64> = (0..200)
+            .map(|i| ((i * 17 + 13) % 97) as f64 / 50.0 - 1.0)
+            .collect();
+
+        let result = adf_test(&series, None);
+        // p-value should be in valid range
+        if !result.p_value.is_nan() {
+            assert!(result.p_value >= 0.0 && result.p_value <= 1.0);
+        }
+    }
+
+    #[test]
+    fn adf_critical_values_ordering() {
+        // 1% CV < 5% CV < 10% CV (all negative, becoming less negative)
+        let series: Vec<f64> = (0..100)
+            .map(|i| ((i * 17 + 13) % 97) as f64 / 50.0 - 1.0)
+            .collect();
+
+        let result = adf_test(&series, None);
+        assert!(result.critical_values.cv_1pct < result.critical_values.cv_5pct);
+        assert!(result.critical_values.cv_5pct < result.critical_values.cv_10pct);
+        // All should be negative for ADF
+        assert!(result.critical_values.cv_1pct < 0.0);
+        assert!(result.critical_values.cv_5pct < 0.0);
+        assert!(result.critical_values.cv_10pct < 0.0);
+    }
+
+    // ==================== kpss_test edge cases ====================
+
+    #[test]
+    fn kpss_constant_series() {
+        let series = vec![5.0; 100];
+        let result = kpss_test(&series, Some(5));
+
+        // Constant series has zero variance -> NaN or degenerate statistic
+        // After demeaning, residuals are all zero
+        assert!(result.statistic.is_nan() || result.statistic == 0.0 || result.is_stationary);
+    }
+
+    #[test]
+    fn kpss_single_value() {
+        let result = kpss_test(&[42.0], None);
+        assert!(result.statistic.is_nan());
+    }
+
+    #[test]
+    fn kpss_two_values() {
+        let result = kpss_test(&[1.0, 2.0], None);
+        assert!(result.statistic.is_nan());
+    }
+
+    #[test]
+    fn kpss_lag_selection_default() {
+        let series: Vec<f64> = (0..100)
+            .map(|i| ((i * 17 + 13) % 97) as f64 / 50.0 - 1.0)
+            .collect();
+
+        let result = kpss_test(&series, None);
+        // Default lag: 4 * (100/100)^0.25 = 4
+        assert!(result.lags >= 1);
+    }
+
+    #[test]
+    fn kpss_critical_values_ordering() {
+        let series: Vec<f64> = (0..100)
+            .map(|i| ((i * 17 + 13) % 97) as f64 / 50.0 - 1.0)
+            .collect();
+
+        let result = kpss_test(&series, None);
+        // KPSS critical values should be positive and increasing
+        assert!(result.critical_values.cv_10pct > 0.0);
+        assert!(result.critical_values.cv_10pct < result.critical_values.cv_5pct);
+        assert!(result.critical_values.cv_5pct < result.critical_values.cv_1pct);
+    }
+
+    #[test]
+    fn kpss_p_value_range() {
+        let series: Vec<f64> = (0..200)
+            .map(|i| ((i * 17 + 13) % 97) as f64 / 50.0 - 1.0)
+            .collect();
+
+        let result = kpss_test(&series, None);
+        if !result.p_value.is_nan() {
+            assert!(result.p_value >= 0.0 && result.p_value <= 1.0);
+        }
+    }
+
+    #[test]
+    fn kpss_large_lag_clamped() {
+        let series: Vec<f64> = (0..20)
+            .map(|i| ((i * 17 + 13) % 97) as f64 / 50.0 - 1.0)
+            .collect();
+
+        let result = kpss_test(&series, Some(100));
+        // Lags should be clamped to n/2
+        assert!(result.lags <= 10);
+    }
+
+    // ==================== kpss_p_value internal ====================
+
+    #[test]
+    fn kpss_p_value_boundaries() {
+        // stat < 0.347 -> p > 0.10
+        let p1 = kpss_p_value(0.1);
+        assert!(p1 > 0.10);
+
+        // stat == 0.347 -> p ≈ 0.10
+        let p2 = kpss_p_value(0.347);
+        assert!((p2 - 0.10).abs() < 0.01);
+
+        // stat == 0.463 -> p ≈ 0.05
+        let p3 = kpss_p_value(0.463);
+        assert!((p3 - 0.05).abs() < 0.01);
+
+        // stat == 0.739 -> p ≈ 0.01
+        let p4 = kpss_p_value(0.739);
+        assert!((p4 - 0.01).abs() < 0.01);
+
+        // stat > 0.739 -> p < 0.01
+        let p5 = kpss_p_value(1.0);
+        assert!(p5 < 0.01);
+
+        // NaN input -> NaN output
+        let p_nan = kpss_p_value(f64::NAN);
+        assert!(p_nan.is_nan());
+    }
+
+    // ==================== adf_p_value internal ====================
+
+    #[test]
+    fn adf_p_value_boundaries() {
+        // Very negative stat -> small p-value
+        let p1 = adf_p_value(-5.0, 100);
+        assert!(p1 < 0.01);
+
+        // Stat near 0 -> large p-value
+        let p2 = adf_p_value(0.0, 100);
+        assert!(p2 > 0.5);
+
+        // Positive stat -> very large p-value
+        let p3 = adf_p_value(2.0, 100);
+        assert!(p3 > 0.5);
+
+        // NaN input -> NaN output
+        let p_nan = adf_p_value(f64::NAN, 100);
+        assert!(p_nan.is_nan());
+    }
+
+    // ==================== test_stationarity edge cases ====================
+
+    #[test]
+    fn combined_test_constant() {
+        let series = vec![42.0; 100];
+        let (adf, kpss, _conclusion) = test_stationarity(&series);
+
+        // Just verify it doesn't panic and returns valid results
+        let _ = adf.statistic;
+        let _ = kpss.statistic;
+        assert!(
+            _conclusion == "stationary"
+                || _conclusion == "non_stationary"
+                || _conclusion == "inconclusive"
+        );
+    }
+
+    #[test]
+    fn combined_test_empty() {
+        let (adf, kpss, _) = test_stationarity(&[]);
+        assert!(adf.statistic.is_nan());
+        assert!(kpss.statistic.is_nan());
+    }
 }

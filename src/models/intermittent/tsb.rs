@@ -465,6 +465,155 @@ mod tests {
         assert!((model.alpha_p() - 0.1).abs() < 1e-10);
     }
 
+    // ==================== Edge cases ====================
+
+    #[test]
+    fn tsb_single_nonzero_demand() {
+        // Only one non-zero value in a series
+        let timestamps = make_timestamps(10);
+        let mut values = vec![0.0; 10];
+        values[5] = 10.0;
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = TSB::new();
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(5).unwrap();
+        // With only one demand occurrence, probability is low
+        for &v in forecast.primary() {
+            assert!(v >= 0.0, "Forecast should be non-negative");
+            assert!(v.is_finite());
+        }
+    }
+
+    #[test]
+    fn tsb_very_sparse_data() {
+        // >90% zeros
+        let timestamps = make_timestamps(50);
+        let mut values = vec![0.0; 50];
+        values[0] = 5.0;
+        values[25] = 3.0;
+        values[49] = 7.0;
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = TSB::new();
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(5).unwrap();
+        for &v in forecast.primary() {
+            assert!(v >= 0.0, "Forecast should be non-negative for sparse data");
+            assert!(v.is_finite());
+        }
+        // Probability should be low for very sparse data
+        let prob = model.probability().unwrap();
+        assert!(
+            prob < 0.5,
+            "Probability should be low for sparse data: {}",
+            prob
+        );
+    }
+
+    #[test]
+    fn tsb_negative_values() {
+        // TSB treats v != 0.0 as demand occurrence for probability,
+        // but only v > 0.0 for demand size extraction
+        let timestamps = make_timestamps(10);
+        let values = vec![5.0, -1.0, 0.0, 3.0, -2.0, 0.0, 4.0, 0.0, 2.0, -1.0];
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = TSB::new();
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(5).unwrap();
+        for &v in forecast.primary() {
+            assert!(
+                v.is_finite(),
+                "Forecast should be finite with negative values"
+            );
+        }
+    }
+
+    #[test]
+    fn tsb_very_long_inter_demand_intervals() {
+        // Two demands separated by many zeros
+        let timestamps = make_timestamps(40);
+        let mut values = vec![0.0; 40];
+        values[0] = 10.0;
+        values[39] = 10.0;
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = TSB::new();
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(5).unwrap();
+        for &v in forecast.primary() {
+            assert!(v.is_finite());
+        }
+        // Probability should be very low with long intervals
+        let prob = model.probability().unwrap();
+        assert!(
+            prob < 0.5,
+            "Probability should be low with long intervals: {}",
+            prob
+        );
+    }
+
+    #[test]
+    fn tsb_all_zeros_forecast_zero() {
+        let timestamps = make_timestamps(20);
+        let values = vec![0.0; 20];
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = TSB::new();
+        model.fit(&ts).unwrap();
+
+        assert_relative_eq!(model.demand_level().unwrap(), 0.0, epsilon = 1e-10);
+        assert_relative_eq!(model.probability().unwrap(), 0.0, epsilon = 1e-10);
+
+        let forecast = model.predict(10).unwrap();
+        for &v in forecast.primary() {
+            assert_relative_eq!(v, 0.0, epsilon = 1e-10);
+        }
+    }
+
+    #[test]
+    fn tsb_different_smoothing_params() {
+        let ts = make_intermittent_series();
+
+        // High alpha_p makes probability decay faster
+        let mut model_fast = TSB::new().with_params(0.1, 0.9);
+        model_fast.fit(&ts).unwrap();
+
+        let mut model_slow = TSB::new().with_params(0.1, 0.01);
+        model_slow.fit(&ts).unwrap();
+
+        // Both should produce valid forecasts
+        let f_fast = model_fast.predict(1).unwrap();
+        let f_slow = model_slow.predict(1).unwrap();
+        assert!(f_fast.primary()[0].is_finite());
+        assert!(f_slow.primary()[0].is_finite());
+    }
+
+    #[test]
+    fn tsb_params_clamped() {
+        let model = TSB::new().with_params(5.0, -1.0);
+        assert!(model.alpha_d() <= 0.99);
+        assert!(model.alpha_p() >= 0.01);
+    }
+
+    #[test]
+    fn tsb_two_observations_minimum() {
+        let timestamps = make_timestamps(2);
+        let values = vec![5.0, 3.0];
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = TSB::new();
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.horizon(), 5);
+    }
+
     /// Validation test comparing TSB output with statsforecast.
     ///
     /// Data: Simple continuous series (all non-zero values)

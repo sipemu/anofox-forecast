@@ -12,7 +12,7 @@
 
 Time series forecasting library for Rust.
 
-Provides 35+ forecasting models, 76+ statistical features, automatic model selection, ensemble methods, seasonality decomposition, changepoint detection, anomaly detection, and model serialization.
+Provides 40+ forecasting models, 76+ statistical features, automatic model selection, ensemble methods, seasonality decomposition, changepoint detection, anomaly detection, hierarchical reconciliation, and model serialization.
 
 ## Use Cases
 
@@ -38,7 +38,7 @@ console.log(forecast.values);
 
 ## Features
 
-- **Forecasting Models (35+)**
+- **Forecasting Models (40+)**
   - ARIMA, SARIMA, and AutoARIMA with automatic order selection
   - Exponential Smoothing: SES, Holt's Linear, Holt-Winters, SeasonalES
   - ETS (Error-Trend-Seasonal) state-space framework with AutoETS
@@ -49,22 +49,27 @@ console.log(forecast.values);
   - MFLES (Multiple Frequency Locally Estimated Scatterplot)
   - MSTL-based forecasting with configurable trend/seasonal methods
   - GARCH for volatility modeling
+  - VAR (Vector Autoregression) for multivariate forecasting with Granger causality
+  - Kalman filter / state-space models (local level, local linear trend, custom)
   - Exogenous regressor support across model families
 
 - **Automatic Model Selection**
   - `AutoForecast`: Unified selection across ARIMA, ETS, and Theta families (parallel with `parallel` feature)
   - `AutoEnsemble`: Automatic ensemble of top-K best models
   - Selection by in-sample MSE or cross-validation error
+  - Builder API: `AutoForecast::builder().seasonal_period(12).include_arima(true).build()`
   - `fit_predict()` convenience method on all models
 
 - **Batch Processing & Parallelism**
   - `fit_predict_many()`: Fit one model across many series (parallel with `parallel` feature)
   - `fit_registry()`: Fit all registered models on a series (parallel)
   - `compare_models()` / `compare_registry()`: Parallel model comparison
+  - Cross-validation folds run in parallel when `parallel` feature is enabled
   - Bootstrap sampling uses `par_iter` when `parallel` is enabled
 
 - **Ensemble Methods**
   - Mean, Median, Weighted MSE, and Custom weight combination strategies
+  - Widest-envelope interval combination for ensemble prediction intervals
   - Automatic ensemble construction from model registry
 
 - **Model Comparison & Evaluation**
@@ -72,6 +77,7 @@ console.log(forecast.values);
   - `compare_registry()`: Compare all registered models at once
   - Accuracy metrics: MAE, MSE, RMSE, MAPE, sMAPE, MASE, and more
   - Time series cross-validation with configurable strategies
+  - `rolling_forecast()`: Walk-forward evaluation with rolling/expanding windows
   - Streaming CV aggregation with early stopping (`cross_validate_early_stop()`)
   - Residual diagnostics: Ljung-Box, Durbin-Watson, Jarque-Bera, Box-Pierce
   - `diagnose_residuals()`: Unified residual diagnostic report
@@ -92,16 +98,23 @@ console.log(forecast.values);
 - **Seasonality & Decomposition**
   - STL (Seasonal-Trend decomposition using LOESS) with `StlBuilder` for ergonomic configuration
   - MSTL (Multiple Seasonal-Trend decomposition) for complex seasonality
+  - Prophet-style Fourier seasonality (`FourierSeasonality`) with flexible harmonic modeling
+  - `TimeSeries::seasonal_strength()` / `trend_strength()` — quick strength assessment
+
+- **Hierarchical Forecasting**
+  - `HierarchyTree`: Define parent-children structure for grouped series
+  - Bottom-up, top-down, and MinTrace OLS reconciliation methods
+  - Ensures coherent forecasts across hierarchical levels
 
 - **Changepoint Detection**
   - PELT algorithm with O(n) average complexity
   - Builder API: `Pelt::new(CostFunction::L2).min_size(5).penalty(5.0).detect(&data)`
   - Multiple cost functions: L1, L2, Normal, Poisson, LinearTrend, MeanVariance, Cusum
 
-- **Anomaly Detection**
-  - Statistical methods (IQR, z-score)
+- **Anomaly Detection & Outlier Handling**
+  - Statistical methods (IQR, z-score, modified z-score)
   - Automatic threshold selection
-  - Seasonality-aware detection
+  - `TimeSeries::with_outliers_replaced()` — automatic outlier replacement with local median
 
 - **Bootstrap Confidence Intervals**
   - Residual bootstrap and block bootstrap methods
@@ -353,7 +366,10 @@ println!("Upper: {:?}", intervals.upper());
 | **Intermittent** | `Croston`, `TSB`, `ADIDA`, `IMAPA` |
 | **Complex Seasonality** | `TBATS`, `AutoTBATS`, `MFLES`, `MSTLForecaster` |
 | **Volatility** | `GARCH` |
+| **Multivariate** | `VAR` (Vector Autoregression) |
+| **State-Space** | `KalmanFilter`, `StateSpaceModel` (local level, local linear trend) |
 | **Ensemble** | `Ensemble` (Mean, Median, Weighted MSE, Custom) |
+| **Hierarchical** | `HierarchyTree` (BottomUp, TopDown, MinTraceOls reconciliation) |
 
 ### Utilities
 
@@ -363,12 +379,13 @@ println!("Upper: {:?}", intervals.upper());
 | `compare_registry()` | Compare all registered models at once |
 | `cross_validate()` | Time series cross-validation (parallel with `parallel` feature) |
 | `cross_validate_early_stop()` | CV with convergence-based early stopping |
+| `rolling_forecast()` | Walk-forward evaluation with rolling/expanding windows |
 | `StreamingCVAggregator` | Online metric aggregation using Welford's algorithm |
 | `fit_predict_many()` | Batch fit-predict across multiple series |
 | `bootstrap_forecast()` | Bootstrap confidence intervals for any model |
 | `diagnose_residuals()` | Unified residual diagnostics (Ljung-Box, DW, Jarque-Bera) |
 | `select_features()` | Automated feature selection (variance, correlation, top-K) |
-| `to_json()` / `from_json()` | Model serialization (requires `serde` feature) |
+| `to_json()` / `from_json()` | Serialization for models, `Forecast`, and `TimeSeries` (requires `serde` feature) |
 | `to_bincode()` / `from_bincode()` | Binary serialization (requires `serde` feature) |
 
 ### Feature Categories

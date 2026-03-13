@@ -18,6 +18,7 @@ use crate::utils::stats::quantile_normal;
 
 /// Error type for Seasonal ES (kept for backward compatibility).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum SeasonalESErrorType {
     /// Additive errors.
     #[default]
@@ -48,6 +49,7 @@ pub enum SeasonalESErrorType {
 /// let forecast = model.predict(12).unwrap();
 /// ```
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SeasonalES {
     /// Seasonal period.
     period: usize,

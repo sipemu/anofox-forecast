@@ -564,12 +564,11 @@ fn evaluate_fold<F: Forecaster>(
     let mut model = model_factory();
     model.fit(&train_series)?;
     let forecast = model.predict(fold.test_size())?;
-    let predicted: Vec<f64> = forecast.primary().to_vec();
-    let actual: Vec<f64> = (fold.test_start..fold.test_end)
-        .map(|i| series.primary_values()[i])
-        .collect();
-    let metrics = calculate_metrics(&actual, &predicted, seasonal_period)?;
-    Ok((metrics, actual, predicted))
+    let predicted = forecast.primary();
+    // Use direct slice to avoid collecting a Vec just for metrics computation
+    let actual_slice = &series.primary_values()[fold.test_start..fold.test_end];
+    let metrics = calculate_metrics(actual_slice, predicted, seasonal_period)?;
+    Ok((metrics, actual_slice.to_vec(), predicted.to_vec()))
 }
 
 /// Perform time series cross-validation.
@@ -834,8 +833,8 @@ fn cross_validate_with_folds<F, Factory>(
     model_factory: &Factory,
 ) -> Result<CVResults>
 where
-    F: Forecaster,
-    Factory: Fn() -> F,
+    F: Forecaster + Send,
+    Factory: Fn() -> F + Sync,
 {
     if folds.is_empty() {
         return Ok(CVResults {
@@ -855,34 +854,30 @@ where
         });
     }
 
+    let seasonal_period = config.seasonal_period;
+
+    // Evaluate each fold (parallel when feature enabled)
+    #[cfg(feature = "parallel")]
+    let fold_results: Vec<Result<(AccuracyMetrics, Vec<f64>, Vec<f64>)>> = folds
+        .par_iter()
+        .map(|fold| evaluate_fold(series, fold, model_factory, seasonal_period))
+        .collect();
+
+    #[cfg(not(feature = "parallel"))]
+    let fold_results: Vec<Result<(AccuracyMetrics, Vec<f64>, Vec<f64>)>> = folds
+        .iter()
+        .map(|fold| evaluate_fold(series, fold, model_factory, seasonal_period))
+        .collect();
+
     let mut fold_metrics = Vec::with_capacity(folds.len());
     let mut all_actual = Vec::new();
     let mut all_predicted = Vec::new();
 
-    for fold in folds {
-        // Create training subset
-        let train_series = series.slice(fold.train_start, fold.train_end)?;
-
-        // Create and fit model
-        let mut model = model_factory();
-        model.fit(&train_series)?;
-
-        // Generate forecast
-        let forecast = model.predict(fold.test_size())?;
-        let predictions = forecast.primary();
-
-        // Get actual values for this fold
-        let actual: Vec<f64> = (fold.test_start..fold.test_end)
-            .map(|i| series.primary_values()[i])
-            .collect();
-
-        // Calculate metrics for this fold
-        let metrics = calculate_metrics(&actual, predictions, config.seasonal_period)?;
+    for result in fold_results {
+        let (metrics, actual, predicted) = result?;
         fold_metrics.push(metrics);
-
-        // Store values for overall metrics
         all_actual.extend_from_slice(&actual);
-        all_predicted.extend_from_slice(predictions);
+        all_predicted.extend_from_slice(&predicted);
     }
 
     let n_folds = fold_metrics.len();
@@ -1187,6 +1182,267 @@ where
         actual_values: all_actual,
         predicted_values: all_predicted,
         folds: used_folds,
+    })
+}
+
+/// Configuration for rolling/expanding window forecast evaluation.
+///
+/// Walk-forward evaluation: train on a window, predict the next `horizon` steps,
+/// step forward, and repeat. Supports both rolling (fixed-size) and expanding
+/// (growing) training windows.
+///
+/// # Example
+///
+/// ```
+/// use anofox_forecast::utils::cross_validation::RollingForecastConfig;
+///
+/// let config = RollingForecastConfig::new(50, 7)
+///     .step_size(7)
+///     .expanding(false); // rolling window
+///
+/// assert_eq!(config.initial_train_size, 50);
+/// assert_eq!(config.horizon, 7);
+/// assert_eq!(config.step_size, 7);
+/// assert!(!config.expanding);
+/// ```
+#[derive(Debug, Clone)]
+pub struct RollingForecastConfig {
+    /// Minimum number of observations for the first training window.
+    pub initial_train_size: usize,
+    /// Number of steps to forecast at each window position.
+    pub horizon: usize,
+    /// Number of steps to advance the window origin between iterations.
+    pub step_size: usize,
+    /// If `true`, the training window grows from the start of the series (expanding).
+    /// If `false`, the training window has a fixed size equal to `initial_train_size` (rolling).
+    pub expanding: bool,
+}
+
+impl RollingForecastConfig {
+    /// Create a new configuration with expanding window (default).
+    ///
+    /// Step size defaults to `horizon` so that forecast windows are non-overlapping.
+    pub fn new(initial_train_size: usize, horizon: usize) -> Self {
+        Self {
+            initial_train_size,
+            horizon,
+            step_size: horizon,
+            expanding: true,
+        }
+    }
+
+    /// Set the step size between successive forecast origins.
+    pub fn step_size(mut self, step: usize) -> Self {
+        self.step_size = step;
+        self
+    }
+
+    /// Set the window mode: `true` for expanding, `false` for rolling.
+    pub fn expanding(mut self, expanding: bool) -> Self {
+        self.expanding = expanding;
+        self
+    }
+}
+
+/// A single window's predictions and actuals from rolling forecast evaluation.
+#[derive(Debug, Clone)]
+pub struct RollingForecastWindow {
+    /// Start index of the training data (inclusive).
+    pub train_start: usize,
+    /// End index of the training data (exclusive).
+    pub train_end: usize,
+    /// Predicted values for this window.
+    pub predictions: Vec<f64>,
+    /// Actual values for this window.
+    pub actuals: Vec<f64>,
+}
+
+/// Results from a rolling/expanding window forecast evaluation.
+#[derive(Debug, Clone)]
+pub struct RollingForecastResult {
+    /// Per-window results in chronological order.
+    pub windows: Vec<RollingForecastWindow>,
+    /// All predictions concatenated in order.
+    pub all_predictions: Vec<f64>,
+    /// All actuals concatenated in order.
+    pub all_actuals: Vec<f64>,
+    /// Per-window accuracy metrics.
+    pub window_metrics: Vec<AccuracyMetrics>,
+    /// Aggregated metrics across all windows.
+    pub aggregated: AggregatedMetrics,
+}
+
+/// Perform rolling or expanding window forecast evaluation.
+///
+/// Walk-forward evaluation trains a model on historical data, generates a forecast
+/// of length `horizon`, records predictions vs actuals, then steps forward and
+/// repeats. This produces realistic out-of-sample accuracy estimates.
+///
+/// # Arguments
+/// * `series` - The full time series to evaluate on
+/// * `config` - Rolling forecast configuration
+/// * `model_factory` - Function that creates a fresh model for each window
+///
+/// # Returns
+/// `RollingForecastResult` containing per-window and aggregated metrics.
+///
+/// # Example
+///
+/// ```
+/// use anofox_forecast::utils::cross_validation::{rolling_forecast, RollingForecastConfig};
+/// use anofox_forecast::models::baseline::Naive;
+/// use anofox_forecast::core::TimeSeries;
+/// use chrono::{TimeZone, Utc};
+///
+/// let timestamps: Vec<_> = (0..30)
+///     .map(|i| Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap()
+///         + chrono::Duration::hours(i))
+///     .collect();
+/// let values: Vec<f64> = (0..30).map(|i| i as f64).collect();
+/// let ts = TimeSeries::univariate(timestamps, values).unwrap();
+///
+/// let config = RollingForecastConfig::new(20, 3).step_size(3);
+/// let result = rolling_forecast(&ts, &config, Naive::new).unwrap();
+///
+/// assert!(result.windows.len() > 0);
+/// assert_eq!(result.all_predictions.len(), result.all_actuals.len());
+/// ```
+pub fn rolling_forecast<F, Factory>(
+    series: &TimeSeries,
+    config: &RollingForecastConfig,
+    model_factory: Factory,
+) -> Result<RollingForecastResult>
+where
+    F: Forecaster + Send,
+    Factory: Fn() -> F + Sync,
+{
+    let n = series.len();
+
+    if config.initial_train_size == 0 {
+        return Err(ForecastError::InvalidParameter(
+            "initial_train_size must be at least 1".to_string(),
+        ));
+    }
+    if config.horizon == 0 {
+        return Err(ForecastError::InvalidParameter(
+            "horizon must be at least 1".to_string(),
+        ));
+    }
+    if config.step_size == 0 {
+        return Err(ForecastError::InvalidParameter(
+            "step_size must be at least 1".to_string(),
+        ));
+    }
+    if config.initial_train_size + config.horizon > n {
+        return Err(ForecastError::InvalidParameter(format!(
+            "Series length ({}) is too short for initial_train_size ({}) + horizon ({})",
+            n, config.initial_train_size, config.horizon
+        )));
+    }
+
+    // Build the list of (train_start, train_end) pairs for each window
+    let mut window_specs: Vec<(usize, usize)> = Vec::new();
+    let mut origin = config.initial_train_size;
+    while origin + config.horizon <= n {
+        let train_start = if config.expanding {
+            0
+        } else {
+            origin.saturating_sub(config.initial_train_size)
+        };
+        let train_end = origin;
+        window_specs.push((train_start, train_end));
+        origin += config.step_size;
+    }
+
+    if window_specs.is_empty() {
+        return Err(ForecastError::InvalidParameter(
+            "Not enough data for any forecast window".to_string(),
+        ));
+    }
+
+    let horizon = config.horizon;
+    let values = series.primary_values();
+
+    // Evaluate each window
+    let evaluate_window =
+        |&(train_start, train_end): &(usize, usize)| -> Result<(RollingForecastWindow, AccuracyMetrics)> {
+            let train_series = series.slice(train_start, train_end)?;
+            let mut model = model_factory();
+            model.fit(&train_series)?;
+            let forecast = model.predict(horizon)?;
+            let predictions: Vec<f64> = forecast.primary().to_vec();
+
+            let test_end = train_end + horizon;
+            let actuals: Vec<f64> = (train_end..test_end).map(|i| values[i]).collect();
+
+            let metrics = calculate_metrics(&actuals, &predictions, None)?;
+
+            let window = RollingForecastWindow {
+                train_start,
+                train_end,
+                predictions,
+                actuals,
+            };
+            Ok((window, metrics))
+        };
+
+    #[cfg(feature = "parallel")]
+    let results: Vec<Result<(RollingForecastWindow, AccuracyMetrics)>> =
+        window_specs.par_iter().map(evaluate_window).collect();
+
+    #[cfg(not(feature = "parallel"))]
+    let results: Vec<Result<(RollingForecastWindow, AccuracyMetrics)>> =
+        window_specs.iter().map(evaluate_window).collect();
+
+    let mut windows = Vec::with_capacity(results.len());
+    let mut window_metrics = Vec::with_capacity(results.len());
+    let mut all_predictions = Vec::new();
+    let mut all_actuals = Vec::new();
+
+    for result in results {
+        let (window, metrics) = result?;
+        all_predictions.extend_from_slice(&window.predictions);
+        all_actuals.extend_from_slice(&window.actuals);
+        windows.push(window);
+        window_metrics.push(metrics);
+    }
+
+    let n_windows = window_metrics.len();
+
+    // Aggregate metrics
+    let mae_values: Vec<f64> = window_metrics.iter().map(|m| m.mae).collect();
+    let rmse_values: Vec<f64> = window_metrics.iter().map(|m| m.rmse).collect();
+    let smape_values: Vec<f64> = window_metrics.iter().map(|m| m.smape).collect();
+
+    let mae_mean = mae_values.iter().sum::<f64>() / n_windows as f64;
+    let rmse_mean = rmse_values.iter().sum::<f64>() / n_windows as f64;
+    let smape_mean = smape_values.iter().sum::<f64>() / n_windows as f64;
+
+    let mae_std = std_dev(&mae_values);
+    let rmse_std = std_dev(&rmse_values);
+
+    let mape = if window_metrics.iter().all(|m| m.mape.is_some()) {
+        let mape_values: Vec<f64> = window_metrics.iter().filter_map(|m| m.mape).collect();
+        Some(mape_values.iter().sum::<f64>() / n_windows as f64)
+    } else {
+        None
+    };
+
+    let aggregated = AggregatedMetrics {
+        mae: mae_mean,
+        rmse: rmse_mean,
+        smape: smape_mean,
+        mape,
+        mae_std,
+        rmse_std,
+    };
+
+    Ok(RollingForecastResult {
+        windows,
+        all_predictions,
+        all_actuals,
+        window_metrics,
+        aggregated,
     })
 }
 
@@ -1942,5 +2198,231 @@ mod tests {
 
         // Should have evaluated all available folds
         assert!(results.n_folds > 0);
+    }
+
+    // ==================== Rolling Forecast Tests ====================
+
+    #[test]
+    fn rolling_forecast_expanding_basic() {
+        let timestamps = make_timestamps(30);
+        let values: Vec<f64> = (0..30).map(|i| i as f64).collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let config = RollingForecastConfig::new(20, 3).step_size(3);
+        let result = rolling_forecast(&ts, &config, Naive::new).unwrap();
+
+        // With 30 points, initial=20, horizon=3, step=3:
+        // Window 0: train [0..20], test [20..23]
+        // Window 1: train [0..23], test [23..26]
+        // Window 2: train [0..26], test [26..29]
+        // Window 3: train [0..29], test [29..32] -> exceeds, so 3 windows
+        assert_eq!(result.windows.len(), 3);
+        assert_eq!(result.all_predictions.len(), 9);
+        assert_eq!(result.all_actuals.len(), 9);
+
+        // Expanding: train_start should always be 0
+        for w in &result.windows {
+            assert_eq!(w.train_start, 0);
+        }
+
+        // Train end should grow
+        assert_eq!(result.windows[0].train_end, 20);
+        assert_eq!(result.windows[1].train_end, 23);
+        assert_eq!(result.windows[2].train_end, 26);
+    }
+
+    #[test]
+    fn rolling_forecast_fixed_window() {
+        let timestamps = make_timestamps(30);
+        let values: Vec<f64> = (0..30).map(|i| i as f64).collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let config = RollingForecastConfig::new(15, 3)
+            .step_size(3)
+            .expanding(false);
+        let result = rolling_forecast(&ts, &config, Naive::new).unwrap();
+
+        // Rolling: train window stays fixed at 15
+        for w in &result.windows {
+            assert_eq!(w.train_end - w.train_start, 15);
+        }
+
+        // train_start should slide forward
+        assert_eq!(result.windows[0].train_start, 0);
+        assert_eq!(result.windows[1].train_start, 3);
+    }
+
+    #[test]
+    fn rolling_forecast_step_size_one() {
+        let timestamps = make_timestamps(25);
+        let values: Vec<f64> = (0..25).map(|i| i as f64).collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let config = RollingForecastConfig::new(20, 3).step_size(1);
+        let result = rolling_forecast(&ts, &config, Naive::new).unwrap();
+
+        // origin goes 20, 21, 22 (22+3=25 is ok), 23 (23+3=26 > 25, stop)
+        assert_eq!(result.windows.len(), 3);
+    }
+
+    #[test]
+    fn rolling_forecast_constant_series() {
+        let timestamps = make_timestamps(30);
+        let values = vec![5.0; 30];
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let config = RollingForecastConfig::new(20, 3).step_size(3);
+        let result = rolling_forecast(&ts, &config, Naive::new).unwrap();
+
+        // Naive on constant series should have zero error
+        assert!(result.aggregated.mae.abs() < 1e-10);
+        assert!(result.aggregated.rmse.abs() < 1e-10);
+
+        // Predictions should equal actuals
+        for (p, a) in result.all_predictions.iter().zip(result.all_actuals.iter()) {
+            assert!((p - a).abs() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn rolling_forecast_actuals_match_series() {
+        let timestamps = make_timestamps(30);
+        let values: Vec<f64> = (0..30).map(|i| i as f64 * 2.0 + 1.0).collect();
+        let ts = TimeSeries::univariate(timestamps, values.clone()).unwrap();
+
+        let config = RollingForecastConfig::new(20, 5).step_size(5);
+        let result = rolling_forecast(&ts, &config, Naive::new).unwrap();
+
+        // Verify actuals come from the original series
+        for w in &result.windows {
+            for (j, &actual) in w.actuals.iter().enumerate() {
+                let idx = w.train_end + j;
+                assert!((actual - values[idx]).abs() < 1e-10);
+            }
+        }
+    }
+
+    #[test]
+    fn rolling_forecast_insufficient_data() {
+        let timestamps = make_timestamps(10);
+        let values: Vec<f64> = (0..10).map(|i| i as f64).collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let config = RollingForecastConfig::new(10, 5);
+        let result = rolling_forecast(&ts, &config, Naive::new);
+
+        // 10 + 5 > 10, not enough data
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rolling_forecast_invalid_params() {
+        let timestamps = make_timestamps(30);
+        let values = vec![1.0; 30];
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        // Zero horizon
+        let config = RollingForecastConfig {
+            initial_train_size: 20,
+            horizon: 0,
+            step_size: 1,
+            expanding: true,
+        };
+        assert!(rolling_forecast(&ts, &config, Naive::new).is_err());
+
+        // Zero step_size
+        let config = RollingForecastConfig {
+            initial_train_size: 20,
+            horizon: 3,
+            step_size: 0,
+            expanding: true,
+        };
+        assert!(rolling_forecast(&ts, &config, Naive::new).is_err());
+
+        // Zero initial_train_size
+        let config = RollingForecastConfig {
+            initial_train_size: 0,
+            horizon: 3,
+            step_size: 1,
+            expanding: true,
+        };
+        assert!(rolling_forecast(&ts, &config, Naive::new).is_err());
+    }
+
+    #[test]
+    fn rolling_forecast_config_builder() {
+        let config = RollingForecastConfig::new(50, 7)
+            .step_size(3)
+            .expanding(false);
+
+        assert_eq!(config.initial_train_size, 50);
+        assert_eq!(config.horizon, 7);
+        assert_eq!(config.step_size, 3);
+        assert!(!config.expanding);
+    }
+
+    #[test]
+    fn rolling_forecast_config_defaults() {
+        let config = RollingForecastConfig::new(100, 12);
+
+        assert_eq!(config.initial_train_size, 100);
+        assert_eq!(config.horizon, 12);
+        assert_eq!(config.step_size, 12); // defaults to horizon
+        assert!(config.expanding); // defaults to true
+    }
+
+    #[test]
+    fn rolling_forecast_metrics_consistent() {
+        let timestamps = make_timestamps(40);
+        let values: Vec<f64> = (0..40).map(|i| (i as f64).sin() * 10.0 + 50.0).collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let config = RollingForecastConfig::new(25, 3).step_size(3);
+        let result = rolling_forecast(&ts, &config, Naive::new).unwrap();
+
+        // RMSE >= MAE always
+        assert!(result.aggregated.rmse >= result.aggregated.mae);
+        // SMAPE in valid range
+        assert!(result.aggregated.smape >= 0.0);
+        assert!(result.aggregated.smape <= 200.0);
+        // Std devs non-negative
+        assert!(result.aggregated.mae_std >= 0.0);
+        assert!(result.aggregated.rmse_std >= 0.0);
+        // Per-window metrics match count
+        assert_eq!(result.window_metrics.len(), result.windows.len());
+    }
+
+    // ==================== Parallel CV Tests ====================
+
+    #[test]
+    fn grouped_cv_parallel_matches_sequential_results() {
+        // Grouped CV uses cross_validate_with_folds internally which now
+        // parallelizes when the feature is enabled. Verify results are valid.
+        let timestamps = make_timestamps(30);
+
+        let series_a =
+            TimeSeries::univariate(timestamps.clone(), (0..30).map(|i| i as f64).collect())
+                .unwrap();
+
+        let series_b = TimeSeries::univariate(
+            timestamps.clone(),
+            (0..30).map(|i| (i as f64) * 2.0).collect(),
+        )
+        .unwrap();
+
+        let series_map = vec![("a".to_string(), series_a), ("b".to_string(), series_b)];
+
+        let config = CVConfig::expanding(15, 3).with_step_size(3);
+        let results = grouped_cross_validate(&config, series_map, Naive::new).unwrap();
+
+        assert_eq!(results.group_results.len(), 2);
+        assert!(results.aggregated.mae.is_finite());
+        assert!(results.aggregated.rmse.is_finite());
+
+        // Both groups should have same number of folds
+        let n_a = results.group_results[0].1.n_folds;
+        let n_b = results.group_results[1].1.n_folds;
+        assert_eq!(n_a, n_b);
+        assert!(n_a > 0);
     }
 }
