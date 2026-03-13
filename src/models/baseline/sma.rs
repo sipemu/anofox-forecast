@@ -189,14 +189,22 @@ impl Forecaster for SimpleMovingAverage {
 
         let z = quantile_normal((1.0 + level) / 2.0);
 
+        // Standard error accounts for estimation uncertainty: se = sigma * sqrt(1 + 1/w)
+        let w = if self.window == 0 {
+            self.fitted.as_ref().map_or(1, |f| f.len()) as f64
+        } else {
+            self.window as f64
+        };
+        let se = sigma * (1.0 + 1.0 / w).sqrt();
+
         let mut predictions = Vec::with_capacity(horizon);
         let mut lower = Vec::with_capacity(horizon);
         let mut upper = Vec::with_capacity(horizon);
 
         for _ in 0..horizon {
             predictions.push(mean);
-            lower.push(mean - z * sigma);
-            upper.push(mean + z * sigma);
+            lower.push(mean - z * se);
+            upper.push(mean + z * se);
         }
 
         Ok(Forecast::from_values_with_intervals(
@@ -221,8 +229,16 @@ impl Forecaster for SimpleMovingAverage {
         let z = quantile_normal((1.0 + level) / 2.0);
         let sigma = variance.sqrt();
 
-        let lower: Vec<f64> = fitted.iter().map(|&f| f - z * sigma).collect();
-        let upper: Vec<f64> = fitted.iter().map(|&f| f + z * sigma).collect();
+        // Standard error accounts for estimation uncertainty: se = sigma * sqrt(1 + 1/w)
+        let w = if self.window == 0 {
+            fitted.len() as f64
+        } else {
+            self.window as f64
+        };
+        let se = sigma * (1.0 + 1.0 / w).sqrt();
+
+        let lower: Vec<f64> = fitted.iter().map(|&f| f - z * se).collect();
+        let upper: Vec<f64> = fitted.iter().map(|&f| f + z * se).collect();
 
         Some(Forecast::from_values_with_intervals(
             fitted.clone(),

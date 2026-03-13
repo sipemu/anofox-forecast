@@ -20,6 +20,7 @@ pub struct RandomWalkWithDrift {
     #[cfg_attr(feature = "serde", serde(with = "crate::utils::persistence::nan_vec"))]
     residuals: Option<Vec<f64>>,
     residual_variance: Option<f64>,
+    drift_se: Option<f64>,
 }
 
 impl RandomWalkWithDrift {
@@ -74,9 +75,10 @@ impl Forecaster for RandomWalkWithDrift {
         // Calculate residual variance for prediction intervals
         let valid_residuals: Vec<f64> = residuals.iter().copied().filter(|r| !r.is_nan()).collect();
         if !valid_residuals.is_empty() {
-            let variance =
-                crate::simd::sum_of_squares(&valid_residuals) / valid_residuals.len() as f64;
+            let n_diffs = valid_residuals.len() as f64;
+            let variance = crate::simd::sum_of_squares(&valid_residuals) / n_diffs;
             self.residual_variance = Some(variance);
+            self.drift_se = Some(variance.sqrt() / n_diffs.sqrt());
         }
 
         self.residuals = Some(residuals);
@@ -101,7 +103,7 @@ impl Forecaster for RandomWalkWithDrift {
         let last = self.last_value.ok_or(ForecastError::FitRequired)?;
         let drift = self.drift.ok_or(ForecastError::FitRequired)?;
         let variance = self.residual_variance.unwrap_or(0.0);
-        let sigma = variance.sqrt();
+        let drift_se = self.drift_se.unwrap_or(0.0);
 
         if horizon == 0 {
             return Ok(Forecast::new());
@@ -114,9 +116,10 @@ impl Forecaster for RandomWalkWithDrift {
         let mut upper = Vec::with_capacity(horizon);
 
         for h in 1..=horizon {
-            let pred = last + (h as f64) * drift;
+            let hf = h as f64;
+            let pred = last + hf * drift;
             predictions.push(pred);
-            let se = sigma * (h as f64).sqrt();
+            let se = (variance * hf + (hf * drift_se).powi(2)).sqrt();
             lower.push(pred - z * se);
             upper.push(pred + z * se);
         }
