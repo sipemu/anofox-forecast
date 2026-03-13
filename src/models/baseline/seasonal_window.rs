@@ -124,7 +124,10 @@ impl Forecaster for SeasonalWindowAverage {
     }
 
     fn predict(&self, horizon: usize) -> Result<Forecast> {
-        let history = self.history.as_ref().ok_or(ForecastError::FitRequired)?;
+        let history = self
+            .history
+            .as_ref()
+            .ok_or(ForecastError::FitRequired { model: None })?;
 
         if horizon == 0 {
             return Ok(Forecast::new());

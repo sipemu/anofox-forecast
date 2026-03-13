@@ -328,7 +328,7 @@ impl Forecaster for SeasonalES {
         let seasonal_values = self
             .seasonal_values
             .as_ref()
-            .ok_or(ForecastError::FitRequired)?;
+            .ok_or(ForecastError::FitRequired { model: None })?;
 
         if horizon == 0 {
             return Ok(Forecast::new());
@@ -528,7 +528,10 @@ mod tests {
     #[test]
     fn seasonal_es_requires_fit() {
         let model = SeasonalES::new(12);
-        assert!(matches!(model.predict(5), Err(ForecastError::FitRequired)));
+        assert!(matches!(
+            model.predict(5),
+            Err(ForecastError::FitRequired { .. })
+        ));
     }
 
     #[test]

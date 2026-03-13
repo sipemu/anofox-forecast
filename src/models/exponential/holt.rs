@@ -263,8 +263,12 @@ impl Forecaster for HoltLinearTrend {
             }
         }
 
-        let alpha = self.alpha.ok_or(ForecastError::FitRequired)?;
-        let beta = self.beta.ok_or(ForecastError::FitRequired)?;
+        let alpha = self
+            .alpha
+            .ok_or(ForecastError::FitRequired { model: None })?;
+        let beta = self
+            .beta
+            .ok_or(ForecastError::FitRequired { model: None })?;
         let phi = self.phi.unwrap_or(1.0);
 
         // Initialize state
@@ -306,8 +310,12 @@ impl Forecaster for HoltLinearTrend {
     }
 
     fn predict(&self, horizon: usize) -> Result<Forecast> {
-        let l = self.level.ok_or(ForecastError::FitRequired)?;
-        let b = self.trend.ok_or(ForecastError::FitRequired)?;
+        let l = self
+            .level
+            .ok_or(ForecastError::FitRequired { model: None })?;
+        let b = self
+            .trend
+            .ok_or(ForecastError::FitRequired { model: None })?;
         let phi = self.phi.unwrap_or(1.0);
 
         if horizon == 0 {
@@ -322,12 +330,20 @@ impl Forecaster for HoltLinearTrend {
     }
 
     fn predict_with_intervals(&self, horizon: usize, level: f64) -> Result<Forecast> {
-        let l = self.level.ok_or(ForecastError::FitRequired)?;
-        let b = self.trend.ok_or(ForecastError::FitRequired)?;
+        let l = self
+            .level
+            .ok_or(ForecastError::FitRequired { model: None })?;
+        let b = self
+            .trend
+            .ok_or(ForecastError::FitRequired { model: None })?;
         let phi = self.phi.unwrap_or(1.0);
         let variance = self.residual_variance.unwrap_or(0.0);
-        let alpha = self.alpha.ok_or(ForecastError::FitRequired)?;
-        let beta = self.beta.ok_or(ForecastError::FitRequired)?;
+        let alpha = self
+            .alpha
+            .ok_or(ForecastError::FitRequired { model: None })?;
+        let beta = self
+            .beta
+            .ok_or(ForecastError::FitRequired { model: None })?;
 
         if horizon == 0 {
             return Ok(Forecast::new());
@@ -555,7 +571,10 @@ mod tests {
     #[test]
     fn holt_requires_fit_before_predict() {
         let model = HoltLinearTrend::new(0.3, 0.1);
-        assert!(matches!(model.predict(5), Err(ForecastError::FitRequired)));
+        assert!(matches!(
+            model.predict(5),
+            Err(ForecastError::FitRequired { .. })
+        ));
     }
 
     #[test]

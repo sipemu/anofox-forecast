@@ -24,8 +24,12 @@
 //! let kpss = kpss_test(&series, None);
 //! ```
 
+pub mod diagnostics;
 pub mod residual_tests;
 pub mod stationarity;
+
+// Re-export from diagnostics
+pub use diagnostics::ModelDiagnostics;
 
 // Re-export from residual_tests
 pub use residual_tests::{

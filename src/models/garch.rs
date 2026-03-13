@@ -453,7 +453,7 @@ impl GARCH {
     /// Uses the same logic as predict() but returns only variance (sigma²) values.
     pub fn forecast_variance(&self, horizon: usize) -> Result<Vec<f64>> {
         if self.y_vals.is_empty() || self.sigma2_vals.is_empty() {
-            return Err(ForecastError::FitRequired);
+            return Err(ForecastError::FitRequired { model: None });
         }
 
         if horizon == 0 {
@@ -587,7 +587,7 @@ impl Forecaster for GARCH {
 
         // Check model is fitted
         if self.y_vals.is_empty() || self.sigma2_vals.is_empty() {
-            return Err(ForecastError::FitRequired);
+            return Err(ForecastError::FitRequired { model: None });
         }
 
         // Standard normal random draws matching np.random.seed(1) + np.random.normal()
@@ -891,7 +891,7 @@ mod tests {
         let model = GARCH::new(1, 1);
         assert!(matches!(
             model.forecast_variance(5),
-            Err(ForecastError::FitRequired)
+            Err(ForecastError::FitRequired { .. })
         ));
     }
 
@@ -1298,7 +1298,10 @@ mod tests {
     #[test]
     fn garch_predict_requires_fit() {
         let model = GARCH::new(1, 1);
-        assert!(matches!(model.predict(5), Err(ForecastError::FitRequired)));
+        assert!(matches!(
+            model.predict(5),
+            Err(ForecastError::FitRequired { .. })
+        ));
     }
 
     #[test]

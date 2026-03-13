@@ -5,6 +5,7 @@
 
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
+use crate::models::explain::{Explainable, ForecastExplanation};
 use crate::models::{validate_series_complete, Forecaster};
 use crate::utils::ols::{ols_fit, ols_residuals, OLSResult};
 use crate::utils::optimization::{nelder_mead, NelderMeadConfig};
@@ -1343,7 +1344,9 @@ impl ETS {
         horizon: usize,
         future_regressors: Option<&HashMap<String, Vec<f64>>>,
     ) -> Result<Forecast> {
-        let level = self.level.ok_or(ForecastError::FitRequired)?;
+        let level = self
+            .level
+            .ok_or(ForecastError::FitRequired { model: None })?;
         let trend = self.trend.unwrap_or(0.0);
         let phi = self.phi.unwrap_or(1.0);
         let period = self.seasonal_period;
@@ -1353,7 +1356,11 @@ impl ETS {
         }
 
         let seasonals_ref = if self.spec.has_seasonal() {
-            Some(self.seasonals.as_ref().ok_or(ForecastError::FitRequired)?)
+            Some(
+                self.seasonals
+                    .as_ref()
+                    .ok_or(ForecastError::FitRequired { model: None })?,
+            )
         } else {
             None
         };
@@ -1763,6 +1770,83 @@ impl Forecaster for ETS {
     }
 }
 
+impl Explainable for ETS {
+    fn explain(&self, horizon: usize) -> Result<ForecastExplanation> {
+        let level_val = self
+            .level
+            .ok_or(ForecastError::FitRequired { model: None })?;
+        let trend_val = self.trend.unwrap_or(0.0);
+        let phi = self.phi.unwrap_or(1.0);
+        let period = self.seasonal_period;
+        if horizon == 0 {
+            return Ok(ForecastExplanation {
+                level: vec![],
+                trend: None,
+                seasonal: None,
+                residual: None,
+                named_components: vec![],
+            });
+        }
+        let seasonals_ref = if self.spec.has_seasonal() {
+            Some(
+                self.seasonals
+                    .as_ref()
+                    .ok_or(ForecastError::FitRequired { model: None })?,
+            )
+        } else {
+            None
+        };
+        let mut level_component = Vec::with_capacity(horizon);
+        let mut trend_component_vec = Vec::with_capacity(horizon);
+        let mut seasonal_component_vec = Vec::with_capacity(horizon);
+        for h in 1..=horizon {
+            let trend_component = if self.spec.has_trend() {
+                if self.spec.is_damped() {
+                    Self::damped_sum(phi, h) * trend_val
+                } else {
+                    h as f64 * trend_val
+                }
+            } else {
+                0.0
+            };
+            match self.spec.seasonal {
+                SeasonalType::None => {
+                    level_component.push(level_val);
+                    trend_component_vec.push(trend_component);
+                }
+                SeasonalType::Additive => {
+                    let s = seasonals_ref.unwrap()[(self.n + h - 1) % period];
+                    level_component.push(level_val);
+                    trend_component_vec.push(trend_component);
+                    seasonal_component_vec.push(s);
+                }
+                SeasonalType::Multiplicative => {
+                    let s = seasonals_ref.unwrap()[(self.n + h - 1) % period];
+                    let base = level_val + trend_component;
+                    level_component.push(level_val);
+                    trend_component_vec.push(trend_component);
+                    seasonal_component_vec.push(base * (s - 1.0));
+                }
+            }
+        }
+        Ok(ForecastExplanation {
+            level: level_component,
+            trend: if self.spec.has_trend() {
+                Some(trend_component_vec)
+            } else {
+                None
+            },
+            seasonal: if self.spec.has_seasonal() {
+                Some(seasonal_component_vec)
+            } else {
+                None
+            },
+            residual: None,
+            named_components: vec![],
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1918,7 +2002,10 @@ mod tests {
     #[test]
     fn ets_requires_fit() {
         let model = ETS::new(ETSSpec::ann(), 1);
-        assert!(matches!(model.predict(5), Err(ForecastError::FitRequired)));
+        assert!(matches!(
+            model.predict(5),
+            Err(ForecastError::FitRequired { .. })
+        ));
     }
 
     #[test]

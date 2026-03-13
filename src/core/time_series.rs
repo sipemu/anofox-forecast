@@ -115,6 +115,38 @@ pub enum MissingValuePolicy {
     Error,
 }
 
+/// Method for aggregating groups of observations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AggregationMethod {
+    /// Sum all values in the group.
+    Sum,
+    /// Arithmetic mean.
+    Mean,
+    /// Median value.
+    Median,
+    /// First value in the group.
+    First,
+    /// Last value in the group.
+    Last,
+    /// Minimum value.
+    Min,
+    /// Maximum value.
+    Max,
+}
+
+/// Method for interpolating values during upsampling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InterpolationMethod {
+    /// Linear interpolation between points.
+    Linear,
+    /// Forward fill (carry previous value).
+    ForwardFill,
+    /// Backward fill (use next value).
+    BackwardFill,
+    /// Fill with zero.
+    Zero,
+}
+
 /// Calendar annotations for holidays and regressors.
 #[derive(Debug, Clone, Default, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -1528,6 +1560,192 @@ impl TimeSeries {
             calendar: self.calendar.clone(),
         })
     }
+
+    // --- Temporal aggregation / resampling ---
+
+    /// Aggregate observations into groups of `period` consecutive points.
+    pub fn aggregate(&self, period: usize, method: AggregationMethod) -> TimeSeries {
+        if period <= 1 || self.is_empty() {
+            return self.clone();
+        }
+        let n = self.len();
+        let num_groups = n.div_ceil(period);
+        let timestamps: Vec<DateTime<Utc>> = (0..num_groups)
+            .map(|g| self.timestamps[g * period])
+            .collect();
+        let values: Vec<Vec<f64>> = self
+            .values
+            .iter()
+            .map(|dim| {
+                (0..num_groups)
+                    .map(|g| {
+                        let start = g * period;
+                        let end = (start + period).min(n);
+                        aggregate_slice(&dim[start..end], method)
+                    })
+                    .collect()
+            })
+            .collect();
+        TimeSeries {
+            timestamps,
+            values,
+            labels: self.labels.clone(),
+            metadata: self.metadata.clone(),
+            dimension_metadata: self.dimension_metadata.clone(),
+            timezone: self.timezone.clone(),
+            frequency: self.frequency.map(|f| f * period as i32),
+            calendar: None,
+        }
+    }
+
+    /// Downsample by taking every `factor`-th observation (decimation).
+    pub fn downsample(&self, factor: usize) -> TimeSeries {
+        if factor <= 1 || self.is_empty() {
+            return self.clone();
+        }
+        let indices: Vec<usize> = (0..self.len()).step_by(factor).collect();
+        let timestamps: Vec<DateTime<Utc>> = indices.iter().map(|&i| self.timestamps[i]).collect();
+        let values: Vec<Vec<f64>> = self
+            .values
+            .iter()
+            .map(|dim| indices.iter().map(|&i| dim[i]).collect())
+            .collect();
+        TimeSeries {
+            timestamps,
+            values,
+            labels: self.labels.clone(),
+            metadata: self.metadata.clone(),
+            dimension_metadata: self.dimension_metadata.clone(),
+            timezone: self.timezone.clone(),
+            frequency: self.frequency.map(|f| f * factor as i32),
+            calendar: None,
+        }
+    }
+
+    /// Upsample by inserting `factor - 1` points between each pair of observations.
+    pub fn upsample(&self, factor: usize, method: InterpolationMethod) -> TimeSeries {
+        if factor <= 1 || self.len() < 2 {
+            return self.clone();
+        }
+        let n = self.len();
+        let new_len = (n - 1) * factor + 1;
+        let timestamps: Vec<DateTime<Utc>> = (0..new_len)
+            .map(|i| {
+                let src_idx = i / factor;
+                let frac = i % factor;
+                if frac == 0 || src_idx >= n - 1 {
+                    self.timestamps[src_idx.min(n - 1)]
+                } else {
+                    self.timestamps[src_idx]
+                        + (self.timestamps[src_idx + 1] - self.timestamps[src_idx]) * frac as i32
+                            / factor as i32
+                }
+            })
+            .collect();
+        let values: Vec<Vec<f64>> = self
+            .values
+            .iter()
+            .map(|dim| {
+                (0..new_len)
+                    .map(|i| {
+                        let src_idx = i / factor;
+                        let frac = i % factor;
+                        if frac == 0 {
+                            dim[src_idx]
+                        } else {
+                            let v0 = dim[src_idx];
+                            let v1 = dim[(src_idx + 1).min(n - 1)];
+                            match method {
+                                InterpolationMethod::Linear => {
+                                    v0 + (frac as f64 / factor as f64) * (v1 - v0)
+                                }
+                                InterpolationMethod::ForwardFill => v0,
+                                InterpolationMethod::BackwardFill => v1,
+                                InterpolationMethod::Zero => 0.0,
+                            }
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        TimeSeries {
+            timestamps,
+            values,
+            labels: self.labels.clone(),
+            metadata: self.metadata.clone(),
+            dimension_metadata: self.dimension_metadata.clone(),
+            timezone: self.timezone.clone(),
+            frequency: self.frequency.map(|f| {
+                let s = f.num_seconds() / factor as i64;
+                Duration::seconds(s.max(1))
+            }),
+            calendar: None,
+        }
+    }
+
+    /// Sliding window aggregation with configurable step size.
+    pub fn sliding_window_aggregate(
+        &self,
+        window: usize,
+        step: usize,
+        method: AggregationMethod,
+    ) -> TimeSeries {
+        let step = if step == 0 { 1 } else { step };
+        if window == 0 || window > self.len() || self.is_empty() {
+            return TimeSeries {
+                timestamps: vec![],
+                values: self.values.iter().map(|_| vec![]).collect(),
+                labels: self.labels.clone(),
+                metadata: self.metadata.clone(),
+                dimension_metadata: self.dimension_metadata.clone(),
+                timezone: self.timezone.clone(),
+                frequency: self.frequency,
+                calendar: None,
+            };
+        }
+        let n = self.len();
+        let starts: Vec<usize> = (0..n)
+            .step_by(step)
+            .take_while(|&s| s + window <= n)
+            .collect();
+        let timestamps: Vec<DateTime<Utc>> = starts.iter().map(|&s| self.timestamps[s]).collect();
+        let values: Vec<Vec<f64>> = self
+            .values
+            .iter()
+            .map(|dim| {
+                starts
+                    .iter()
+                    .map(|&s| aggregate_slice(&dim[s..s + window], method))
+                    .collect()
+            })
+            .collect();
+        TimeSeries {
+            timestamps,
+            values,
+            labels: self.labels.clone(),
+            metadata: self.metadata.clone(),
+            dimension_metadata: self.dimension_metadata.clone(),
+            timezone: self.timezone.clone(),
+            frequency: self.frequency.map(|f| f * step as i32),
+            calendar: None,
+        }
+    }
+}
+
+/// Apply an aggregation method to a slice of values.
+fn aggregate_slice(values: &[f64], method: AggregationMethod) -> f64 {
+    if values.is_empty() {
+        return f64::NAN;
+    }
+    match method {
+        AggregationMethod::Sum => values.iter().sum(),
+        AggregationMethod::Mean => nan_mean(values),
+        AggregationMethod::Median => nan_median(values),
+        AggregationMethod::First => values[0],
+        AggregationMethod::Last => values[values.len() - 1],
+        AggregationMethod::Min => values.iter().copied().fold(f64::INFINITY, f64::min),
+        AggregationMethod::Max => values.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+    }
 }
 
 /// Generate a sequence of timestamps from start to end (inclusive) with the given frequency.
@@ -2782,6 +3000,238 @@ mod tests {
         assert_relative_eq!(promo[1], 2.0);
         assert_relative_eq!(promo[2], 3.0);
         assert_relative_eq!(promo[3], 2.0);
+    }
+
+    // --- Temporal aggregation / resampling tests ---
+
+    #[test]
+    fn agg_sum_exact() {
+        let ts =
+            TimeSeries::univariate(make_timestamps(6), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+        let a = ts.aggregate(3, AggregationMethod::Sum);
+        assert_eq!(a.len(), 2);
+        assert_relative_eq!(a.primary_values()[0], 6.0);
+        assert_relative_eq!(a.primary_values()[1], 15.0);
+    }
+
+    #[test]
+    fn agg_sum_rem() {
+        let ts =
+            TimeSeries::univariate(make_timestamps(7), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0])
+                .unwrap();
+        let a = ts.aggregate(3, AggregationMethod::Sum);
+        assert_eq!(a.len(), 3);
+        assert_relative_eq!(a.primary_values()[2], 7.0);
+    }
+
+    #[test]
+    fn agg_mean_exact() {
+        let ts = TimeSeries::univariate(make_timestamps(6), vec![2.0, 4.0, 6.0, 8.0, 10.0, 12.0])
+            .unwrap();
+        let a = ts.aggregate(2, AggregationMethod::Mean);
+        assert_eq!(a.len(), 3);
+        assert_relative_eq!(a.primary_values()[0], 3.0);
+        assert_relative_eq!(a.primary_values()[1], 7.0);
+        assert_relative_eq!(a.primary_values()[2], 11.0);
+    }
+
+    #[test]
+    fn agg_mean_rem() {
+        let ts =
+            TimeSeries::univariate(make_timestamps(5), vec![10.0, 20.0, 30.0, 40.0, 50.0]).unwrap();
+        let a = ts.aggregate(3, AggregationMethod::Mean);
+        assert_relative_eq!(a.primary_values()[0], 20.0);
+        assert_relative_eq!(a.primary_values()[1], 45.0);
+    }
+
+    #[test]
+    fn agg_median_test() {
+        let ts = TimeSeries::univariate(make_timestamps(5), vec![1.0, 5.0, 3.0, 7.0, 2.0]).unwrap();
+        let a = ts.aggregate(3, AggregationMethod::Median);
+        assert_relative_eq!(a.primary_values()[0], 3.0);
+        assert_relative_eq!(a.primary_values()[1], 4.5);
+    }
+
+    #[test]
+    fn agg_first_last_min_max() {
+        let ts = TimeSeries::univariate(make_timestamps(4), vec![3.0, 1.0, 4.0, 2.0]).unwrap();
+        assert_relative_eq!(
+            ts.aggregate(2, AggregationMethod::First).primary_values()[0],
+            3.0
+        );
+        assert_relative_eq!(
+            ts.aggregate(2, AggregationMethod::Last).primary_values()[0],
+            1.0
+        );
+        assert_relative_eq!(
+            ts.aggregate(2, AggregationMethod::Min).primary_values()[0],
+            1.0
+        );
+        assert_relative_eq!(
+            ts.aggregate(2, AggregationMethod::Max).primary_values()[0],
+            3.0
+        );
+    }
+
+    #[test]
+    fn agg_ts_first() {
+        let t = make_timestamps(6);
+        let ts = TimeSeries::univariate(t.clone(), vec![1.0; 6]).unwrap();
+        let a = ts.aggregate(3, AggregationMethod::Sum);
+        assert_eq!(a.timestamps()[0], t[0]);
+        assert_eq!(a.timestamps()[1], t[3]);
+    }
+
+    #[test]
+    fn agg_identity() {
+        let ts = TimeSeries::univariate(make_timestamps(4), vec![1.0, 2.0, 3.0, 4.0]).unwrap();
+        assert_eq!(ts.aggregate(1, AggregationMethod::Sum).len(), 4);
+        assert_eq!(ts.aggregate(0, AggregationMethod::Sum).len(), 4);
+    }
+
+    #[test]
+    fn agg_empty() {
+        assert!(TimeSeries::univariate(vec![], vec![])
+            .unwrap()
+            .aggregate(3, AggregationMethod::Sum)
+            .is_empty());
+    }
+
+    #[test]
+    fn ds_correct() {
+        let t = make_timestamps(10);
+        let v: Vec<f64> = (0..10).map(|i| i as f64).collect();
+        let ts = TimeSeries::univariate(t.clone(), v).unwrap();
+        let d = ts.downsample(3);
+        assert_eq!(d.len(), 4);
+        assert_relative_eq!(d.primary_values()[1], 3.0);
+        assert_eq!(d.timestamps()[1], t[3]);
+    }
+
+    #[test]
+    fn ds_edge() {
+        let ts = TimeSeries::univariate(make_timestamps(5), vec![1.0, 2.0, 3.0, 4.0, 5.0]).unwrap();
+        assert_eq!(ts.downsample(1).len(), 5);
+        assert_eq!(ts.downsample(0).len(), 5);
+        assert_eq!(ts.downsample(10).len(), 1);
+        assert!(TimeSeries::univariate(vec![], vec![])
+            .unwrap()
+            .downsample(3)
+            .is_empty());
+    }
+
+    #[test]
+    fn us_linear() {
+        let ts = TimeSeries::univariate(make_timestamps(3), vec![0.0, 6.0, 12.0]).unwrap();
+        let u = ts.upsample(3, InterpolationMethod::Linear);
+        assert_eq!(u.len(), 7);
+        for (i, e) in [0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0].iter().enumerate() {
+            assert_relative_eq!(u.primary_values()[i], e);
+        }
+    }
+
+    #[test]
+    fn us_ffill() {
+        let ts = TimeSeries::univariate(make_timestamps(3), vec![10.0, 20.0, 30.0]).unwrap();
+        let u = ts.upsample(2, InterpolationMethod::ForwardFill);
+        for (i, e) in [10.0, 10.0, 20.0, 20.0, 30.0].iter().enumerate() {
+            assert_relative_eq!(u.primary_values()[i], e);
+        }
+    }
+
+    #[test]
+    fn us_bfill() {
+        let ts = TimeSeries::univariate(make_timestamps(3), vec![10.0, 20.0, 30.0]).unwrap();
+        let u = ts.upsample(2, InterpolationMethod::BackwardFill);
+        for (i, e) in [10.0, 20.0, 20.0, 30.0, 30.0].iter().enumerate() {
+            assert_relative_eq!(u.primary_values()[i], e);
+        }
+    }
+
+    #[test]
+    fn us_zero_test() {
+        let ts = TimeSeries::univariate(make_timestamps(3), vec![10.0, 20.0, 30.0]).unwrap();
+        let u = ts.upsample(2, InterpolationMethod::Zero);
+        for (i, e) in [10.0, 0.0, 20.0, 0.0, 30.0].iter().enumerate() {
+            assert_relative_eq!(u.primary_values()[i], e);
+        }
+    }
+
+    #[test]
+    fn us_ts_interp() {
+        let t = make_timestamps(3);
+        let ts = TimeSeries::univariate(t.clone(), vec![0.0, 1.0, 2.0]).unwrap();
+        let u = ts.upsample(2, InterpolationMethod::Linear);
+        assert_eq!(u.timestamps()[0], t[0]);
+        assert_eq!(u.timestamps()[2], t[1]);
+        assert_eq!(u.timestamps()[1], t[0] + (t[1] - t[0]) / 2);
+    }
+
+    #[test]
+    fn us_edge() {
+        let ts = TimeSeries::univariate(make_timestamps(3), vec![1.0, 2.0, 3.0]).unwrap();
+        assert_eq!(ts.upsample(1, InterpolationMethod::Linear).len(), 3);
+        let ts1 = TimeSeries::univariate(make_timestamps(1), vec![42.0]).unwrap();
+        assert_eq!(ts1.upsample(5, InterpolationMethod::Linear).len(), 1);
+        assert!(TimeSeries::univariate(vec![], vec![])
+            .unwrap()
+            .upsample(3, InterpolationMethod::Linear)
+            .is_empty());
+    }
+
+    #[test]
+    fn us_roundtrip() {
+        let v: Vec<f64> = (0..11).map(|i| i as f64 * 2.0).collect();
+        let ts = TimeSeries::univariate(make_timestamps(11), v.clone()).unwrap();
+        let u = ts.downsample(2).upsample(2, InterpolationMethod::Linear);
+        for i in 0..11 {
+            assert_relative_eq!(u.primary_values()[i], v[i], epsilon = 1e-10);
+        }
+    }
+
+    #[test]
+    fn sw_sum_s1() {
+        let t = make_timestamps(5);
+        let ts = TimeSeries::univariate(t.clone(), vec![1.0, 2.0, 3.0, 4.0, 5.0]).unwrap();
+        let s = ts.sliding_window_aggregate(3, 1, AggregationMethod::Sum);
+        assert_eq!(s.len(), 3);
+        assert_relative_eq!(s.primary_values()[0], 6.0);
+        assert_relative_eq!(s.primary_values()[1], 9.0);
+        assert_eq!(s.timestamps()[0], t[0]);
+    }
+
+    #[test]
+    fn sw_mean_s2() {
+        let ts = TimeSeries::univariate(make_timestamps(6), vec![2.0, 4.0, 6.0, 8.0, 10.0, 12.0])
+            .unwrap();
+        let s = ts.sliding_window_aggregate(3, 2, AggregationMethod::Mean);
+        assert_eq!(s.len(), 2);
+        assert_relative_eq!(s.primary_values()[0], 4.0);
+        assert_relative_eq!(s.primary_values()[1], 8.0);
+    }
+
+    #[test]
+    fn sw_edge() {
+        let ts = TimeSeries::univariate(make_timestamps(4), vec![1.0, 2.0, 3.0, 4.0]).unwrap();
+        assert!(ts
+            .sliding_window_aggregate(5, 1, AggregationMethod::Sum)
+            .is_empty());
+        assert_eq!(
+            ts.sliding_window_aggregate(4, 1, AggregationMethod::Sum)
+                .len(),
+            1
+        );
+        assert!(ts
+            .sliding_window_aggregate(0, 1, AggregationMethod::Sum)
+            .is_empty());
+        let s = ts.sliding_window_aggregate(2, 0, AggregationMethod::Sum);
+        assert_eq!(s.len(), 3);
+        assert_relative_eq!(s.primary_values()[0], 3.0);
+        assert_relative_eq!(s.primary_values()[2], 7.0);
+        assert!(TimeSeries::univariate(vec![], vec![])
+            .unwrap()
+            .sliding_window_aggregate(3, 1, AggregationMethod::Sum)
+            .is_empty());
     }
 
     #[test]

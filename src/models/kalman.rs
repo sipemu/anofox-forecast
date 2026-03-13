@@ -557,8 +557,14 @@ impl KalmanFilter {
     /// Produces `horizon` predicted observations starting from the current state.
     /// The filter must have been run (or initial state set) before calling this.
     pub fn predict(&self, horizon: usize) -> Result<Vec<Vec<f64>>> {
-        let x = self.state.as_ref().ok_or(ForecastError::FitRequired)?;
-        let p = self.covariance.as_ref().ok_or(ForecastError::FitRequired)?;
+        let x = self
+            .state
+            .as_ref()
+            .ok_or(ForecastError::FitRequired { model: None })?;
+        let p = self
+            .covariance
+            .as_ref()
+            .ok_or(ForecastError::FitRequired { model: None })?;
 
         if horizon == 0 {
             return Ok(vec![]);
@@ -829,7 +835,10 @@ mod tests {
         let model = StateSpaceModel::local_level(1.0, 0.5);
         let kf = KalmanFilter::new(model).unwrap();
         let result = kf.predict(5);
-        assert!(matches!(result.unwrap_err(), ForecastError::FitRequired));
+        assert!(matches!(
+            result.unwrap_err(),
+            ForecastError::FitRequired { .. }
+        ));
     }
 
     #[test]

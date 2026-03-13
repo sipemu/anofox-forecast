@@ -154,7 +154,9 @@ impl Forecaster for SimpleExponentialSmoothing {
             self.alpha = Some(Self::optimize_alpha(values));
         }
 
-        let alpha = self.alpha.ok_or(ForecastError::FitRequired)?;
+        let alpha = self
+            .alpha
+            .ok_or(ForecastError::FitRequired { model: None })?;
 
         // Initialize level with first observation
         let mut level = values[0];
@@ -190,7 +192,9 @@ impl Forecaster for SimpleExponentialSmoothing {
     }
 
     fn predict(&self, horizon: usize) -> Result<Forecast> {
-        let level = self.level.ok_or(ForecastError::FitRequired)?;
+        let level = self
+            .level
+            .ok_or(ForecastError::FitRequired { model: None })?;
 
         if horizon == 0 {
             return Ok(Forecast::new());
@@ -202,9 +206,13 @@ impl Forecaster for SimpleExponentialSmoothing {
     }
 
     fn predict_with_intervals(&self, horizon: usize, level: f64) -> Result<Forecast> {
-        let current_level = self.level.ok_or(ForecastError::FitRequired)?;
+        let current_level = self
+            .level
+            .ok_or(ForecastError::FitRequired { model: None })?;
         let variance = self.residual_variance.unwrap_or(0.0);
-        let alpha = self.alpha.ok_or(ForecastError::FitRequired)?;
+        let alpha = self
+            .alpha
+            .ok_or(ForecastError::FitRequired { model: None })?;
 
         if horizon == 0 {
             return Ok(Forecast::new());
@@ -438,7 +446,10 @@ mod tests {
     #[test]
     fn ses_requires_fit_before_predict() {
         let model = SimpleExponentialSmoothing::new(0.3);
-        assert!(matches!(model.predict(5), Err(ForecastError::FitRequired)));
+        assert!(matches!(
+            model.predict(5),
+            Err(ForecastError::FitRequired { .. })
+        ));
     }
 
     #[test]

@@ -6,6 +6,7 @@
 
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
+use crate::models::explain::{Explainable, ForecastExplanation};
 use crate::models::{validate_series_complete, Forecaster};
 use crate::utils::ols::{ols_fit, ols_residuals, OLSResult};
 use crate::utils::optimization::{nelder_mead, NelderMeadConfig};
@@ -561,9 +562,13 @@ impl Theta {
         horizon: usize,
         future_regressors: Option<&HashMap<String, Vec<f64>>>,
     ) -> Result<Forecast> {
-        let smoothed = self.level.ok_or(ForecastError::FitRequired)?;
-        let alpha = self.alpha.ok_or(ForecastError::FitRequired)?;
-        let b = self.b.ok_or(ForecastError::FitRequired)?;
+        let smoothed = self
+            .level
+            .ok_or(ForecastError::FitRequired { model: None })?;
+        let alpha = self
+            .alpha
+            .ok_or(ForecastError::FitRequired { model: None })?;
+        let b = self.b.ok_or(ForecastError::FitRequired { model: None })?;
 
         if horizon == 0 {
             return Ok(Forecast::new());
@@ -626,6 +631,55 @@ impl Theta {
         };
 
         Ok(Forecast::from_values(predictions))
+    }
+}
+
+impl Explainable for Theta {
+    fn explain(&self, horizon: usize) -> Result<ForecastExplanation> {
+        let smoothed = self
+            .level
+            .ok_or(ForecastError::FitRequired { model: None })?;
+        let alpha = self
+            .alpha
+            .ok_or(ForecastError::FitRequired { model: None })?;
+        let b = self.b.ok_or(ForecastError::FitRequired { model: None })?;
+        if horizon == 0 {
+            return Ok(ForecastExplanation {
+                level: vec![],
+                trend: None,
+                seasonal: None,
+                residual: None,
+                named_components: vec![],
+            });
+        }
+        let level_component = vec![smoothed; horizon];
+        let trend_component: Vec<f64> = (1..=horizon)
+            .map(|h| (1.0 - 1.0 / self.theta) * b * (1.0 / alpha + (h as f64 - 1.0)))
+            .collect();
+        let base_forecasts: Vec<f64> = level_component
+            .iter()
+            .zip(trend_component.iter())
+            .map(|(&l, &t)| l + t)
+            .collect();
+        let seasonal_component = if let Some(ref sf) = self.seasonal_forecast {
+            let reseasonalized = self.reseasonalize(&base_forecasts, 0, sf);
+            Some(
+                reseasonalized
+                    .iter()
+                    .zip(base_forecasts.iter())
+                    .map(|(&r, &b)| r - b)
+                    .collect(),
+            )
+        } else {
+            None
+        };
+        Ok(ForecastExplanation {
+            level: level_component,
+            trend: Some(trend_component),
+            seasonal: seasonal_component,
+            residual: None,
+            named_components: vec![],
+        })
     }
 }
 
@@ -710,7 +764,9 @@ impl Forecaster for Theta {
             self.alpha = Some(Self::optimize_alpha(&deseasonalized));
         }
 
-        let alpha = self.alpha.ok_or(ForecastError::FitRequired)?;
+        let alpha = self
+            .alpha
+            .ok_or(ForecastError::FitRequired { model: None })?;
 
         // Apply SES to the ORIGINAL (deseasonalized) series
         // This matches statsforecast's approach
@@ -1068,7 +1124,10 @@ mod tests {
     #[test]
     fn theta_requires_fit() {
         let model = Theta::new();
-        assert!(matches!(model.predict(5), Err(ForecastError::FitRequired)));
+        assert!(matches!(
+            model.predict(5),
+            Err(ForecastError::FitRequired { .. })
+        ));
     }
 
     #[test]

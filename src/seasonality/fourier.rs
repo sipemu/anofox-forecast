@@ -224,7 +224,7 @@ impl FourierSeasonality {
         let coefficients = self
             .coefficients
             .as_ref()
-            .ok_or(ForecastError::FitRequired)?;
+            .ok_or(ForecastError::FitRequired { model: None })?;
 
         if timestamps.is_empty() {
             return Err(ForecastError::EmptyData);
@@ -545,7 +545,7 @@ mod tests {
         let ts = vec![1.0, 2.0, 3.0];
         assert!(matches!(
             model.predict(&ts),
-            Err(ForecastError::FitRequired)
+            Err(ForecastError::FitRequired { .. })
         ));
     }
 

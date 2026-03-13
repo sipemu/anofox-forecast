@@ -5,6 +5,7 @@
 
 use crate::time_series::{Forecast, TimeSeries};
 use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
 
 // Import all models from anofox-forecast
 use anofox_forecast::models::Forecaster as ForecasterTrait;
@@ -1761,6 +1762,246 @@ impl EnsembleForecaster {
     #[wasm_bindgen(js_name = modelCount)]
     pub fn model_count(&self) -> usize {
         self.model.model_count()
+    }
+
+    /// Get the model name.
+    #[wasm_bindgen(getter)]
+    pub fn name(&self) -> String {
+        self.model.name().to_string()
+    }
+}
+
+// =============================================================================
+// VAR (Vector Autoregression)
+// =============================================================================
+
+/// Vector Autoregression forecaster for multivariate time series.
+///
+/// Models multiple time series jointly where each variable at time t is a
+/// linear function of the p most recent lags of all variables.
+#[wasm_bindgen]
+pub struct VARForecaster {
+    order: usize,
+    inner: anofox_forecast::models::var::VAR,
+    fitted: bool,
+}
+
+#[wasm_bindgen]
+impl VARForecaster {
+    /// Create a new VAR forecaster with the given lag order.
+    ///
+    /// @param order - Number of lags (p). Must be at least 1.
+    #[wasm_bindgen(constructor)]
+    pub fn new(order: usize) -> Self {
+        Self {
+            order,
+            inner: anofox_forecast::models::var::VAR::new(order),
+            fitted: false,
+        }
+    }
+
+    /// Fit the VAR model to multivariate time series data.
+    ///
+    /// @param data - Array of Float64Arrays, one per variable. All must have the same length.
+    #[wasm_bindgen(js_name = fitMultivariate)]
+    pub fn fit_multivariate(&mut self, data: js_sys::Array) -> Result<(), JsError> {
+        let k = data.length() as usize;
+        if k == 0 {
+            return Err(JsError::new("data must contain at least one variable"));
+        }
+        let mut vecs: Vec<Vec<f64>> = Vec::with_capacity(k);
+        for i in 0..k {
+            let arr = data.get(i as u32);
+            let typed: js_sys::Float64Array = arr
+                .dyn_into()
+                .map_err(|_| JsError::new("each element of data must be a Float64Array"))?;
+            vecs.push(typed.to_vec());
+        }
+        self.inner
+            .fit(&vecs)
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        self.fitted = true;
+        Ok(())
+    }
+
+    /// Predict future values for all variables.
+    ///
+    /// @param horizon - Number of steps to forecast
+    /// @returns Array of Float64Arrays, one per variable
+    #[wasm_bindgen(js_name = predictMultivariate)]
+    pub fn predict_multivariate(&self, horizon: usize) -> Result<js_sys::Array, JsError> {
+        if !self.fitted {
+            return Err(JsError::new("model must be fitted before prediction"));
+        }
+        let forecasts = self
+            .inner
+            .predict(horizon)
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        let result = js_sys::Array::new_with_length(forecasts.len() as u32);
+        for (i, series) in forecasts.iter().enumerate() {
+            let arr = js_sys::Float64Array::new_with_length(series.len() as u32);
+            arr.copy_from(series);
+            result.set(i as u32, arr.into());
+        }
+        Ok(result)
+    }
+
+    /// Perform a Granger causality test.
+    ///
+    /// Tests whether variable `cause` Granger-causes variable `effect`.
+    ///
+    /// @param cause - Index of the potentially causal variable (0-based)
+    /// @param effect - Index of the effect variable (0-based)
+    /// @returns F-statistic. Higher values indicate stronger evidence of causality.
+    #[wasm_bindgen(js_name = grangerCausalityTest)]
+    pub fn granger_causality_test(&self, cause: usize, effect: usize) -> Result<f64, JsError> {
+        self.inner
+            .granger_causality_test(cause, effect)
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// Get the lag order.
+    #[wasm_bindgen(getter)]
+    pub fn order(&self) -> usize {
+        self.order
+    }
+
+    /// Get the model name.
+    #[wasm_bindgen(getter)]
+    pub fn name(&self) -> String {
+        "VAR".to_string()
+    }
+}
+
+// =============================================================================
+// KALMAN FILTER
+// =============================================================================
+
+/// Kalman filter forecaster for state-space models.
+///
+/// Supports local level and local linear trend models out of the box.
+#[wasm_bindgen]
+pub struct KalmanForecaster {
+    model: anofox_forecast::models::kalman_forecaster::KalmanForecaster,
+    fitted: bool,
+    innovation_variance: f64,
+}
+
+#[wasm_bindgen]
+impl KalmanForecaster {
+    /// Create a local level (random walk plus noise) model.
+    ///
+    /// @param obs_noise - Observation noise variance
+    /// @param state_noise - State (level) noise variance
+    #[wasm_bindgen(js_name = localLevel)]
+    pub fn local_level(obs_noise: f64, state_noise: f64) -> Self {
+        let ssm =
+            anofox_forecast::models::kalman::StateSpaceModel::local_level(obs_noise, state_noise);
+        Self {
+            model: anofox_forecast::models::kalman_forecaster::KalmanForecaster::with_model(ssm),
+            fitted: false,
+            innovation_variance: 0.0,
+        }
+    }
+
+    /// Create a local linear trend model.
+    ///
+    /// @param obs_noise - Observation noise variance
+    /// @param level_noise - Level noise variance
+    /// @param trend_noise - Trend noise variance
+    #[wasm_bindgen(js_name = localLinearTrend)]
+    pub fn local_linear_trend(obs_noise: f64, level_noise: f64, trend_noise: f64) -> Self {
+        let ssm = anofox_forecast::models::kalman::StateSpaceModel::local_linear_trend(
+            obs_noise,
+            level_noise,
+            trend_noise,
+        );
+        Self {
+            model: anofox_forecast::models::kalman_forecaster::KalmanForecaster::with_model(ssm),
+            fitted: false,
+            innovation_variance: 0.0,
+        }
+    }
+
+    /// Fit the Kalman filter to a time series.
+    ///
+    /// @param series - TimeSeries to fit
+    pub fn fit(&mut self, series: &TimeSeries) -> Result<(), JsError> {
+        self.model
+            .fit(series.inner())
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        // Compute innovation variance from residuals for interval prediction.
+        if let Some(residuals) = self.model.residuals() {
+            let n = residuals.len();
+            if n > 0 {
+                let mean: f64 = residuals.iter().sum::<f64>() / n as f64;
+                self.innovation_variance =
+                    residuals.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / n as f64;
+            }
+        }
+        self.fitted = true;
+        Ok(())
+    }
+
+    /// Predict future values.
+    ///
+    /// @param horizon - Number of steps to forecast
+    /// @returns Forecast with point predictions
+    pub fn predict(&self, horizon: usize) -> Result<Forecast, JsError> {
+        self.model
+            .predict(horizon)
+            .map(Forecast::from_inner)
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// Predict with prediction intervals.
+    ///
+    /// @param horizon - Number of steps to forecast
+    /// @param level - Confidence level (e.g., 0.95 for 95% intervals)
+    /// @returns Forecast with predictions and intervals
+    #[wasm_bindgen(js_name = predictWithIntervals)]
+    pub fn predict_with_intervals(&self, horizon: usize, level: f64) -> Result<Forecast, JsError> {
+        self.model
+            .predict_with_intervals(horizon, level)
+            .map(Forecast::from_inner)
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// Apply the Kalman smoother (RTS smoother) and return smoothed observations.
+    ///
+    /// @param series - TimeSeries to smooth
+    /// @returns Array of smoothed observation values
+    pub fn smooth(&mut self, series: &TimeSeries) -> Result<Vec<f64>, JsError> {
+        // Fit first to produce filtered states.
+        self.model
+            .fit(series.inner())
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        self.fitted = true;
+
+        // Run the underlying Kalman filter + smoother.
+        let values = series.inner().primary_values();
+        let observations: Vec<Vec<f64>> = values.iter().map(|&v| vec![v]).collect();
+
+        let ssm = anofox_forecast::models::kalman::StateSpaceModel::local_level(1.0, 0.1);
+        let mut kf = anofox_forecast::models::kalman::KalmanFilter::new(ssm)
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        let filtered = kf
+            .filter(&observations)
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        let smoothed = kf
+            .smooth(&filtered)
+            .map_err(|e| JsError::new(&e.to_string()))?;
+
+        // Extract the first observation dimension from each smoothed state.
+        let result: Vec<f64> = smoothed
+            .iter()
+            .map(|state| {
+                // H * x_smoothed gives the smoothed observation
+                state.state[0]
+            })
+            .collect();
+
+        Ok(result)
     }
 
     /// Get the model name.

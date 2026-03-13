@@ -798,7 +798,7 @@ impl Forecaster for AutoARIMA {
         match self.selected_model.as_ref() {
             Some(SelectedModel::ARIMA(model)) => model.predict(horizon),
             Some(SelectedModel::SARIMA(model)) => model.predict(horizon),
-            None => Err(ForecastError::FitRequired),
+            None => Err(ForecastError::FitRequired { model: None }),
         }
     }
 
@@ -806,7 +806,7 @@ impl Forecaster for AutoARIMA {
         match self.selected_model.as_ref() {
             Some(SelectedModel::ARIMA(model)) => model.predict_with_intervals(horizon, level),
             Some(SelectedModel::SARIMA(model)) => model.predict_with_intervals(horizon, level),
-            None => Err(ForecastError::FitRequired),
+            None => Err(ForecastError::FitRequired { model: None }),
         }
     }
 
@@ -869,7 +869,7 @@ impl Forecaster for AutoARIMA {
             Some(SelectedModel::SARIMA(model)) => {
                 model.predict_with_exog(horizon, future_regressors)
             }
-            None => Err(ForecastError::FitRequired),
+            None => Err(ForecastError::FitRequired { model: None }),
         }
     }
 
@@ -886,7 +886,7 @@ impl Forecaster for AutoARIMA {
             Some(SelectedModel::SARIMA(model)) => {
                 model.predict_with_exog_intervals(horizon, future_regressors, level)
             }
-            None => Err(ForecastError::FitRequired),
+            None => Err(ForecastError::FitRequired { model: None }),
         }
     }
 }
@@ -1040,7 +1040,10 @@ mod tests {
     #[test]
     fn auto_arima_requires_fit() {
         let model = AutoARIMA::new();
-        assert!(matches!(model.predict(5), Err(ForecastError::FitRequired)));
+        assert!(matches!(
+            model.predict(5),
+            Err(ForecastError::FitRequired { .. })
+        ));
     }
 
     #[test]

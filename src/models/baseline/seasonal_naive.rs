@@ -96,7 +96,10 @@ impl Forecaster for SeasonalNaive {
     }
 
     fn predict(&self, horizon: usize) -> Result<Forecast> {
-        let history = self.history.as_ref().ok_or(ForecastError::FitRequired)?;
+        let history = self
+            .history
+            .as_ref()
+            .ok_or(ForecastError::FitRequired { model: None })?;
 
         if horizon == 0 {
             return Ok(Forecast::new());
@@ -120,7 +123,10 @@ impl Forecaster for SeasonalNaive {
     }
 
     fn predict_with_intervals(&self, horizon: usize, level: f64) -> Result<Forecast> {
-        let history = self.history.as_ref().ok_or(ForecastError::FitRequired)?;
+        let history = self
+            .history
+            .as_ref()
+            .ok_or(ForecastError::FitRequired { model: None })?;
         let variance = self.residual_variance.unwrap_or(0.0);
         let sigma = variance.sqrt();
 

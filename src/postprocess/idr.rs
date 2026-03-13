@@ -224,7 +224,7 @@ impl IDRPredictor {
         let values = point_forecasts.values();
 
         if result.fitted_models.is_empty() {
-            return Err(ForecastError::FitRequired);
+            return Err(ForecastError::FitRequired { model: None });
         }
 
         let fitted = &result.fitted_models[0];

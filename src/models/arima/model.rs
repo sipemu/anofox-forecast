@@ -496,12 +496,18 @@ impl ARIMA {
         horizon: usize,
         future_regressors: Option<&HashMap<String, Vec<f64>>>,
     ) -> Result<Forecast> {
-        let original = self.original.as_ref().ok_or(ForecastError::FitRequired)?;
+        let original = self
+            .original
+            .as_ref()
+            .ok_or(ForecastError::FitRequired { model: None })?;
         let diff_series = self
             .differenced
             .as_ref()
-            .ok_or(ForecastError::FitRequired)?;
-        let residuals = self.residuals.as_ref().ok_or(ForecastError::FitRequired)?;
+            .ok_or(ForecastError::FitRequired { model: None })?;
+        let residuals = self
+            .residuals
+            .as_ref()
+            .ok_or(ForecastError::FitRequired { model: None })?;
 
         if horizon == 0 {
             return Ok(Forecast::new());
@@ -1454,11 +1460,14 @@ impl SARIMA {
         horizon: usize,
         future_regressors: Option<&HashMap<String, Vec<f64>>>,
     ) -> Result<Forecast> {
-        let original = self.original.as_ref().ok_or(ForecastError::FitRequired)?;
+        let original = self
+            .original
+            .as_ref()
+            .ok_or(ForecastError::FitRequired { model: None })?;
         let diff_series = self
             .differenced
             .as_ref()
-            .ok_or(ForecastError::FitRequired)?;
+            .ok_or(ForecastError::FitRequired { model: None })?;
 
         if horizon == 0 {
             return Ok(Forecast::new());
@@ -1988,7 +1997,10 @@ mod tests {
     #[test]
     fn arima_requires_fit() {
         let model = ARIMA::new(1, 1, 1);
-        assert!(matches!(model.predict(5), Err(ForecastError::FitRequired)));
+        assert!(matches!(
+            model.predict(5),
+            Err(ForecastError::FitRequired { .. })
+        ));
     }
 
     #[test]
@@ -2141,6 +2153,9 @@ mod tests {
     #[test]
     fn sarima_requires_fit() {
         let model = SARIMA::new(1, 1, 1, 1, 1, 1, 12);
-        assert!(matches!(model.predict(5), Err(ForecastError::FitRequired)));
+        assert!(matches!(
+            model.predict(5),
+            Err(ForecastError::FitRequired { .. })
+        ));
     }
 }

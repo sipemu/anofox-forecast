@@ -524,7 +524,7 @@ impl Forecaster for AutoForecast {
             Some(SelectedAutoModel::ARIMA(m)) => m.predict(horizon),
             Some(SelectedAutoModel::ETS(m)) => m.predict(horizon),
             Some(SelectedAutoModel::Theta(m)) => m.predict(horizon),
-            None => Err(ForecastError::FitRequired),
+            None => Err(ForecastError::FitRequired { model: None }),
         }
     }
 
@@ -533,7 +533,7 @@ impl Forecaster for AutoForecast {
             Some(SelectedAutoModel::ARIMA(m)) => m.predict_with_intervals(horizon, level),
             Some(SelectedAutoModel::ETS(m)) => m.predict_with_intervals(horizon, level),
             Some(SelectedAutoModel::Theta(m)) => m.predict_with_intervals(horizon, level),
-            None => Err(ForecastError::FitRequired),
+            None => Err(ForecastError::FitRequired { model: None }),
         }
     }
 
@@ -595,7 +595,7 @@ impl Forecaster for AutoForecast {
             Some(SelectedAutoModel::ARIMA(m)) => m.predict_with_exog(horizon, future_regressors),
             Some(SelectedAutoModel::ETS(m)) => m.predict_with_exog(horizon, future_regressors),
             Some(SelectedAutoModel::Theta(m)) => m.predict_with_exog(horizon, future_regressors),
-            None => Err(ForecastError::FitRequired),
+            None => Err(ForecastError::FitRequired { model: None }),
         }
     }
 
@@ -615,7 +615,7 @@ impl Forecaster for AutoForecast {
             Some(SelectedAutoModel::Theta(m)) => {
                 m.predict_with_exog_intervals(horizon, future_regressors, level)
             }
-            None => Err(ForecastError::FitRequired),
+            None => Err(ForecastError::FitRequired { model: None }),
         }
     }
 }
@@ -734,7 +734,10 @@ mod tests {
     #[test]
     fn auto_forecast_requires_fit() {
         let model = AutoForecast::new();
-        assert!(matches!(model.predict(5), Err(ForecastError::FitRequired)));
+        assert!(matches!(
+            model.predict(5),
+            Err(ForecastError::FitRequired { .. })
+        ));
     }
 
     #[test]

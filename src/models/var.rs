@@ -202,12 +202,15 @@ impl VAR {
         let coefficients = self
             .coefficients
             .as_ref()
-            .ok_or(ForecastError::FitRequired)?;
-        let intercepts = self.intercepts.as_ref().ok_or(ForecastError::FitRequired)?;
+            .ok_or(ForecastError::FitRequired { model: None })?;
+        let intercepts = self
+            .intercepts
+            .as_ref()
+            .ok_or(ForecastError::FitRequired { model: None })?;
         let training_data = self
             .training_data
             .as_ref()
-            .ok_or(ForecastError::FitRequired)?;
+            .ok_or(ForecastError::FitRequired { model: None })?;
 
         if horizon == 0 {
             return Err(ForecastError::InvalidParameter(
@@ -313,11 +316,14 @@ impl VAR {
     /// * `IndexOutOfBounds` if `cause` or `effect` >= k.
     /// * `InvalidParameter` if `cause == effect`.
     pub fn granger_causality_test(&self, cause: usize, effect: usize) -> Result<f64> {
-        let residuals = self.residuals.as_ref().ok_or(ForecastError::FitRequired)?;
+        let residuals = self
+            .residuals
+            .as_ref()
+            .ok_or(ForecastError::FitRequired { model: None })?;
         let training_data = self
             .training_data
             .as_ref()
-            .ok_or(ForecastError::FitRequired)?;
+            .ok_or(ForecastError::FitRequired { model: None })?;
 
         let k = self.n_vars;
         let p = self.order;
@@ -608,7 +614,7 @@ mod tests {
         let model = VAR::new(1);
         assert!(matches!(
             model.predict(5).unwrap_err(),
-            ForecastError::FitRequired
+            ForecastError::FitRequired { .. }
         ));
     }
 
@@ -815,7 +821,7 @@ mod tests {
         let model = VAR::new(1);
         assert!(matches!(
             model.granger_causality_test(0, 1).unwrap_err(),
-            ForecastError::FitRequired
+            ForecastError::FitRequired { .. }
         ));
     }
 }

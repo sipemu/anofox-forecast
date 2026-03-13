@@ -363,7 +363,7 @@ impl Forecaster for AutoETS {
         let model = self
             .selected_model
             .as_ref()
-            .ok_or(ForecastError::FitRequired)?;
+            .ok_or(ForecastError::FitRequired { model: None })?;
         model.predict(horizon)
     }
 
@@ -376,7 +376,7 @@ impl Forecaster for AutoETS {
         let model = self
             .selected_model
             .as_ref()
-            .ok_or(ForecastError::FitRequired)?;
+            .ok_or(ForecastError::FitRequired { model: None })?;
         model.predict_with_intervals(horizon, level)
     }
 
@@ -420,7 +420,7 @@ impl Forecaster for AutoETS {
         let model = self
             .selected_model
             .as_ref()
-            .ok_or(ForecastError::FitRequired)?;
+            .ok_or(ForecastError::FitRequired { model: None })?;
 
         // Get base forecast from selected ETS model (fit on adjusted series)
         let base_forecast = model.predict(horizon)?;
@@ -469,7 +469,7 @@ impl Forecaster for AutoETS {
         let model = self
             .selected_model
             .as_ref()
-            .ok_or(ForecastError::FitRequired)?;
+            .ok_or(ForecastError::FitRequired { model: None })?;
 
         // Get base forecast with intervals from selected ETS model
         let base_forecast = model.predict_with_intervals(horizon, level)?;
@@ -666,7 +666,10 @@ mod tests {
     #[test]
     fn auto_ets_requires_fit() {
         let model = AutoETS::new();
-        assert!(matches!(model.predict(5), Err(ForecastError::FitRequired)));
+        assert!(matches!(
+            model.predict(5),
+            Err(ForecastError::FitRequired { .. })
+        ));
     }
 
     #[test]

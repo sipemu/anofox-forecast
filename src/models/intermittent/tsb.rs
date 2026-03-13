@@ -201,8 +201,12 @@ impl Forecaster for TSB {
     }
 
     fn predict(&self, horizon: usize) -> Result<Forecast> {
-        let demand_level = self.demand_level.ok_or(ForecastError::FitRequired)?;
-        let probability = self.probability.ok_or(ForecastError::FitRequired)?;
+        let demand_level = self
+            .demand_level
+            .ok_or(ForecastError::FitRequired { model: None })?;
+        let probability = self
+            .probability
+            .ok_or(ForecastError::FitRequired { model: None })?;
 
         if horizon == 0 {
             return Ok(Forecast::from_values(Vec::new()));
@@ -226,7 +230,10 @@ impl Forecaster for TSB {
         }
 
         // Compute variance from residuals (excluding NaN values)
-        let residuals = self.residuals.as_ref().ok_or(ForecastError::FitRequired)?;
+        let residuals = self
+            .residuals
+            .as_ref()
+            .ok_or(ForecastError::FitRequired { model: None })?;
         let valid_residuals: Vec<f64> = residuals.iter().copied().filter(|r| !r.is_nan()).collect();
 
         let std_dev = if valid_residuals.len() > 1 {
@@ -417,7 +424,10 @@ mod tests {
     #[test]
     fn tsb_requires_fit() {
         let model = TSB::new();
-        assert!(matches!(model.predict(5), Err(ForecastError::FitRequired)));
+        assert!(matches!(
+            model.predict(5),
+            Err(ForecastError::FitRequired { .. })
+        ));
     }
 
     #[test]

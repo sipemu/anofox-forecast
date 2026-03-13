@@ -33,8 +33,15 @@ pub enum ForecastError {
     TimestampError(String),
 
     /// Model has not been fitted yet.
-    #[error("model must be fitted before prediction")]
-    FitRequired,
+    #[error("{}", match model { Some(m) => format!("Model '{}' must be fitted before prediction", m), None => "model must be fitted before prediction".to_string() })]
+    FitRequired { model: Option<String> },
+
+    /// A sub-model within an ensemble or composite model failed.
+    #[error("sub-model '{model_name}' failed: {source}")]
+    SubModelError {
+        model_name: String,
+        source: Box<ForecastError>,
+    },
 
     /// Missing values detected when not allowed.
     #[error("missing values detected in data")]
@@ -106,8 +113,23 @@ mod tests {
         };
         assert_eq!(err.to_string(), "dimension mismatch: expected 3, got 2");
 
-        let err = ForecastError::FitRequired;
+        let err = ForecastError::FitRequired { model: None };
         assert_eq!(err.to_string(), "model must be fitted before prediction");
+
+        let err = ForecastError::FitRequired {
+            model: Some("TestModel".to_string()),
+        };
+        assert_eq!(
+            err.to_string(),
+            "Model 'TestModel' must be fitted before prediction"
+        );
+
+        let inner = ForecastError::EmptyData;
+        let err = ForecastError::SubModelError {
+            model_name: "SES".to_string(),
+            source: Box::new(inner),
+        };
+        assert_eq!(err.to_string(), "sub-model 'SES' failed: empty input data");
     }
 
     #[test]

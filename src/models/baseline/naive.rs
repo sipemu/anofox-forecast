@@ -38,7 +38,9 @@ impl Naive {
         horizon: usize,
         future_regressors: Option<&HashMap<String, Vec<f64>>>,
     ) -> Result<Forecast> {
-        let last = self.last_value.ok_or(ForecastError::FitRequired)?;
+        let last = self
+            .last_value
+            .ok_or(ForecastError::FitRequired { model: None })?;
 
         if horizon == 0 {
             return Ok(Forecast::new());
@@ -184,8 +186,13 @@ impl Forecaster for Naive {
         future_regressors: &HashMap<String, Vec<f64>>,
         level: f64,
     ) -> Result<Forecast> {
-        let last = self.last_value.ok_or(ForecastError::FitRequired)?;
-        let _history = self.history.as_ref().ok_or(ForecastError::FitRequired)?;
+        let last = self
+            .last_value
+            .ok_or(ForecastError::FitRequired { model: None })?;
+        let _history = self
+            .history
+            .as_ref()
+            .ok_or(ForecastError::FitRequired { model: None })?;
 
         if horizon == 0 {
             return Ok(Forecast::new());
@@ -214,7 +221,10 @@ impl Forecaster for Naive {
         };
 
         // Calculate residual standard deviation for confidence intervals
-        let residuals = self.residuals.as_ref().ok_or(ForecastError::FitRequired)?;
+        let residuals = self
+            .residuals
+            .as_ref()
+            .ok_or(ForecastError::FitRequired { model: None })?;
         let valid_residuals: Vec<f64> = residuals.iter().copied().filter(|r| !r.is_nan()).collect();
 
         let z = quantile_normal((1.0 + level) / 2.0);
@@ -250,15 +260,23 @@ impl Forecaster for Naive {
     }
 
     fn predict_with_intervals(&self, horizon: usize, level: f64) -> Result<Forecast> {
-        let last = self.last_value.ok_or(ForecastError::FitRequired)?;
-        let _history = self.history.as_ref().ok_or(ForecastError::FitRequired)?;
+        let last = self
+            .last_value
+            .ok_or(ForecastError::FitRequired { model: None })?;
+        let _history = self
+            .history
+            .as_ref()
+            .ok_or(ForecastError::FitRequired { model: None })?;
 
         if horizon == 0 {
             return Ok(Forecast::new());
         }
 
         // Calculate residual standard deviation for confidence intervals
-        let residuals = self.residuals.as_ref().ok_or(ForecastError::FitRequired)?;
+        let residuals = self
+            .residuals
+            .as_ref()
+            .ok_or(ForecastError::FitRequired { model: None })?;
         let valid_residuals: Vec<f64> = residuals.iter().copied().filter(|r| !r.is_nan()).collect();
 
         if valid_residuals.is_empty() {
@@ -475,7 +493,10 @@ mod tests {
     #[test]
     fn naive_requires_fit_before_predict() {
         let model = Naive::new();
-        assert!(matches!(model.predict(5), Err(ForecastError::FitRequired)));
+        assert!(matches!(
+            model.predict(5),
+            Err(ForecastError::FitRequired { .. })
+        ));
     }
 
     #[test]

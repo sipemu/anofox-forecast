@@ -58,9 +58,23 @@ pub enum ReconciliationMethod {
     /// Disaggregate the top-level forecast downward using historical proportions.
     /// Requires `set_actuals()` to have been called.
     TopDown,
+    /// Reconcile from a chosen middle level: aggregate upward (BottomUp-style) to
+    /// the root and disaggregate downward (TopDown-style with historical proportions)
+    /// to the leaves. `middle_level = 0` behaves like TopDown; a level at or beyond
+    /// the maximum depth behaves like BottomUp.
+    /// Requires `set_actuals()` to have been called (for downward proportions).
+    MiddleOut {
+        /// The depth (0 = root) of the "middle" level whose forecasts are trusted.
+        middle_level: usize,
+    },
     /// Optimal combination using MinT (Minimum Trace) with OLS covariance.
     /// Minimises the trace of the reconciled forecast error covariance.
     MinTraceOls,
+    /// MinT with Ledoit-Wolf shrinkage covariance.
+    /// Requires `set_residuals()` to have been called.
+    /// Uses Σ = α·F + (1−α)·S where F is the diagonal target and S is the
+    /// sample covariance, with α chosen by the Ledoit-Wolf formula.
+    MinTraceShrink,
 }
 
 /// A hierarchical tree of named nodes with reconciliation support.
@@ -75,6 +89,8 @@ pub struct HierarchyTree {
     root: usize,
     /// Historical actual values per node, used for TopDown proportions.
     actuals: Option<HashMap<String, Vec<f64>>>,
+    /// Historical residuals per node, used for MinTraceShrink covariance.
+    residuals: Option<HashMap<String, Vec<f64>>>,
 }
 
 impl HierarchyTree {
@@ -156,6 +172,7 @@ impl HierarchyTree {
             name_to_idx,
             root,
             actuals: None,
+            residuals: None,
         })
     }
 
@@ -186,6 +203,15 @@ impl HierarchyTree {
     /// Only leaf-level actuals are strictly required for TopDown.
     pub fn set_actuals(&mut self, actuals: HashMap<String, Vec<f64>>) {
         self.actuals = Some(actuals);
+    }
+
+    /// Provide historical residuals for MinTraceShrink covariance estimation.
+    ///
+    /// Each entry maps a node name to its vector of historical residuals.
+    /// All nodes in the hierarchy must be present and all vectors must have
+    /// the same length.
+    pub fn set_residuals(&mut self, residuals: HashMap<String, Vec<f64>>) {
+        self.residuals = Some(residuals);
     }
 
     /// Names of all nodes in BFS (top-down) order.
@@ -257,7 +283,11 @@ impl HierarchyTree {
         match method {
             ReconciliationMethod::BottomUp => self.bottom_up(&base_map, horizon),
             ReconciliationMethod::TopDown => self.top_down(&base_map, horizon),
+            ReconciliationMethod::MiddleOut { middle_level } => {
+                self.middle_out(&base_map, horizon, middle_level)
+            }
             ReconciliationMethod::MinTraceOls => self.min_trace_ols(&base_map, horizon),
+            ReconciliationMethod::MinTraceShrink => self.min_trace_shrink(&base_map, horizon),
         }
     }
 
@@ -449,6 +479,334 @@ impl HierarchyTree {
             .collect())
     }
 
+    /// Maximum depth in the hierarchy (root is level 0).
+    fn max_level(&self) -> usize {
+        self.nodes.iter().map(|n| n.level).max().unwrap_or(0)
+    }
+
+    /// Return indices of all nodes at a given level.
+    fn nodes_at_level(&self, level: usize) -> Vec<usize> {
+        self.nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.level == level)
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Collect all leaf descendants of a given node (recursive).
+    fn leaf_descendants(&self, idx: usize) -> Vec<usize> {
+        if self.nodes[idx].children.is_empty() {
+            return vec![idx];
+        }
+        let mut leaves = Vec::new();
+        for &child in &self.nodes[idx].children {
+            leaves.extend(self.leaf_descendants(child));
+        }
+        leaves
+    }
+
+    /// MiddleOut reconciliation.
+    ///
+    /// - Nodes at `middle_level` are treated as anchors.
+    /// - Above: aggregate upward (BottomUp-style) from anchor forecasts.
+    /// - Below: disaggregate downward (TopDown-style) using historical proportions.
+    /// - Edge: level=0 → equivalent to TopDown; level>=max → equivalent to BottomUp.
+    fn middle_out(
+        &self,
+        base_map: &HashMap<&str, &Vec<f64>>,
+        horizon: usize,
+        middle_level: usize,
+    ) -> Result<Vec<(String, Vec<f64>)>> {
+        let max_lvl = self.max_level();
+
+        // Edge cases
+        if middle_level == 0 {
+            return self.top_down(base_map, horizon);
+        }
+        if middle_level >= max_lvl {
+            return self.bottom_up(base_map, horizon);
+        }
+
+        let actuals = self.actuals.as_ref().ok_or_else(|| {
+            ForecastError::InvalidParameter(
+                "MiddleOut reconciliation requires historical actuals; call set_actuals() first"
+                    .into(),
+            )
+        })?;
+
+        let n = self.nodes.len();
+        let mut reconciled: Vec<Vec<f64>> = vec![vec![0.0; horizon]; n];
+
+        // 1. Set middle-level forecasts from base.
+        let middle_nodes = self.nodes_at_level(middle_level);
+        for &mid in &middle_nodes {
+            reconciled[mid] = base_map[self.nodes[mid].name.as_str()].clone();
+        }
+
+        // 2. Disaggregate downward from each middle node to its leaf descendants.
+        for &mid in &middle_nodes {
+            let leaf_descs = self.leaf_descendants(mid);
+
+            // Compute proportions from actuals (each leaf relative to its middle ancestor).
+            let mid_actuals = actuals.get(&self.nodes[mid].name).ok_or_else(|| {
+                ForecastError::InvalidParameter(format!(
+                    "missing actuals for middle node '{}'",
+                    self.nodes[mid].name
+                ))
+            })?;
+
+            let mut proportions = Vec::with_capacity(leaf_descs.len());
+            for &leaf in &leaf_descs {
+                let leaf_actuals = actuals.get(&self.nodes[leaf].name).ok_or_else(|| {
+                    ForecastError::InvalidParameter(format!(
+                        "missing actuals for leaf node '{}'",
+                        self.nodes[leaf].name
+                    ))
+                })?;
+
+                let len = leaf_actuals.len().min(mid_actuals.len());
+                if len == 0 {
+                    proportions.push(0.0);
+                    continue;
+                }
+                let leaf_sum: f64 = leaf_actuals[..len].iter().sum();
+                let mid_sum: f64 = mid_actuals[..len].iter().sum();
+                if mid_sum.abs() < 1e-15 {
+                    proportions.push(0.0);
+                } else {
+                    proportions.push(leaf_sum / mid_sum);
+                }
+            }
+
+            // Normalize
+            let prop_sum: f64 = proportions.iter().sum();
+            if prop_sum > 1e-15 {
+                for p in &mut proportions {
+                    *p /= prop_sum;
+                }
+            }
+
+            // Set leaf forecasts
+            for (i, &leaf) in leaf_descs.iter().enumerate() {
+                for h in 0..horizon {
+                    reconciled[leaf][h] = proportions[i] * reconciled[mid][h];
+                }
+            }
+
+            // Fill intermediate nodes between middle and leaves (sum children upward).
+            // Walk levels from max_lvl-1 down to middle_level+1.
+            for lvl in (middle_level + 1..max_lvl).rev() {
+                for node_idx in 0..n {
+                    if self.nodes[node_idx].level == lvl
+                        && !self.nodes[node_idx].children.is_empty()
+                    {
+                        // Check if this node is a descendant of mid
+                        if self.is_descendant_of(node_idx, mid) {
+                            for h in 0..horizon {
+                                reconciled[node_idx][h] = self.nodes[node_idx]
+                                    .children
+                                    .iter()
+                                    .map(|&c| reconciled[c][h])
+                                    .sum();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Aggregate upward from middle level to root.
+        let bfs_order = self.bfs_order();
+        for &idx in bfs_order.iter().rev() {
+            if self.nodes[idx].level < middle_level && !self.nodes[idx].children.is_empty() {
+                for h in 0..horizon {
+                    reconciled[idx][h] = self.nodes[idx]
+                        .children
+                        .iter()
+                        .map(|&c| reconciled[c][h])
+                        .sum();
+                }
+            }
+        }
+
+        Ok(self.to_named_output(&reconciled))
+    }
+
+    /// Check if `node` is a descendant of `ancestor`.
+    fn is_descendant_of(&self, node: usize, ancestor: usize) -> bool {
+        let mut cur = node;
+        while let Some(parent) = self.nodes[cur].parent {
+            if parent == ancestor {
+                return true;
+            }
+            cur = parent;
+        }
+        false
+    }
+
+    /// MinT with Ledoit-Wolf shrinkage covariance.
+    ///
+    /// Like MinTraceOLS but uses Σ = α·F + (1-α)·S where:
+    /// - S = sample covariance matrix of residuals
+    /// - F = diagonal target (variances only)
+    /// - α = optimal Ledoit-Wolf shrinkage intensity
+    ///
+    /// Reconciliation: ỹ = S_mat (S_mat' Σ^{-1} S_mat)^{-1} S_mat' Σ^{-1} ŷ
+    fn min_trace_shrink(
+        &self,
+        base_map: &HashMap<&str, &Vec<f64>>,
+        horizon: usize,
+    ) -> Result<Vec<(String, Vec<f64>)>> {
+        let residuals = self.residuals.as_ref().ok_or_else(|| {
+            ForecastError::InvalidParameter(
+                "MinTraceShrink requires historical residuals; call set_residuals() first".into(),
+            )
+        })?;
+
+        let n = self.nodes.len();
+        let leaves = self.leaves();
+        let m = leaves.len();
+
+        // Collect residual matrix: rows = observations, cols = nodes (in index order)
+        // Validate all nodes have residuals and same length.
+        let first_name = &self.nodes[0].name;
+        let res_first = residuals.get(first_name).ok_or_else(|| {
+            ForecastError::InvalidParameter(format!("missing residuals for node '{}'", first_name))
+        })?;
+        let t = res_first.len();
+        if t < 2 {
+            return Err(ForecastError::InvalidParameter(
+                "MinTraceShrink requires at least 2 residual observations".into(),
+            ));
+        }
+
+        let mut res_matrix: Vec<Vec<f64>> = Vec::with_capacity(n);
+        for node in &self.nodes {
+            let r = residuals.get(&node.name).ok_or_else(|| {
+                ForecastError::InvalidParameter(format!(
+                    "missing residuals for node '{}'",
+                    node.name
+                ))
+            })?;
+            if r.len() != t {
+                return Err(ForecastError::DimensionMismatch {
+                    expected: t,
+                    got: r.len(),
+                });
+            }
+            res_matrix.push(r.clone());
+        }
+
+        // Compute sample covariance S (n x n)
+        let means: Vec<f64> = res_matrix
+            .iter()
+            .map(|r| r.iter().sum::<f64>() / t as f64)
+            .collect();
+
+        let mut sample_cov = vec![vec![0.0; n]; n];
+        for i in 0..n {
+            for j in i..n {
+                let cov: f64 = (0..t)
+                    .map(|k| (res_matrix[i][k] - means[i]) * (res_matrix[j][k] - means[j]))
+                    .sum::<f64>()
+                    / (t - 1) as f64;
+                sample_cov[i][j] = cov;
+                sample_cov[j][i] = cov;
+            }
+        }
+
+        // Diagonal target F (variances only)
+        let diag: Vec<f64> = (0..n).map(|i| sample_cov[i][i]).collect();
+
+        // Ledoit-Wolf optimal shrinkage intensity
+        let alpha = ledoit_wolf_alpha(&res_matrix, &sample_cov, &diag, t, n);
+
+        // Shrinkage covariance: Sigma = alpha*F + (1-alpha)*S
+        let mut sigma = vec![vec![0.0; n]; n];
+        for i in 0..n {
+            for j in 0..n {
+                sigma[i][j] = (1.0 - alpha) * sample_cov[i][j];
+            }
+            sigma[i][i] += alpha * diag[i];
+        }
+
+        // Invert sigma via Cholesky
+        let sigma_flat: Vec<f64> = sigma.iter().flat_map(|row| row.iter().copied()).collect();
+        let l_sigma = cholesky(n, &sigma_flat)?;
+
+        // Build summing matrix S_mat (n x m)
+        let mut s_mat = vec![vec![0.0_f64; m]; n];
+        for (j, &leaf) in leaves.iter().enumerate() {
+            let mut cur = leaf;
+            s_mat[cur][j] = 1.0;
+            while let Some(parent) = self.nodes[cur].parent {
+                s_mat[parent][j] = 1.0;
+                cur = parent;
+            }
+        }
+
+        // Compute Sigma_inv * S_mat  (n x m)
+        // For each column j of S_mat, solve Sigma * x = s_mat_col_j
+        let mut sigma_inv_s = vec![vec![0.0; m]; n];
+        for j in 0..m {
+            let col: Vec<f64> = (0..n).map(|i| s_mat[i][j]).collect();
+            let x = cholesky_solve_vec(n, &l_sigma, &col);
+            for i in 0..n {
+                sigma_inv_s[i][j] = x[i];
+            }
+        }
+
+        // Compute S_mat' * Sigma_inv * S_mat  (m x m)
+        let mut st_sigma_inv_s = vec![vec![0.0; m]; m];
+        for i in 0..m {
+            for j in i..m {
+                let dot: f64 = (0..n).map(|k| s_mat[k][i] * sigma_inv_s[k][j]).sum();
+                st_sigma_inv_s[i][j] = dot;
+                st_sigma_inv_s[j][i] = dot;
+            }
+        }
+
+        // Invert (S_mat' Sigma_inv S_mat) via Cholesky
+        let st_sigma_inv_s_flat: Vec<f64> = st_sigma_inv_s
+            .iter()
+            .flat_map(|row| row.iter().copied())
+            .collect();
+        let l_inner = cholesky(m, &st_sigma_inv_s_flat)?;
+
+        // For each time step: reconciled = S_mat * (S_mat' Σ^{-1} S_mat)^{-1} * S_mat' Σ^{-1} * ŷ
+        let bfs_order = self.bfs_order();
+        let mut reconciled = vec![vec![0.0; horizon]; n];
+
+        for h in 0..horizon {
+            let base_vec: Vec<f64> = (0..n)
+                .map(|i| base_map[self.nodes[i].name.as_str()][h])
+                .collect();
+
+            // z = Sigma_inv * base_vec
+            let z = cholesky_solve_vec(n, &l_sigma, &base_vec);
+
+            // w = S_mat' * z  (m-vector)
+            let mut w = vec![0.0; m];
+            for j in 0..m {
+                w[j] = (0..n).map(|i| s_mat[i][j] * z[i]).sum();
+            }
+
+            // v = (S_mat' Sigma_inv S_mat)^{-1} * w
+            let v = cholesky_solve_vec(m, &l_inner, &w);
+
+            // result = S_mat * v
+            for i in 0..n {
+                reconciled[i][h] = (0..m).map(|j| s_mat[i][j] * v[j]).sum();
+            }
+        }
+
+        Ok(bfs_order
+            .iter()
+            .map(|&idx| (self.nodes[idx].name.clone(), reconciled[idx].clone()))
+            .collect())
+    }
+
     /// BFS order of node indices.
     fn bfs_order(&self) -> Vec<usize> {
         let mut order = Vec::with_capacity(self.nodes.len());
@@ -519,6 +877,59 @@ fn cholesky_solve_vec(n: usize, l: &[f64], b: &[f64]) -> Vec<f64> {
         x[i] = (z[i] - s) / l[i * n + i];
     }
     x
+}
+
+/// Compute the optimal Ledoit-Wolf shrinkage intensity.
+///
+/// `res_matrix[i]` = residuals for node i (length T).
+/// `sample_cov` = n×n sample covariance.
+/// `diag` = diagonal of sample_cov.
+/// Returns α in [0, 1].
+fn ledoit_wolf_alpha(
+    res_matrix: &[Vec<f64>],
+    sample_cov: &[Vec<f64>],
+    diag: &[f64],
+    t: usize,
+    n: usize,
+) -> f64 {
+    let tf = t as f64;
+
+    // Means
+    let means: Vec<f64> = res_matrix
+        .iter()
+        .map(|r| r.iter().sum::<f64>() / tf)
+        .collect();
+
+    // Compute sum of squared off-diagonal sample covariances (denominator)
+    let mut delta = 0.0;
+    for i in 0..n {
+        for j in 0..n {
+            let diff = sample_cov[i][j] - if i == j { diag[i] } else { 0.0 };
+            delta += diff * diff;
+        }
+    }
+
+    // Compute numerator: sum over i,j of (1/T) sum_k (z_ik z_jk - s_ij)^2
+    // where z_ik = (r_ik - mean_i)
+    let mut gamma = 0.0;
+    for i in 0..n {
+        for j in 0..n {
+            let mut sum_sq = 0.0;
+            for k in 0..t {
+                let zi = res_matrix[i][k] - means[i];
+                let zj = res_matrix[j][k] - means[j];
+                let dev = zi * zj - sample_cov[i][j];
+                sum_sq += dev * dev;
+            }
+            gamma += sum_sq / tf;
+        }
+    }
+
+    if delta < 1e-30 {
+        return 1.0;
+    }
+
+    (gamma / (tf * delta)).clamp(0.0, 1.0)
 }
 
 #[cfg(test)]
@@ -778,5 +1189,289 @@ mod tests {
         assert!(tree
             .reconcile(&base, ReconciliationMethod::BottomUp)
             .is_err());
+    }
+
+    // ── MiddleOut ─────────────────────────────────────────────────────
+
+    #[test]
+    fn middle_out_level0_equals_top_down() {
+        let mut tree = HierarchyTree::new(vec![
+            ("Total", &["East", "West"]),
+            ("East", &["NY", "MA"]),
+            ("West", &["CA", "WA"]),
+        ])
+        .unwrap();
+
+        let mut actuals = HashMap::new();
+        actuals.insert("Total".into(), vec![100.0; 5]);
+        actuals.insert("East".into(), vec![60.0; 5]);
+        actuals.insert("West".into(), vec![40.0; 5]);
+        actuals.insert("NY".into(), vec![35.0; 5]);
+        actuals.insert("MA".into(), vec![25.0; 5]);
+        actuals.insert("CA".into(), vec![25.0; 5]);
+        actuals.insert("WA".into(), vec![15.0; 5]);
+        tree.set_actuals(actuals);
+
+        let base = vec![
+            ("Total".into(), vec![200.0]),
+            ("East".into(), vec![999.0]),
+            ("West".into(), vec![999.0]),
+            ("NY".into(), vec![999.0]),
+            ("MA".into(), vec![999.0]),
+            ("CA".into(), vec![999.0]),
+            ("WA".into(), vec![999.0]),
+        ];
+
+        let td = tree
+            .reconcile(&base, ReconciliationMethod::TopDown)
+            .unwrap();
+        let mo = tree
+            .reconcile(&base, ReconciliationMethod::MiddleOut { middle_level: 0 })
+            .unwrap();
+
+        let td_map: HashMap<&str, &Vec<f64>> = td.iter().map(|(k, v)| (k.as_str(), v)).collect();
+        let mo_map: HashMap<&str, &Vec<f64>> = mo.iter().map(|(k, v)| (k.as_str(), v)).collect();
+
+        for name in &["Total", "East", "West", "NY", "MA", "CA", "WA"] {
+            approx_eq(td_map[name][0], mo_map[name][0], 1e-10);
+        }
+    }
+
+    #[test]
+    fn middle_out_level_max_equals_bottom_up() {
+        let tree = HierarchyTree::new(vec![
+            ("Total", &["East", "West"]),
+            ("East", &["NY", "MA"]),
+            ("West", &["CA", "WA"]),
+        ])
+        .unwrap();
+
+        let base = vec![
+            ("Total".into(), vec![999.0]),
+            ("East".into(), vec![999.0]),
+            ("West".into(), vec![999.0]),
+            ("NY".into(), vec![10.0]),
+            ("MA".into(), vec![20.0]),
+            ("CA".into(), vec![30.0]),
+            ("WA".into(), vec![40.0]),
+        ];
+
+        let bu = tree
+            .reconcile(&base, ReconciliationMethod::BottomUp)
+            .unwrap();
+        let mo = tree
+            .reconcile(&base, ReconciliationMethod::MiddleOut { middle_level: 99 })
+            .unwrap();
+
+        let bu_map: HashMap<&str, &Vec<f64>> = bu.iter().map(|(k, v)| (k.as_str(), v)).collect();
+        let mo_map: HashMap<&str, &Vec<f64>> = mo.iter().map(|(k, v)| (k.as_str(), v)).collect();
+
+        for name in &["Total", "East", "West", "NY", "MA", "CA", "WA"] {
+            approx_eq(bu_map[name][0], mo_map[name][0], 1e-10);
+        }
+    }
+
+    #[test]
+    fn middle_out_level1_coherent() {
+        let mut tree = HierarchyTree::new(vec![
+            ("Total", &["East", "West"]),
+            ("East", &["NY", "MA"]),
+            ("West", &["CA", "WA"]),
+        ])
+        .unwrap();
+
+        let mut actuals = HashMap::new();
+        actuals.insert("Total".into(), vec![100.0; 5]);
+        actuals.insert("East".into(), vec![60.0; 5]);
+        actuals.insert("West".into(), vec![40.0; 5]);
+        actuals.insert("NY".into(), vec![35.0; 5]);
+        actuals.insert("MA".into(), vec![25.0; 5]);
+        actuals.insert("CA".into(), vec![25.0; 5]);
+        actuals.insert("WA".into(), vec![15.0; 5]);
+        tree.set_actuals(actuals);
+
+        let base = vec![
+            ("Total".into(), vec![999.0]),
+            ("East".into(), vec![120.0]),
+            ("West".into(), vec![80.0]),
+            ("NY".into(), vec![999.0]),
+            ("MA".into(), vec![999.0]),
+            ("CA".into(), vec![999.0]),
+            ("WA".into(), vec![999.0]),
+        ];
+
+        let result = tree
+            .reconcile(&base, ReconciliationMethod::MiddleOut { middle_level: 1 })
+            .unwrap();
+        let map: HashMap<&str, &Vec<f64>> = result.iter().map(|(k, v)| (k.as_str(), v)).collect();
+
+        // Coherence checks
+        approx_eq(map["East"][0], map["NY"][0] + map["MA"][0], 1e-10);
+        approx_eq(map["West"][0], map["CA"][0] + map["WA"][0], 1e-10);
+        approx_eq(map["Total"][0], map["East"][0] + map["West"][0], 1e-10);
+
+        // Middle-level forecasts should be preserved
+        approx_eq(map["East"][0], 120.0, 1e-10);
+        approx_eq(map["West"][0], 80.0, 1e-10);
+
+        // Total should be sum of middle
+        approx_eq(map["Total"][0], 200.0, 1e-10);
+
+        // Disaggregation using proportions: NY/East = 35/60
+        approx_eq(map["NY"][0], 120.0 * 35.0 / 60.0, 1e-10);
+        approx_eq(map["MA"][0], 120.0 * 25.0 / 60.0, 1e-10);
+        approx_eq(map["CA"][0], 80.0 * 25.0 / 40.0, 1e-10);
+        approx_eq(map["WA"][0], 80.0 * 15.0 / 40.0, 1e-10);
+    }
+
+    #[test]
+    fn middle_out_requires_actuals() {
+        let tree = HierarchyTree::new(vec![
+            ("Total", &["East", "West"]),
+            ("East", &["NY", "MA"]),
+            ("West", &["CA", "WA"]),
+        ])
+        .unwrap();
+
+        let base = vec![
+            ("Total".into(), vec![100.0]),
+            ("East".into(), vec![50.0]),
+            ("West".into(), vec![50.0]),
+            ("NY".into(), vec![25.0]),
+            ("MA".into(), vec![25.0]),
+            ("CA".into(), vec![25.0]),
+            ("WA".into(), vec![25.0]),
+        ];
+
+        assert!(tree
+            .reconcile(&base, ReconciliationMethod::MiddleOut { middle_level: 1 },)
+            .is_err());
+    }
+
+    // ── MinTraceShrink ────────────────────────────────────────────────
+
+    #[test]
+    fn mint_shrink_coherent() {
+        let mut tree = HierarchyTree::new(vec![("Total", &["A", "B"])]).unwrap();
+
+        // Generate residuals
+        let mut residuals = HashMap::new();
+        let ra: Vec<f64> = (0..50).map(|i| (i as f64 * 0.7).sin() * 0.5).collect();
+        let rb: Vec<f64> = (0..50).map(|i| (i as f64 * 1.1).cos() * 0.3).collect();
+        let rt: Vec<f64> = ra.iter().zip(rb.iter()).map(|(a, b)| a + b).collect();
+        residuals.insert("Total".into(), rt);
+        residuals.insert("A".into(), ra);
+        residuals.insert("B".into(), rb);
+        tree.set_residuals(residuals);
+
+        let base = vec![
+            ("Total".into(), vec![100.0]),
+            ("A".into(), vec![55.0]),
+            ("B".into(), vec![40.0]),
+        ];
+
+        let result = tree
+            .reconcile(&base, ReconciliationMethod::MinTraceShrink)
+            .unwrap();
+        let map: HashMap<&str, &Vec<f64>> = result.iter().map(|(k, v)| (k.as_str(), v)).collect();
+
+        // Coherence: Total = A + B
+        approx_eq(map["Total"][0], map["A"][0] + map["B"][0], 1e-10);
+    }
+
+    #[test]
+    fn mint_shrink_three_levels_coherent() {
+        let mut tree = HierarchyTree::new(vec![
+            ("Total", &["East", "West"]),
+            ("East", &["NY", "MA"]),
+            ("West", &["CA", "WA"]),
+        ])
+        .unwrap();
+
+        let t = 50;
+        let ny: Vec<f64> = (0..t).map(|i| (i as f64 * 0.3).sin()).collect();
+        let ma: Vec<f64> = (0..t).map(|i| (i as f64 * 0.5).cos()).collect();
+        let ca: Vec<f64> = (0..t).map(|i| (i as f64 * 0.7).sin() * 0.8).collect();
+        let wa: Vec<f64> = (0..t).map(|i| (i as f64 * 0.2).cos() * 0.6).collect();
+        let east: Vec<f64> = ny.iter().zip(ma.iter()).map(|(a, b)| a + b).collect();
+        let west: Vec<f64> = ca.iter().zip(wa.iter()).map(|(a, b)| a + b).collect();
+        let total: Vec<f64> = east.iter().zip(west.iter()).map(|(a, b)| a + b).collect();
+
+        let mut residuals = HashMap::new();
+        residuals.insert("Total".into(), total);
+        residuals.insert("East".into(), east);
+        residuals.insert("West".into(), west);
+        residuals.insert("NY".into(), ny);
+        residuals.insert("MA".into(), ma);
+        residuals.insert("CA".into(), ca);
+        residuals.insert("WA".into(), wa);
+        tree.set_residuals(residuals);
+
+        let base = vec![
+            ("Total".into(), vec![100.0, 200.0]),
+            ("East".into(), vec![55.0, 110.0]),
+            ("West".into(), vec![50.0, 95.0]),
+            ("NY".into(), vec![25.0, 55.0]),
+            ("MA".into(), vec![28.0, 52.0]),
+            ("CA".into(), vec![26.0, 48.0]),
+            ("WA".into(), vec![22.0, 50.0]),
+        ];
+
+        let result = tree
+            .reconcile(&base, ReconciliationMethod::MinTraceShrink)
+            .unwrap();
+        let map: HashMap<&str, &Vec<f64>> = result.iter().map(|(k, v)| (k.as_str(), v)).collect();
+
+        for h in 0..2 {
+            approx_eq(map["East"][h], map["NY"][h] + map["MA"][h], 1e-10);
+            approx_eq(map["West"][h], map["CA"][h] + map["WA"][h], 1e-10);
+            approx_eq(map["Total"][h], map["East"][h] + map["West"][h], 1e-10);
+        }
+    }
+
+    #[test]
+    fn mint_shrink_requires_residuals() {
+        let tree = HierarchyTree::new(vec![("Total", &["A", "B"])]).unwrap();
+        let base = vec![
+            ("Total".into(), vec![100.0]),
+            ("A".into(), vec![50.0]),
+            ("B".into(), vec![50.0]),
+        ];
+        assert!(tree
+            .reconcile(&base, ReconciliationMethod::MinTraceShrink)
+            .is_err());
+    }
+
+    #[test]
+    fn mint_shrink_already_coherent_unchanged() {
+        let mut tree = HierarchyTree::new(vec![("Total", &["A", "B"])]).unwrap();
+
+        // Use identity-like residuals
+        let t = 100;
+        let ra: Vec<f64> = (0..t).map(|i| (i as f64 * 0.3).sin() * 0.1).collect();
+        let rb: Vec<f64> = (0..t).map(|i| (i as f64 * 0.5).cos() * 0.1).collect();
+        let rt: Vec<f64> = ra.iter().zip(rb.iter()).map(|(a, b)| a + b).collect();
+        let mut residuals = HashMap::new();
+        residuals.insert("Total".into(), rt);
+        residuals.insert("A".into(), ra);
+        residuals.insert("B".into(), rb);
+        tree.set_residuals(residuals);
+
+        // Already coherent base
+        let base = vec![
+            ("Total".into(), vec![100.0]),
+            ("A".into(), vec![60.0]),
+            ("B".into(), vec![40.0]),
+        ];
+
+        let result = tree
+            .reconcile(&base, ReconciliationMethod::MinTraceShrink)
+            .unwrap();
+        let map: HashMap<&str, &Vec<f64>> = result.iter().map(|(k, v)| (k.as_str(), v)).collect();
+
+        // Should remain close to original (already coherent)
+        approx_eq(map["Total"][0], 100.0, 1.0);
+        approx_eq(map["A"][0], 60.0, 1.0);
+        approx_eq(map["B"][0], 40.0, 1.0);
     }
 }

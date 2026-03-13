@@ -224,14 +224,14 @@ impl Forecaster for AutoEnsemble {
     fn predict(&self, horizon: usize) -> Result<Forecast> {
         self.ensemble
             .as_ref()
-            .ok_or(ForecastError::FitRequired)?
+            .ok_or(ForecastError::FitRequired { model: None })?
             .predict(horizon)
     }
 
     fn predict_with_intervals(&self, horizon: usize, level: f64) -> Result<Forecast> {
         self.ensemble
             .as_ref()
-            .ok_or(ForecastError::FitRequired)?
+            .ok_or(ForecastError::FitRequired { model: None })?
             .predict_with_intervals(horizon, level)
     }
 

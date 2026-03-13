@@ -580,9 +580,11 @@ impl DynamicTheta {
         horizon: usize,
         future_regressors: Option<&HashMap<String, Vec<f64>>>,
     ) -> Result<Forecast> {
-        let level = self.level.ok_or(ForecastError::FitRequired)?;
-        let an = self.an.ok_or(ForecastError::FitRequired)?;
-        let bn = self.bn.ok_or(ForecastError::FitRequired)?;
+        let level = self
+            .level
+            .ok_or(ForecastError::FitRequired { model: None })?;
+        let an = self.an.ok_or(ForecastError::FitRequired { model: None })?;
+        let bn = self.bn.ok_or(ForecastError::FitRequired { model: None })?;
 
         if horizon == 0 {
             return Ok(Forecast::new());
@@ -624,7 +626,9 @@ impl DynamicTheta {
         };
 
         // Use dynamic coefficients for forecasting
-        let n = self.series_len.ok_or(ForecastError::FitRequired)?;
+        let n = self
+            .series_len
+            .ok_or(ForecastError::FitRequired { model: None })?;
         let beta = 1.0 - self.alpha;
 
         let mut predictions = Vec::with_capacity(horizon);
@@ -1063,7 +1067,10 @@ mod tests {
     #[test]
     fn dynamic_theta_requires_fit() {
         let model = DynamicTheta::new(0.1);
-        assert!(matches!(model.predict(5), Err(ForecastError::FitRequired)));
+        assert!(matches!(
+            model.predict(5),
+            Err(ForecastError::FitRequired { .. })
+        ));
     }
 
     #[test]

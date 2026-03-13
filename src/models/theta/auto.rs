@@ -266,7 +266,7 @@ impl Forecaster for AutoTheta {
         let model = self
             .fitted_model
             .as_ref()
-            .ok_or(ForecastError::FitRequired)?;
+            .ok_or(ForecastError::FitRequired { model: None })?;
 
         match model {
             FittedModel::STM(m) => m.predict(horizon),
@@ -280,7 +280,7 @@ impl Forecaster for AutoTheta {
         let model = self
             .fitted_model
             .as_ref()
-            .ok_or(ForecastError::FitRequired)?;
+            .ok_or(ForecastError::FitRequired { model: None })?;
 
         match model {
             FittedModel::STM(m) => m.predict_with_intervals(horizon, confidence),
@@ -352,7 +352,7 @@ impl Forecaster for AutoTheta {
         let model = self
             .fitted_model
             .as_ref()
-            .ok_or(ForecastError::FitRequired)?;
+            .ok_or(ForecastError::FitRequired { model: None })?;
 
         match model {
             FittedModel::STM(m) => m.predict_with_exog(horizon, future_regressors),
@@ -371,7 +371,7 @@ impl Forecaster for AutoTheta {
         let model = self
             .fitted_model
             .as_ref()
-            .ok_or(ForecastError::FitRequired)?;
+            .ok_or(ForecastError::FitRequired { model: None })?;
 
         match model {
             FittedModel::STM(m) => m.predict_with_exog_intervals(horizon, future_regressors, level),
@@ -518,7 +518,10 @@ mod tests {
     #[test]
     fn auto_theta_requires_fit() {
         let model = AutoTheta::new();
-        assert!(matches!(model.predict(5), Err(ForecastError::FitRequired)));
+        assert!(matches!(
+            model.predict(5),
+            Err(ForecastError::FitRequired { .. })
+        ));
     }
 
     #[test]

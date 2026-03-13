@@ -138,11 +138,11 @@ where
 {
     let residuals = model
         .residuals()
-        .ok_or(crate::error::ForecastError::FitRequired)?;
+        .ok_or(crate::error::ForecastError::FitRequired { model: None })?;
 
     let fitted = model
         .fitted_values()
-        .ok_or(crate::error::ForecastError::FitRequired)?;
+        .ok_or(crate::error::ForecastError::FitRequired { model: None })?;
 
     // Filter out NaN residuals
     let valid_residuals: Vec<f64> = residuals.iter().copied().filter(|r| !r.is_nan()).collect();

@@ -167,7 +167,9 @@ impl Forecaster for SimpleMovingAverage {
     }
 
     fn predict(&self, horizon: usize) -> Result<Forecast> {
-        let mean = self.last_mean.ok_or(ForecastError::FitRequired)?;
+        let mean = self
+            .last_mean
+            .ok_or(ForecastError::FitRequired { model: None })?;
 
         if horizon == 0 {
             return Ok(Forecast::new());
@@ -179,7 +181,9 @@ impl Forecaster for SimpleMovingAverage {
     }
 
     fn predict_with_intervals(&self, horizon: usize, level: f64) -> Result<Forecast> {
-        let mean = self.last_mean.ok_or(ForecastError::FitRequired)?;
+        let mean = self
+            .last_mean
+            .ok_or(ForecastError::FitRequired { model: None })?;
         let variance = self.residual_variance.unwrap_or(0.0);
         let sigma = variance.sqrt();
 
@@ -488,7 +492,10 @@ mod tests {
         ));
 
         // Unfitted model can't predict
-        assert!(matches!(model.predict(5), Err(ForecastError::FitRequired)));
+        assert!(matches!(
+            model.predict(5),
+            Err(ForecastError::FitRequired { .. })
+        ));
     }
 
     #[test]

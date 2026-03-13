@@ -87,8 +87,12 @@ impl Forecaster for RandomWalkWithDrift {
     }
 
     fn predict(&self, horizon: usize) -> Result<Forecast> {
-        let last = self.last_value.ok_or(ForecastError::FitRequired)?;
-        let drift = self.drift.ok_or(ForecastError::FitRequired)?;
+        let last = self
+            .last_value
+            .ok_or(ForecastError::FitRequired { model: None })?;
+        let drift = self
+            .drift
+            .ok_or(ForecastError::FitRequired { model: None })?;
 
         if horizon == 0 {
             return Ok(Forecast::new());
@@ -100,8 +104,12 @@ impl Forecaster for RandomWalkWithDrift {
     }
 
     fn predict_with_intervals(&self, horizon: usize, level: f64) -> Result<Forecast> {
-        let last = self.last_value.ok_or(ForecastError::FitRequired)?;
-        let drift = self.drift.ok_or(ForecastError::FitRequired)?;
+        let last = self
+            .last_value
+            .ok_or(ForecastError::FitRequired { model: None })?;
+        let drift = self
+            .drift
+            .ok_or(ForecastError::FitRequired { model: None })?;
         let variance = self.residual_variance.unwrap_or(0.0);
         let drift_se = self.drift_se.unwrap_or(0.0);
 

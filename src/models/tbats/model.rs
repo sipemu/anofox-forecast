@@ -775,7 +775,7 @@ impl Forecaster for TBATS {
 
     fn predict(&self, horizon: usize) -> Result<Forecast> {
         if self.fitted.is_none() {
-            return Err(ForecastError::FitRequired);
+            return Err(ForecastError::FitRequired { model: None });
         }
 
         if horizon == 0 {
@@ -1028,7 +1028,10 @@ mod tests {
     #[test]
     fn tbats_requires_fit() {
         let model = TBATS::new(vec![24]);
-        assert!(matches!(model.predict(5), Err(ForecastError::FitRequired)));
+        assert!(matches!(
+            model.predict(5),
+            Err(ForecastError::FitRequired { .. })
+        ));
     }
 
     #[test]

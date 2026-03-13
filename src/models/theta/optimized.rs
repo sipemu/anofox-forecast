@@ -465,10 +465,16 @@ impl OptimizedTheta {
         horizon: usize,
         future_regressors: Option<&HashMap<String, Vec<f64>>>,
     ) -> Result<Forecast> {
-        let level = self.level.ok_or(ForecastError::FitRequired)?;
-        let alpha = self.alpha.ok_or(ForecastError::FitRequired)?;
-        let theta = self.theta.ok_or(ForecastError::FitRequired)?;
-        let b = self.b.ok_or(ForecastError::FitRequired)?;
+        let level = self
+            .level
+            .ok_or(ForecastError::FitRequired { model: None })?;
+        let alpha = self
+            .alpha
+            .ok_or(ForecastError::FitRequired { model: None })?;
+        let theta = self
+            .theta
+            .ok_or(ForecastError::FitRequired { model: None })?;
+        let b = self.b.ok_or(ForecastError::FitRequired { model: None })?;
 
         if horizon == 0 {
             return Ok(Forecast::new());
@@ -906,7 +912,10 @@ mod tests {
     #[test]
     fn optimized_theta_requires_fit() {
         let model = OptimizedTheta::new();
-        assert!(matches!(model.predict(5), Err(ForecastError::FitRequired)));
+        assert!(matches!(
+            model.predict(5),
+            Err(ForecastError::FitRequired { .. })
+        ));
     }
 
     #[test]

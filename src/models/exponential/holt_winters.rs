@@ -354,9 +354,15 @@ impl Forecaster for HoltWinters {
             self.gamma = Some(gamma);
         }
 
-        let alpha = self.alpha.ok_or(ForecastError::FitRequired)?;
-        let beta = self.beta.ok_or(ForecastError::FitRequired)?;
-        let gamma = self.gamma.ok_or(ForecastError::FitRequired)?;
+        let alpha = self
+            .alpha
+            .ok_or(ForecastError::FitRequired { model: None })?;
+        let beta = self
+            .beta
+            .ok_or(ForecastError::FitRequired { model: None })?;
+        let gamma = self
+            .gamma
+            .ok_or(ForecastError::FitRequired { model: None })?;
         let period = self.seasonal_period;
 
         // Initialize state
@@ -427,9 +433,16 @@ impl Forecaster for HoltWinters {
     }
 
     fn predict(&self, horizon: usize) -> Result<Forecast> {
-        let level = self.level.ok_or(ForecastError::FitRequired)?;
-        let trend = self.trend.ok_or(ForecastError::FitRequired)?;
-        let seasonals = self.seasonals.as_ref().ok_or(ForecastError::FitRequired)?;
+        let level = self
+            .level
+            .ok_or(ForecastError::FitRequired { model: None })?;
+        let trend = self
+            .trend
+            .ok_or(ForecastError::FitRequired { model: None })?;
+        let seasonals = self
+            .seasonals
+            .as_ref()
+            .ok_or(ForecastError::FitRequired { model: None })?;
         let period = self.seasonal_period;
 
         if horizon == 0 {
@@ -453,9 +466,16 @@ impl Forecaster for HoltWinters {
     }
 
     fn predict_with_intervals(&self, horizon: usize, level: f64) -> Result<Forecast> {
-        let l = self.level.ok_or(ForecastError::FitRequired)?;
-        let b = self.trend.ok_or(ForecastError::FitRequired)?;
-        let seasonals = self.seasonals.as_ref().ok_or(ForecastError::FitRequired)?;
+        let l = self
+            .level
+            .ok_or(ForecastError::FitRequired { model: None })?;
+        let b = self
+            .trend
+            .ok_or(ForecastError::FitRequired { model: None })?;
+        let seasonals = self
+            .seasonals
+            .as_ref()
+            .ok_or(ForecastError::FitRequired { model: None })?;
         let variance = self.residual_variance.unwrap_or(0.0);
         let period = self.seasonal_period;
 
@@ -669,7 +689,10 @@ mod tests {
     #[test]
     fn hw_requires_fit_before_predict() {
         let model = HoltWinters::additive(0.3, 0.1, 0.1, 4);
-        assert!(matches!(model.predict(4), Err(ForecastError::FitRequired)));
+        assert!(matches!(
+            model.predict(4),
+            Err(ForecastError::FitRequired { .. })
+        ));
     }
 
     #[test]

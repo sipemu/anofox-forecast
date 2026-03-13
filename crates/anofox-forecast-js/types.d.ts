@@ -2129,6 +2129,158 @@ export class EnsembleForecaster {
 }
 
 // =============================================================================
+// VAR (Vector Autoregression)
+// =============================================================================
+
+/**
+ * Vector Autoregression forecaster for multivariate time series.
+ *
+ * Models multiple time series jointly where each variable at time t is a
+ * linear function of the p most recent lags of all variables.
+ *
+ * @example
+ * ```typescript
+ * const model = new VARForecaster(2); // VAR(2)
+ * const y1 = new Float64Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+ * const y2 = new Float64Array([10, 9, 8, 7, 6, 5, 4, 3, 2, 1]);
+ * model.fitMultivariate([y1, y2]);
+ * const forecasts = model.predictMultivariate(5);
+ * ```
+ */
+export class VARForecaster {
+  /**
+   * Create a new VAR forecaster with the given lag order.
+   *
+   * @param order - Number of lags (p). Must be at least 1.
+   */
+  constructor(order: number);
+
+  /**
+   * Fit the VAR model to multivariate time series data.
+   *
+   * @param data - Array of Float64Arrays, one per variable. All must have the same length.
+   * @throws Error if data is empty, dimensions mismatch, or insufficient observations.
+   */
+  fitMultivariate(data: Float64Array[]): void;
+
+  /**
+   * Predict future values for all variables.
+   *
+   * @param horizon - Number of steps to forecast
+   * @returns Array of Float64Arrays, one per variable
+   * @throws Error if the model has not been fitted
+   */
+  predictMultivariate(horizon: number): Float64Array[];
+
+  /**
+   * Perform a Granger causality test.
+   *
+   * Tests whether variable `cause` Granger-causes variable `effect`.
+   * Higher F-statistic values indicate stronger evidence of causality.
+   *
+   * @param cause - Index of the potentially causal variable (0-based)
+   * @param effect - Index of the effect variable (0-based)
+   * @returns F-statistic
+   * @throws Error if the model has not been fitted, or indices are out of bounds
+   */
+  grangerCausalityTest(cause: number, effect: number): number;
+
+  /** The lag order (p). */
+  readonly order: number;
+
+  /** The model name. */
+  readonly name: string;
+
+  /** Release WASM memory associated with this object. */
+  free(): void;
+}
+
+// =============================================================================
+// Kalman Filter
+// =============================================================================
+
+/**
+ * Kalman filter forecaster for state-space models.
+ *
+ * Supports local level (random walk plus noise) and local linear trend models.
+ * Use static factory methods `localLevel()` or `localLinearTrend()` to create instances.
+ *
+ * @example
+ * ```typescript
+ * const model = KalmanForecaster.localLevel(1.0, 0.1);
+ * model.fit(series);
+ * const forecast = model.predict(5);
+ * ```
+ */
+export class KalmanForecaster {
+  /**
+   * Create a local level (random walk plus noise) model.
+   *
+   * State: level(t) = level(t-1) + w(t), w ~ N(0, state_noise)
+   * Observation: y(t) = level(t) + v(t), v ~ N(0, obs_noise)
+   *
+   * @param obsNoise - Observation noise variance
+   * @param stateNoise - State (level) noise variance
+   */
+  static localLevel(obsNoise: number, stateNoise: number): KalmanForecaster;
+
+  /**
+   * Create a local linear trend model.
+   *
+   * @param obsNoise - Observation noise variance
+   * @param levelNoise - Level noise variance
+   * @param trendNoise - Trend noise variance
+   */
+  static localLinearTrend(
+    obsNoise: number,
+    levelNoise: number,
+    trendNoise: number,
+  ): KalmanForecaster;
+
+  /**
+   * Fit the Kalman filter to a time series.
+   *
+   * @param series - TimeSeries to fit
+   * @throws Error if fitting fails
+   */
+  fit(series: TimeSeries): void;
+
+  /**
+   * Predict future values.
+   *
+   * @param horizon - Number of steps to forecast
+   * @returns Forecast with point predictions
+   * @throws Error if the model has not been fitted
+   */
+  predict(horizon: number): Forecast;
+
+  /**
+   * Predict with prediction intervals.
+   *
+   * @param horizon - Number of steps to forecast
+   * @param level - Confidence level (e.g., 0.95 for 95% intervals)
+   * @returns Forecast with predictions and intervals
+   * @throws Error if the model has not been fitted
+   */
+  predictWithIntervals(horizon: number, level: number): Forecast;
+
+  /**
+   * Apply the Kalman smoother and return smoothed observation values.
+   *
+   * @param series - TimeSeries to smooth
+   * @returns Array of smoothed observation values
+   * @throws Error if smoothing fails
+   */
+  smooth(series: TimeSeries): Float64Array | number[];
+
+  /** The model name. */
+  readonly name: string;
+
+  /** Release WASM memory associated with this object. */
+  free(): void;
+}
+
+// =============================================================================
 // Auto Model Selection
 // =============================================================================
 

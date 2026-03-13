@@ -28,7 +28,7 @@ checksum = "4b46cbb362ab8752921c97e041f5e366ee6297bd428a31275b9fcf1e380f7299"
 
 [[package]]
 name = "anofox-forecast"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "anofox-regression",
  "approx",
@@ -50,7 +50,7 @@ dependencies = [
 
 [[package]]
 name = "anofox-forecast-js"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "anofox-forecast",
  "chrono",

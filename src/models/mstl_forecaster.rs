@@ -9,6 +9,7 @@
 
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
+use crate::models::explain::{Explainable, ForecastExplanation};
 use crate::models::exponential::{AutoETS, AutoETSConfig, SimpleExponentialSmoothing};
 use crate::models::{validate_series_complete, Forecaster};
 use crate::seasonality::{MSTLResult, MSTL};
@@ -403,11 +404,11 @@ impl Forecaster for MSTLForecaster {
         let decomposition = self
             .decomposition
             .as_ref()
-            .ok_or(ForecastError::FitRequired)?;
+            .ok_or(ForecastError::FitRequired { model: None })?;
         let trend_forecaster = self
             .trend_forecaster
             .as_ref()
-            .ok_or(ForecastError::FitRequired)?;
+            .ok_or(ForecastError::FitRequired { model: None })?;
 
         if horizon == 0 {
             return Ok(Forecast::new());
@@ -496,6 +497,42 @@ impl Forecaster for MSTLForecaster {
 
     fn name(&self) -> &str {
         "MSTLForecaster"
+    }
+}
+
+impl Explainable for MSTLForecaster {
+    fn explain(&self, horizon: usize) -> Result<ForecastExplanation> {
+        let decomposition = self
+            .decomposition
+            .as_ref()
+            .ok_or(ForecastError::FitRequired { model: None })?;
+        let trend_forecaster = self
+            .trend_forecaster
+            .as_ref()
+            .ok_or(ForecastError::FitRequired { model: None })?;
+        if horizon == 0 {
+            return Ok(ForecastExplanation {
+                level: vec![],
+                trend: None,
+                seasonal: None,
+                residual: None,
+                named_components: vec![],
+            });
+        }
+        let trend_forecast = trend_forecaster.predict(horizon)?;
+        let mut named_components = Vec::new();
+        for (idx, seasonal) in decomposition.seasonal_components.iter().enumerate() {
+            let period = decomposition.seasonal_periods[idx];
+            let sf = self.project_seasonal(seasonal, period, horizon);
+            named_components.push((format!("seasonal_{}", period), sf));
+        }
+        Ok(ForecastExplanation {
+            level: trend_forecast,
+            trend: None,
+            seasonal: None,
+            residual: None,
+            named_components,
+        })
     }
 }
 
@@ -669,7 +706,10 @@ mod tests {
     #[test]
     fn mstl_forecaster_requires_fit() {
         let model = MSTLForecaster::new(vec![12]);
-        assert!(matches!(model.predict(5), Err(ForecastError::FitRequired)));
+        assert!(matches!(
+            model.predict(5),
+            Err(ForecastError::FitRequired { .. })
+        ));
     }
 
     #[test]

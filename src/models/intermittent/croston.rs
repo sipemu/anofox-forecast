@@ -316,8 +316,12 @@ impl Forecaster for Croston {
     }
 
     fn predict(&self, horizon: usize) -> Result<Forecast> {
-        let demand_level = self.demand_level.ok_or(ForecastError::FitRequired)?;
-        let interval_level = self.interval_level.ok_or(ForecastError::FitRequired)?;
+        let demand_level = self
+            .demand_level
+            .ok_or(ForecastError::FitRequired { model: None })?;
+        let interval_level = self
+            .interval_level
+            .ok_or(ForecastError::FitRequired { model: None })?;
 
         if horizon == 0 {
             return Ok(Forecast::from_values(Vec::new()));
@@ -338,7 +342,10 @@ impl Forecaster for Croston {
         }
 
         // Compute variance from residuals
-        let residuals = self.residuals.as_ref().ok_or(ForecastError::FitRequired)?;
+        let residuals = self
+            .residuals
+            .as_ref()
+            .ok_or(ForecastError::FitRequired { model: None })?;
         let variance = if residuals.len() > 1 {
             let mean_resid: f64 = residuals.iter().sum::<f64>() / residuals.len() as f64;
             residuals
@@ -566,7 +573,10 @@ mod tests {
     #[test]
     fn croston_requires_fit() {
         let model = Croston::new();
-        assert!(matches!(model.predict(5), Err(ForecastError::FitRequired)));
+        assert!(matches!(
+            model.predict(5),
+            Err(ForecastError::FitRequired { .. })
+        ));
     }
 
     #[test]

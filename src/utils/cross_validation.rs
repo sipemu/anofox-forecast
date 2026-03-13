@@ -89,6 +89,8 @@ pub struct CvFoldGenerator {
     pub gap: usize,
     /// Purge window: observations to remove before training end (prevents lookahead bias).
     pub purge: usize,
+    /// Embargo: observations to exclude after each test set.
+    pub embargo: usize,
     /// Cross-validation strategy (expanding or rolling).
     pub strategy: CVStrategy,
 }
@@ -101,6 +103,7 @@ impl Default for CvFoldGenerator {
             step_size: 1,
             gap: 0,
             purge: 0,
+            embargo: 0,
             strategy: CVStrategy::Expanding,
         }
     }
@@ -149,6 +152,12 @@ impl CvFoldGenerator {
         self
     }
 
+    /// Set the embargo window size.
+    pub fn embargo(mut self, e: usize) -> Self {
+        self.embargo = e;
+        self
+    }
+
     /// Set the cross-validation strategy.
     pub fn strategy(mut self, s: CVStrategy) -> Self {
         self.strategy = s;
@@ -162,35 +171,43 @@ impl CvFoldGenerator {
     pub fn generate(&self, series_len: usize) -> Vec<Fold> {
         let mut folds = Vec::new();
         let mut origin = self.initial_window;
-
+        let mut max_embargo_end: usize = 0;
         while origin + self.gap + self.horizon <= series_len {
-            let train_start = match self.strategy {
+            let base_train_start = match self.strategy {
                 CVStrategy::Rolling => origin.saturating_sub(self.initial_window),
                 CVStrategy::Expanding => 0,
             };
-
-            // Apply purge to training end
             let train_end = origin.saturating_sub(self.purge);
-
-            // Skip if purge makes training window too small
+            let train_start = if self.embargo > 0 && max_embargo_end > base_train_start {
+                max_embargo_end.min(train_end)
+            } else {
+                base_train_start
+            };
             if train_end <= train_start {
+                let test_end = origin + self.gap + self.horizon;
+                let embargo_end = (test_end + self.embargo).min(series_len);
+                if embargo_end > max_embargo_end {
+                    max_embargo_end = embargo_end;
+                }
                 origin += self.step_size;
                 continue;
             }
-
             let test_start = origin + self.gap;
             let test_end = test_start + self.horizon;
-
             folds.push(Fold {
                 train_start,
                 train_end,
                 test_start,
                 test_end,
             });
-
+            if self.embargo > 0 {
+                let embargo_end = (test_end + self.embargo).min(series_len);
+                if embargo_end > max_embargo_end {
+                    max_embargo_end = embargo_end;
+                }
+            }
             origin += self.step_size;
         }
-
         folds
     }
 
@@ -217,6 +234,8 @@ pub struct CVConfig {
     pub gap: usize,
     /// Purge window: observations to remove before training end.
     pub purge: usize,
+    /// Embargo: observations to exclude after each test set.
+    pub embargo: usize,
 }
 
 impl Default for CVConfig {
@@ -229,6 +248,7 @@ impl Default for CVConfig {
             seasonal_period: None,
             gap: 0,
             purge: 0,
+            embargo: 0,
         }
     }
 }
@@ -244,6 +264,7 @@ impl CVConfig {
             seasonal_period: None,
             gap: 0,
             purge: 0,
+            embargo: 0,
         }
     }
 
@@ -257,6 +278,7 @@ impl CVConfig {
             seasonal_period: None,
             gap: 0,
             purge: 0,
+            embargo: 0,
         }
     }
 
@@ -289,6 +311,12 @@ impl CVConfig {
         self
     }
 
+    /// Set the embargo window size.
+    pub fn with_embargo(mut self, embargo: usize) -> Self {
+        self.embargo = embargo;
+        self
+    }
+
     /// Convert to a CvFoldGenerator.
     pub fn to_fold_generator(&self) -> CvFoldGenerator {
         CvFoldGenerator {
@@ -297,6 +325,7 @@ impl CVConfig {
             step_size: self.step_size,
             gap: self.gap,
             purge: self.purge,
+            embargo: self.embargo,
             strategy: self.strategy,
         }
     }
@@ -2424,5 +2453,87 @@ mod tests {
         let n_b = results.group_results[1].1.n_folds;
         assert_eq!(n_a, n_b);
         assert!(n_a > 0);
+    }
+
+    #[test]
+    fn fold_generator_embargo_zero_matches_no_embargo() {
+        let g1 = CvFoldGenerator::new()
+            .initial_window(10)
+            .horizon(3)
+            .step_size(3);
+        let g2 = CvFoldGenerator::new()
+            .initial_window(10)
+            .horizon(3)
+            .step_size(3)
+            .embargo(0);
+        assert_eq!(g1.generate(50), g2.generate(50));
+    }
+    #[test]
+    fn fold_generator_embargo_shrinks_training() {
+        let folds = CvFoldGenerator::new()
+            .initial_window(10)
+            .horizon(3)
+            .step_size(3)
+            .embargo(5)
+            .generate(50);
+        assert!(!folds.is_empty());
+        if folds.len() > 1 {
+            assert!(folds[1].train_start > 0);
+        }
+    }
+    #[test]
+    fn fold_generator_embargo_with_gap_and_purge() {
+        let folds = CvFoldGenerator::new()
+            .initial_window(10)
+            .horizon(3)
+            .step_size(3)
+            .gap(1)
+            .purge(1)
+            .embargo(3)
+            .generate(50);
+        assert!(!folds.is_empty());
+        for fold in &folds {
+            assert!(fold.train_end > fold.train_start);
+        }
+    }
+    #[test]
+    fn fold_generator_embargo_beyond_series_clamps() {
+        let folds = CvFoldGenerator::new()
+            .initial_window(10)
+            .horizon(3)
+            .step_size(3)
+            .embargo(1000)
+            .generate(30);
+        assert!(folds.len() <= 2, "got {}", folds.len());
+    }
+    #[test]
+    fn fold_generator_embargo_expanding_vs_rolling() {
+        assert!(!CvFoldGenerator::new()
+            .initial_window(10)
+            .horizon(2)
+            .step_size(2)
+            .strategy(CVStrategy::Expanding)
+            .embargo(3)
+            .generate(40)
+            .is_empty());
+        for fold in &CvFoldGenerator::new()
+            .initial_window(10)
+            .horizon(2)
+            .step_size(2)
+            .strategy(CVStrategy::Rolling)
+            .embargo(3)
+            .generate(40)
+        {
+            assert!(fold.train_end > fold.train_start);
+        }
+    }
+    #[test]
+    fn fold_generator_embargo_cvconfig_integration() {
+        let gen = CVConfig::expanding(10, 3)
+            .with_step_size(3)
+            .with_embargo(5)
+            .to_fold_generator();
+        assert_eq!(gen.embargo, 5);
+        assert!(!gen.generate(50).is_empty());
     }
 }

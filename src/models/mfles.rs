@@ -719,7 +719,9 @@ impl MFLES {
         horizon: usize,
         future_regressors: Option<&HashMap<String, Vec<f64>>>,
     ) -> Result<Forecast> {
-        let trend = self.trend.ok_or(ForecastError::FitRequired)?;
+        let trend = self
+            .trend
+            .ok_or(ForecastError::FitRequired { model: None })?;
 
         if horizon == 0 {
             return Ok(Forecast::from_values(Vec::new()));
@@ -1195,7 +1197,10 @@ impl Forecaster for MFLES {
         }
 
         // Compute variance from residuals
-        let residuals = self.residuals.as_ref().ok_or(ForecastError::FitRequired)?;
+        let residuals = self
+            .residuals
+            .as_ref()
+            .ok_or(ForecastError::FitRequired { model: None })?;
         let variance = if residuals.len() > 1 {
             let mean_resid: f64 = residuals.iter().sum::<f64>() / residuals.len() as f64;
             residuals
@@ -1237,7 +1242,10 @@ impl Forecaster for MFLES {
         }
 
         // Compute variance from residuals
-        let residuals = self.residuals.as_ref().ok_or(ForecastError::FitRequired)?;
+        let residuals = self
+            .residuals
+            .as_ref()
+            .ok_or(ForecastError::FitRequired { model: None })?;
         let variance = if residuals.len() > 1 {
             let mean_resid: f64 = residuals.iter().sum::<f64>() / residuals.len() as f64;
             residuals
@@ -1427,7 +1435,10 @@ mod tests {
     #[test]
     fn mfles_requires_fit() {
         let model = MFLES::new(vec![12]);
-        assert!(matches!(model.predict(5), Err(ForecastError::FitRequired)));
+        assert!(matches!(
+            model.predict(5),
+            Err(ForecastError::FitRequired { .. })
+        ));
     }
 
     #[test]

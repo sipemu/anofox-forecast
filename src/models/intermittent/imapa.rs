@@ -286,7 +286,9 @@ impl Forecaster for IMAPA {
     }
 
     fn predict(&self, horizon: usize) -> Result<Forecast> {
-        let forecast_level = self.forecast_level.ok_or(ForecastError::FitRequired)?;
+        let forecast_level = self
+            .forecast_level
+            .ok_or(ForecastError::FitRequired { model: None })?;
 
         if horizon == 0 {
             return Ok(Forecast::from_values(Vec::new()));
@@ -305,7 +307,10 @@ impl Forecaster for IMAPA {
         }
 
         // Compute variance from residuals
-        let residuals = self.residuals.as_ref().ok_or(ForecastError::FitRequired)?;
+        let residuals = self
+            .residuals
+            .as_ref()
+            .ok_or(ForecastError::FitRequired { model: None })?;
         let variance = if residuals.len() > 1 {
             let mean_resid: f64 = residuals.iter().sum::<f64>() / residuals.len() as f64;
             residuals
@@ -490,7 +495,10 @@ mod tests {
     #[test]
     fn imapa_requires_fit() {
         let model = IMAPA::new();
-        assert!(matches!(model.predict(5), Err(ForecastError::FitRequired)));
+        assert!(matches!(
+            model.predict(5),
+            Err(ForecastError::FitRequired { .. })
+        ));
     }
 
     #[test]

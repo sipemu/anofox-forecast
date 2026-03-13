@@ -243,14 +243,14 @@ impl Forecaster for AutoTBATS {
     fn predict(&self, horizon: usize) -> Result<Forecast> {
         self.best_model
             .as_ref()
-            .ok_or(ForecastError::FitRequired)?
+            .ok_or(ForecastError::FitRequired { model: None })?
             .predict(horizon)
     }
 
     fn predict_with_intervals(&self, horizon: usize, level: f64) -> Result<Forecast> {
         self.best_model
             .as_ref()
-            .ok_or(ForecastError::FitRequired)?
+            .ok_or(ForecastError::FitRequired { model: None })?
             .predict_with_intervals(horizon, level)
     }
 
@@ -355,7 +355,10 @@ mod tests {
     #[test]
     fn auto_tbats_requires_fit() {
         let model = AutoTBATS::new(vec![24]);
-        assert!(matches!(model.predict(5), Err(ForecastError::FitRequired)));
+        assert!(matches!(
+            model.predict(5),
+            Err(ForecastError::FitRequired { .. })
+        ));
     }
 
     #[test]
