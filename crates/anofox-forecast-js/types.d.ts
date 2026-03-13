@@ -266,7 +266,7 @@ export class CalendarAnnotations {
 /**
  * Get the library version string.
  *
- * @returns The version of the anofox-forecast library (e.g. "0.4.4")
+ * @returns The version of the anofox-forecast library (e.g. "0.4.5")
  */
 export function version(): string;
 
