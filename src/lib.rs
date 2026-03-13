@@ -46,7 +46,7 @@ pub mod validation;
 pub use error::{ForecastError, Result};
 
 pub mod prelude {
-    pub use crate::core::{Forecast, TimeSeries};
+    pub use crate::core::{ConstrainedForecast, Forecast, ForecastConstraint, TimeSeries};
     pub use crate::error::{ForecastError, Result};
     pub use crate::models::Forecaster;
     pub use crate::utils::{
