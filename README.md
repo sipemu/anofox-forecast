@@ -85,6 +85,7 @@ console.log(forecast.values);
   - Streaming CV aggregation with early stopping (`cross_validate_early_stop()`)
   - `ModelDiagnostics`: Ljung-Box, Jarque-Bera, Breusch-Pagan residual diagnostics
   - `IntermittentDiagnostics`: Syntetos-Boylan demand classification (Smooth/Erratic/Intermittent/Lumpy)
+  - `AidAnalyzer`: Automatic Identification of Demand — distribution fitting, demand type classification, and per-observation anomaly detection (stockouts, lifecycle events, outliers)
 
 - **Time Series Feature Extraction (76+ features)**
   - Basic statistics (mean, variance, quantiles, energy, etc.)
@@ -414,6 +415,7 @@ println!("Upper: {:?}", intervals.upper());
 | `diagnose_residuals()` | Unified residual diagnostics (Ljung-Box, DW, Jarque-Bera) |
 | `ModelDiagnostics` | Comprehensive diagnostics: Ljung-Box, Jarque-Bera, Breusch-Pagan |
 | `IntermittentDiagnostics` | Syntetos-Boylan demand classification with model recommendations |
+| `AidAnalyzer` | Automatic Identification of Demand: distribution fitting, anomaly detection |
 | `ForecastMetrics::compute()` | All 10 metrics in one call (MAE through Theil's U) |
 | `fit_all_and_compare()` | Fit all registry models, rank by holdout accuracy |
 | `cross_validate_all()` | CV all registry models with aggregated metrics |

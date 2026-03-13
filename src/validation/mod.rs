@@ -24,10 +24,16 @@
 //! let kpss = kpss_test(&series, None);
 //! ```
 
+#[cfg(feature = "postprocess")]
+pub mod aid;
 pub mod diagnostics;
 pub mod intermittent_diagnostics;
 pub mod residual_tests;
 pub mod stationarity;
+
+// Re-export from AID
+#[cfg(feature = "postprocess")]
+pub use aid::{AidAnalyzer, AidAnomalyLabel, AidFeatures, AidResult, AidSummary};
 
 // Re-export from diagnostics
 pub use diagnostics::ModelDiagnostics;
