@@ -1725,6 +1725,87 @@ impl EnsembleForecaster {
         .with_method(anofox_forecast::models::ensemble::CombinationMethod::WeightedMSE);
     }
 
+    /// Set the combination method to inverse AIC weighting.
+    ///
+    /// Computes Akaike weights from in-sample residuals.
+    #[wasm_bindgen(js_name = setInverseAic)]
+    pub fn set_inverse_aic(&mut self) {
+        self.model = std::mem::replace(
+            &mut self.model,
+            anofox_forecast::models::ensemble::Ensemble::new(vec![]),
+        )
+        .with_method(anofox_forecast::models::ensemble::CombinationMethod::InverseAIC);
+    }
+
+    /// Set the combination method to stacking (projected gradient descent).
+    ///
+    /// Trains non-negative weights that sum to one on validation data.
+    ///
+    /// @param folds - Number of folds (default: 5)
+    #[wasm_bindgen(js_name = setStacking)]
+    pub fn set_stacking(&mut self, folds: Option<usize>) {
+        self.model = std::mem::replace(
+            &mut self.model,
+            anofox_forecast::models::ensemble::Ensemble::new(vec![]),
+        )
+        .with_method(
+            anofox_forecast::models::ensemble::CombinationMethod::Stacking {
+                folds: folds.unwrap_or(5),
+            },
+        );
+    }
+
+    /// Set the combination method to per-horizon adaptive weighting.
+    ///
+    /// Computes separate weight vectors for each forecast horizon step
+    /// based on rolling-origin evaluation.
+    #[wasm_bindgen(js_name = setHorizonAdaptive)]
+    pub fn set_horizon_adaptive(&mut self) {
+        self.model = std::mem::replace(
+            &mut self.model,
+            anofox_forecast::models::ensemble::Ensemble::new(vec![]),
+        )
+        .with_method(anofox_forecast::models::ensemble::CombinationMethod::HorizonAdaptive);
+    }
+
+    /// Set the combination method by name string.
+    ///
+    /// Supported values: "mean", "median", "weighted_mse", "inverse_aic",
+    /// "stacking", "horizon_adaptive".
+    ///
+    /// @param method - Combination method name
+    #[wasm_bindgen(js_name = setMethod)]
+    pub fn set_method(&mut self, method: &str) -> Result<(), JsError> {
+        let combination = match method.to_lowercase().as_str() {
+            "mean" => anofox_forecast::models::ensemble::CombinationMethod::Mean,
+            "median" => anofox_forecast::models::ensemble::CombinationMethod::Median,
+            "weighted_mse" | "weightedmse" => {
+                anofox_forecast::models::ensemble::CombinationMethod::WeightedMSE
+            }
+            "inverse_aic" | "inverseaic" => {
+                anofox_forecast::models::ensemble::CombinationMethod::InverseAIC
+            }
+            "stacking" => {
+                anofox_forecast::models::ensemble::CombinationMethod::Stacking { folds: 5 }
+            }
+            "horizon_adaptive" | "horizonadaptive" => {
+                anofox_forecast::models::ensemble::CombinationMethod::HorizonAdaptive
+            }
+            other => {
+                return Err(JsError::new(&format!(
+                    "Unknown combination method '{}'. Use: mean, median, weighted_mse, inverse_aic, stacking, horizon_adaptive",
+                    other
+                )));
+            }
+        };
+        self.model = std::mem::replace(
+            &mut self.model,
+            anofox_forecast::models::ensemble::Ensemble::new(vec![]),
+        )
+        .with_method(combination);
+        Ok(())
+    }
+
     /// Fit all models in the ensemble.
     ///
     /// @param series - TimeSeries to fit

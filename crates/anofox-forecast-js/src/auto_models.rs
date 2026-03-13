@@ -166,6 +166,116 @@ struct ModelScoreJs {
 }
 
 // =============================================================================
+// AutoForecastBuilder
+// =============================================================================
+
+/// Builder for constructing an AutoForecaster with custom parameters.
+///
+/// Uses a fluent API: chain setter methods and call `build()` to produce
+/// an `AutoForecaster`.
+#[wasm_bindgen]
+pub struct AutoForecastBuilder {
+    seasonal_period: Option<usize>,
+    include_arima: Option<bool>,
+    include_ets: Option<bool>,
+    include_theta: Option<bool>,
+    use_cross_validation: Option<bool>,
+}
+
+#[wasm_bindgen]
+impl AutoForecastBuilder {
+    /// Create a new builder with all defaults enabled.
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        Self {
+            seasonal_period: None,
+            include_arima: None,
+            include_ets: None,
+            include_theta: None,
+            use_cross_validation: None,
+        }
+    }
+
+    /// Set the seasonal period.
+    ///
+    /// @param period - Seasonal period (e.g., 12 for monthly data)
+    #[wasm_bindgen(js_name = seasonalPeriod)]
+    pub fn seasonal_period(mut self, period: usize) -> Self {
+        self.seasonal_period = Some(period);
+        self
+    }
+
+    /// Include or exclude AutoARIMA from the candidate set.
+    ///
+    /// @param include - Whether to include AutoARIMA (default: true)
+    #[wasm_bindgen(js_name = includeArima)]
+    pub fn include_arima(mut self, include: bool) -> Self {
+        self.include_arima = Some(include);
+        self
+    }
+
+    /// Include or exclude AutoETS from the candidate set.
+    ///
+    /// @param include - Whether to include AutoETS (default: true)
+    #[wasm_bindgen(js_name = includeEts)]
+    pub fn include_ets(mut self, include: bool) -> Self {
+        self.include_ets = Some(include);
+        self
+    }
+
+    /// Include or exclude AutoTheta from the candidate set.
+    ///
+    /// @param include - Whether to include AutoTheta (default: true)
+    #[wasm_bindgen(js_name = includeTheta)]
+    pub fn include_theta(mut self, include: bool) -> Self {
+        self.include_theta = Some(include);
+        self
+    }
+
+    /// Use cross-validation instead of in-sample MSE for model selection.
+    ///
+    /// @param useCv - Whether to use cross-validation (default: false)
+    #[wasm_bindgen(js_name = useCrossValidation)]
+    pub fn use_cross_validation(mut self, use_cv: bool) -> Self {
+        self.use_cross_validation = Some(use_cv);
+        self
+    }
+
+    /// Build the AutoForecaster with the configured parameters.
+    ///
+    /// @returns A new AutoForecaster ready to fit
+    pub fn build(self) -> AutoForecaster {
+        let mut builder = AutoForecast::builder();
+
+        if let Some(p) = self.seasonal_period {
+            builder = builder.seasonal_period(p);
+        }
+        if let Some(v) = self.include_arima {
+            builder = builder.include_arima(v);
+        }
+        if let Some(v) = self.include_ets {
+            builder = builder.include_ets(v);
+        }
+        if let Some(v) = self.include_theta {
+            builder = builder.include_theta(v);
+        }
+        if let Some(true) = self.use_cross_validation {
+            builder = builder.selection(SelectionStrategy::CrossValidation);
+        }
+
+        AutoForecaster {
+            model: builder.build(),
+        }
+    }
+}
+
+impl Default for AutoForecastBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// =============================================================================
 // AutoEnsemble
 // =============================================================================
 

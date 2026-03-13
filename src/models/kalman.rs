@@ -9,29 +9,474 @@
 use crate::error::{ForecastError, Result};
 
 // ---------------------------------------------------------------------------
-// Small dense matrix helpers (column-major Vec<Vec<f64>> where outer = rows)
+// DenseMatrix: flat row-major layout for cache-friendly matrix operations
 // ---------------------------------------------------------------------------
 
-/// Create an n x n identity matrix.
-fn mat_eye(n: usize) -> Vec<Vec<f64>> {
-    let mut m = vec![vec![0.0; n]; n];
-    for i in 0..n {
-        m[i][i] = 1.0;
+/// Dense matrix stored in row-major flat `Vec<f64>` for cache locality.
+#[derive(Debug, Clone)]
+struct DenseMatrix {
+    data: Vec<f64>,
+    rows: usize,
+    cols: usize,
+}
+
+impl DenseMatrix {
+    /// Create a new matrix from existing data (row-major order).
+    #[allow(dead_code)]
+    fn new(rows: usize, cols: usize, data: Vec<f64>) -> Self {
+        debug_assert_eq!(data.len(), rows * cols);
+        Self { data, rows, cols }
     }
-    m
+
+    /// Create a zero matrix of given dimensions.
+    fn zeros(rows: usize, cols: usize) -> Self {
+        Self {
+            data: vec![0.0; rows * cols],
+            rows,
+            cols,
+        }
+    }
+
+    /// Create an n x n identity matrix.
+    fn identity(n: usize) -> Self {
+        let mut m = Self::zeros(n, n);
+        for i in 0..n {
+            m.data[i * n + i] = 1.0;
+        }
+        m
+    }
+
+    /// Get element at (row, col).
+    #[inline(always)]
+    fn get(&self, r: usize, c: usize) -> f64 {
+        self.data[r * self.cols + c]
+    }
+
+    /// Set element at (row, col).
+    #[inline(always)]
+    #[allow(dead_code)]
+    fn set(&mut self, r: usize, c: usize, v: f64) {
+        self.data[r * self.cols + c] = v;
+    }
+
+    /// Get a row as a slice.
+    #[inline]
+    fn row(&self, r: usize) -> &[f64] {
+        let start = r * self.cols;
+        &self.data[start..start + self.cols]
+    }
+
+    /// Get column values as a new Vec.
+    #[allow(dead_code)]
+    fn col(&self, c: usize) -> Vec<f64> {
+        (0..self.rows)
+            .map(|r| self.data[r * self.cols + c])
+            .collect()
+    }
+
+    /// Convert from `Vec<Vec<f64>>` (row-major nested).
+    fn from_nested(nested: &[Vec<f64>]) -> Self {
+        let rows = nested.len();
+        if rows == 0 {
+            return Self::zeros(0, 0);
+        }
+        let cols = nested[0].len();
+        let mut data = Vec::with_capacity(rows * cols);
+        for row in nested {
+            data.extend_from_slice(row);
+        }
+        Self { data, rows, cols }
+    }
+
+    /// Convert to `Vec<Vec<f64>>` for public API compatibility.
+    fn to_nested(&self) -> Vec<Vec<f64>> {
+        (0..self.rows).map(|r| self.row(r).to_vec()).collect()
+    }
+
+    // --- In-place operations ---
+
+    /// self += other
+    fn add_inplace(&mut self, other: &DenseMatrix) {
+        debug_assert_eq!(self.rows, other.rows);
+        debug_assert_eq!(self.cols, other.cols);
+        for (a, b) in self.data.iter_mut().zip(other.data.iter()) {
+            *a += *b;
+        }
+    }
+
+    /// self -= other
+    #[allow(dead_code)]
+    fn sub_inplace(&mut self, other: &DenseMatrix) {
+        debug_assert_eq!(self.rows, other.rows);
+        debug_assert_eq!(self.cols, other.cols);
+        for (a, b) in self.data.iter_mut().zip(other.data.iter()) {
+            *a -= *b;
+        }
+    }
+
+    /// self *= scalar
+    #[allow(dead_code)]
+    fn scale_inplace(&mut self, scalar: f64) {
+        for v in self.data.iter_mut() {
+            *v *= scalar;
+        }
+    }
+
+    // --- Allocating operations ---
+
+    /// Matrix multiply into pre-allocated buffer: out = self * other
+    fn mul_into(&self, other: &DenseMatrix, out: &mut DenseMatrix) {
+        debug_assert_eq!(self.cols, other.rows);
+        debug_assert_eq!(out.rows, self.rows);
+        debug_assert_eq!(out.cols, other.cols);
+        // Zero the output
+        for v in out.data.iter_mut() {
+            *v = 0.0;
+        }
+        let ar = self.rows;
+        let ac = self.cols;
+        let bc = other.cols;
+        for i in 0..ar {
+            let out_row = i * bc;
+            let a_row = i * ac;
+            for k in 0..ac {
+                let a_ik = self.data[a_row + k];
+                let b_row = k * bc;
+                for j in 0..bc {
+                    out.data[out_row + j] += a_ik * other.data[b_row + j];
+                }
+            }
+        }
+    }
+
+    /// Matrix-vector multiply: y = self * x
+    fn mul_vec(&self, x: &[f64]) -> Vec<f64> {
+        debug_assert_eq!(self.cols, x.len());
+        let mut out = vec![0.0; self.rows];
+        for i in 0..self.rows {
+            let row_start = i * self.cols;
+            let mut s = 0.0;
+            for j in 0..self.cols {
+                s += self.data[row_start + j] * x[j];
+            }
+            out[i] = s;
+        }
+        out
+    }
+
+    /// Copy contents from another matrix of the same dimensions.
+    fn copy_from(&mut self, other: &DenseMatrix) {
+        debug_assert_eq!(self.rows, other.rows);
+        debug_assert_eq!(self.cols, other.cols);
+        self.data.copy_from_slice(&other.data);
+    }
+
+    /// Symmetrize in-place: self = (self + self^T) / 2
+    fn symmetrize_inplace(&mut self) {
+        debug_assert_eq!(self.rows, self.cols);
+        let n = self.rows;
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let ij = i * n + j;
+                let ji = j * n + i;
+                let avg = 0.5 * (self.data[ij] + self.data[ji]);
+                self.data[ij] = avg;
+                self.data[ji] = avg;
+            }
+        }
+    }
+
+    /// Set self = A - B (reuses allocation).
+    fn set_sub(&mut self, a: &DenseMatrix, b: &DenseMatrix) {
+        debug_assert_eq!(a.rows, b.rows);
+        debug_assert_eq!(a.cols, b.cols);
+        debug_assert_eq!(self.rows, a.rows);
+        debug_assert_eq!(self.cols, a.cols);
+        for i in 0..self.data.len() {
+            self.data[i] = a.data[i] - b.data[i];
+        }
+    }
+
+    /// Fill with zeros.
+    fn zero_fill(&mut self) {
+        for v in self.data.iter_mut() {
+            *v = 0.0;
+        }
+    }
 }
 
-/// Create an n x m zero matrix.
-fn mat_zeros(rows: usize, cols: usize) -> Vec<Vec<f64>> {
-    vec![vec![0.0; cols]; rows]
+// ---------------------------------------------------------------------------
+// Cholesky decomposition and solvers using DenseMatrix
+// ---------------------------------------------------------------------------
+
+/// Cholesky decomposition of a symmetric positive-definite matrix.
+/// Writes lower-triangular L into `l` such that A = L * L^T.
+fn dm_cholesky(a: &DenseMatrix, l: &mut DenseMatrix) -> Result<()> {
+    debug_assert_eq!(a.rows, a.cols);
+    let n = a.rows;
+    debug_assert_eq!(l.rows, n);
+    debug_assert_eq!(l.cols, n);
+    l.zero_fill();
+    for j in 0..n {
+        let mut sum = 0.0;
+        for k in 0..j {
+            let ljk = l.data[j * n + k];
+            sum += ljk * ljk;
+        }
+        let diag = a.data[j * n + j] - sum;
+        if diag < 0.0 {
+            return Err(ForecastError::SingularMatrix(
+                "matrix is not positive-definite in Cholesky decomposition".into(),
+            ));
+        }
+        let ljj = diag.sqrt();
+        if ljj == 0.0 {
+            return Err(ForecastError::SingularMatrix(
+                "zero diagonal in Cholesky decomposition".into(),
+            ));
+        }
+        l.data[j * n + j] = ljj;
+        for i in (j + 1)..n {
+            let mut s = 0.0;
+            for k in 0..j {
+                s += l.data[i * n + k] * l.data[j * n + k];
+            }
+            l.data[i * n + j] = (a.data[i * n + j] - s) / ljj;
+        }
+    }
+    Ok(())
 }
 
-/// Number of rows.
+/// Solve L * x = b via forward substitution (L lower triangular).
+fn dm_forward_solve(l: &DenseMatrix, b: &[f64], x: &mut [f64]) {
+    let n = b.len();
+    for i in 0..n {
+        let mut s = 0.0;
+        let row = i * l.cols;
+        for j in 0..i {
+            s += l.data[row + j] * x[j];
+        }
+        x[i] = (b[i] - s) / l.data[row + i];
+    }
+}
+
+/// Solve L^T * x = b via back substitution (L lower triangular).
+fn dm_back_solve(l: &DenseMatrix, b: &[f64], x: &mut [f64]) {
+    let n = b.len();
+    for i in (0..n).rev() {
+        let mut s = 0.0;
+        for j in (i + 1)..n {
+            s += l.data[j * l.cols + i] * x[j]; // L^T[i][j] = L[j][i]
+        }
+        x[i] = (b[i] - s) / l.data[i * l.cols + i];
+    }
+}
+
+/// Inverse of a symmetric positive-definite matrix via Cholesky.
+/// Uses pre-allocated scratch buffers.
+fn dm_inv_spd(
+    a: &DenseMatrix,
+    l: &mut DenseMatrix,
+    inv: &mut DenseMatrix,
+    y_buf: &mut [f64],
+    x_buf: &mut [f64],
+) -> Result<()> {
+    let n = a.rows;
+    dm_cholesky(a, l)?;
+    inv.zero_fill();
+    for col in 0..n {
+        // Set up unit vector in y_buf
+        for v in y_buf[..n].iter_mut() {
+            *v = 0.0;
+        }
+        y_buf[col] = 1.0;
+        dm_forward_solve(l, &y_buf[..n], &mut x_buf[..n]);
+        // Now x_buf holds the forward-solve result; solve L^T * result = x_buf
+        // Reuse y_buf for the final result
+        dm_back_solve(l, &x_buf[..n], &mut y_buf[..n]);
+        for row in 0..n {
+            inv.data[row * n + col] = y_buf[row];
+        }
+    }
+    Ok(())
+}
+
+/// Log-determinant of a symmetric positive-definite matrix via Cholesky.
+fn dm_log_det_spd(a: &DenseMatrix, l: &mut DenseMatrix) -> Result<f64> {
+    dm_cholesky(a, l)?;
+    let n = a.rows;
+    let mut ld = 0.0;
+    for i in 0..n {
+        ld += l.data[i * n + i].ln();
+    }
+    Ok(2.0 * ld)
+}
+
+/// Quadratic form x^T * A^{-1} * x for SPD A.
+fn dm_quad_form_inv(
+    a: &DenseMatrix,
+    x: &[f64],
+    l: &mut DenseMatrix,
+    y_buf: &mut [f64],
+) -> Result<f64> {
+    let n = a.rows;
+    dm_cholesky(a, l)?;
+    dm_forward_solve(l, x, &mut y_buf[..n]);
+    Ok(y_buf[..n].iter().map(|v| v * v).sum())
+}
+
+// ---------------------------------------------------------------------------
+// Public types
+// ---------------------------------------------------------------------------
+
+/// Internal version of StateSpaceModel using DenseMatrix for performance.
+#[derive(Debug, Clone)]
+struct InternalSSM {
+    transition: DenseMatrix,        // F: ns x ns
+    observation: DenseMatrix,       // H: no x ns
+    process_noise: DenseMatrix,     // Q: ns x ns
+    observation_noise: DenseMatrix, // R: no x no
+    transition_t: DenseMatrix,      // F^T: ns x ns (pre-computed)
+    observation_t: DenseMatrix,     // H^T: ns x no (pre-computed)
+}
+
+impl InternalSSM {
+    fn from_model(model: &StateSpaceModel) -> Self {
+        let f = DenseMatrix::from_nested(&model.transition);
+        let h = DenseMatrix::from_nested(&model.observation);
+        let q = DenseMatrix::from_nested(&model.process_noise);
+        let r = DenseMatrix::from_nested(&model.observation_noise);
+        // Pre-compute transposes (done once, reused every step).
+        let ft = {
+            let ns = f.rows;
+            let mut t = DenseMatrix::zeros(ns, ns);
+            for i in 0..ns {
+                for j in 0..ns {
+                    t.data[j * ns + i] = f.data[i * ns + j];
+                }
+            }
+            t
+        };
+        let ht = {
+            let no = h.rows;
+            let ns = h.cols;
+            let mut t = DenseMatrix::zeros(ns, no);
+            for i in 0..no {
+                for j in 0..ns {
+                    t.data[j * no + i] = h.data[i * ns + j];
+                }
+            }
+            t
+        };
+        Self {
+            transition: f,
+            observation: h,
+            process_noise: q,
+            observation_noise: r,
+            transition_t: ft,
+            observation_t: ht,
+        }
+    }
+
+    fn n_state(&self) -> usize {
+        self.transition.rows
+    }
+
+    fn n_obs(&self) -> usize {
+        self.observation.rows
+    }
+}
+
+/// Pre-allocated scratch buffers for the Kalman filter loop.
+struct FilterScratch {
+    // Predict step temporaries
+    fp: DenseMatrix,     // F * P, ns x ns
+    p_pred: DenseMatrix, // F * P * F^T + Q, ns x ns
+
+    // Update step temporaries
+    hp: DenseMatrix,    // H * P_pred, no x ns
+    s: DenseMatrix,     // H * P_pred * H^T + R, no x no
+    pht: DenseMatrix,   // P_pred * H^T, ns x no
+    s_inv: DenseMatrix, // S^{-1}, no x no
+    k: DenseMatrix,     // Kalman gain, ns x no
+    kh: DenseMatrix,    // K * H, ns x ns
+    i_kh: DenseMatrix,  // I - K*H, ns x ns
+
+    // Cholesky scratch
+    l_obs: DenseMatrix, // Cholesky factor for observation space, no x no
+
+    // Vector scratch
+    y_buf: Vec<f64>,
+    x_buf: Vec<f64>,
+}
+
+impl FilterScratch {
+    fn new(ns: usize, no: usize) -> Self {
+        let buf_len = ns.max(no);
+        Self {
+            fp: DenseMatrix::zeros(ns, ns),
+            p_pred: DenseMatrix::zeros(ns, ns),
+            hp: DenseMatrix::zeros(no, ns),
+            s: DenseMatrix::zeros(no, no),
+            pht: DenseMatrix::zeros(ns, no),
+            s_inv: DenseMatrix::zeros(no, no),
+            k: DenseMatrix::zeros(ns, no),
+            kh: DenseMatrix::zeros(ns, ns),
+            i_kh: DenseMatrix::zeros(ns, ns),
+            l_obs: DenseMatrix::zeros(no, no),
+            y_buf: vec![0.0; buf_len],
+            x_buf: vec![0.0; buf_len],
+        }
+    }
+}
+
+/// Pre-allocated scratch buffers for the RTS smoother loop.
+struct SmoothScratch {
+    fp: DenseMatrix,         // F * P, ns x ns
+    p_pred: DenseMatrix,     // F * P * F^T + Q, ns x ns
+    p_pred_inv: DenseMatrix, // P_pred^{-1}, ns x ns
+    pft: DenseMatrix,        // P * F^T, ns x ns
+    g: DenseMatrix,          // smoother gain, ns x ns
+    gt: DenseMatrix,         // G^T, ns x ns
+    p_diff: DenseMatrix,     // P_s(t+1) - P_pred, ns x ns
+    gp: DenseMatrix,         // G * p_diff, ns x ns
+    gpgt: DenseMatrix,       // G * p_diff * G^T, ns x ns
+
+    // Cholesky scratch
+    l: DenseMatrix,
+
+    // Vector scratch
+    y_buf: Vec<f64>,
+    x_buf: Vec<f64>,
+    diff: Vec<f64>,
+}
+
+impl SmoothScratch {
+    fn new(ns: usize) -> Self {
+        Self {
+            fp: DenseMatrix::zeros(ns, ns),
+            p_pred: DenseMatrix::zeros(ns, ns),
+            p_pred_inv: DenseMatrix::zeros(ns, ns),
+            pft: DenseMatrix::zeros(ns, ns),
+            g: DenseMatrix::zeros(ns, ns),
+            gt: DenseMatrix::zeros(ns, ns),
+            p_diff: DenseMatrix::zeros(ns, ns),
+            gp: DenseMatrix::zeros(ns, ns),
+            gpgt: DenseMatrix::zeros(ns, ns),
+            l: DenseMatrix::zeros(ns, ns),
+            y_buf: vec![0.0; ns],
+            x_buf: vec![0.0; ns],
+            diff: vec![0.0; ns],
+        }
+    }
+}
+
+/// Helper: row count of nested Vec matrix.
 fn mat_rows(m: &[Vec<f64>]) -> usize {
     m.len()
 }
 
-/// Number of columns (assumes non-empty and rectangular).
+/// Helper: column count of nested Vec matrix.
 fn mat_cols(m: &[Vec<f64>]) -> usize {
     if m.is_empty() {
         0
@@ -39,176 +484,6 @@ fn mat_cols(m: &[Vec<f64>]) -> usize {
         m[0].len()
     }
 }
-
-/// Matrix addition: C = A + B.
-fn mat_add(a: &[Vec<f64>], b: &[Vec<f64>]) -> Vec<Vec<f64>> {
-    let r = mat_rows(a);
-    let c = mat_cols(a);
-    let mut out = mat_zeros(r, c);
-    for i in 0..r {
-        for j in 0..c {
-            out[i][j] = a[i][j] + b[i][j];
-        }
-    }
-    out
-}
-
-/// Matrix subtraction: C = A - B.
-fn mat_sub(a: &[Vec<f64>], b: &[Vec<f64>]) -> Vec<Vec<f64>> {
-    let r = mat_rows(a);
-    let c = mat_cols(a);
-    let mut out = mat_zeros(r, c);
-    for i in 0..r {
-        for j in 0..c {
-            out[i][j] = a[i][j] - b[i][j];
-        }
-    }
-    out
-}
-
-/// Matrix multiply: C = A * B.
-fn mat_mul(a: &[Vec<f64>], b: &[Vec<f64>]) -> Vec<Vec<f64>> {
-    let ar = mat_rows(a);
-    let ac = mat_cols(a);
-    let bc = mat_cols(b);
-    let mut out = mat_zeros(ar, bc);
-    for i in 0..ar {
-        for k in 0..ac {
-            let a_ik = a[i][k];
-            for j in 0..bc {
-                out[i][j] += a_ik * b[k][j];
-            }
-        }
-    }
-    out
-}
-
-/// Matrix-vector multiply: y = A * x.
-fn mat_vec(a: &[Vec<f64>], x: &[f64]) -> Vec<f64> {
-    let r = mat_rows(a);
-    let c = mat_cols(a);
-    let mut out = vec![0.0; r];
-    for i in 0..r {
-        let mut s = 0.0;
-        for j in 0..c {
-            s += a[i][j] * x[j];
-        }
-        out[i] = s;
-    }
-    out
-}
-
-/// Transpose.
-fn mat_transpose(a: &[Vec<f64>]) -> Vec<Vec<f64>> {
-    let r = mat_rows(a);
-    let c = mat_cols(a);
-    let mut out = mat_zeros(c, r);
-    for i in 0..r {
-        for j in 0..c {
-            out[j][i] = a[i][j];
-        }
-    }
-    out
-}
-
-/// Cholesky decomposition of a symmetric positive-definite matrix.
-/// Returns lower-triangular L such that A = L * L^T.
-fn cholesky(a: &[Vec<f64>]) -> Result<Vec<Vec<f64>>> {
-    let n = mat_rows(a);
-    let mut l = mat_zeros(n, n);
-    for j in 0..n {
-        let mut sum = 0.0;
-        for k in 0..j {
-            sum += l[j][k] * l[j][k];
-        }
-        let diag = a[j][j] - sum;
-        if diag < 0.0 {
-            return Err(ForecastError::SingularMatrix(
-                "matrix is not positive-definite in Cholesky decomposition".into(),
-            ));
-        }
-        l[j][j] = diag.sqrt();
-        if l[j][j] == 0.0 {
-            return Err(ForecastError::SingularMatrix(
-                "zero diagonal in Cholesky decomposition".into(),
-            ));
-        }
-        for i in (j + 1)..n {
-            let mut s = 0.0;
-            for k in 0..j {
-                s += l[i][k] * l[j][k];
-            }
-            l[i][j] = (a[i][j] - s) / l[j][j];
-        }
-    }
-    Ok(l)
-}
-
-/// Solve L * x = b via forward substitution (L lower triangular).
-fn forward_solve(l: &[Vec<f64>], b: &[f64]) -> Vec<f64> {
-    let n = b.len();
-    let mut x = vec![0.0; n];
-    for i in 0..n {
-        let mut s = 0.0;
-        for j in 0..i {
-            s += l[i][j] * x[j];
-        }
-        x[i] = (b[i] - s) / l[i][i];
-    }
-    x
-}
-
-/// Solve L^T * x = b via back substitution (L lower triangular).
-fn back_solve(l: &[Vec<f64>], b: &[f64]) -> Vec<f64> {
-    let n = b.len();
-    let mut x = vec![0.0; n];
-    for i in (0..n).rev() {
-        let mut s = 0.0;
-        for j in (i + 1)..n {
-            s += l[j][i] * x[j]; // L^T[i][j] = L[j][i]
-        }
-        x[i] = (b[i] - s) / l[i][i];
-    }
-    x
-}
-
-/// Inverse of a symmetric positive-definite matrix via Cholesky.
-fn mat_inv_spd(a: &[Vec<f64>]) -> Result<Vec<Vec<f64>>> {
-    let n = mat_rows(a);
-    let l = cholesky(a)?;
-    let mut inv = mat_zeros(n, n);
-    for col in 0..n {
-        let mut e = vec![0.0; n];
-        e[col] = 1.0;
-        let y = forward_solve(&l, &e);
-        let x = back_solve(&l, &y);
-        for row in 0..n {
-            inv[row][col] = x[row];
-        }
-    }
-    Ok(inv)
-}
-
-/// Log-determinant of a symmetric positive-definite matrix via Cholesky.
-fn mat_log_det_spd(a: &[Vec<f64>]) -> Result<f64> {
-    let l = cholesky(a)?;
-    let mut ld = 0.0;
-    for i in 0..mat_rows(&l) {
-        ld += l[i][i].ln();
-    }
-    Ok(2.0 * ld)
-}
-
-/// Quadratic form x^T * A^{-1} * x for SPD A.
-fn quad_form_inv(a: &[Vec<f64>], x: &[f64]) -> Result<f64> {
-    let l = cholesky(a)?;
-    let y = forward_solve(&l, x);
-    Ok(y.iter().map(|v| v * v).sum())
-}
-
-// ---------------------------------------------------------------------------
-// Public types
-// ---------------------------------------------------------------------------
 
 /// Specification of a linear Gaussian state-space model.
 ///
@@ -344,9 +619,11 @@ pub struct KalmanState {
 /// Kalman filter with filtering, smoothing, and prediction.
 #[derive(Debug, Clone)]
 pub struct KalmanFilter {
+    #[allow(dead_code)]
     model: StateSpaceModel,
+    internal: InternalSSM,
     state: Option<Vec<f64>>,
-    covariance: Option<Vec<Vec<f64>>>,
+    covariance: Option<DenseMatrix>,
 }
 
 impl KalmanFilter {
@@ -355,8 +632,10 @@ impl KalmanFilter {
     /// The model dimensions are validated on construction.
     pub fn new(model: StateSpaceModel) -> Result<Self> {
         model.validate()?;
+        let internal = InternalSSM::from_model(&model);
         Ok(Self {
             model,
+            internal,
             state: None,
             covariance: None,
         })
@@ -365,7 +644,7 @@ impl KalmanFilter {
     /// Set initial state estimate and error covariance.
     pub fn set_initial_state(&mut self, state: Vec<f64>, covariance: Vec<Vec<f64>>) {
         self.state = Some(state);
-        self.covariance = Some(covariance);
+        self.covariance = Some(DenseMatrix::from_nested(&covariance));
     }
 
     /// Run the forward Kalman filter on a sequence of observations.
@@ -376,8 +655,8 @@ impl KalmanFilter {
         if observations.is_empty() {
             return Err(ForecastError::EmptyData);
         }
-        let ns = self.model.n_state();
-        let no = self.model.n_obs();
+        let ns = self.internal.n_state();
+        let no = self.internal.n_obs();
 
         // Validate observation dimensions.
         for (t, obs) in observations.iter().enumerate() {
@@ -398,85 +677,103 @@ impl KalmanFilter {
             }
         }
 
-        let f = &self.model.transition;
-        let h = &self.model.observation;
-        let q = &self.model.process_noise;
-        let r = &self.model.observation_noise;
+        let ssm = &self.internal;
 
         // Initial state: use diffuse prior if not set.
         let mut x = self.state.clone().unwrap_or_else(|| vec![0.0; ns]);
         let mut p = self.covariance.clone().unwrap_or_else(|| {
-            let mut m = mat_eye(ns);
+            let mut m = DenseMatrix::identity(ns);
             for i in 0..ns {
-                m[i][i] = 1e6;
+                m.data[i * ns + i] = 1e6;
             }
             m
         });
 
         let mut results = Vec::with_capacity(observations.len());
 
-        let ht = mat_transpose(h);
-        let ft = mat_transpose(f);
+        // Pre-allocate all scratch buffers (reused every iteration).
+        let mut scratch = FilterScratch::new(ns, no);
 
         for obs in observations {
             // --- Predict ---
-            let x_pred = mat_vec(f, &x);
-            let p_pred = mat_add(&mat_mul(&mat_mul(f, &p), &ft), q);
+            let x_pred = ssm.transition.mul_vec(&x);
+
+            // p_pred = F * P * F^T + Q
+            ssm.transition.mul_into(&p, &mut scratch.fp);
+            scratch.fp.mul_into(&ssm.transition_t, &mut scratch.p_pred);
+            scratch.p_pred.add_inplace(&ssm.process_noise);
 
             // --- Update ---
             // Innovation: y - H * x_pred
-            let y_pred = mat_vec(h, &x_pred);
+            let y_pred = ssm.observation.mul_vec(&x_pred);
             let innovation: Vec<f64> = obs.iter().zip(y_pred.iter()).map(|(a, b)| a - b).collect();
 
             // Innovation covariance: S = H * P_pred * H^T + R
-            let s = mat_add(&mat_mul(&mat_mul(h, &p_pred), &ht), r);
+            ssm.observation.mul_into(&scratch.p_pred, &mut scratch.hp);
+            scratch.hp.mul_into(&ssm.observation_t, &mut scratch.s);
+            scratch.s.add_inplace(&ssm.observation_noise);
 
-            // Check if S is (near) singular — degenerate case with zero noise.
-            let s_max_diag = (0..no).map(|i| s[i][i].abs()).fold(0.0_f64, f64::max);
+            // Check if S is (near) singular -- degenerate case with zero noise.
+            let s_max_diag = (0..no)
+                .map(|i| scratch.s.get(i, i).abs())
+                .fold(0.0_f64, f64::max);
             let degenerate = s_max_diag < 1e-30;
 
             let ll;
             if degenerate {
                 // S is effectively zero: perfect prediction, no update needed.
                 x = x_pred;
-                p = p_pred;
+                p.copy_from(&scratch.p_pred);
                 ll = 0.0;
             } else {
                 // Kalman gain: K = P_pred * H^T * S^{-1}
-                let s_inv = mat_inv_spd(&s)?;
-                let k = mat_mul(&mat_mul(&p_pred, &ht), &s_inv);
+                dm_inv_spd(
+                    &scratch.s,
+                    &mut scratch.l_obs,
+                    &mut scratch.s_inv,
+                    &mut scratch.y_buf,
+                    &mut scratch.x_buf,
+                )?;
+                scratch
+                    .p_pred
+                    .mul_into(&ssm.observation_t, &mut scratch.pht);
+                scratch.pht.mul_into(&scratch.s_inv, &mut scratch.k);
 
                 // Updated state: x = x_pred + K * innovation
-                let k_inn = mat_vec(&k, &innovation);
-                x = x_pred
-                    .iter()
-                    .zip(k_inn.iter())
-                    .map(|(a, b)| a + b)
-                    .collect();
+                let k_inn = scratch.k.mul_vec(&innovation);
+                x.clear();
+                x.extend(x_pred.iter().zip(k_inn.iter()).map(|(a, b)| a + b));
 
                 // Updated covariance: P = (I - K * H) * P_pred
-                let kh = mat_mul(&k, h);
-                let i_kh = mat_sub(&mat_eye(ns), &kh);
-                p = mat_mul(&i_kh, &p_pred);
-
-                // Symmetrize P for numerical stability.
-                let pt = mat_transpose(&p);
+                scratch.k.mul_into(&ssm.observation, &mut scratch.kh);
+                // i_kh = I - kh
                 for i in 0..ns {
                     for j in 0..ns {
-                        p[i][j] = 0.5 * (p[i][j] + pt[i][j]);
+                        let idx = i * ns + j;
+                        scratch.i_kh.data[idx] =
+                            if i == j { 1.0 } else { 0.0 } - scratch.kh.data[idx];
                     }
                 }
+                scratch.i_kh.mul_into(&scratch.p_pred, &mut p);
+
+                // Symmetrize P for numerical stability.
+                p.symmetrize_inplace();
 
                 // Log-likelihood contribution:
                 // -0.5 * (n_obs * ln(2*pi) + ln|S| + innovation^T * S^{-1} * innovation)
-                let log_det = mat_log_det_spd(&s)?;
-                let quad = quad_form_inv(&s, &innovation)?;
+                let log_det = dm_log_det_spd(&scratch.s, &mut scratch.l_obs)?;
+                let quad = dm_quad_form_inv(
+                    &scratch.s,
+                    &innovation,
+                    &mut scratch.l_obs,
+                    &mut scratch.y_buf,
+                )?;
                 ll = -0.5 * (no as f64 * (2.0 * std::f64::consts::PI).ln() + log_det + quad);
             }
 
             results.push(KalmanState {
                 state: x.clone(),
-                covariance: p.clone(),
+                covariance: p.to_nested(),
                 predicted_obs: y_pred,
                 innovation,
                 log_likelihood: ll,
@@ -499,54 +796,67 @@ impl KalmanFilter {
         }
 
         let n = filtered.len();
-        let f = &self.model.transition;
-        let q = &self.model.process_noise;
-        let ft = mat_transpose(f);
+        let ssm = &self.internal;
+        let ns = ssm.n_state();
 
         let mut smoothed = filtered.to_vec();
 
+        // Pre-allocate scratch buffers (reused every iteration).
+        let mut scratch = SmoothScratch::new(ns);
+
         // Backward pass: t = n-2 .. 0
         for t in (0..n.saturating_sub(1)).rev() {
-            // Predicted state and covariance at t+1 from filtered state at t.
-            let x_pred = mat_vec(f, &filtered[t].state);
-            let p_pred = mat_add(&mat_mul(&mat_mul(f, &filtered[t].covariance), &ft), q);
+            let p_filt = DenseMatrix::from_nested(&filtered[t].covariance);
 
-            // Smoother gain: G = P_t * F^T * P_pred^{-1}
-            let p_pred_inv = mat_inv_spd(&p_pred)?;
-            let g = mat_mul(&mat_mul(&filtered[t].covariance, &ft), &p_pred_inv);
+            // Predicted state and covariance at t+1 from filtered state at t.
+            let x_pred = ssm.transition.mul_vec(&filtered[t].state);
+
+            // p_pred = F * P_filt * F^T + Q
+            ssm.transition.mul_into(&p_filt, &mut scratch.fp);
+            scratch.fp.mul_into(&ssm.transition_t, &mut scratch.p_pred);
+            scratch.p_pred.add_inplace(&ssm.process_noise);
+
+            // Smoother gain: G = P_filt * F^T * P_pred^{-1}
+            dm_inv_spd(
+                &scratch.p_pred,
+                &mut scratch.l,
+                &mut scratch.p_pred_inv,
+                &mut scratch.y_buf,
+                &mut scratch.x_buf,
+            )?;
+            p_filt.mul_into(&ssm.transition_t, &mut scratch.pft);
+            scratch.pft.mul_into(&scratch.p_pred_inv, &mut scratch.g);
 
             // Smoothed state: x_s(t) = x_f(t) + G * (x_s(t+1) - x_pred(t+1))
-            let diff: Vec<f64> = smoothed[t + 1]
-                .state
-                .iter()
-                .zip(x_pred.iter())
-                .map(|(a, b)| a - b)
-                .collect();
-            let correction = mat_vec(&g, &diff);
-            smoothed[t].state = filtered[t]
-                .state
-                .iter()
-                .zip(correction.iter())
-                .map(|(a, b)| a + b)
-                .collect();
+            for i in 0..ns {
+                scratch.diff[i] = smoothed[t + 1].state[i] - x_pred[i];
+            }
+            let correction = scratch.g.mul_vec(&scratch.diff);
+            for i in 0..ns {
+                smoothed[t].state[i] = filtered[t].state[i] + correction[i];
+            }
 
             // Smoothed covariance:
             // P_s(t) = P_f(t) + G * (P_s(t+1) - P_pred(t+1)) * G^T
-            let gt = mat_transpose(&g);
-            let p_diff = mat_sub(&smoothed[t + 1].covariance, &p_pred);
-            smoothed[t].covariance = mat_add(
-                &filtered[t].covariance,
-                &mat_mul(&mat_mul(&g, &p_diff), &gt),
-            );
+            let p_smooth_next = DenseMatrix::from_nested(&smoothed[t + 1].covariance);
+            scratch.p_diff.set_sub(&p_smooth_next, &scratch.p_pred);
 
-            // Symmetrize for numerical stability.
-            let ns = mat_rows(&smoothed[t].covariance);
-            let sym = mat_transpose(&smoothed[t].covariance);
+            // gt = G^T
             for i in 0..ns {
                 for j in 0..ns {
-                    smoothed[t].covariance[i][j] = 0.5 * (smoothed[t].covariance[i][j] + sym[i][j]);
+                    scratch.gt.data[j * ns + i] = scratch.g.data[i * ns + j];
                 }
             }
+
+            scratch.g.mul_into(&scratch.p_diff, &mut scratch.gp);
+            scratch.gp.mul_into(&scratch.gt, &mut scratch.gpgt);
+
+            // P_s(t) = P_f(t) + gpgt
+            let mut p_smoothed = p_filt;
+            p_smoothed.add_inplace(&scratch.gpgt);
+            p_smoothed.symmetrize_inplace();
+
+            smoothed[t].covariance = p_smoothed.to_nested();
         }
 
         Ok(smoothed)
@@ -570,19 +880,24 @@ impl KalmanFilter {
             return Ok(vec![]);
         }
 
-        let f = &self.model.transition;
-        let h = &self.model.observation;
-        let q = &self.model.process_noise;
-        let ft = mat_transpose(f);
+        let ssm = &self.internal;
+        let ns = ssm.n_state();
 
         let mut x_cur = x.clone();
         let mut p_cur = p.clone();
         let mut predictions = Vec::with_capacity(horizon);
 
+        // Pre-allocate scratch for predict loop.
+        let mut fp = DenseMatrix::zeros(ns, ns);
+        let mut p_next = DenseMatrix::zeros(ns, ns);
+
         for _ in 0..horizon {
-            x_cur = mat_vec(f, &x_cur);
-            p_cur = mat_add(&mat_mul(&mat_mul(f, &p_cur), &ft), q);
-            let y_pred = mat_vec(h, &x_cur);
+            x_cur = ssm.transition.mul_vec(&x_cur);
+            ssm.transition.mul_into(&p_cur, &mut fp);
+            fp.mul_into(&ssm.transition_t, &mut p_next);
+            p_next.add_inplace(&ssm.process_noise);
+            p_cur.copy_from(&p_next);
+            let y_pred = ssm.observation.mul_vec(&x_cur);
             predictions.push(y_pred);
         }
 

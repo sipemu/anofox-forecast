@@ -122,6 +122,38 @@ export class Forecast {
    */
   hasUpper(): boolean;
 
+  // ===========================================================================
+  // Forecast Constraints
+  // ===========================================================================
+
+  /**
+   * Return a new forecast with all values clamped to be non-negative (>= 0).
+   *
+   * Applies to point predictions, lower and upper intervals.
+   *
+   * @returns A new Forecast with non-negative values
+   */
+  nonNegative(): Forecast;
+
+  /**
+   * Return a new forecast with all values clamped to `[lower, upper]`.
+   *
+   * Applies to point predictions, lower and upper intervals.
+   *
+   * @param lower - Lower bound
+   * @param upper - Upper bound
+   * @returns A new Forecast with clamped values
+   */
+  clamp(lower: number, upper: number): Forecast;
+
+  /**
+   * Return a new forecast with point values rounded to the nearest integer,
+   * lower intervals floored, and upper intervals ceiled.
+   *
+   * @returns A new Forecast with integer-rounded values
+   */
+  roundToInteger(): Forecast;
+
   /** Release WASM memory associated with this object. */
   free(): void;
 }
@@ -638,6 +670,78 @@ export function diagnoseResiduals(
   residuals: Float64Array,
   fittedParams?: number,
 ): DiagnoseResidualsResult;
+
+// =============================================================================
+// Model Diagnostics
+// =============================================================================
+
+/**
+ * Complete model diagnostics report.
+ *
+ * Includes Ljung-Box, Jarque-Bera, and Breusch-Pagan tests, plus
+ * residual ACF/PACF and summary statistics.
+ *
+ * @example
+ * ```typescript
+ * const diag = JsModelDiagnostics.fromResiduals(
+ *   new Float64Array([0.1, -0.2, 0.3, -0.1, 0.05]),
+ *   0.05,
+ * );
+ * console.log(diag.passesAll);
+ * console.log(diag.ljungBoxPvalue);
+ * console.log(diag.summary());
+ * ```
+ */
+export class JsModelDiagnostics {
+  /**
+   * Create diagnostics from an array of residuals.
+   *
+   * @param residuals - Array of model residuals
+   * @param significance - Significance level for tests (e.g., 0.05)
+   * @returns A new JsModelDiagnostics instance
+   */
+  static fromResiduals(residuals: Float64Array | number[], significance: number): JsModelDiagnostics;
+
+  /** Whether all diagnostic tests pass at the configured significance level. */
+  readonly passesAll: boolean;
+
+  /** Ljung-Box test p-value for autocorrelation. */
+  readonly ljungBoxPvalue: number;
+
+  /** Number of lags used in the Ljung-Box test. */
+  readonly ljungBoxLags: number;
+
+  /** Jarque-Bera test statistic for normality. */
+  readonly jarqueBeraStatistic: number;
+
+  /** Jarque-Bera test p-value. */
+  readonly jarqueBeraPvalue: number;
+
+  /** Breusch-Pagan heteroscedasticity test p-value. */
+  readonly heteroscedasticityPvalue: number;
+
+  /** Mean of the residuals. */
+  readonly residualMean: number;
+
+  /** Standard deviation of the residuals. */
+  readonly residualStd: number;
+
+  /** Autocorrelation function of the residuals. */
+  readonly residualAcf: Float64Array;
+
+  /** Partial autocorrelation function of the residuals. */
+  readonly residualPacf: Float64Array;
+
+  /**
+   * Get a human-readable summary of all diagnostic test results.
+   *
+   * @returns Multi-line summary string
+   */
+  summary(): string;
+
+  /** Release WASM memory associated with this object. */
+  free(): void;
+}
 
 /**
  * Perform the Augmented Dickey-Fuller (ADF) test for unit root.
@@ -2092,6 +2196,41 @@ export class EnsembleForecaster {
   setWeightedMse(): void;
 
   /**
+   * Set the combination method to inverse AIC weighting.
+   *
+   * Computes Akaike weights from in-sample residuals.
+   */
+  setInverseAic(): void;
+
+  /**
+   * Set the combination method to stacking (projected gradient descent).
+   *
+   * Trains non-negative weights that sum to one on validation data.
+   *
+   * @param folds - Number of folds (default: 5)
+   */
+  setStacking(folds?: number): void;
+
+  /**
+   * Set the combination method to per-horizon adaptive weighting.
+   *
+   * Computes separate weight vectors for each forecast horizon step
+   * based on rolling-origin evaluation.
+   */
+  setHorizonAdaptive(): void;
+
+  /**
+   * Set the combination method by name string.
+   *
+   * Supported values: "mean", "median", "weighted_mse", "inverse_aic",
+   * "stacking", "horizon_adaptive".
+   *
+   * @param method - Combination method name
+   * @throws Error if the method name is unknown
+   */
+  setMethod(method: "mean" | "median" | "weighted_mse" | "inverse_aic" | "stacking" | "horizon_adaptive"): void;
+
+  /**
    * Fit all models in the ensemble.
    *
    * @param series - TimeSeries to fit
@@ -2380,6 +2519,78 @@ export class AutoForecaster {
 
   /** The model name. */
   readonly name: string;
+
+  /** Release WASM memory associated with this object. */
+  free(): void;
+}
+
+/**
+ * Builder for constructing an AutoForecaster with custom parameters.
+ *
+ * Uses a fluent API: chain setter methods and call `build()` to produce
+ * an `AutoForecaster`.
+ *
+ * @example
+ * ```typescript
+ * const model = new AutoForecastBuilder()
+ *   .seasonalPeriod(12)
+ *   .includeArima(true)
+ *   .includeEts(true)
+ *   .includeTheta(false)
+ *   .build();
+ * model.fit(ts);
+ * ```
+ */
+export class AutoForecastBuilder {
+  /** Create a new builder with all defaults enabled. */
+  constructor();
+
+  /**
+   * Set the seasonal period.
+   *
+   * @param period - Seasonal period (e.g., 12 for monthly data)
+   * @returns this (for chaining)
+   */
+  seasonalPeriod(period: number): AutoForecastBuilder;
+
+  /**
+   * Include or exclude AutoARIMA from the candidate set.
+   *
+   * @param include - Whether to include AutoARIMA (default: true)
+   * @returns this (for chaining)
+   */
+  includeArima(include: boolean): AutoForecastBuilder;
+
+  /**
+   * Include or exclude AutoETS from the candidate set.
+   *
+   * @param include - Whether to include AutoETS (default: true)
+   * @returns this (for chaining)
+   */
+  includeEts(include: boolean): AutoForecastBuilder;
+
+  /**
+   * Include or exclude AutoTheta from the candidate set.
+   *
+   * @param include - Whether to include AutoTheta (default: true)
+   * @returns this (for chaining)
+   */
+  includeTheta(include: boolean): AutoForecastBuilder;
+
+  /**
+   * Use cross-validation instead of in-sample MSE for model selection.
+   *
+   * @param useCv - Whether to use cross-validation (default: false)
+   * @returns this (for chaining)
+   */
+  useCrossValidation(useCv: boolean): AutoForecastBuilder;
+
+  /**
+   * Build the AutoForecaster with the configured parameters.
+   *
+   * @returns A new AutoForecaster ready to fit
+   */
+  build(): AutoForecaster;
 
   /** Release WASM memory associated with this object. */
   free(): void;

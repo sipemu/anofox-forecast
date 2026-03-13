@@ -20,7 +20,7 @@
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
 use crate::models::arima::diff::{difference, integrate};
-use crate::models::{validate_series_complete, Forecaster};
+use crate::models::{validate_series_complete, FittedParams, Forecaster};
 use crate::utils::ols::{ols_fit, ols_residuals, OLSResult};
 use crate::utils::optimization::{nelder_mead, NelderMeadConfig};
 use crate::utils::stats::quantile_normal;
@@ -155,6 +155,8 @@ pub struct ARIMA {
     /// OLS result for exogenous regressors (if any).
     #[cfg_attr(feature = "serde", serde(skip))]
     exog_ols: Option<OLSResult>,
+    /// Whether to skip optimization when fit() is called (warm-start mode).
+    skip_optimization: bool,
 }
 
 impl ARIMA {
@@ -174,6 +176,46 @@ impl ARIMA {
             bic: None,
             n: 0,
             exog_ols: None,
+            skip_optimization: false,
+        }
+    }
+
+    /// Create a warm-started ARIMA model with pre-fitted coefficients.
+    ///
+    /// The resulting model can be used for forecasting after calling `fit()` with
+    /// data (needed for differencing context). When `fit()` is called, the
+    /// provided coefficients are used directly without re-optimization.
+    ///
+    /// # Arguments
+    /// * `p` - AR order
+    /// * `d` - Differencing order
+    /// * `q` - MA order
+    /// * `ar_coeffs` - Pre-fitted AR coefficients (length must equal p)
+    /// * `ma_coeffs` - Pre-fitted MA coefficients (length must equal q)
+    /// * `intercept` - Pre-fitted intercept value
+    pub fn with_coefficients(
+        p: usize,
+        d: usize,
+        q: usize,
+        ar_coeffs: Vec<f64>,
+        ma_coeffs: Vec<f64>,
+        intercept: f64,
+    ) -> Self {
+        Self {
+            spec: ARIMASpec::new(p, d, q),
+            ar_coefficients: ar_coeffs,
+            ma_coefficients: ma_coeffs,
+            intercept,
+            original: None,
+            differenced: None,
+            fitted_diff: None,
+            residuals: None,
+            residual_variance: None,
+            aic: None,
+            bic: None,
+            n: 0,
+            exog_ols: None,
+            skip_optimization: true,
         }
     }
 
@@ -653,8 +695,10 @@ impl Forecaster for ARIMA {
         let diff_series = difference(&adjusted_values, self.spec.d);
         self.differenced = Some(diff_series.clone());
 
-        // Estimate parameters
-        self.estimate_parameters(&diff_series);
+        // Estimate parameters (skip when warm-started with pre-fitted coefficients)
+        if !self.skip_optimization {
+            self.estimate_parameters(&diff_series);
+        }
 
         // Calculate fitted values and residuals
         self.calculate_fitted(&diff_series);
@@ -792,6 +836,31 @@ impl Forecaster for ARIMA {
 
     fn name(&self) -> &str {
         "ARIMA"
+    }
+
+    fn fitted_params(&self) -> Option<FittedParams> {
+        if self.ar_coefficients.is_empty()
+            && self.ma_coefficients.is_empty()
+            && self.intercept == 0.0
+            && self.original.is_none()
+        {
+            return None;
+        }
+        let mut params = HashMap::new();
+        params.insert("p".to_string(), self.spec.p as f64);
+        params.insert("d".to_string(), self.spec.d as f64);
+        params.insert("q".to_string(), self.spec.q as f64);
+        params.insert("intercept".to_string(), self.intercept);
+        for (i, &c) in self.ar_coefficients.iter().enumerate() {
+            params.insert(format!("ar_{}", i + 1), c);
+        }
+        for (i, &c) in self.ma_coefficients.iter().enumerate() {
+            params.insert(format!("ma_{}", i + 1), c);
+        }
+        Some(FittedParams {
+            params,
+            seasonal: None,
+        })
     }
 }
 
@@ -2157,5 +2226,81 @@ mod tests {
             model.predict(5),
             Err(ForecastError::FitRequired { .. })
         ));
+    }
+
+    // =========================================================================
+    // Warm-start tests
+    // =========================================================================
+
+    #[test]
+    fn arima_extract_params_then_warm_start() {
+        let timestamps = make_timestamps(50);
+        let values: Vec<f64> = (0..50).map(|i| 10.0 + (i as f64) * 0.3).collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        // Fit original model
+        let mut model = ARIMA::new(1, 1, 1);
+        model.fit(&ts).unwrap();
+        let forecast1 = model.predict(5).unwrap();
+
+        // Extract params and warm-start
+        let fp = model.fitted_params().unwrap();
+        let ar_1 = fp.params["ar_1"];
+        let ma_1 = fp.params["ma_1"];
+        let intercept = fp.params["intercept"];
+
+        let mut warm = ARIMA::with_coefficients(1, 1, 1, vec![ar_1], vec![ma_1], intercept);
+        warm.fit(&ts).unwrap(); // ARIMA needs fit for differencing context
+        let forecast2 = warm.predict(5).unwrap();
+
+        // Forecasts should be identical since same coefficients are used
+        for (a, b) in forecast1.primary().iter().zip(forecast2.primary().iter()) {
+            assert!((a - b).abs() < 1e-6, "predictions differ: {} vs {}", a, b);
+        }
+    }
+
+    #[test]
+    fn arima_warm_start_fit_uses_provided_coefficients() {
+        let timestamps = make_timestamps(50);
+        let values: Vec<f64> = (0..50).map(|i| 10.0 + (i as f64) * 0.3).collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        // Create warm-started ARIMA with specific coefficients
+        let mut model = ARIMA::with_coefficients(1, 1, 0, vec![0.5], vec![], 0.3);
+        model.fit(&ts).unwrap();
+
+        assert!(model.fitted_values().is_some());
+        assert!(model.residuals().is_some());
+
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.horizon(), 5);
+        for &v in forecast.primary() {
+            assert!(v.is_finite());
+        }
+    }
+
+    #[test]
+    fn arima_fitted_params_returns_none_before_fit() {
+        let model = ARIMA::new(1, 1, 1);
+        assert!(model.fitted_params().is_none());
+    }
+
+    #[test]
+    fn arima_fitted_params_contains_expected_keys() {
+        let timestamps = make_timestamps(50);
+        let values: Vec<f64> = (0..50).map(|i| 10.0 + (i as f64) * 0.3).collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = ARIMA::new(1, 1, 1);
+        model.fit(&ts).unwrap();
+
+        let fp = model.fitted_params().unwrap();
+        assert!(fp.params.contains_key("p"));
+        assert!(fp.params.contains_key("d"));
+        assert!(fp.params.contains_key("q"));
+        assert!(fp.params.contains_key("intercept"));
+        assert!(fp.params.contains_key("ar_1"));
+        assert!(fp.params.contains_key("ma_1"));
+        assert!(fp.seasonal.is_none());
     }
 }

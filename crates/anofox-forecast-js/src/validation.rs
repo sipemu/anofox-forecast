@@ -206,6 +206,100 @@ pub fn diagnose_residuals(
 }
 
 // =============================================================================
+// Model Diagnostics
+// =============================================================================
+
+use anofox_forecast::validation::diagnostics::ModelDiagnostics as InnerModelDiagnostics;
+
+/// Complete model diagnostics report.
+///
+/// Includes Ljung-Box, Jarque-Bera, and Breusch-Pagan tests, plus
+/// residual ACF/PACF and summary statistics.
+#[wasm_bindgen]
+pub struct JsModelDiagnostics {
+    inner: InnerModelDiagnostics,
+}
+
+#[wasm_bindgen]
+impl JsModelDiagnostics {
+    /// Create diagnostics from an array of residuals.
+    ///
+    /// @param residuals - Array of model residuals
+    /// @param significance - Significance level for tests (e.g., 0.05)
+    #[wasm_bindgen(js_name = fromResiduals)]
+    pub fn from_residuals(residuals: &[f64], significance: f64) -> Self {
+        Self {
+            inner: InnerModelDiagnostics::from_residuals(residuals, significance),
+        }
+    }
+
+    /// Whether all diagnostic tests pass at the configured significance level.
+    #[wasm_bindgen(getter, js_name = passesAll)]
+    pub fn passes_all(&self) -> bool {
+        self.inner.passes_all
+    }
+
+    /// Ljung-Box test p-value for autocorrelation.
+    #[wasm_bindgen(getter, js_name = ljungBoxPvalue)]
+    pub fn ljung_box_pvalue(&self) -> f64 {
+        self.inner.ljung_box_pvalue
+    }
+
+    /// Number of lags used in the Ljung-Box test.
+    #[wasm_bindgen(getter, js_name = ljungBoxLags)]
+    pub fn ljung_box_lags(&self) -> usize {
+        self.inner.ljung_box_lags
+    }
+
+    /// Jarque-Bera test statistic for normality.
+    #[wasm_bindgen(getter, js_name = jarqueBeraStatistic)]
+    pub fn jarque_bera_statistic(&self) -> f64 {
+        self.inner.jarque_bera_statistic
+    }
+
+    /// Jarque-Bera test p-value.
+    #[wasm_bindgen(getter, js_name = jarqueBeraPvalue)]
+    pub fn jarque_bera_pvalue(&self) -> f64 {
+        self.inner.jarque_bera_pvalue
+    }
+
+    /// Breusch-Pagan heteroscedasticity test p-value.
+    #[wasm_bindgen(getter, js_name = heteroscedasticityPvalue)]
+    pub fn heteroscedasticity_pvalue(&self) -> f64 {
+        self.inner.heteroscedasticity_pvalue
+    }
+
+    /// Mean of the residuals.
+    #[wasm_bindgen(getter, js_name = residualMean)]
+    pub fn residual_mean(&self) -> f64 {
+        self.inner.residual_mean
+    }
+
+    /// Standard deviation of the residuals.
+    #[wasm_bindgen(getter, js_name = residualStd)]
+    pub fn residual_std(&self) -> f64 {
+        self.inner.residual_std
+    }
+
+    /// Autocorrelation function of the residuals.
+    #[wasm_bindgen(getter, js_name = residualAcf)]
+    pub fn residual_acf(&self) -> Vec<f64> {
+        self.inner.residual_acf.clone()
+    }
+
+    /// Partial autocorrelation function of the residuals.
+    #[wasm_bindgen(getter, js_name = residualPacf)]
+    pub fn residual_pacf(&self) -> Vec<f64> {
+        self.inner.residual_pacf.clone()
+    }
+
+    /// Get a human-readable summary of the diagnostics.
+    pub fn summary(&self) -> String {
+        self.inner.summary()
+    }
+}
+
+// =============================================================================
 // Stationarity tests
 // =============================================================================
 

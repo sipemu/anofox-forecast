@@ -25,11 +25,15 @@
 //! ```
 
 pub mod diagnostics;
+pub mod intermittent_diagnostics;
 pub mod residual_tests;
 pub mod stationarity;
 
 // Re-export from diagnostics
 pub use diagnostics::ModelDiagnostics;
+
+// Re-export from intermittent_diagnostics
+pub use intermittent_diagnostics::{DemandClassification, IntermittentDiagnostics};
 
 // Re-export from residual_tests
 pub use residual_tests::{

@@ -18,7 +18,7 @@ pub mod time_series;
 pub mod validation;
 
 // Re-export all public items for flat WASM module access.
-pub use auto_models::{AutoEnsembleForecaster, AutoForecaster};
+pub use auto_models::{AutoEnsembleForecaster, AutoForecastBuilder, AutoForecaster};
 pub use bootstrap::bootstrap_forecast_js;
 pub use calendar::*;
 pub use changepoint::{detect_changepoints, detect_changepoints_bic};

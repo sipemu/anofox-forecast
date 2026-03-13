@@ -7,7 +7,7 @@
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
 use crate::models::explain::{Explainable, ForecastExplanation};
-use crate::models::{validate_series_complete, Forecaster};
+use crate::models::{validate_series_complete, FittedParams, Forecaster};
 use crate::utils::ols::{ols_fit, ols_residuals, OLSResult};
 use crate::utils::optimization::{nelder_mead, NelderMeadConfig};
 use crate::utils::stats::quantile_normal;
@@ -79,6 +79,8 @@ pub struct Theta {
     /// OLS result for exogenous regressors (if any).
     #[cfg_attr(feature = "serde", serde(skip))]
     exog_ols: Option<OLSResult>,
+    /// Whether to skip optimization when fit() is called (warm-start mode).
+    skip_optimization: bool,
 }
 
 impl Theta {
@@ -104,6 +106,7 @@ impl Theta {
             residual_variance: None,
             n: 0,
             exog_ols: None,
+            skip_optimization: false,
         }
     }
 
@@ -112,6 +115,39 @@ impl Theta {
         Self {
             theta,
             ..Self::new()
+        }
+    }
+
+    /// Create a warm-started Theta model with pre-fitted parameters.
+    ///
+    /// The resulting model can produce predictions immediately via `predict()`
+    /// without calling `fit()` (requires `level` and `b` to be set).
+    /// If `fit()` is later called, the provided theta is used and optimization
+    /// of alpha is skipped.
+    ///
+    /// # Arguments
+    /// * `theta` - The theta parameter (typically 2.0 for STM)
+    /// * `alpha` - Pre-fitted SES smoothing parameter
+    /// * `level` - Pre-fitted level state
+    /// * `b` - Pre-fitted regression slope
+    pub fn with_theta_value(theta: f64, alpha: f64, level: f64, b: f64) -> Self {
+        Self {
+            theta,
+            alpha: Some(alpha.clamp(0.0001, 0.9999)),
+            optimize: false,
+            seasonal_period: 0,
+            decomposition_type: DecompositionType::Multiplicative,
+            decomposition_fallback: false,
+            b: Some(b),
+            level: Some(level),
+            seasonals: None,
+            seasonal_forecast: None,
+            fitted: None,
+            residuals: None,
+            residual_variance: None,
+            n: 0,
+            exog_ols: None,
+            skip_optimization: true,
         }
     }
 
@@ -760,7 +796,7 @@ impl Forecaster for Theta {
 
         // Optimize alpha on the ORIGINAL (deseasonalized) series
         // Note: statsforecast applies SES to original series, not theta-transformed
-        if self.optimize {
+        if self.optimize && !self.skip_optimization {
             self.alpha = Some(Self::optimize_alpha(&deseasonalized));
         }
 
@@ -980,6 +1016,21 @@ impl Forecaster for Theta {
 
     fn name(&self) -> &str {
         "Theta"
+    }
+
+    fn fitted_params(&self) -> Option<FittedParams> {
+        let level = self.level?;
+        let b = self.b?;
+        let alpha = self.alpha?;
+        let mut params = HashMap::new();
+        params.insert("theta".to_string(), self.theta);
+        params.insert("alpha".to_string(), alpha);
+        params.insert("level".to_string(), level);
+        params.insert("b".to_string(), b);
+        Some(FittedParams {
+            params,
+            seasonal: self.seasonals.clone(),
+        })
     }
 }
 
@@ -1475,5 +1526,90 @@ mod tests {
                 p
             );
         }
+    }
+
+    // =========================================================================
+    // Warm-start tests
+    // =========================================================================
+
+    #[test]
+    fn theta_warm_start_predict_without_fit() {
+        // Create a warm-started Theta model and predict directly
+        let model = Theta::with_theta_value(2.0, 0.1, 50.0, 0.5);
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.horizon(), 5);
+        for &v in forecast.primary() {
+            assert!(v.is_finite());
+        }
+    }
+
+    #[test]
+    fn theta_extract_params_then_warm_start() {
+        let timestamps = make_timestamps(50);
+        let values: Vec<f64> = (0..50).map(|i| 10.0 + (i as f64) * 0.3).collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        // Fit original model
+        let mut model = Theta::new();
+        model.fit(&ts).unwrap();
+        let forecast1 = model.predict(5).unwrap();
+
+        // Extract params and warm-start
+        let fp = model.fitted_params().unwrap();
+        let theta = fp.params["theta"];
+        let alpha = fp.params["alpha"];
+        let level = fp.params["level"];
+        let b = fp.params["b"];
+
+        let warm = Theta::with_theta_value(theta, alpha, level, b);
+        let forecast2 = warm.predict(5).unwrap();
+
+        // Both should produce identical forecasts
+        for (a, b_val) in forecast1.primary().iter().zip(forecast2.primary().iter()) {
+            assert_relative_eq!(a, b_val, epsilon = 1e-10);
+        }
+    }
+
+    #[test]
+    fn theta_warm_start_fit_refines() {
+        let timestamps = make_timestamps(50);
+        let values: Vec<f64> = (0..50).map(|i| 10.0 + (i as f64) * 0.3).collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        // Warm-start with approximate params then fit
+        let mut model = Theta::with_theta_value(2.0, 0.1, 5.0, 0.1);
+        model.fit(&ts).unwrap();
+
+        assert!(model.fitted_values().is_some());
+        assert!(model.residuals().is_some());
+
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.horizon(), 5);
+        for &v in forecast.primary() {
+            assert!(v.is_finite());
+            assert!(v > 5.0); // Should be above initial level
+        }
+    }
+
+    #[test]
+    fn theta_fitted_params_returns_none_before_fit() {
+        let model = Theta::new();
+        assert!(model.fitted_params().is_none());
+    }
+
+    #[test]
+    fn theta_fitted_params_contains_expected_keys() {
+        let timestamps = make_timestamps(50);
+        let values: Vec<f64> = (0..50).map(|i| 10.0 + (i as f64) * 0.3).collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = Theta::new();
+        model.fit(&ts).unwrap();
+
+        let fp = model.fitted_params().unwrap();
+        assert!(fp.params.contains_key("theta"));
+        assert!(fp.params.contains_key("alpha"));
+        assert!(fp.params.contains_key("level"));
+        assert!(fp.params.contains_key("b"));
     }
 }

@@ -181,6 +181,27 @@ impl Forecast {
     pub fn upper(&self) -> Option<Vec<f64>> {
         self.inner.upper_series(0).ok().map(|s| s.to_vec())
     }
+
+    /// Return a new forecast with all values clamped to be non-negative.
+    #[wasm_bindgen(js_name = nonNegative)]
+    pub fn non_negative(&self) -> Forecast {
+        Forecast::from_inner(self.inner.non_negative())
+    }
+
+    /// Return a new forecast with all values clamped to `[lower, upper]`.
+    ///
+    /// @param lower - Lower bound
+    /// @param upper - Upper bound
+    pub fn clamp(&self, lower: f64, upper: f64) -> Forecast {
+        Forecast::from_inner(self.inner.clamp(lower, upper))
+    }
+
+    /// Return a new forecast with point values rounded to the nearest integer,
+    /// lower intervals floored, and upper intervals ceiled.
+    #[wasm_bindgen(js_name = roundToInteger)]
+    pub fn round_to_integer(&self) -> Forecast {
+        Forecast::from_inner(self.inner.round_to_integer())
+    }
 }
 
 #[cfg(test)]

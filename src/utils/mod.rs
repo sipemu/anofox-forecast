@@ -20,7 +20,10 @@ pub use cross_validation::{
     CvFoldGenerator, FillStrategy, Fold, GroupedCVResults, LastValueFill, MeanFill, MedianFill,
     ModeFill, RollingForecastConfig, RollingForecastResult, RollingForecastWindow, ZeroFill,
 };
-pub use metrics::{calculate_metrics, AccuracyMetrics};
+pub use metrics::{
+    calculate_metrics, coverage, mda, msis, skill_score, theils_u1, theils_u2, wape,
+    AccuracyMetrics, ForecastMetrics,
+};
 pub use ols::{ols_fit, ols_residuals, OLSResult};
 pub use optimization::{nelder_mead, NelderMeadConfig, NelderMeadResult};
 pub use stats::quantile_normal;

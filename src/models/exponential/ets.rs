@@ -6,7 +6,7 @@
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
 use crate::models::explain::{Explainable, ForecastExplanation};
-use crate::models::{validate_series_complete, Forecaster};
+use crate::models::{validate_series_complete, FittedParams, Forecaster};
 use crate::utils::ols::{ols_fit, ols_residuals, OLSResult};
 use crate::utils::optimization::{nelder_mead, NelderMeadConfig};
 use crate::utils::stats::quantile_normal;
@@ -467,6 +467,8 @@ pub struct ETS {
     /// OLS result for exogenous regressors.
     #[cfg_attr(feature = "serde", serde(skip))]
     exog_ols: Option<OLSResult>,
+    /// Whether to skip optimization when fit() is called (warm-start mode).
+    skip_optimization: bool,
 }
 
 impl ETS {
@@ -492,6 +494,7 @@ impl ETS {
             bic: None,
             n: 0,
             exog_ols: None,
+            skip_optimization: false,
         }
     }
 
@@ -524,6 +527,54 @@ impl ETS {
             bic: None,
             n: 0,
             exog_ols: None,
+            skip_optimization: false,
+        }
+    }
+
+    /// Create a warm-started ETS model with pre-fitted initial states.
+    ///
+    /// The resulting model can produce predictions immediately via `predict()`
+    /// without calling `fit()`. If `fit()` is later called, the provided states
+    /// are used as the starting point for state propagation (optimization is skipped).
+    ///
+    /// # Arguments
+    /// * `spec` - The ETS specification (error, trend, seasonal types)
+    /// * `seasonal_period` - Seasonal period (use 1 for non-seasonal)
+    /// * `level` - Pre-fitted level state
+    /// * `trend` - Pre-fitted trend state (pass 0.0 for non-trend models)
+    /// * `seasonal_values` - Pre-fitted seasonal state vector (empty for non-seasonal)
+    pub fn with_initial_states(
+        spec: ETSSpec,
+        seasonal_period: usize,
+        level: f64,
+        trend: f64,
+        seasonal_values: Vec<f64>,
+    ) -> Self {
+        Self {
+            spec,
+            seasonal_period,
+            alpha: Some(0.3),
+            beta: if spec.has_trend() { Some(0.1) } else { None },
+            gamma: if spec.has_seasonal() { Some(0.1) } else { None },
+            phi: if spec.is_damped() { Some(0.98) } else { None },
+            optimize: false,
+            level: Some(level),
+            trend: Some(trend),
+            seasonals: if seasonal_values.is_empty() {
+                None
+            } else {
+                Some(seasonal_values)
+            },
+            fitted: None,
+            residuals: None,
+            residual_variance: None,
+            log_likelihood: None,
+            aic: None,
+            aicc: None,
+            bic: None,
+            n: 0,
+            exog_ols: None,
+            skip_optimization: true,
         }
     }
 
@@ -1526,7 +1577,19 @@ impl Forecaster for ETS {
         // Initialize state: optimize_params() calls initialize_state() internally,
         // so skip the redundant call when optimizing (the common case).
         let (init_level, init_trend, mut seasonals);
-        if self.optimize {
+        if self.skip_optimization {
+            if let Some(lvl) = self.level {
+                // Warm-start: use pre-set states directly
+                init_level = lvl;
+                init_trend = self.trend.unwrap_or(0.0);
+                seasonals = self.seasonals.clone().unwrap_or_default();
+            } else {
+                // skip_optimization but no level set — use defaults
+                init_level = values[0];
+                init_trend = 0.0;
+                seasonals = vec![1.0; self.seasonal_period.max(1)];
+            }
+        } else if self.optimize {
             let (alpha, beta, gamma, phi, opt_level, opt_trend, opt_seasonals) =
                 self.optimize_params(values);
             self.alpha = Some(alpha);
@@ -1767,6 +1830,33 @@ impl Forecaster for ETS {
 
     fn name(&self) -> &str {
         "ETS"
+    }
+
+    fn fitted_params(&self) -> Option<FittedParams> {
+        let level = self.level?;
+        let mut params = HashMap::new();
+        params.insert("level".to_string(), level);
+        if let Some(alpha) = self.alpha {
+            params.insert("alpha".to_string(), alpha);
+        }
+        if let Some(trend) = self.trend {
+            params.insert("trend".to_string(), trend);
+        }
+        if let Some(beta) = self.beta {
+            params.insert("beta".to_string(), beta);
+        }
+        if let Some(gamma) = self.gamma {
+            params.insert("gamma".to_string(), gamma);
+        }
+        if let Some(phi) = self.phi {
+            params.insert("phi".to_string(), phi);
+        }
+        params.insert("seasonal_period".to_string(), self.seasonal_period as f64);
+        params.insert("n".to_string(), self.n as f64);
+        Some(FittedParams {
+            params,
+            seasonal: self.seasonals.clone(),
+        })
     }
 }
 
@@ -2498,5 +2588,105 @@ mod tests {
                 SeasonalType::None
             )
         );
+    }
+
+    // =========================================================================
+    // Warm-start tests
+    // =========================================================================
+
+    #[test]
+    fn ets_warm_start_predict_without_fit() {
+        // Create a warm-started ETS(A,N,N) model with a known level
+        let model = ETS::with_initial_states(ETSSpec::ann(), 1, 42.0, 0.0, vec![]);
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.horizon(), 5);
+        // ETS(A,N,N) flat forecast at level
+        for &v in forecast.primary() {
+            assert_relative_eq!(v, 42.0, epsilon = 1e-10);
+        }
+    }
+
+    #[test]
+    fn ets_warm_start_with_trend() {
+        // ETS(A,A,N) warm-started with level=10 and trend=2
+        let model = ETS::with_initial_states(ETSSpec::aan(), 1, 10.0, 2.0, vec![]);
+        let forecast = model.predict(3).unwrap();
+        let preds = forecast.primary();
+        // h=1: 10+2=12, h=2: 10+2*2=14, h=3: 10+3*2=16
+        assert_relative_eq!(preds[0], 12.0, epsilon = 1e-10);
+        assert_relative_eq!(preds[1], 14.0, epsilon = 1e-10);
+        assert_relative_eq!(preds[2], 16.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn ets_extract_params_then_warm_start() {
+        let timestamps = make_timestamps(30);
+        let values: Vec<f64> = (0..30).map(|i| 10.0 + (i as f64) * 0.5).collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        // Fit original model
+        let mut model = ETS::new(ETSSpec::ann(), 1);
+        model.fit(&ts).unwrap();
+        let forecast1 = model.predict(5).unwrap();
+
+        // Extract params and warm-start
+        let fp = model.fitted_params().unwrap();
+        let level = fp.params["level"];
+        let trend = *fp.params.get("trend").unwrap_or(&0.0);
+        let warm = ETS::with_initial_states(
+            ETSSpec::ann(),
+            1,
+            level,
+            trend,
+            fp.seasonal.unwrap_or_default(),
+        );
+        let forecast2 = warm.predict(5).unwrap();
+
+        // Both should produce identical forecasts (ETS(A,N,N) flat at level)
+        for (a, b) in forecast1.primary().iter().zip(forecast2.primary().iter()) {
+            assert_relative_eq!(a, b, epsilon = 1e-10);
+        }
+    }
+
+    #[test]
+    fn ets_warm_start_fit_refines() {
+        let timestamps = make_timestamps(30);
+        let values: Vec<f64> = (0..30).map(|i| 10.0 + (i as f64) * 0.5).collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        // Warm-start with approximate params then fit to refine
+        let mut model = ETS::with_initial_states(ETSSpec::ann(), 1, 5.0, 0.0, vec![]);
+        model.fit(&ts).unwrap();
+
+        assert!(model.fitted_values().is_some());
+        assert!(model.residuals().is_some());
+
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.horizon(), 5);
+        // Level should have been updated from initial 5.0
+        for &v in forecast.primary() {
+            assert!(v > 5.0);
+        }
+    }
+
+    #[test]
+    fn ets_fitted_params_returns_none_before_fit() {
+        let model = ETS::new(ETSSpec::ann(), 1);
+        assert!(model.fitted_params().is_none());
+    }
+
+    #[test]
+    fn ets_fitted_params_contains_expected_keys() {
+        let timestamps = make_timestamps(30);
+        let values: Vec<f64> = (0..30).map(|i| 10.0 + (i as f64) * 0.5).collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = ETS::new(ETSSpec::ann(), 1);
+        model.fit(&ts).unwrap();
+
+        let fp = model.fitted_params().unwrap();
+        assert!(fp.params.contains_key("level"));
+        assert!(fp.params.contains_key("alpha"));
+        assert!(fp.params.contains_key("seasonal_period"));
     }
 }

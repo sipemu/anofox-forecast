@@ -4,6 +4,30 @@ use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
 use std::collections::HashMap;
 
+/// Container for fitted model parameters, enabling warm-starting and parameter extraction.
+///
+/// Models populate `params` with scalar parameters (keyed by name) and optionally
+/// `seasonal` with seasonal state vectors.
+///
+/// # Example
+///
+/// ```
+/// use anofox_forecast::models::FittedParams;
+///
+/// let fp = FittedParams {
+///     params: [("alpha".into(), 0.3), ("level".into(), 12.5)].into(),
+///     seasonal: None,
+/// };
+/// assert_eq!(fp.params["alpha"], 0.3);
+/// ```
+#[derive(Debug, Clone)]
+pub struct FittedParams {
+    /// Scalar model parameters keyed by name.
+    pub params: HashMap<String, f64>,
+    /// Optional seasonal state vector.
+    pub seasonal: Option<Vec<f64>>,
+}
+
 /// Validate that a time series has no missing values (NaN/Inf) before model fitting.
 ///
 /// This should be called at the start of every `Forecaster::fit()` implementation.
@@ -77,6 +101,16 @@ pub trait Forecaster {
     /// Check if the model has been fitted.
     fn is_fitted(&self) -> bool {
         self.fitted_values().is_some()
+    }
+
+    /// Extract fitted parameters from the model.
+    ///
+    /// Returns `None` if the model has not been fitted or does not support
+    /// parameter extraction. Models that implement this method return a
+    /// `FittedParams` containing their internal state, which can be used
+    /// to warm-start a new model instance.
+    fn fitted_params(&self) -> Option<FittedParams> {
+        None
     }
 
     // =========================================================================

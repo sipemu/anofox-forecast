@@ -7,6 +7,7 @@ pub mod arima;
 pub mod auto_forecast;
 pub mod baseline;
 pub mod batch;
+pub mod convenience;
 pub mod ensemble;
 pub mod exponential;
 pub mod garch;
@@ -25,6 +26,8 @@ pub use kalman_forecaster::KalmanForecaster;
 pub use mfles::MFLES;
 pub use mstl_forecaster::{MSTLForecaster, SeasonalForecastMethod, TrendForecastMethod};
 pub use tbats::{AutoTBATS, TBATS};
-pub use traits::{validate_series_complete, BoxedForecaster, Forecaster, ModelRegistry, ModelSpec};
+pub use traits::{
+    validate_series_complete, BoxedForecaster, FittedParams, Forecaster, ModelRegistry, ModelSpec,
+};
 pub use var::VAR;
 pub use var_forecaster::VARForecaster;

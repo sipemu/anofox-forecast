@@ -4,9 +4,10 @@
 
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
-use crate::models::{validate_series_complete, Forecaster};
+use crate::models::{validate_series_complete, FittedParams, Forecaster};
 use crate::utils::optimization::{nelder_mead, NelderMeadConfig};
 use crate::utils::stats::quantile_normal;
+use std::collections::HashMap;
 
 /// Simple Exponential Smoothing forecaster.
 ///
@@ -52,6 +53,8 @@ pub struct SimpleExponentialSmoothing {
     residual_variance: Option<f64>,
     /// Original series length.
     n: usize,
+    /// Whether to skip optimization when fit() is called (warm-start mode).
+    skip_optimization: bool,
 }
 
 impl SimpleExponentialSmoothing {
@@ -68,6 +71,7 @@ impl SimpleExponentialSmoothing {
             residuals: None,
             residual_variance: None,
             n: 0,
+            skip_optimization: false,
         }
     }
 
@@ -83,6 +87,29 @@ impl SimpleExponentialSmoothing {
             residuals: None,
             residual_variance: None,
             n: 0,
+            skip_optimization: false,
+        }
+    }
+
+    /// Create a warm-started SES model with pre-fitted alpha and level.
+    ///
+    /// The resulting model can produce predictions immediately via `predict()`
+    /// without calling `fit()`. If `fit()` is later called, the provided alpha
+    /// is used directly (optimization is skipped).
+    ///
+    /// # Arguments
+    /// * `alpha` - Pre-fitted smoothing parameter (0 < alpha < 1)
+    /// * `level` - Pre-fitted level state
+    pub fn with_alpha(alpha: f64, level: f64) -> Self {
+        Self {
+            alpha: Some(alpha.clamp(0.0001, 0.9999)),
+            optimize: false,
+            level: Some(level),
+            fitted: None,
+            residuals: None,
+            residual_variance: None,
+            n: 0,
+            skip_optimization: true,
         }
     }
 
@@ -149,8 +176,8 @@ impl Forecaster for SimpleExponentialSmoothing {
 
         self.n = values.len();
 
-        // Optimize alpha if needed
-        if self.optimize {
+        // Optimize alpha if needed (skip when warm-started with skip_optimization)
+        if self.optimize && !self.skip_optimization {
             self.alpha = Some(Self::optimize_alpha(values));
         }
 
@@ -281,6 +308,18 @@ impl Forecaster for SimpleExponentialSmoothing {
 
     fn name(&self) -> &str {
         "SimpleExponentialSmoothing"
+    }
+
+    fn fitted_params(&self) -> Option<FittedParams> {
+        let alpha = self.alpha?;
+        let level = self.level?;
+        let mut params = HashMap::new();
+        params.insert("alpha".to_string(), alpha);
+        params.insert("level".to_string(), level);
+        Some(FittedParams {
+            params,
+            seasonal: None,
+        })
     }
 }
 
@@ -786,5 +825,91 @@ mod tests {
         let width_first = upper[1] - lower[1]; // Skip first which may be NaN
         let width_last = upper[n - 1] - lower[n - 1];
         assert_relative_eq!(width_first, width_last, epsilon = 1e-10);
+    }
+
+    // =========================================================================
+    // Warm-start tests
+    // =========================================================================
+
+    #[test]
+    fn ses_warm_start_predict_without_fit() {
+        // Create a warm-started model and predict directly without fit()
+        let model = SimpleExponentialSmoothing::with_alpha(0.3, 15.0);
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.horizon(), 5);
+        // SES produces flat forecasts at the provided level
+        for &v in forecast.primary() {
+            assert_relative_eq!(v, 15.0, epsilon = 1e-10);
+        }
+    }
+
+    #[test]
+    fn ses_extract_params_then_warm_start() {
+        let timestamps = make_timestamps(20);
+        let values: Vec<f64> = (0..20).map(|i| 10.0 + (i as f64) * 0.5).collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        // Fit original model
+        let mut model = SimpleExponentialSmoothing::new(0.3);
+        model.fit(&ts).unwrap();
+        let forecast1 = model.predict(5).unwrap();
+
+        // Extract params and warm-start a new model
+        let fp = model.fitted_params().unwrap();
+        let alpha = fp.params["alpha"];
+        let level = fp.params["level"];
+        let warm = SimpleExponentialSmoothing::with_alpha(alpha, level);
+        let forecast2 = warm.predict(5).unwrap();
+
+        // Both should produce identical forecasts
+        for (a, b) in forecast1.primary().iter().zip(forecast2.primary().iter()) {
+            assert_relative_eq!(a, b, epsilon = 1e-10);
+        }
+    }
+
+    #[test]
+    fn ses_warm_start_fit_refines() {
+        let timestamps = make_timestamps(20);
+        let values: Vec<f64> = (0..20).map(|i| 10.0 + (i as f64) * 0.5).collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        // Warm-start with approximate params then fit
+        let mut model = SimpleExponentialSmoothing::with_alpha(0.3, 10.0);
+        model.fit(&ts).unwrap();
+
+        // After fit, model should have fitted values and updated level
+        assert!(model.fitted_values().is_some());
+        assert!(model.residuals().is_some());
+        assert!(model.level().is_some());
+
+        let forecast = model.predict(5).unwrap();
+        assert_eq!(forecast.horizon(), 5);
+        // Forecast should be at the new level (not the initial 10.0)
+        for &v in forecast.primary() {
+            assert!(v > 10.0); // Level should have moved up with trending data
+        }
+    }
+
+    #[test]
+    fn ses_fitted_params_returns_none_before_fit() {
+        let model = SimpleExponentialSmoothing::new(0.3);
+        // alpha is set but level is None, so fitted_params should return None
+        assert!(model.fitted_params().is_none());
+    }
+
+    #[test]
+    fn ses_fitted_params_roundtrip() {
+        let timestamps = make_timestamps(10);
+        let values = vec![10.0, 12.0, 11.0, 13.0, 12.0, 14.0, 13.0, 15.0, 14.0, 16.0];
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = SimpleExponentialSmoothing::new(0.3);
+        model.fit(&ts).unwrap();
+
+        let fp = model.fitted_params().unwrap();
+        assert!(fp.params.contains_key("alpha"));
+        assert!(fp.params.contains_key("level"));
+        assert!(fp.seasonal.is_none());
+        assert_relative_eq!(fp.params["alpha"], 0.3, epsilon = 1e-10);
     }
 }
