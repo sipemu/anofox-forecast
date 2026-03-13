@@ -115,7 +115,10 @@ mod tests {
             .iter()
             .zip(restored_forecast.primary().iter())
         {
-            assert!((a - b).abs() < 1e-10, "ARIMA forecasts should match after round-trip");
+            assert!(
+                (a - b).abs() < 1e-10,
+                "ARIMA forecasts should match after round-trip"
+            );
         }
     }
 
@@ -141,7 +144,10 @@ mod tests {
             .iter()
             .zip(restored_forecast.primary().iter())
         {
-            assert!((a - b).abs() < 1e-10, "ETS forecasts should match after round-trip");
+            assert!(
+                (a - b).abs() < 1e-10,
+                "ETS forecasts should match after round-trip"
+            );
         }
     }
 
@@ -161,7 +167,10 @@ mod tests {
 
         // The exog_ols field is skipped during serialization,
         // so it should be None after deserialization
-        assert!(!restored.has_exog(), "exog_ols should be None after deserialization");
+        assert!(
+            !restored.has_exog(),
+            "exog_ols should be None after deserialization"
+        );
     }
 
     #[test]

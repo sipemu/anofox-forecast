@@ -66,10 +66,7 @@ impl FeatureSelector {
     ///
     /// # Returns
     /// Sorted list of feature names that pass the variance threshold.
-    pub fn variance_threshold(
-        features: &HashMap<String, Vec<f64>>,
-        threshold: f64,
-    ) -> Vec<String> {
+    pub fn variance_threshold(features: &HashMap<String, Vec<f64>>, threshold: f64) -> Vec<String> {
         let mut selected: Vec<String> = features
             .iter()
             .filter(|(_, values)| compute_variance(values) >= threshold)
@@ -90,10 +87,7 @@ impl FeatureSelector {
     ///
     /// # Returns
     /// Sorted list of feature names after removing redundant ones.
-    pub fn correlation_filter(
-        features: &HashMap<String, Vec<f64>>,
-        threshold: f64,
-    ) -> Vec<String> {
+    pub fn correlation_filter(features: &HashMap<String, Vec<f64>>, threshold: f64) -> Vec<String> {
         let mut names: Vec<&String> = features.keys().collect();
         names.sort();
 
@@ -317,10 +311,7 @@ mod tests {
 
     #[test]
     fn variance_threshold_keeps_all_above() {
-        let features = make_features(&[
-            ("a", vec![1.0, 10.0, 20.0]),
-            ("b", vec![5.0, 15.0, 25.0]),
-        ]);
+        let features = make_features(&[("a", vec![1.0, 10.0, 20.0]), ("b", vec![5.0, 15.0, 25.0])]);
         let selected = FeatureSelector::variance_threshold(&features, 0.01);
         assert_eq!(selected.len(), 2);
     }
@@ -440,10 +431,7 @@ mod tests {
 
     #[test]
     fn rank_features_all_constant() {
-        let features = make_features(&[
-            ("a", vec![1.0, 1.0, 1.0]),
-            ("b", vec![2.0, 2.0, 2.0]),
-        ]);
+        let features = make_features(&[("a", vec![1.0, 1.0, 1.0]), ("b", vec![2.0, 2.0, 2.0])]);
         let ranked = rank_features(&features);
         // All zero variance: equal weight
         for fi in &ranked {
@@ -458,7 +446,7 @@ mod tests {
         let features = make_features(&[
             ("varying", vec![1.0, 2.0, 3.0, 4.0, 5.0]),
             ("constant", vec![7.0, 7.0, 7.0, 7.0, 7.0]),
-            ("correlated", vec![2.0, 4.0, 6.0, 8.0, 10.0]),    // = 2 * varying
+            ("correlated", vec![2.0, 4.0, 6.0, 8.0, 10.0]), // = 2 * varying
             ("independent", vec![5.0, 3.0, 1.0, 4.0, 2.0]),
         ]);
         let config = FeatureSelectionConfig {

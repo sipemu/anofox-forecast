@@ -1,19 +1,29 @@
 //! Batch Forecasting example.
 //!
 //! Demonstrates fitting multiple models to multiple time series
-//! and comparing results.
+//! and comparing results. Uses the `batch` module for parallel processing
+//! when the `parallel` feature is enabled.
 //!
-//! Run with: cargo run --example batch
+//! Run with:
+//!   cargo run --example batch
+//!   cargo run --example batch --features parallel   # parallel mode
 
 use anofox_forecast::core::TimeSeries;
 use anofox_forecast::models::baseline::{Naive, RandomWalkWithDrift, SimpleMovingAverage};
+use anofox_forecast::models::batch::{fit_predict_many, fit_registry};
 use anofox_forecast::models::exponential::{HoltLinearTrend, SimpleExponentialSmoothing};
-use anofox_forecast::models::{BoxedForecaster, ModelRegistry, ModelSpec};
+use anofox_forecast::models::{ModelRegistry, ModelSpec};
 use anofox_forecast::utils::comparison::{compare_registry, ComparisonConfig, ComparisonTable};
 use chrono::{Duration, TimeZone, Utc};
 
 /// Generate a synthetic time series with trend + seasonality + noise.
-fn make_series(name: &str, n: usize, trend: f64, amplitude: f64, period: usize) -> (String, TimeSeries) {
+fn make_series(
+    name: &str,
+    n: usize,
+    trend: f64,
+    amplitude: f64,
+    period: usize,
+) -> (String, TimeSeries) {
     let timestamps: Vec<_> = (0..n)
         .map(|i| Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap() + Duration::hours(i as i64))
         .collect();
@@ -31,7 +41,11 @@ fn make_series(name: &str, n: usize, trend: f64, amplitude: f64, period: usize) 
 }
 
 fn main() {
-    println!("=== Batch Forecasting Example ===\n");
+    println!("=== Batch Forecasting Example ===");
+    #[cfg(feature = "parallel")]
+    println!("(parallel mode enabled)\n");
+    #[cfg(not(feature = "parallel"))]
+    println!("(sequential mode — enable `parallel` feature for rayon)\n");
 
     // --- 1. Create multiple time series ---
     let series_list = vec![
@@ -65,52 +79,66 @@ fn main() {
         true,
     ));
 
-    let config = ComparisonConfig::default();
-
-    // --- 3. Compare all models on each series ---
+    // --- 3. Compare all models on each series (parallel when feature enabled) ---
     println!("--- Model comparison per series ---\n");
     for (name, ts) in &series_list {
         println!("Series: {}", name);
-        match compare_registry(&registry, ts, &config) {
+        match compare_registry(&registry, ts, &ComparisonConfig::default()) {
             Ok(results) => println!("{}\n", ComparisonTable(results)),
             Err(e) => println!("  Error: {}\n", e),
         }
     }
 
-    // --- 4. Batch fit-and-predict across all series ---
+    // --- 4. Batch fit-and-predict: one model across all series (parallel) ---
     let horizon = 6;
-    println!("--- Batch forecast (horizon={}) ---\n", horizon);
+    println!("--- Batch fit_predict_many (horizon={}) ---\n", horizon);
 
-    let factories: Vec<(&str, Box<dyn Fn() -> BoxedForecaster>)> = vec![
-        ("Naive", Box::new(|| Box::new(Naive::new()))),
-        ("RWD", Box::new(|| Box::new(RandomWalkWithDrift::new()))),
-        ("SES", Box::new(|| Box::new(SimpleExponentialSmoothing::new(0.3)))),
-        ("Holt", Box::new(|| Box::new(HoltLinearTrend::new(0.3, 0.1)))),
-    ];
+    let series_refs: Vec<&TimeSeries> = series_list.iter().map(|(_, ts)| ts).collect();
 
-    for (series_name, ts) in &series_list {
-        println!("Series: {}", series_name);
-        for (model_name, factory) in &factories {
-            let mut model = factory();
-            if model.fit(ts).is_err() {
-                println!("  {}: fit failed", model_name);
-                continue;
+    // fit_predict_many uses rayon::par_iter when `parallel` is enabled
+    let results = fit_predict_many(Naive::new, &series_refs, horizon);
+    for (r, (name, _)) in results.iter().zip(&series_list) {
+        match &r.forecast {
+            Some(f) => {
+                let vals: Vec<String> = f
+                    .primary()
+                    .iter()
+                    .map(|v: &f64| format!("{:.2}", v))
+                    .collect();
+                println!("  {} ({}): [{}]", name, r.model_name, vals.join(", "));
             }
-            match model.predict(horizon) {
-                Ok(forecast) => {
-                    let vals: Vec<String> = forecast.primary().iter().map(|v| format!("{:.2}", v)).collect();
-                    println!("  {}: [{}]", model_name, vals.join(", "));
-                }
-                Err(e) => println!("  {}: predict failed: {}", model_name, e),
-            }
+            None => println!(
+                "  {}: {}",
+                name,
+                r.error.as_deref().unwrap_or("unknown error")
+            ),
         }
-        println!();
     }
+    println!();
 
-    // --- 5. Pick the best model per series ---
+    // --- 5. Registry comparison: all models on one series (parallel) ---
+    println!("--- fit_registry: all models on one series ---\n");
+    let reg_results = fit_registry(&registry, &series_list[0].1);
+    for r in &reg_results {
+        if let Some(metrics) = &r.metrics {
+            println!(
+                "  {}: RMSE={:.4}, MAE={:.4}",
+                r.model_name, metrics.rmse, metrics.mae
+            );
+        } else {
+            println!(
+                "  {}: {}",
+                r.model_name,
+                r.error.as_deref().unwrap_or("no metrics")
+            );
+        }
+    }
+    println!();
+
+    // --- 6. Pick the best model per series ---
     println!("--- Best model per series (by in-sample RMSE) ---\n");
     for (name, ts) in &series_list {
-        match compare_registry(&registry, ts, &config) {
+        match compare_registry(&registry, ts, &ComparisonConfig::default()) {
             Ok(results) if !results.is_empty() => {
                 let best = &results[0];
                 println!(

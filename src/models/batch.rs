@@ -237,7 +237,7 @@ where
 /// series, predicts one step ahead (for metric comparison), and computes in-sample
 /// accuracy metrics when fitted values are available.
 ///
-/// This is useful for model selection: quickly comparing many models on the same data.
+/// With the `parallel` feature enabled, models are fitted in parallel using rayon.
 ///
 /// # Arguments
 /// * `registry` - A [`ModelRegistry`] containing model specifications to compare.
@@ -270,56 +270,60 @@ where
 /// ```
 pub fn fit_registry(registry: &ModelRegistry, series: &TimeSeries) -> Vec<RegistryResult> {
     let actual = series.primary_values();
+    let specs: Vec<_> = registry.iter().collect();
 
-    registry
-        .iter()
-        .map(|spec| {
-            let model_name = spec.name.to_string();
-            let mut model = spec.create();
+    let process = |spec: &&crate::models::traits::ModelSpec| -> RegistryResult {
+        let model_name = spec.name.to_string();
+        let mut model = spec.create();
 
-            match model.fit(series) {
-                Ok(()) => {
-                    // Compute in-sample accuracy metrics from fitted values.
-                    // Some models produce NaN for initial fitted values (e.g., Naive has no
-                    // prediction for the first observation). We filter to aligned, finite pairs.
-                    let metrics = model.fitted_values().and_then(|fitted| {
-                        let (a, p): (Vec<f64>, Vec<f64>) = actual
-                            .iter()
-                            .zip(fitted.iter())
-                            .filter(|(a, f)| a.is_finite() && f.is_finite())
-                            .map(|(&a, &f)| (a, f))
-                            .unzip();
-                        if a.is_empty() {
-                            return None;
-                        }
-                        calculate_metrics(&a, &p, None).ok()
-                    });
-
-                    // Produce a short-horizon forecast for comparison.
-                    match model.predict(1) {
-                        Ok(forecast) => RegistryResult {
-                            model_name,
-                            forecast: Some(forecast),
-                            metrics,
-                            error: None,
-                        },
-                        Err(e) => RegistryResult {
-                            model_name,
-                            forecast: None,
-                            metrics,
-                            error: Some(format!("predict failed: {e}")),
-                        },
+        match model.fit(series) {
+            Ok(()) => {
+                let metrics = model.fitted_values().and_then(|fitted| {
+                    let (a, p): (Vec<f64>, Vec<f64>) = actual
+                        .iter()
+                        .zip(fitted.iter())
+                        .filter(|(a, f)| a.is_finite() && f.is_finite())
+                        .map(|(&a, &f)| (a, f))
+                        .unzip();
+                    if a.is_empty() {
+                        return None;
                     }
+                    calculate_metrics(&a, &p, None).ok()
+                });
+
+                match model.predict(1) {
+                    Ok(forecast) => RegistryResult {
+                        model_name,
+                        forecast: Some(forecast),
+                        metrics,
+                        error: None,
+                    },
+                    Err(e) => RegistryResult {
+                        model_name,
+                        forecast: None,
+                        metrics,
+                        error: Some(format!("predict failed: {e}")),
+                    },
                 }
-                Err(e) => RegistryResult {
-                    model_name,
-                    forecast: None,
-                    metrics: None,
-                    error: Some(format!("fit failed: {e}")),
-                },
             }
-        })
-        .collect()
+            Err(e) => RegistryResult {
+                model_name,
+                forecast: None,
+                metrics: None,
+                error: Some(format!("fit failed: {e}")),
+            },
+        }
+    };
+
+    #[cfg(feature = "parallel")]
+    {
+        specs.par_iter().map(process).collect()
+    }
+
+    #[cfg(not(feature = "parallel"))]
+    {
+        specs.iter().map(process).collect()
+    }
 }
 
 #[cfg(test)]
@@ -602,7 +606,10 @@ mod tests {
         assert_eq!(results.len(), 2);
 
         assert!(results[0].error.is_none(), "Naive should succeed");
-        assert!(results[1].error.is_some(), "SeasonalNaive(12) should fail with 5 points");
+        assert!(
+            results[1].error.is_some(),
+            "SeasonalNaive(12) should fail with 5 points"
+        );
     }
 
     #[test]
@@ -635,7 +642,10 @@ mod tests {
 
         // RandomWalkWithDrift should capture the trend better than Naive on a linear series.
         // Both have MAE=1 for a unit-step series, but RWD should be at least as good.
-        assert!(rwd_rmse <= naive_rmse + 0.01, "RWD rmse={rwd_rmse} should be <= Naive rmse={naive_rmse}");
+        assert!(
+            rwd_rmse <= naive_rmse + 0.01,
+            "RWD rmse={rwd_rmse} should be <= Naive rmse={naive_rmse}"
+        );
     }
 
     // -----------------------------------------------------------------------

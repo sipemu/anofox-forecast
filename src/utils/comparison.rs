@@ -19,7 +19,7 @@
 //! #     (1..=30).map(|i| i as f64).collect(),
 //! # ).unwrap();
 //!
-//! let factories: Vec<(&str, Box<dyn Fn() -> BoxedForecaster>)> = vec![
+//! let factories: Vec<(&str, Box<dyn Fn() -> BoxedForecaster + Send + Sync>)> = vec![
 //!     ("Naive", Box::new(|| Box::new(Naive::new()))),
 //!     ("RWD", Box::new(|| Box::new(RandomWalkWithDrift::new()))),
 //! ];
@@ -39,6 +39,9 @@ use crate::utils::cross_validation::CVConfig;
 use crate::utils::metrics::{calculate_metrics, AccuracyMetrics};
 use std::fmt;
 use std::time::Instant;
+
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 
 /// Result of comparing a single model against a time series.
 #[derive(Debug, Clone)]
@@ -139,14 +142,21 @@ impl fmt::Display for ComparisonTable {
                 writeln!(
                     f,
                     "{:<20} {:>10.4} {:>10.4} {:>10.4} {:>10} {:>12}",
-                    r.model_name, r.in_sample.rmse, r.in_sample.mae, r.in_sample.smape, cv_rmse,
+                    r.model_name,
+                    r.in_sample.rmse,
+                    r.in_sample.mae,
+                    r.in_sample.smape,
+                    cv_rmse,
                     r.fit_time_us
                 )?;
             } else {
                 writeln!(
                     f,
                     "{:<20} {:>10.4} {:>10.4} {:>10.4} {:>12}",
-                    r.model_name, r.in_sample.rmse, r.in_sample.mae, r.in_sample.smape,
+                    r.model_name,
+                    r.in_sample.rmse,
+                    r.in_sample.mae,
+                    r.in_sample.smape,
                     r.fit_time_us
                 )?;
             }
@@ -256,55 +266,53 @@ fn run_cv_for_factory(
 /// #     (1..=30).map(|i| i as f64).collect(),
 /// # ).unwrap();
 ///
-/// let factories: Vec<(&str, Box<dyn Fn() -> BoxedForecaster>)> = vec![
+/// let factories: Vec<(&str, Box<dyn Fn() -> BoxedForecaster + Send + Sync>)> = vec![
 ///     ("Naive", Box::new(|| Box::new(Naive::new()))),
 /// ];
 /// let results = compare_models(&factories, &ts, &ComparisonConfig::default()).unwrap();
 /// assert_eq!(results.len(), 1);
 /// ```
 pub fn compare_models(
-    factories: &[(&str, Box<dyn Fn() -> BoxedForecaster>)],
+    factories: &[(&str, Box<dyn Fn() -> BoxedForecaster + Send + Sync>)],
     series: &TimeSeries,
     config: &ComparisonConfig,
 ) -> Result<Vec<ComparisonResult>> {
     let actual = series.primary_values();
-    let mut results = Vec::new();
 
-    for (name, factory) in factories {
+    let process = |(name, factory): &(&str, Box<dyn Fn() -> BoxedForecaster + Send + Sync>)| -> Option<ComparisonResult> {
         let mut model = factory();
 
-        // Time the fit
         let start = Instant::now();
         if model.fit(series).is_err() {
-            continue;
+            return None;
         }
         let fit_time_us = start.elapsed().as_micros() as u64;
 
-        // Compute in-sample metrics from fitted values
         let in_sample = match model.fitted_values() {
-            Some(fitted) => match compute_in_sample(actual, fitted) {
-                Some(m) => m,
-                None => continue,
-            },
-            None => continue,
+            Some(fitted) => compute_in_sample(actual, fitted)?,
+            None => return None,
         };
 
-        // Optionally run cross-validation
         let cv_metrics = if config.run_cv {
             run_cv_for_factory(factory.as_ref(), series, &config.cv_config)
         } else {
             None
         };
 
-        results.push(ComparisonResult {
+        Some(ComparisonResult {
             model_name: name.to_string(),
             in_sample,
             cv_metrics,
             fit_time_us,
-        });
-    }
+        })
+    };
 
-    // Sort by in-sample RMSE ascending
+    #[cfg(feature = "parallel")]
+    let mut results: Vec<ComparisonResult> = factories.par_iter().filter_map(process).collect();
+
+    #[cfg(not(feature = "parallel"))]
+    let mut results: Vec<ComparisonResult> = factories.iter().filter_map(process).collect();
+
     results.sort_by(|a, b| {
         a.in_sample
             .rmse
@@ -353,28 +361,22 @@ pub fn compare_registry(
     config: &ComparisonConfig,
 ) -> Result<Vec<ComparisonResult>> {
     let actual = series.primary_values();
-    let mut results = Vec::new();
+    let specs: Vec<_> = registry.iter().collect();
 
-    for spec in registry.iter() {
+    let process = |spec: &&crate::models::ModelSpec| -> Option<ComparisonResult> {
         let mut model = spec.create();
 
-        // Time the fit
         let start = Instant::now();
         if model.fit(series).is_err() {
-            continue;
+            return None;
         }
         let fit_time_us = start.elapsed().as_micros() as u64;
 
-        // Compute in-sample metrics from fitted values
         let in_sample = match model.fitted_values() {
-            Some(fitted) => match compute_in_sample(actual, fitted) {
-                Some(m) => m,
-                None => continue,
-            },
-            None => continue,
+            Some(fitted) => compute_in_sample(actual, fitted)?,
+            None => return None,
         };
 
-        // Optionally run cross-validation
         let cv_metrics = if config.run_cv {
             let factory = || spec.create();
             run_cv_for_factory(&factory, series, &config.cv_config)
@@ -382,15 +384,20 @@ pub fn compare_registry(
             None
         };
 
-        results.push(ComparisonResult {
+        Some(ComparisonResult {
             model_name: spec.name.to_string(),
             in_sample,
             cv_metrics,
             fit_time_us,
-        });
-    }
+        })
+    };
 
-    // Sort by in-sample RMSE ascending
+    #[cfg(feature = "parallel")]
+    let mut results: Vec<ComparisonResult> = specs.par_iter().filter_map(process).collect();
+
+    #[cfg(not(feature = "parallel"))]
+    let mut results: Vec<ComparisonResult> = specs.iter().filter_map(process).collect();
+
     results.sort_by(|a, b| {
         a.in_sample
             .rmse
@@ -431,12 +438,9 @@ mod tests {
     #[test]
     fn test_compare_two_models() {
         let ts = make_test_series(30);
-        let factories: Vec<(&str, Box<dyn Fn() -> BoxedForecaster>)> = vec![
+        let factories: Vec<(&str, Box<dyn Fn() -> BoxedForecaster + Send + Sync>)> = vec![
             ("Naive", Box::new(|| Box::new(Naive::new()))),
-            (
-                "RWD",
-                Box::new(|| Box::new(RandomWalkWithDrift::new())),
-            ),
+            ("RWD", Box::new(|| Box::new(RandomWalkWithDrift::new()))),
         ];
 
         let config = ComparisonConfig::default();
@@ -455,16 +459,10 @@ mod tests {
     #[test]
     fn test_compare_three_models() {
         let ts = make_test_series(30);
-        let factories: Vec<(&str, Box<dyn Fn() -> BoxedForecaster>)> = vec![
+        let factories: Vec<(&str, Box<dyn Fn() -> BoxedForecaster + Send + Sync>)> = vec![
             ("Naive", Box::new(|| Box::new(Naive::new()))),
-            (
-                "RWD",
-                Box::new(|| Box::new(RandomWalkWithDrift::new())),
-            ),
-            (
-                "WindowAvg",
-                Box::new(|| Box::new(WindowAverage::new(5))),
-            ),
+            ("RWD", Box::new(|| Box::new(RandomWalkWithDrift::new()))),
+            ("WindowAvg", Box::new(|| Box::new(WindowAverage::new(5)))),
         ];
 
         let config = ComparisonConfig::default();
@@ -484,12 +482,9 @@ mod tests {
     #[test]
     fn test_compare_with_cv() {
         let ts = make_test_series(50);
-        let factories: Vec<(&str, Box<dyn Fn() -> BoxedForecaster>)> = vec![
+        let factories: Vec<(&str, Box<dyn Fn() -> BoxedForecaster + Send + Sync>)> = vec![
             ("Naive", Box::new(|| Box::new(Naive::new()))),
-            (
-                "RWD",
-                Box::new(|| Box::new(RandomWalkWithDrift::new())),
-            ),
+            ("RWD", Box::new(|| Box::new(RandomWalkWithDrift::new()))),
         ];
 
         let cv_config = CVConfig::expanding(20, 1).with_step_size(5);
@@ -519,11 +514,7 @@ mod tests {
         let ts = make_test_series(30);
 
         let mut registry = ModelRegistry::new();
-        registry.register(ModelSpec::new(
-            "Naive",
-            || Box::new(Naive::new()),
-            true,
-        ));
+        registry.register(ModelSpec::new("Naive", || Box::new(Naive::new()), true));
         registry.register(ModelSpec::new(
             "RWD",
             || Box::new(RandomWalkWithDrift::new()),
@@ -545,7 +536,7 @@ mod tests {
     #[test]
     fn test_compare_empty_factories() {
         let ts = make_test_series(30);
-        let factories: Vec<(&str, Box<dyn Fn() -> BoxedForecaster>)> = vec![];
+        let factories: Vec<(&str, Box<dyn Fn() -> BoxedForecaster + Send + Sync>)> = vec![];
 
         let config = ComparisonConfig::default();
         let results = compare_models(&factories, &ts, &config).unwrap();
@@ -571,12 +562,9 @@ mod tests {
     #[test]
     fn test_display_table_without_cv() {
         let ts = make_test_series(30);
-        let factories: Vec<(&str, Box<dyn Fn() -> BoxedForecaster>)> = vec![
+        let factories: Vec<(&str, Box<dyn Fn() -> BoxedForecaster + Send + Sync>)> = vec![
             ("Naive", Box::new(|| Box::new(Naive::new()))),
-            (
-                "RWD",
-                Box::new(|| Box::new(RandomWalkWithDrift::new())),
-            ),
+            ("RWD", Box::new(|| Box::new(RandomWalkWithDrift::new()))),
         ];
 
         let config = ComparisonConfig::default();
@@ -597,9 +585,8 @@ mod tests {
     #[test]
     fn test_display_table_with_cv() {
         let ts = make_test_series(50);
-        let factories: Vec<(&str, Box<dyn Fn() -> BoxedForecaster>)> = vec![
-            ("Naive", Box::new(|| Box::new(Naive::new()))),
-        ];
+        let factories: Vec<(&str, Box<dyn Fn() -> BoxedForecaster + Send + Sync>)> =
+            vec![("Naive", Box::new(|| Box::new(Naive::new())))];
 
         let cv_config = CVConfig::expanding(20, 1).with_step_size(5);
         let config = ComparisonConfig::new().with_cv(cv_config);
@@ -631,9 +618,7 @@ mod tests {
     #[test]
     fn test_config_builder() {
         let cv_config = CVConfig::expanding(15, 3).with_step_size(2);
-        let config = ComparisonConfig::new()
-            .with_cv(cv_config)
-            .with_horizon(5);
+        let config = ComparisonConfig::new().with_cv(cv_config).with_horizon(5);
 
         assert!(config.run_cv);
         assert_eq!(config.horizon, 5);
@@ -656,13 +641,11 @@ mod tests {
     fn test_compare_skips_failed_models() {
         // Use a very short series so SeasonalNaive(12) fails but Naive succeeds
         let ts = make_test_series(10);
-        let factories: Vec<(&str, Box<dyn Fn() -> BoxedForecaster>)> = vec![
+        let factories: Vec<(&str, Box<dyn Fn() -> BoxedForecaster + Send + Sync>)> = vec![
             ("Naive", Box::new(|| Box::new(Naive::new()))),
             (
                 "SeasonalNaive",
-                Box::new(|| {
-                    Box::new(crate::models::baseline::SeasonalNaive::new(12))
-                }),
+                Box::new(|| Box::new(crate::models::baseline::SeasonalNaive::new(12))),
             ),
         ];
 

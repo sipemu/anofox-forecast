@@ -751,7 +751,7 @@ pub struct GroupedCVResults {
 /// ];
 ///
 /// let config = CVConfig::expanding(15, 3).with_step_size(3);
-/// let results = grouped_cross_validate(&config, series_map.into_iter(), Naive::new).unwrap();
+/// let results = grouped_cross_validate(&config, series_map, Naive::new).unwrap();
 ///
 /// assert_eq!(results.group_results.len(), 2);
 /// ```
@@ -1080,13 +1080,13 @@ mod tests {
 
         // Very small ratio should give at least 1 training sample
         let (train, test) = train_test_split(&ts, 0.1).unwrap();
-        assert!(train.len() >= 1);
-        assert!(test.len() >= 1);
+        assert!(!train.is_empty());
+        assert!(!test.is_empty());
 
         // Very large ratio should give at least 1 test sample
         let (train, test) = train_test_split(&ts, 0.99).unwrap();
-        assert!(train.len() >= 1);
-        assert!(test.len() >= 1);
+        assert!(!train.is_empty());
+        assert!(!test.is_empty());
     }
 
     #[test]
@@ -1443,7 +1443,7 @@ mod tests {
         ];
 
         let config = CVConfig::expanding(15, 3).with_step_size(3);
-        let results = grouped_cross_validate(&config, series_map.into_iter(), Naive::new).unwrap();
+        let results = grouped_cross_validate(&config, series_map, Naive::new).unwrap();
 
         assert_eq!(results.group_results.len(), 2);
         assert!(results.aggregated.mae.is_finite());
@@ -1471,7 +1471,7 @@ mod tests {
         ];
 
         let config = CVConfig::expanding(10, 1);
-        let results = grouped_cross_validate(&config, series_map.into_iter(), Naive::new).unwrap();
+        let results = grouped_cross_validate(&config, series_map, Naive::new).unwrap();
 
         // Folds should be based on min length (20)
         for (_, cv_result) in &results.group_results {
@@ -1484,7 +1484,7 @@ mod tests {
         let series_map: Vec<(String, TimeSeries)> = vec![];
         let config = CVConfig::expanding(10, 1);
 
-        let result = grouped_cross_validate(&config, series_map.into_iter(), Naive::new);
+        let result = grouped_cross_validate(&config, series_map, Naive::new);
         assert!(result.is_err());
     }
 }
