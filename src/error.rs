@@ -51,6 +51,18 @@ pub enum ForecastError {
     /// Computation error (e.g., numerical issues).
     #[error("computation error: {0}")]
     ComputationError(String),
+
+    /// Convergence failure during optimization or model fitting.
+    #[error("convergence failure: {0}")]
+    ConvergenceFailure(String),
+
+    /// Linear algebra failure (e.g., singular matrix, failed decomposition).
+    #[error("singular matrix: {0}")]
+    SingularMatrix(String),
+
+    /// Serialization or persistence error.
+    #[error("serialization error: {0}")]
+    SerializationError(String),
 }
 
 #[cfg(test)]

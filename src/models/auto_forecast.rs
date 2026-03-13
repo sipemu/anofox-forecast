@@ -12,6 +12,9 @@ use crate::models::{validate_series_complete, Forecaster};
 use std::collections::HashMap;
 use std::fmt;
 
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+
 /// Strategy for selecting the best model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SelectionStrategy {
@@ -172,61 +175,79 @@ impl AutoForecast {
 
     /// Fit using in-sample MSE comparison.
     fn fit_in_sample(&mut self, series: &TimeSeries) -> Result<()> {
-        let mut candidates: Vec<(SelectedAutoModel, String, f64)> = Vec::new();
+        // Build a list of factory closures that each create, fit, and score a candidate.
+        // Models are created and consumed within the closure so non-Send types never
+        // cross thread boundaries.
+        let seasonal_period = self.config.seasonal_period;
 
-        // Try AutoARIMA
+        let mut factories: Vec<
+            Box<dyn Fn(&TimeSeries) -> Option<(SelectedAutoModel, String, f64)> + Send + Sync>,
+        > = Vec::new();
+
         if self.config.include_arima {
-            let mut model = match self.config.seasonal_period {
-                Some(p) if p > 1 => AutoARIMA::seasonal(p),
-                _ => AutoARIMA::new(),
-            };
-            if model.fit(series).is_ok() {
-                if let Some(residuals) = model.residuals() {
-                    let mse = Self::calculate_mse(residuals);
-                    if mse.is_finite() {
-                        let name = model.name().to_string();
-                        candidates.push((SelectedAutoModel::ARIMA(model), name, mse));
-                    }
+            factories.push(Box::new(move |ts: &TimeSeries| {
+                let mut model = match seasonal_period {
+                    Some(p) if p > 1 => AutoARIMA::seasonal(p),
+                    _ => AutoARIMA::new(),
+                };
+                model.fit(ts).ok()?;
+                let residuals = model.residuals()?;
+                let mse = Self::calculate_mse(residuals);
+                if mse.is_finite() {
+                    let name = model.name().to_string();
+                    Some((SelectedAutoModel::ARIMA(model), name, mse))
+                } else {
+                    None
                 }
-            }
+            }));
         }
 
-        // Try AutoETS
         if self.config.include_ets {
-            let mut model = match self.config.seasonal_period {
-                Some(p) if p > 1 => AutoETS::with_period(p),
-                _ => AutoETS::new(),
-            };
-            if model.fit(series).is_ok() {
-                if let Some(residuals) = model.residuals() {
-                    let mse = Self::calculate_mse(residuals);
-                    if mse.is_finite() {
-                        let name = model.name().to_string();
-                        candidates.push((SelectedAutoModel::ETS(model), name, mse));
-                    }
+            factories.push(Box::new(move |ts: &TimeSeries| {
+                let mut model = match seasonal_period {
+                    Some(p) if p > 1 => AutoETS::with_period(p),
+                    _ => AutoETS::new(),
+                };
+                model.fit(ts).ok()?;
+                let residuals = model.residuals()?;
+                let mse = Self::calculate_mse(residuals);
+                if mse.is_finite() {
+                    let name = model.name().to_string();
+                    Some((SelectedAutoModel::ETS(model), name, mse))
+                } else {
+                    None
                 }
-            }
+            }));
         }
 
-        // Try AutoTheta
         if self.config.include_theta {
-            let mut model = match self.config.seasonal_period {
-                Some(p) if p > 1 => AutoTheta::seasonal(p),
-                _ => AutoTheta::new(),
-            };
-            if model.fit(series).is_ok() {
-                if let Some(residuals) = model.residuals() {
-                    let mse = Self::calculate_mse(residuals);
-                    if mse.is_finite() {
-                        let name = model.name().to_string();
-                        candidates.push((SelectedAutoModel::Theta(model), name, mse));
-                    }
+            factories.push(Box::new(move |ts: &TimeSeries| {
+                let mut model = match seasonal_period {
+                    Some(p) if p > 1 => AutoTheta::seasonal(p),
+                    _ => AutoTheta::new(),
+                };
+                model.fit(ts).ok()?;
+                let residuals = model.residuals()?;
+                let mse = Self::calculate_mse(residuals);
+                if mse.is_finite() {
+                    let name = model.name().to_string();
+                    Some((SelectedAutoModel::Theta(model), name, mse))
+                } else {
+                    None
                 }
-            }
+            }));
         }
+
+        #[cfg(feature = "parallel")]
+        let mut candidates: Vec<(SelectedAutoModel, String, f64)> =
+            factories.par_iter().filter_map(|f| f(series)).collect();
+
+        #[cfg(not(feature = "parallel"))]
+        let mut candidates: Vec<(SelectedAutoModel, String, f64)> =
+            factories.iter().filter_map(|f| f(series)).collect();
 
         if candidates.is_empty() {
-            return Err(ForecastError::ComputationError(
+            return Err(ForecastError::ConvergenceFailure(
                 "No candidate model could be fitted".to_string(),
             ));
         }
@@ -262,86 +283,114 @@ impl AutoForecast {
 
         let cv_config = CVConfig::expanding(initial_window, horizon).with_step_size(step_size);
 
-        let mut cv_scores: Vec<(SelectedAutoModel, String, f64)> = Vec::new();
+        // Build a list of factory closures that each run CV and refit on full data.
+        // Models are created and consumed within the closure so non-Send types never
+        // cross thread boundaries.
+        let seasonal_period = self.config.seasonal_period;
 
-        // CV for AutoARIMA
+        let mut factories: Vec<
+            Box<
+                dyn Fn(&CVConfig, &TimeSeries) -> Option<(SelectedAutoModel, String, f64)>
+                    + Send
+                    + Sync,
+            >,
+        > = Vec::new();
+
         if self.config.include_arima {
-            let period = self.config.seasonal_period;
-            let cv_result = cross_validate(&cv_config, series, move || match period {
-                Some(p) if p > 1 => AutoARIMA::seasonal(p),
-                _ => AutoARIMA::new(),
-            });
-            if let Ok(results) = cv_result {
-                if results.n_folds > 0 && results.aggregated.rmse.is_finite() {
-                    // Also fit on the full series so the winner is ready for prediction
-                    let mut model = match period {
-                        Some(p) if p > 1 => AutoARIMA::seasonal(p),
-                        _ => AutoARIMA::new(),
-                    };
-                    if model.fit(series).is_ok() {
-                        let name = model.name().to_string();
-                        cv_scores.push((
-                            SelectedAutoModel::ARIMA(model),
-                            name,
-                            results.aggregated.rmse,
-                        ));
+            factories.push(Box::new(move |cv_cfg: &CVConfig, ts: &TimeSeries| {
+                let period = seasonal_period;
+                let cv_result = cross_validate(cv_cfg, ts, move || match period {
+                    Some(p) if p > 1 => AutoARIMA::seasonal(p),
+                    _ => AutoARIMA::new(),
+                });
+                if let Ok(results) = cv_result {
+                    if results.n_folds > 0 && results.aggregated.rmse.is_finite() {
+                        let mut model = match period {
+                            Some(p) if p > 1 => AutoARIMA::seasonal(p),
+                            _ => AutoARIMA::new(),
+                        };
+                        if model.fit(ts).is_ok() {
+                            let name = model.name().to_string();
+                            return Some((
+                                SelectedAutoModel::ARIMA(model),
+                                name,
+                                results.aggregated.rmse,
+                            ));
+                        }
                     }
                 }
-            }
+                None
+            }));
         }
 
-        // CV for AutoETS
         if self.config.include_ets {
-            let period = self.config.seasonal_period;
-            let cv_result = cross_validate(&cv_config, series, move || match period {
-                Some(p) if p > 1 => AutoETS::with_period(p),
-                _ => AutoETS::new(),
-            });
-            if let Ok(results) = cv_result {
-                if results.n_folds > 0 && results.aggregated.rmse.is_finite() {
-                    let mut model = match period {
-                        Some(p) if p > 1 => AutoETS::with_period(p),
-                        _ => AutoETS::new(),
-                    };
-                    if model.fit(series).is_ok() {
-                        let name = model.name().to_string();
-                        cv_scores.push((
-                            SelectedAutoModel::ETS(model),
-                            name,
-                            results.aggregated.rmse,
-                        ));
+            factories.push(Box::new(move |cv_cfg: &CVConfig, ts: &TimeSeries| {
+                let period = seasonal_period;
+                let cv_result = cross_validate(cv_cfg, ts, move || match period {
+                    Some(p) if p > 1 => AutoETS::with_period(p),
+                    _ => AutoETS::new(),
+                });
+                if let Ok(results) = cv_result {
+                    if results.n_folds > 0 && results.aggregated.rmse.is_finite() {
+                        let mut model = match period {
+                            Some(p) if p > 1 => AutoETS::with_period(p),
+                            _ => AutoETS::new(),
+                        };
+                        if model.fit(ts).is_ok() {
+                            let name = model.name().to_string();
+                            return Some((
+                                SelectedAutoModel::ETS(model),
+                                name,
+                                results.aggregated.rmse,
+                            ));
+                        }
                     }
                 }
-            }
+                None
+            }));
         }
 
-        // CV for AutoTheta
         if self.config.include_theta {
-            let period = self.config.seasonal_period;
-            let cv_result = cross_validate(&cv_config, series, move || match period {
-                Some(p) if p > 1 => AutoTheta::seasonal(p),
-                _ => AutoTheta::new(),
-            });
-            if let Ok(results) = cv_result {
-                if results.n_folds > 0 && results.aggregated.rmse.is_finite() {
-                    let mut model = match period {
-                        Some(p) if p > 1 => AutoTheta::seasonal(p),
-                        _ => AutoTheta::new(),
-                    };
-                    if model.fit(series).is_ok() {
-                        let name = model.name().to_string();
-                        cv_scores.push((
-                            SelectedAutoModel::Theta(model),
-                            name,
-                            results.aggregated.rmse,
-                        ));
+            factories.push(Box::new(move |cv_cfg: &CVConfig, ts: &TimeSeries| {
+                let period = seasonal_period;
+                let cv_result = cross_validate(cv_cfg, ts, move || match period {
+                    Some(p) if p > 1 => AutoTheta::seasonal(p),
+                    _ => AutoTheta::new(),
+                });
+                if let Ok(results) = cv_result {
+                    if results.n_folds > 0 && results.aggregated.rmse.is_finite() {
+                        let mut model = match period {
+                            Some(p) if p > 1 => AutoTheta::seasonal(p),
+                            _ => AutoTheta::new(),
+                        };
+                        if model.fit(ts).is_ok() {
+                            let name = model.name().to_string();
+                            return Some((
+                                SelectedAutoModel::Theta(model),
+                                name,
+                                results.aggregated.rmse,
+                            ));
+                        }
                     }
                 }
-            }
+                None
+            }));
         }
+
+        #[cfg(feature = "parallel")]
+        let mut cv_scores: Vec<(SelectedAutoModel, String, f64)> = factories
+            .par_iter()
+            .filter_map(|f| f(&cv_config, series))
+            .collect();
+
+        #[cfg(not(feature = "parallel"))]
+        let mut cv_scores: Vec<(SelectedAutoModel, String, f64)> = factories
+            .iter()
+            .filter_map(|f| f(&cv_config, series))
+            .collect();
 
         if cv_scores.is_empty() {
-            return Err(ForecastError::ComputationError(
+            return Err(ForecastError::ConvergenceFailure(
                 "No candidate model produced valid cross-validation results".to_string(),
             ));
         }
@@ -764,7 +813,7 @@ mod tests {
 
         assert!(matches!(
             model.fit(&ts),
-            Err(ForecastError::ComputationError(_))
+            Err(ForecastError::ConvergenceFailure(_))
         ));
     }
 }

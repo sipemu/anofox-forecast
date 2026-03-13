@@ -441,6 +441,106 @@ pub fn scale(data: &[f64], scalar: f64) -> Vec<f64> {
 }
 
 // ============================================================================
+// Correlation Operations
+// ============================================================================
+
+/// Pearson correlation coefficient between two vectors.
+///
+/// Computes `cov(x, y) / (std(x) * std(y))` using SIMD-accelerated
+/// dot products and sums. Returns a value in [-1, 1].
+///
+/// # Panics
+///
+/// Panics if the vectors have different lengths.
+///
+/// # Example
+///
+/// ```
+/// use anofox_forecast::simd::correlation;
+/// let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+/// let y = vec![2.0, 4.0, 6.0, 8.0, 10.0];
+/// assert!((correlation(&x, &y) - 1.0).abs() < 1e-5);
+/// ```
+#[inline]
+pub fn correlation(x: &[f64], y: &[f64]) -> f64 {
+    assert_eq!(
+        x.len(),
+        y.len(),
+        "vectors must have same length for correlation"
+    );
+    let n = x.len();
+    if n < 2 {
+        return f64::NAN;
+    }
+
+    let mean_x = mean(x);
+    let mean_y = mean(y);
+    let n_f64 = n as f64;
+
+    // cov = dot(x, y) / n - mean_x * mean_y
+    let dot_xy = dot(x, y);
+    let cov = dot_xy / n_f64 - mean_x * mean_y;
+
+    // var_x = dot(x, x) / n - mean_x^2
+    let var_x = sum_of_squares(x) / n_f64 - mean_x * mean_x;
+    // var_y = dot(y, y) / n - mean_y^2
+    let var_y = sum_of_squares(y) / n_f64 - mean_y * mean_y;
+
+    let denom = (var_x * var_y).sqrt();
+    if denom < 1e-10 {
+        return 0.0;
+    }
+
+    cov / denom
+}
+
+/// Autocorrelation at a given lag.
+///
+/// Computes the Pearson autocorrelation of `data` with itself shifted by `lag`
+/// positions, using SIMD-accelerated operations. Uses the standard normalization
+/// where the denominator is the variance of the full series.
+///
+/// # Example
+///
+/// ```
+/// use anofox_forecast::simd::autocorrelation;
+/// let data: Vec<f64> = (0..20).map(|i| i as f64).collect();
+/// // Lag 0 should give 1.0
+/// assert!((autocorrelation(&data, 0) - 1.0).abs() < 1e-5);
+/// ```
+#[inline]
+pub fn autocorrelation(data: &[f64], lag: usize) -> f64 {
+    let n = data.len();
+    if n <= lag {
+        return f64::NAN;
+    }
+
+    let m = mean(data);
+
+    // Population variance of the full series via SIMD
+    let var = sum_of_squares(data) / n as f64 - m * m;
+
+    if var < 1e-10 {
+        return 0.0;
+    }
+
+    // Compute the lagged cross-product sum using SIMD:
+    // sum((data[lag..] - m) * (data[..n-lag] - m))
+    let head = &data[..n - lag]; // data[i - lag] for i in lag..n
+    let tail = &data[lag..]; // data[i] for i in lag..n
+
+    let dot_val = dot(tail, head);
+    let sum_tail = sum(tail);
+    let sum_head = sum(head);
+    let n_effective = (n - lag) as f64;
+
+    // Expand (tail[i] - m)(head[i] - m) = tail[i]*head[i] - m*head[i] - m*tail[i] + m^2
+    let cross_sum = dot_val - m * sum_head - m * sum_tail + m * m * n_effective;
+
+    cross_sum / (n as f64 * var)
+}
+
+// ============================================================================
 // Normalization Operations
 // ============================================================================
 
@@ -864,5 +964,218 @@ mod tests {
         let b = vec![3.0, 4.0];
         assert_close(l1_distance(&a, &b), 10.0, "negative l1"); // |(-1)-3| + |(-2)-4| = 4 + 6
         assert_close(squared_distance(&a, &b), 52.0, "negative squared"); // 16 + 36
+    }
+
+    // ==================== correlation ====================
+
+    /// Naive Pearson correlation for test comparison
+    fn naive_correlation(x: &[f64], y: &[f64]) -> f64 {
+        let n = x.len() as f64;
+        let mean_x = x.iter().sum::<f64>() / n;
+        let mean_y = y.iter().sum::<f64>() / n;
+        let mut cov = 0.0;
+        let mut var_x = 0.0;
+        let mut var_y = 0.0;
+        for (xi, yi) in x.iter().zip(y.iter()) {
+            let dx = xi - mean_x;
+            let dy = yi - mean_y;
+            cov += dx * dy;
+            var_x += dx * dx;
+            var_y += dy * dy;
+        }
+        let denom = (var_x * var_y).sqrt();
+        if denom < 1e-10 {
+            0.0
+        } else {
+            cov / denom
+        }
+    }
+
+    #[test]
+    fn test_correlation_perfect_positive() {
+        let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let y = vec![2.0, 4.0, 6.0, 8.0, 10.0];
+        assert_close(correlation(&x, &y), 1.0, "perfect positive correlation");
+    }
+
+    #[test]
+    fn test_correlation_perfect_negative() {
+        let x = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let y = vec![10.0, 8.0, 6.0, 4.0, 2.0];
+        assert_close(correlation(&x, &y), -1.0, "perfect negative correlation");
+    }
+
+    #[test]
+    fn test_correlation_zero() {
+        // Orthogonal-ish vectors
+        let x = vec![1.0, -1.0, 1.0, -1.0];
+        let y = vec![1.0, 1.0, -1.0, -1.0];
+        assert_close(correlation(&x, &y), 0.0, "zero correlation");
+    }
+
+    #[test]
+    fn test_correlation_constant() {
+        let x = vec![3.0, 3.0, 3.0, 3.0];
+        let y = vec![1.0, 2.0, 3.0, 4.0];
+        assert_close(correlation(&x, &y), 0.0, "constant x correlation");
+    }
+
+    #[test]
+    fn test_correlation_matches_naive() {
+        let x: Vec<f64> = (0..100).map(|i| (i as f64 * 0.1).sin()).collect();
+        let y: Vec<f64> = (0..100).map(|i| (i as f64 * 0.1).cos()).collect();
+        let simd_r = correlation(&x, &y);
+        let naive_r = naive_correlation(&x, &y);
+        assert!(
+            (simd_r - naive_r).abs() < 1e-4,
+            "correlation mismatch: simd={}, naive={}, diff={}",
+            simd_r,
+            naive_r,
+            (simd_r - naive_r).abs()
+        );
+    }
+
+    #[test]
+    fn test_correlation_large_vectors() {
+        let x: Vec<f64> = (0..1000).map(|i| i as f64).collect();
+        let y: Vec<f64> = (0..1000).map(|i| (i * 2 + 3) as f64).collect();
+        assert_close(correlation(&x, &y), 1.0, "large perfect correlation");
+    }
+
+    #[test]
+    fn test_correlation_edge_cases() {
+        assert!(correlation(&[1.0], &[2.0]).is_nan(), "single element");
+        assert!(correlation(&[], &[]).is_nan(), "empty");
+    }
+
+    #[test]
+    fn test_correlation_non_multiple_of_four() {
+        // Test lengths 3, 5, 7 to exercise remainder handling
+        for len in [3, 5, 7, 9, 13] {
+            let x: Vec<f64> = (0..len).map(|i| i as f64).collect();
+            let y: Vec<f64> = (0..len).map(|i| (i * 2 + 1) as f64).collect();
+            let simd_r = correlation(&x, &y);
+            let naive_r = naive_correlation(&x, &y);
+            assert!(
+                (simd_r - naive_r).abs() < 1e-4,
+                "correlation mismatch for len={}: simd={}, naive={}",
+                len,
+                simd_r,
+                naive_r
+            );
+        }
+    }
+
+    // ==================== autocorrelation ====================
+
+    /// Naive autocorrelation for test comparison
+    fn naive_autocorrelation(data: &[f64], lag: usize) -> f64 {
+        let n = data.len();
+        if n <= lag {
+            return f64::NAN;
+        }
+        let m = data.iter().sum::<f64>() / n as f64;
+        let var: f64 = data.iter().map(|x| (x - m).powi(2)).sum::<f64>() / n as f64;
+        if var < 1e-10 {
+            return 0.0;
+        }
+        let mut cross_sum = 0.0;
+        for i in lag..n {
+            cross_sum += (data[i] - m) * (data[i - lag] - m);
+        }
+        cross_sum / (n as f64 * var)
+    }
+
+    #[test]
+    fn test_autocorrelation_lag_0() {
+        let data: Vec<f64> = (0..20).map(|i| i as f64).collect();
+        assert_close(autocorrelation(&data, 0), 1.0, "acf lag 0");
+    }
+
+    #[test]
+    fn test_autocorrelation_linear_trend() {
+        let data: Vec<f64> = (0..20).map(|i| i as f64).collect();
+        let acf1 = autocorrelation(&data, 1);
+        assert!(
+            acf1 > 0.8,
+            "Expected high ACF(1) for linear trend, got {}",
+            acf1
+        );
+    }
+
+    #[test]
+    fn test_autocorrelation_alternating() {
+        let data: Vec<f64> = (0..20)
+            .map(|i| if i % 2 == 0 { 1.0 } else { -1.0 })
+            .collect();
+        let acf1 = autocorrelation(&data, 1);
+        assert!(
+            acf1 < -0.5,
+            "Expected negative ACF(1) for alternating, got {}",
+            acf1
+        );
+    }
+
+    #[test]
+    fn test_autocorrelation_constant() {
+        let data = vec![5.0; 10];
+        assert_close(autocorrelation(&data, 1), 0.0, "constant acf");
+    }
+
+    #[test]
+    fn test_autocorrelation_matches_naive() {
+        let data: Vec<f64> = (0..100).map(|i| (i as f64 * 0.1).sin()).collect();
+        for lag in [1, 2, 5, 10] {
+            let simd_acf = autocorrelation(&data, lag);
+            let naive_acf = naive_autocorrelation(&data, lag);
+            assert!(
+                (simd_acf - naive_acf).abs() < 1e-4,
+                "acf mismatch at lag {}: simd={}, naive={}, diff={}",
+                lag,
+                simd_acf,
+                naive_acf,
+                (simd_acf - naive_acf).abs()
+            );
+        }
+    }
+
+    #[test]
+    fn test_autocorrelation_large() {
+        let data: Vec<f64> = (0..1000).map(|i| (i as f64 * 0.05).sin()).collect();
+        let simd_acf = autocorrelation(&data, 3);
+        let naive_acf = naive_autocorrelation(&data, 3);
+        assert!(
+            (simd_acf - naive_acf).abs() < 1e-4,
+            "large acf mismatch: simd={}, naive={}",
+            simd_acf,
+            naive_acf
+        );
+    }
+
+    #[test]
+    fn test_autocorrelation_edge_cases() {
+        assert!(autocorrelation(&[], 1).is_nan(), "empty acf");
+        assert!(autocorrelation(&[1.0], 1).is_nan(), "too short for lag");
+        assert!(
+            autocorrelation(&[1.0, 2.0], 5).is_nan(),
+            "lag exceeds length"
+        );
+    }
+
+    #[test]
+    fn test_autocorrelation_non_multiple_of_four() {
+        // Lengths where the effective slice (n - lag) is not a multiple of 4
+        let data: Vec<f64> = (0..23).map(|i| (i as f64 * 0.3).sin()).collect();
+        for lag in [1, 2, 3, 4, 5] {
+            let simd_acf = autocorrelation(&data, lag);
+            let naive_acf = naive_autocorrelation(&data, lag);
+            assert!(
+                (simd_acf - naive_acf).abs() < 1e-4,
+                "acf mismatch for len=23, lag={}: simd={}, naive={}",
+                lag,
+                simd_acf,
+                naive_acf
+            );
+        }
     }
 }

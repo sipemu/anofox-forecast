@@ -98,6 +98,29 @@ impl TimeSeries {
         self.inner.has_missing_values()
     }
 
+    /// Attach calendar annotations (holidays, regressors) to this time series.
+    ///
+    /// Models that support exogenous variables will automatically use the
+    /// calendar annotations during fitting.
+    ///
+    /// @param calendar - CalendarAnnotations instance
+    #[wasm_bindgen(js_name = setCalendar)]
+    pub fn set_calendar(&mut self, calendar: &crate::calendar::CalendarAnnotations) {
+        self.inner.set_calendar(calendar.inner().clone());
+    }
+
+    /// Check if calendar annotations are attached.
+    #[wasm_bindgen(js_name = hasCalendar)]
+    pub fn has_calendar(&self) -> bool {
+        self.inner.calendar().is_some()
+    }
+
+    /// Remove calendar annotations from this time series.
+    #[wasm_bindgen(js_name = clearCalendar)]
+    pub fn clear_calendar(&mut self) {
+        self.inner.clear_calendar();
+    }
+
     /// Get the inner TimeSeries (for internal use).
     pub(crate) fn inner(&self) -> &InnerTimeSeries {
         &self.inner

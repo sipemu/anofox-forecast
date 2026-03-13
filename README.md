@@ -52,9 +52,16 @@ console.log(forecast.values);
   - Exogenous regressor support across model families
 
 - **Automatic Model Selection**
-  - `AutoForecast`: Unified selection across ARIMA, ETS, and Theta families
+  - `AutoForecast`: Unified selection across ARIMA, ETS, and Theta families (parallel with `parallel` feature)
   - `AutoEnsemble`: Automatic ensemble of top-K best models
   - Selection by in-sample MSE or cross-validation error
+  - `fit_predict()` convenience method on all models
+
+- **Batch Processing & Parallelism**
+  - `fit_predict_many()`: Fit one model across many series (parallel with `parallel` feature)
+  - `fit_registry()`: Fit all registered models on a series (parallel)
+  - `compare_models()` / `compare_registry()`: Parallel model comparison
+  - Bootstrap sampling uses `par_iter` when `parallel` is enabled
 
 - **Ensemble Methods**
   - Mean, Median, Weighted MSE, and Custom weight combination strategies
@@ -65,6 +72,7 @@ console.log(forecast.values);
   - `compare_registry()`: Compare all registered models at once
   - Accuracy metrics: MAE, MSE, RMSE, MAPE, sMAPE, MASE, and more
   - Time series cross-validation with configurable strategies
+  - Streaming CV aggregation with early stopping (`cross_validate_early_stop()`)
   - Residual diagnostics: Ljung-Box, Durbin-Watson, Jarque-Bera, Box-Pierce
   - `diagnose_residuals()`: Unified residual diagnostic report
 
@@ -77,16 +85,17 @@ console.log(forecast.values);
   - Trend analysis and stationarity tests (ADF, KPSS)
   - Automated feature selection (variance threshold, correlation filter, top-K)
 
-- **Seasonality & Decomposition**
-  - STL (Seasonal-Trend decomposition using LOESS)
-  - MSTL (Multiple Seasonal-Trend decomposition) for complex seasonality
-
 - **Spectral Analysis**
   - Welch's periodogram for reduced variance spectral estimation
   - For comprehensive periodicity detection, see [fdars](https://crates.io/crates/fdars-core)
 
+- **Seasonality & Decomposition**
+  - STL (Seasonal-Trend decomposition using LOESS) with `StlBuilder` for ergonomic configuration
+  - MSTL (Multiple Seasonal-Trend decomposition) for complex seasonality
+
 - **Changepoint Detection**
   - PELT algorithm with O(n) average complexity
+  - Builder API: `Pelt::new(CostFunction::L2).min_size(5).penalty(5.0).detect(&data)`
   - Multiple cost functions: L1, L2, Normal, Poisson, LinearTrend, MeanVariance, Cusum
 
 - **Anomaly Detection**
@@ -109,6 +118,7 @@ console.log(forecast.values);
 
 - **Model Serialization** (optional `serde` feature)
   - Save/load models to JSON with `to_json()`/`from_json()`
+  - Binary serialization with `to_bincode()`/`from_bincode()` for compact storage
   - File persistence with `save_to_file()`/`load_from_file()`
   - Round-trip serialization for all major model families
 
@@ -150,8 +160,8 @@ anofox-forecast = { version = "0.4", default-features = false }  # to disable
 | Feature | Default | Description |
 |---------|---------|-------------|
 | `postprocess` | Yes | Conformal prediction, IDR, QRA, historical simulation |
-| `parallel` | No | Rayon-based parallelism for AutoARIMA (not available on WASM) |
-| `serde` | No | JSON serialization/deserialization for models |
+| `parallel` | No | Rayon-based parallelism for AutoARIMA, AutoForecast, batch processing, bootstrap, and cross-validation (not available on WASM) |
+| `serde` | No | JSON and bincode serialization/deserialization for models |
 
 ## Quick Start
 
@@ -351,11 +361,15 @@ println!("Upper: {:?}", intervals.upper());
 |-----------------|-------------|
 | `compare_models()` | Compare forecasters on the same data with timing |
 | `compare_registry()` | Compare all registered models at once |
-| `cross_validate()` | Time series cross-validation |
+| `cross_validate()` | Time series cross-validation (parallel with `parallel` feature) |
+| `cross_validate_early_stop()` | CV with convergence-based early stopping |
+| `StreamingCVAggregator` | Online metric aggregation using Welford's algorithm |
+| `fit_predict_many()` | Batch fit-predict across multiple series |
 | `bootstrap_forecast()` | Bootstrap confidence intervals for any model |
 | `diagnose_residuals()` | Unified residual diagnostics (Ljung-Box, DW, Jarque-Bera) |
 | `select_features()` | Automated feature selection (variance, correlation, top-K) |
 | `to_json()` / `from_json()` | Model serialization (requires `serde` feature) |
+| `to_bincode()` / `from_bincode()` | Binary serialization (requires `serde` feature) |
 
 ### Feature Categories
 
@@ -378,6 +392,10 @@ println!("Upper: {:?}", intervals.upper());
 | `HistoricalSimulator` | Empirical error distribution |
 | `IDRPredictor` | Isotonic Distributional Regression |
 | `QRAPredictor` | Quantile Regression Averaging |
+
+## Guides
+
+- [Model Selection Guide](docs/model_selection_guide.md) — Which model to use for your data
 
 ## Dependencies
 

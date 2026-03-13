@@ -18,7 +18,7 @@ default = ["postprocess"]
 parallel = ["rayon"]
 js = ["getrandom/js"]
 postprocess = ["dep:faer", "dep:anofox-regression"]
-serde = ["dep:serde", "dep:serde_json"]
+serde = ["dep:serde", "dep:serde_json", "dep:bincode"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
@@ -35,6 +35,7 @@ anofox-regression = { version = "0.5.0", optional = true }
 faer = { version = "0.23", optional = true, default-features = false, features = ["std", "linalg"] }
 serde = { version = "1.0", features = ["derive"], optional = true }
 serde_json = { version = "1.0", optional = true }
+bincode = { version = "1.3", optional = true }
 
 [dev-dependencies]
 approx = "0.5"
@@ -69,6 +70,14 @@ harness = false
 
 [[bench]]
 name = "bootstrap_benchmark"
+harness = false
+
+[[bench]]
+name = "ensemble_benchmark"
+harness = false
+
+[[bench]]
+name = "cv_benchmark"
 harness = false
 
 # Examples

@@ -1,0 +1,26 @@
+{
+  "name": "anofox-forecast-js",
+  "version": "0.4.4",
+  "description": "WebAssembly bindings for anofox-forecast time series forecasting library",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sipemu/anofox-forecast"
+  },
+  "keywords": [
+    "wasm",
+    "time-series",
+    "forecasting",
+    "arima",
+    "ets",
+    "theta",
+    "typescript"
+  ],
+  "types": "types.d.ts",
+  "files": [
+    "types.d.ts"
+  ],
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}

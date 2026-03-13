@@ -700,4 +700,215 @@ mod tests {
             assert_eq!(quantiles.n_times(), 5);
         }
     }
+
+    // =========================================================================
+    // Additional tests: known values, zero variance, edge cases
+    // =========================================================================
+
+    mod known_values {
+        use super::*;
+
+        /// For a perfect linear relationship y = x, the median quantile (0.5)
+        /// prediction should be close to the identity function.
+        #[test]
+        fn perfect_linear_relationship_median() {
+            let pred = QRAPredictor::standard(vec![0.5]);
+
+            let n = 50;
+            let matrix: Vec<Vec<f64>> = (0..n).map(|i| vec![i as f64]).collect();
+            let actuals: Vec<f64> = (0..n).map(|i| i as f64).collect();
+
+            let result = pred.fit(&matrix, &actuals).unwrap();
+
+            let new_matrix = vec![vec![25.0]];
+            let quantiles = pred.predict(&result, &new_matrix).unwrap();
+
+            let predicted = quantiles.at_time(0).unwrap()[0];
+            assert!(
+                (predicted - 25.0).abs() < 1.0,
+                "Median prediction for y=x at x=25 should be near 25, got {}",
+                predicted
+            );
+        }
+
+        /// Verify that for y = 2*x + 1, the median prediction reflects
+        /// the linear relationship.
+        #[test]
+        fn linear_relationship_with_slope_and_intercept() {
+            let pred = QRAPredictor::standard(vec![0.5]).with_intercept(true);
+
+            let n = 50;
+            let matrix: Vec<Vec<f64>> = (0..n).map(|i| vec![i as f64]).collect();
+            let actuals: Vec<f64> = (0..n).map(|i| 2.0 * i as f64 + 1.0).collect();
+
+            let result = pred.fit(&matrix, &actuals).unwrap();
+
+            // Predict at x=10
+            let new_matrix = vec![vec![10.0]];
+            let quantiles = pred.predict(&result, &new_matrix).unwrap();
+
+            let predicted = quantiles.at_time(0).unwrap()[0];
+            let expected = 2.0 * 10.0 + 1.0;
+            assert!(
+                (predicted - expected).abs() < 1.0,
+                "Expected ~{}, got {}",
+                expected,
+                predicted
+            );
+        }
+
+        /// QRA with two equal-weight forecasters should average them.
+        #[test]
+        fn equal_forecasters_median_approximates_average() {
+            let pred = QRAPredictor::standard(vec![0.5]);
+
+            let n = 50;
+            // Two forecasters: f1 = i, f2 = i + 2
+            // Actuals = i + 1 (average of the two)
+            let matrix: Vec<Vec<f64>> = (0..n).map(|i| vec![i as f64, i as f64 + 2.0]).collect();
+            let actuals: Vec<f64> = (0..n).map(|i| i as f64 + 1.0).collect();
+
+            let result = pred.fit(&matrix, &actuals).unwrap();
+
+            let new_matrix = vec![vec![100.0, 102.0]];
+            let quantiles = pred.predict(&result, &new_matrix).unwrap();
+
+            let predicted = quantiles.at_time(0).unwrap()[0];
+            // Should be close to 101.0 (average)
+            assert!(
+                (predicted - 101.0).abs() < 2.0,
+                "Expected ~101.0, got {}",
+                predicted
+            );
+        }
+
+        /// Verify the QRAResult has_intercept reflects configuration.
+        #[test]
+        fn has_intercept_reflects_config() {
+            let pred_with = QRAPredictor::standard(vec![0.5]).with_intercept(true);
+            let pred_without = QRAPredictor::standard(vec![0.5]).with_intercept(false);
+
+            let n = 20;
+            let matrix: Vec<Vec<f64>> = (0..n).map(|i| vec![i as f64]).collect();
+            let actuals: Vec<f64> = (0..n).map(|i| i as f64 + 0.5).collect();
+
+            let result_with = pred_with.fit(&matrix, &actuals).unwrap();
+            let result_without = pred_without.fit(&matrix, &actuals).unwrap();
+
+            assert!(result_with.has_intercept());
+            assert!(!result_without.has_intercept());
+        }
+
+        /// Out-of-range coefficient index returns None.
+        #[test]
+        fn coefficients_out_of_range_returns_none() {
+            let pred = QRAPredictor::standard(vec![0.5]);
+
+            let n = 20;
+            let matrix: Vec<Vec<f64>> = (0..n).map(|i| vec![i as f64]).collect();
+            let actuals: Vec<f64> = (0..n).map(|i| i as f64).collect();
+
+            let result = pred.fit(&matrix, &actuals).unwrap();
+
+            assert!(result.coefficients(0).is_some());
+            assert!(result.coefficients(999).is_none());
+        }
+    }
+
+    mod zero_variance {
+        use super::*;
+
+        /// Constant forecasts (zero variance) with constant actuals.
+        #[test]
+        fn constant_forecasts_constant_actuals() {
+            let pred = QRAPredictor::standard(vec![0.1, 0.5, 0.9]);
+
+            let n = 20;
+            let matrix: Vec<Vec<f64>> = (0..n).map(|_| vec![5.0]).collect();
+            let actuals: Vec<f64> = vec![5.0; n];
+
+            let result = pred.fit(&matrix, &actuals).unwrap();
+
+            let new_matrix = vec![vec![5.0]];
+            let quantiles = pred.predict(&result, &new_matrix).unwrap();
+
+            // All quantiles should be close to 5.0
+            let row = quantiles.at_time(0).unwrap();
+            for &val in row {
+                assert!(
+                    (val - 5.0).abs() < 1.0,
+                    "With constant data, quantiles should be near 5.0, got {}",
+                    val
+                );
+            }
+        }
+
+        /// Constant forecasts but varying actuals.
+        #[test]
+        fn constant_forecasts_varying_actuals() {
+            let pred = QRAPredictor::standard(vec![0.1, 0.5, 0.9]);
+
+            let n = 30;
+            let matrix: Vec<Vec<f64>> = (0..n).map(|_| vec![10.0]).collect();
+            // Actuals vary: 9, 10, 11, 9, 10, 11, ...
+            let actuals: Vec<f64> = (0..n).map(|i| 9.0 + (i % 3) as f64).collect();
+
+            let result = pred.fit(&matrix, &actuals).unwrap();
+
+            let new_matrix = vec![vec![10.0]];
+            let quantiles = pred.predict(&result, &new_matrix).unwrap();
+
+            let row = quantiles.at_time(0).unwrap();
+            // q0.1 should be <= q0.5 <= q0.9 (enforced by monotonicity sort)
+            assert!(row[0] <= row[1]);
+            assert!(row[1] <= row[2]);
+        }
+    }
+
+    mod empty_and_error_cases {
+        use super::*;
+
+        /// Predict with empty forecasts matrix.
+        #[test]
+        fn predict_empty_matrix() {
+            let pred = QRAPredictor::standard(vec![0.5]);
+
+            let n = 20;
+            let matrix: Vec<Vec<f64>> = (0..n).map(|i| vec![i as f64]).collect();
+            let actuals: Vec<f64> = (0..n).map(|i| i as f64).collect();
+
+            let result = pred.fit(&matrix, &actuals).unwrap();
+
+            let empty: Vec<Vec<f64>> = vec![];
+            let pred_result = pred.predict(&result, &empty);
+            assert!(pred_result.is_err());
+        }
+
+        /// Fit with zero-length inner vectors (empty forecasters).
+        #[test]
+        fn fit_with_empty_forecaster_vectors() {
+            let pred = QRAPredictor::standard(vec![0.5]);
+
+            let matrix: Vec<Vec<f64>> = vec![vec![], vec![], vec![]];
+            let actuals = vec![1.0, 2.0, 3.0];
+
+            let result = pred.fit(&matrix, &actuals);
+            assert!(result.is_err());
+        }
+
+        /// Multiple quantiles produce multiple models.
+        #[test]
+        fn multiple_quantiles_produce_multiple_models() {
+            let quantiles = vec![0.1, 0.25, 0.5, 0.75, 0.9];
+            let pred = QRAPredictor::standard(quantiles.clone());
+
+            let n = 30;
+            let matrix: Vec<Vec<f64>> = (0..n).map(|i| vec![i as f64]).collect();
+            let actuals: Vec<f64> = (0..n).map(|i| i as f64 + 0.5).collect();
+
+            let result = pred.fit(&matrix, &actuals).unwrap();
+            assert_eq!(result.n_models(), 5);
+            assert_eq!(result.quantiles(), &quantiles);
+        }
+    }
 }

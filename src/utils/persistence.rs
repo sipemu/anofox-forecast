@@ -31,7 +31,7 @@ pub mod nan_vec {
 #[cfg(feature = "serde")]
 pub fn to_json<T: Serialize>(model: &T) -> crate::error::Result<String> {
     serde_json::to_string_pretty(model).map_err(|e| {
-        crate::error::ForecastError::ComputationError(format!("serialization failed: {}", e))
+        crate::error::ForecastError::SerializationError(format!("serialization failed: {}", e))
     })
 }
 
@@ -39,7 +39,7 @@ pub fn to_json<T: Serialize>(model: &T) -> crate::error::Result<String> {
 #[cfg(feature = "serde")]
 pub fn from_json<T: DeserializeOwned>(json: &str) -> crate::error::Result<T> {
     serde_json::from_str(json).map_err(|e| {
-        crate::error::ForecastError::ComputationError(format!("deserialization failed: {}", e))
+        crate::error::ForecastError::SerializationError(format!("deserialization failed: {}", e))
     })
 }
 
@@ -48,7 +48,7 @@ pub fn from_json<T: DeserializeOwned>(json: &str) -> crate::error::Result<T> {
 pub fn save_to_file<T: Serialize>(model: &T, path: &std::path::Path) -> crate::error::Result<()> {
     let json = to_json(model)?;
     std::fs::write(path, json).map_err(|e| {
-        crate::error::ForecastError::ComputationError(format!("file write failed: {}", e))
+        crate::error::ForecastError::SerializationError(format!("file write failed: {}", e))
     })
 }
 
@@ -56,9 +56,52 @@ pub fn save_to_file<T: Serialize>(model: &T, path: &std::path::Path) -> crate::e
 #[cfg(feature = "serde")]
 pub fn load_from_file<T: DeserializeOwned>(path: &std::path::Path) -> crate::error::Result<T> {
     let json = std::fs::read_to_string(path).map_err(|e| {
-        crate::error::ForecastError::ComputationError(format!("file read failed: {}", e))
+        crate::error::ForecastError::SerializationError(format!("file read failed: {}", e))
     })?;
     from_json(&json)
+}
+
+/// Serialize a model to a bincode byte vector.
+#[cfg(feature = "serde")]
+pub fn to_bincode<T: Serialize>(model: &T) -> crate::error::Result<Vec<u8>> {
+    bincode::serialize(model).map_err(|e| {
+        crate::error::ForecastError::SerializationError(format!(
+            "bincode serialization failed: {}",
+            e
+        ))
+    })
+}
+
+/// Deserialize a model from a bincode byte slice.
+#[cfg(feature = "serde")]
+pub fn from_bincode<T: DeserializeOwned>(data: &[u8]) -> crate::error::Result<T> {
+    bincode::deserialize(data).map_err(|e| {
+        crate::error::ForecastError::SerializationError(format!(
+            "bincode deserialization failed: {}",
+            e
+        ))
+    })
+}
+
+/// Save a model to a file in bincode format.
+#[cfg(feature = "serde")]
+pub fn save_to_bincode<T: Serialize>(
+    model: &T,
+    path: &std::path::Path,
+) -> crate::error::Result<()> {
+    let bytes = to_bincode(model)?;
+    std::fs::write(path, bytes).map_err(|e| {
+        crate::error::ForecastError::SerializationError(format!("file write failed: {}", e))
+    })
+}
+
+/// Load a model from a bincode file.
+#[cfg(feature = "serde")]
+pub fn load_from_bincode<T: DeserializeOwned>(path: &std::path::Path) -> crate::error::Result<T> {
+    let bytes = std::fs::read(path).map_err(|e| {
+        crate::error::ForecastError::SerializationError(format!("file read failed: {}", e))
+    })?;
+    from_bincode(&bytes)
 }
 
 #[cfg(all(test, feature = "serde"))]

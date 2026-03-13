@@ -65,6 +65,62 @@ impl PeltConfig {
     }
 }
 
+/// Convenience wrapper for PELT changepoint detection with a builder API.
+///
+/// # Example
+///
+/// ```
+/// use anofox_forecast::changepoint::{Pelt, CostFunction};
+///
+/// let mut series = vec![0.0; 50];
+/// series.extend(vec![10.0; 50]);
+///
+/// let result = Pelt::new(CostFunction::L2)
+///     .min_size(5)
+///     .penalty(5.0)
+///     .detect(&series);
+///
+/// assert!(result.n_changepoints >= 1);
+/// ```
+#[derive(Debug, Clone)]
+pub struct Pelt {
+    config: PeltConfig,
+}
+
+impl Pelt {
+    /// Create a new PELT detector with the given cost function.
+    pub fn new(cost_fn: CostFunction) -> Self {
+        Self {
+            config: PeltConfig {
+                cost_fn,
+                ..PeltConfig::default()
+            },
+        }
+    }
+
+    /// Set the minimum segment size.
+    pub fn min_size(mut self, min_size: usize) -> Self {
+        self.config.min_segment_length = min_size.max(1);
+        self
+    }
+
+    /// Set the penalty for each changepoint.
+    pub fn penalty(mut self, penalty: f64) -> Self {
+        self.config.penalty = penalty;
+        self
+    }
+
+    /// Run changepoint detection on the given series.
+    pub fn detect(&self, series: &[f64]) -> PeltResult {
+        pelt_detect(series, &self.config)
+    }
+
+    /// Get a reference to the underlying configuration.
+    pub fn config(&self) -> &PeltConfig {
+        &self.config
+    }
+}
+
 /// Result of PELT changepoint detection.
 #[derive(Debug, Clone)]
 pub struct PeltResult {

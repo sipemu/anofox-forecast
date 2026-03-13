@@ -346,7 +346,7 @@ impl Forecaster for AutoETS {
         self.selected_spec = best_spec;
 
         if self.selected_model.is_none() {
-            return Err(ForecastError::ComputationError(
+            return Err(ForecastError::ConvergenceFailure(
                 "No valid ETS model could be fitted".to_string(),
             ));
         }

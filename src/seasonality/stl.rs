@@ -388,6 +388,89 @@ impl Default for STL {
     }
 }
 
+/// Convenience wrapper for STL decomposition with a builder API.
+///
+/// # Example
+///
+/// ```
+/// use anofox_forecast::seasonality::StlBuilder;
+///
+/// let series: Vec<f64> = (0..120)
+///     .map(|i| {
+///         let trend = 0.1 * i as f64;
+///         let seasonal = 10.0 * ((2.0 * std::f64::consts::PI * i as f64 / 12.0).sin());
+///         trend + seasonal
+///     })
+///     .collect();
+///
+/// let result = StlBuilder::new(12)
+///     .seasonal_window(7)
+///     .trend_window(15)
+///     .robust(true)
+///     .decompose(&series)
+///     .unwrap();
+///
+/// assert_eq!(result.trend.len(), series.len());
+/// ```
+#[derive(Debug, Clone)]
+pub struct StlBuilder {
+    stl: STL,
+}
+
+impl StlBuilder {
+    /// Create a new STL builder with the given seasonal period.
+    pub fn new(period: usize) -> Self {
+        Self {
+            stl: STL::new(period),
+        }
+    }
+
+    /// Set the seasonal smoothing window (ns parameter).
+    /// The value will be rounded up to odd if even.
+    pub fn seasonal_window(mut self, window: usize) -> Self {
+        self.stl = self.stl.with_seasonal_smoothness(window);
+        self
+    }
+
+    /// Set the trend smoothing window (nt parameter).
+    /// The value will be rounded up to odd if even.
+    pub fn trend_window(mut self, window: usize) -> Self {
+        self.stl = self.stl.with_trend_smoothness(window);
+        self
+    }
+
+    /// Enable or disable robust fitting.
+    /// When enabled, uses 6 outer iterations by default.
+    pub fn robust(mut self, enable: bool) -> Self {
+        if enable {
+            self.stl = self.stl.robust();
+        }
+        self
+    }
+
+    /// Set the number of inner iterations.
+    pub fn inner_iterations(mut self, n: usize) -> Self {
+        self.stl = self.stl.with_inner_iterations(n);
+        self
+    }
+
+    /// Set the number of outer (robustness) iterations.
+    pub fn outer_iterations(mut self, n: usize) -> Self {
+        self.stl = self.stl.with_outer_iterations(n);
+        self
+    }
+
+    /// Run STL decomposition on the given series.
+    pub fn decompose(&self, series: &[f64]) -> Option<STLResult> {
+        self.stl.decompose(series)
+    }
+
+    /// Get a reference to the underlying STL configuration.
+    pub fn config(&self) -> &STL {
+        &self.stl
+    }
+}
+
 /// Compute variance.
 fn variance(values: &[f64]) -> f64 {
     let n = values.len();
@@ -601,5 +684,136 @@ mod tests {
             "Trend strength should be in [0, 1]: {}",
             strength
         );
+    }
+
+    // ==================== StlBuilder tests ====================
+
+    #[test]
+    fn stl_builder_basic() {
+        let period = 12;
+        let series = generate_seasonal_series(120, period);
+
+        let result = StlBuilder::new(period).decompose(&series).unwrap();
+
+        assert_eq!(result.trend.len(), series.len());
+        assert_eq!(result.seasonal.len(), series.len());
+        assert_eq!(result.remainder.len(), series.len());
+
+        // Verify additive decomposition
+        for i in 0..series.len() {
+            let reconstructed = result.trend[i] + result.seasonal[i] + result.remainder[i];
+            assert!(
+                (series[i] - reconstructed).abs() < 1e-10,
+                "Reconstruction failed at index {}",
+                i,
+            );
+        }
+    }
+
+    #[test]
+    fn stl_builder_with_all_options() {
+        let period = 12;
+        let series = generate_seasonal_series(120, period);
+
+        let result = StlBuilder::new(period)
+            .seasonal_window(7)
+            .trend_window(15)
+            .robust(true)
+            .inner_iterations(3)
+            .outer_iterations(4)
+            .decompose(&series)
+            .unwrap();
+
+        assert_eq!(result.trend.len(), series.len());
+        assert!(result.seasonal_strength() > 0.0);
+    }
+
+    #[test]
+    fn stl_builder_robust_with_outliers() {
+        let period = 12;
+        let mut series = generate_seasonal_series(120, period);
+        series[30] = 100.0;
+        series[60] = -100.0;
+
+        let result = StlBuilder::new(period)
+            .robust(true)
+            .decompose(&series)
+            .unwrap();
+
+        let strength = result.seasonal_strength();
+        assert!(
+            strength > 0.1,
+            "Robust builder should detect seasonality: {}",
+            strength,
+        );
+    }
+
+    #[test]
+    fn stl_builder_robust_false_is_noop() {
+        let period = 12;
+        let series = generate_seasonal_series(120, period);
+
+        // robust(false) should behave the same as no robust call
+        let result_default = StlBuilder::new(period).decompose(&series).unwrap();
+        let result_no_robust = StlBuilder::new(period)
+            .robust(false)
+            .decompose(&series)
+            .unwrap();
+
+        for i in 0..series.len() {
+            assert!(
+                (result_default.trend[i] - result_no_robust.trend[i]).abs() < 1e-10,
+                "robust(false) should match default at index {}",
+                i,
+            );
+        }
+    }
+
+    #[test]
+    fn stl_builder_insufficient_data() {
+        let period = 12;
+        let series = vec![1.0; 10];
+
+        assert!(StlBuilder::new(period).decompose(&series).is_none());
+    }
+
+    #[test]
+    fn stl_builder_matches_stl_direct() {
+        let period = 12;
+        let series = generate_seasonal_series(120, period);
+
+        let direct = STL::new(period)
+            .with_seasonal_smoothness(7)
+            .with_trend_smoothness(21)
+            .decompose(&series)
+            .unwrap();
+
+        let builder = StlBuilder::new(period)
+            .seasonal_window(7)
+            .trend_window(21)
+            .decompose(&series)
+            .unwrap();
+
+        for i in 0..series.len() {
+            assert!(
+                (direct.trend[i] - builder.trend[i]).abs() < 1e-10,
+                "Builder and direct STL should match at index {}",
+                i,
+            );
+            assert!(
+                (direct.seasonal[i] - builder.seasonal[i]).abs() < 1e-10,
+                "Builder and direct STL seasonal should match at index {}",
+                i,
+            );
+        }
+    }
+
+    #[test]
+    fn stl_builder_config_access() {
+        let builder = StlBuilder::new(12).seasonal_window(7).trend_window(15);
+
+        let config = builder.config();
+        // Just verify we can access the underlying config without panic
+        let _ = format!("{:?}", config);
     }
 }

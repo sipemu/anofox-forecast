@@ -280,6 +280,7 @@ impl IDRPredictor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use approx::assert_relative_eq;
     use chrono::{TimeZone, Utc};
 
     fn make_timestamps(n: usize) -> Vec<chrono::DateTime<Utc>> {
@@ -305,6 +306,19 @@ mod tests {
         }
 
         #[test]
+        fn new_single_quantile() {
+            let pred = IDRPredictor::new(vec![0.5]);
+            assert_eq!(pred.quantiles(), &[0.5]);
+        }
+
+        #[test]
+        fn new_many_quantiles() {
+            let quantiles: Vec<f64> = (1..20).map(|i| i as f64 / 20.0).collect();
+            let pred = IDRPredictor::new(quantiles.clone());
+            assert_eq!(pred.quantiles(), &quantiles);
+        }
+
+        #[test]
         #[should_panic(expected = "quantiles must be in (0, 1)")]
         fn new_panics_on_zero_quantile() {
             IDRPredictor::new(vec![0.0, 0.5, 0.9]);
@@ -317,9 +331,27 @@ mod tests {
         }
 
         #[test]
+        #[should_panic(expected = "quantiles must be in (0, 1)")]
+        fn new_panics_on_negative_quantile() {
+            IDRPredictor::new(vec![-0.1, 0.5, 0.9]);
+        }
+
+        #[test]
+        #[should_panic(expected = "quantiles must be in (0, 1)")]
+        fn new_panics_on_quantile_greater_than_one() {
+            IDRPredictor::new(vec![0.1, 0.5, 1.5]);
+        }
+
+        #[test]
         #[should_panic(expected = "quantiles must be sorted")]
         fn new_panics_on_unsorted_quantiles() {
             IDRPredictor::new(vec![0.9, 0.5, 0.1]);
+        }
+
+        #[test]
+        #[should_panic(expected = "quantiles must be sorted")]
+        fn new_panics_on_duplicate_quantiles() {
+            IDRPredictor::new(vec![0.5, 0.5, 0.9]);
         }
 
         #[test]
@@ -327,6 +359,13 @@ mod tests {
             let pred = IDRPredictor::new(vec![0.1, 0.5, 0.9]);
             let cloned = pred.clone();
             assert_eq!(pred.quantiles(), cloned.quantiles());
+        }
+
+        #[test]
+        fn predictor_is_debuggable() {
+            let pred = IDRPredictor::new(vec![0.1, 0.5, 0.9]);
+            let debug_str = format!("{:?}", pred);
+            assert!(debug_str.contains("IDRPredictor"));
         }
     }
 
@@ -350,13 +389,27 @@ mod tests {
         }
 
         #[test]
+        fn fit_with_two_data_points() {
+            let pred = IDRPredictor::new(vec![0.5]);
+            let forecasts = vec![10.0, 12.0];
+            let actuals = vec![11.0, 13.0];
+
+            let result = pred.fit(&forecasts, &actuals);
+            assert!(result.is_ok());
+        }
+
+        #[test]
         fn fit_fails_on_length_mismatch() {
             let pred = IDRPredictor::new(vec![0.1, 0.5, 0.9]);
             let forecasts = vec![10.0, 11.0, 12.0];
             let actuals = vec![10.5, 11.5];
 
-            let result = pred.fit(&forecasts, &actuals);
-            assert!(result.is_err());
+            let err = pred.fit(&forecasts, &actuals).unwrap_err();
+            assert!(
+                matches!(err, ForecastError::DimensionMismatch { .. }),
+                "Expected DimensionMismatch, got {:?}",
+                err
+            );
         }
 
         #[test]
@@ -365,8 +418,12 @@ mod tests {
             let forecasts: Vec<f64> = vec![];
             let actuals: Vec<f64> = vec![];
 
-            let result = pred.fit(&forecasts, &actuals);
-            assert!(result.is_err());
+            let err = pred.fit(&forecasts, &actuals).unwrap_err();
+            assert!(
+                matches!(err, ForecastError::EmptyData),
+                "Expected EmptyData, got {:?}",
+                err
+            );
         }
 
         #[test]
@@ -375,8 +432,19 @@ mod tests {
             let forecasts = vec![10.0];
             let actuals = vec![10.5];
 
-            let result = pred.fit(&forecasts, &actuals);
-            assert!(result.is_err());
+            let err = pred.fit(&forecasts, &actuals).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    ForecastError::InsufficientData {
+                        needed: 2,
+                        got: 1,
+                        ..
+                    }
+                ),
+                "Expected InsufficientData, got {:?}",
+                err
+            );
         }
 
         #[test]
@@ -403,8 +471,60 @@ mod tests {
             let result = pred.fit(&forecasts, &actuals).unwrap();
             let grid = result.x_grid();
 
-            // Should have unique values only
-            assert!(grid.len() <= 3);
+            // Should have unique values only (3 unique forecasts)
+            assert_eq!(grid.len(), 3);
+        }
+
+        #[test]
+        fn x_grid_contains_all_unique_forecasts() {
+            let pred = IDRPredictor::new(vec![0.5]);
+            let forecasts = vec![10.0, 20.0, 30.0, 40.0, 50.0];
+            let actuals = vec![10.5, 20.5, 30.5, 40.5, 50.5];
+
+            let result = pred.fit(&forecasts, &actuals).unwrap();
+            let grid = result.x_grid();
+
+            assert_eq!(grid.len(), 5);
+            assert_relative_eq!(grid[0], 10.0, epsilon = 1e-10);
+            assert_relative_eq!(grid[4], 50.0, epsilon = 1e-10);
+        }
+
+        #[test]
+        fn y_grid_has_correct_dimensions() {
+            let pred = IDRPredictor::new(vec![0.1, 0.5, 0.9]);
+            let forecasts = vec![10.0, 20.0, 30.0, 40.0, 50.0];
+            let actuals = vec![10.5, 20.5, 30.5, 40.5, 50.5];
+
+            let result = pred.fit(&forecasts, &actuals).unwrap();
+
+            // y_grid should have one entry per unique x value
+            assert_eq!(result.y_grid().len(), result.x_grid().len());
+            // Each y_grid entry should have one value per quantile
+            for row in result.y_grid() {
+                assert_eq!(row.len(), 3);
+            }
+        }
+
+        #[test]
+        fn fit_with_negative_values() {
+            let pred = IDRPredictor::new(vec![0.5]);
+            let forecasts = vec![-5.0, -3.0, -1.0, 1.0, 3.0];
+            let actuals = vec![-4.5, -2.5, -0.5, 1.5, 3.5];
+
+            let result = pred.fit(&forecasts, &actuals);
+            assert!(result.is_ok());
+        }
+
+        #[test]
+        fn fit_with_constant_forecasts() {
+            let pred = IDRPredictor::new(vec![0.5]);
+            let forecasts = vec![10.0, 10.0, 10.0, 10.0, 10.0];
+            let actuals = vec![9.0, 10.0, 11.0, 12.0, 8.0];
+
+            let result = pred.fit(&forecasts, &actuals);
+            assert!(result.is_ok());
+            // All forecasts are identical, so grid should have a single point
+            assert_eq!(result.unwrap().x_grid().len(), 1);
         }
     }
 
@@ -460,6 +580,19 @@ mod tests {
         }
 
         #[test]
+        fn predict_single_value() {
+            let pred = IDRPredictor::new(vec![0.5]);
+            let forecasts: Vec<f64> = (0..10).map(|i| i as f64).collect();
+            let actuals: Vec<f64> = forecasts.iter().map(|&f| f + 1.0).collect();
+
+            let result = pred.fit(&forecasts, &actuals).unwrap();
+            let quantiles = pred.predict_values(&result, &[5.0]).unwrap();
+
+            assert_eq!(quantiles.n_times(), 1);
+            assert_eq!(quantiles.n_quantiles(), 1);
+        }
+
+        #[test]
         fn quantile_values_are_monotonic() {
             let pred = IDRPredictor::new(vec![0.1, 0.5, 0.9]);
             let forecasts = vec![10.0, 11.0, 12.0, 13.0, 14.0];
@@ -496,6 +629,55 @@ mod tests {
                 "Higher forecast should give higher quantile prediction"
             );
         }
+
+        #[test]
+        fn predict_at_training_points() {
+            let pred = IDRPredictor::new(vec![0.5]);
+            let forecasts: Vec<f64> = (0..20).map(|i| i as f64).collect();
+            let actuals: Vec<f64> = forecasts.iter().map(|&f| f + 1.0).collect();
+
+            let result = pred.fit(&forecasts, &actuals).unwrap();
+
+            // Predict at exact training points should succeed
+            let quantiles = pred.predict_values(&result, &forecasts).unwrap();
+            assert_eq!(quantiles.n_times(), 20);
+        }
+
+        #[test]
+        fn predict_extrapolation() {
+            let pred = IDRPredictor::new(vec![0.5]);
+            let forecasts: Vec<f64> = (0..10).map(|i| i as f64).collect();
+            let actuals: Vec<f64> = forecasts.iter().map(|&f| f + 1.0).collect();
+
+            let result = pred.fit(&forecasts, &actuals).unwrap();
+
+            // Predict well outside training range
+            let quantiles = pred.predict_values(&result, &[100.0]).unwrap();
+            assert_eq!(quantiles.n_times(), 1);
+            // Should produce a finite value
+            assert!(quantiles.at_time(0).unwrap()[0].is_finite());
+        }
+
+        #[test]
+        fn predict_returns_finite_values() {
+            let pred = IDRPredictor::new(vec![0.1, 0.5, 0.9]);
+            let forecasts: Vec<f64> = (0..20).map(|i| i as f64 * 10.0).collect();
+            let actuals: Vec<f64> = forecasts
+                .iter()
+                .enumerate()
+                .map(|(i, &f)| f + (i as f64).sin() * 5.0)
+                .collect();
+
+            let result = pred.fit(&forecasts, &actuals).unwrap();
+            let quantiles = pred.predict_values(&result, &[50.0, 100.0, 150.0]).unwrap();
+
+            for t in 0..3 {
+                let row = quantiles.at_time(t).unwrap();
+                for &val in row {
+                    assert!(val.is_finite(), "All predicted quantiles must be finite");
+                }
+            }
+        }
     }
 
     // =========================================================================
@@ -530,6 +712,39 @@ mod tests {
 
             assert_eq!(result.quantiles(), cloned.quantiles());
             assert_eq!(result.x_grid(), cloned.x_grid());
+        }
+
+        #[test]
+        fn result_is_debuggable() {
+            let pred = IDRPredictor::new(vec![0.5]);
+            let forecasts = vec![10.0, 12.0, 14.0];
+            let actuals = vec![10.5, 12.5, 14.5];
+
+            let result = pred.fit(&forecasts, &actuals).unwrap();
+            let debug_str = format!("{:?}", result);
+            assert!(debug_str.contains("IDRResult"));
+        }
+
+        #[test]
+        fn y_grid_quantiles_are_monotonic() {
+            let pred = IDRPredictor::new(vec![0.1, 0.5, 0.9]);
+            let forecasts: Vec<f64> = (0..20).map(|i| i as f64).collect();
+            let actuals: Vec<f64> = forecasts
+                .iter()
+                .enumerate()
+                .map(|(i, &f)| f + ((i % 5) as f64 - 2.0))
+                .collect();
+
+            let result = pred.fit(&forecasts, &actuals).unwrap();
+
+            // At each grid point, quantile values should be monotonic
+            for row in result.y_grid() {
+                assert!(
+                    row[0] <= row[1] && row[1] <= row[2],
+                    "y_grid quantiles should be monotonic: {:?}",
+                    row
+                );
+            }
         }
     }
 
@@ -567,6 +782,114 @@ mod tests {
                 let row = quantiles.at_time(t).unwrap();
                 assert!(row[0] <= row[1], "q0.1 <= q0.5 at t={}", t);
                 assert!(row[1] <= row[2], "q0.5 <= q0.9 at t={}", t);
+            }
+        }
+
+        #[test]
+        fn constant_bias_captured() {
+            let pred = IDRPredictor::new(vec![0.5]);
+
+            // Forecasts are always 1.0 below actuals
+            let forecasts: Vec<f64> = (0..50).map(|i| i as f64).collect();
+            let actuals: Vec<f64> = forecasts.iter().map(|&f| f + 1.0).collect();
+
+            let result = pred.fit(&forecasts, &actuals).unwrap();
+
+            // The median prediction for forecast=25 should be close to 26
+            let quantiles = pred.predict_values(&result, &[25.0]).unwrap();
+            let median = quantiles.at_time(0).unwrap()[0];
+
+            assert_relative_eq!(median, 26.0, epsilon = 1.0);
+        }
+
+        #[test]
+        fn larger_dataset_produces_more_grid_points() {
+            let pred = IDRPredictor::new(vec![0.5]);
+
+            let small_forecasts: Vec<f64> = (0..5).map(|i| i as f64 * 10.0).collect();
+            let small_actuals: Vec<f64> = small_forecasts.iter().map(|&f| f + 1.0).collect();
+            let small_result = pred.fit(&small_forecasts, &small_actuals).unwrap();
+
+            let large_forecasts: Vec<f64> = (0..50).map(|i| i as f64).collect();
+            let large_actuals: Vec<f64> = large_forecasts.iter().map(|&f| f + 1.0).collect();
+            let large_result = pred.fit(&large_forecasts, &large_actuals).unwrap();
+
+            assert!(
+                large_result.x_grid().len() > small_result.x_grid().len(),
+                "More unique training points should yield a larger grid"
+            );
+        }
+    }
+
+    // =========================================================================
+    // Edge case tests
+    // =========================================================================
+
+    mod edge_cases {
+        use super::*;
+
+        #[test]
+        fn fit_with_identical_values() {
+            let pred = IDRPredictor::new(vec![0.5]);
+            let forecasts = vec![5.0, 5.0, 5.0, 5.0, 5.0];
+            let actuals = vec![5.0, 5.0, 5.0, 5.0, 5.0];
+
+            let result = pred.fit(&forecasts, &actuals).unwrap();
+            let quantiles = pred.predict_values(&result, &[5.0]).unwrap();
+
+            // With zero error and constant data, prediction should be close to 5.0
+            let val = quantiles.at_time(0).unwrap()[0];
+            assert_relative_eq!(val, 5.0, epsilon = 1e-6);
+        }
+
+        #[test]
+        fn fit_with_large_values() {
+            let pred = IDRPredictor::new(vec![0.5]);
+            let forecasts = vec![1e10, 2e10, 3e10, 4e10, 5e10];
+            let actuals = vec![1.1e10, 2.1e10, 3.1e10, 4.1e10, 5.1e10];
+
+            let result = pred.fit(&forecasts, &actuals);
+            assert!(result.is_ok());
+        }
+
+        #[test]
+        fn fit_with_very_small_values() {
+            let pred = IDRPredictor::new(vec![0.5]);
+            let forecasts = vec![1e-10, 2e-10, 3e-10, 4e-10, 5e-10];
+            let actuals = vec![1.1e-10, 2.1e-10, 3.1e-10, 4.1e-10, 5.1e-10];
+
+            let result = pred.fit(&forecasts, &actuals);
+            assert!(result.is_ok());
+        }
+
+        #[test]
+        fn predict_with_many_quantiles() {
+            let quantiles: Vec<f64> = (1..10).map(|i| i as f64 / 10.0).collect();
+            let pred = IDRPredictor::new(quantiles);
+
+            let forecasts: Vec<f64> = (0..20).map(|i| i as f64).collect();
+            let actuals: Vec<f64> = forecasts
+                .iter()
+                .enumerate()
+                .map(|(i, &f)| f + (i as f64 * 0.3).sin())
+                .collect();
+
+            let result = pred.fit(&forecasts, &actuals).unwrap();
+            let quantile_forecasts = pred.predict_values(&result, &[10.0]).unwrap();
+
+            assert_eq!(quantile_forecasts.n_quantiles(), 9);
+
+            // All 9 quantile values should be monotonically non-decreasing
+            let row = quantile_forecasts.at_time(0).unwrap();
+            for i in 1..row.len() {
+                assert!(
+                    row[i] >= row[i - 1],
+                    "Quantiles should be monotonic: q[{}]={} < q[{}]={}",
+                    i - 1,
+                    row[i - 1],
+                    i,
+                    row[i]
+                );
             }
         }
     }

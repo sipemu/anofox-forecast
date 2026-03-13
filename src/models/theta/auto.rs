@@ -239,7 +239,7 @@ impl Forecaster for AutoTheta {
         }
 
         if scores.is_empty() {
-            return Err(ForecastError::ComputationError(
+            return Err(ForecastError::ConvergenceFailure(
                 "All Theta model variants failed to fit".to_string(),
             ));
         }

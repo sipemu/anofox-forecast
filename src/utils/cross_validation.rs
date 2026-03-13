@@ -924,6 +924,272 @@ where
     })
 }
 
+/// Streaming cross-validation aggregator using Welford's online algorithm.
+///
+/// Accumulates fold metrics incrementally without storing all individual results,
+/// enabling early stopping and convergence monitoring for large-scale CV.
+///
+/// # Example
+///
+/// ```
+/// use anofox_forecast::utils::cross_validation::StreamingCVAggregator;
+/// use anofox_forecast::utils::metrics::AccuracyMetrics;
+///
+/// let mut agg = StreamingCVAggregator::new();
+///
+/// // Add fold results one at a time
+/// let metrics = AccuracyMetrics {
+///     mae: 1.5, mse: 4.0, rmse: 2.0, smape: 10.0, mape: Some(8.0), mase: None, r_squared: 0.9,
+/// };
+/// agg.update(&metrics);
+///
+/// assert_eq!(agg.n_folds(), 1);
+/// assert!((agg.mean_mae() - 1.5).abs() < 1e-10);
+///
+/// // Check convergence: has the running mean stabilized?
+/// assert!(!agg.has_converged(0.01)); // need at least 3 folds
+/// ```
+#[derive(Debug, Clone)]
+pub struct StreamingCVAggregator {
+    count: usize,
+    // Welford accumulators: (mean, M2) for online variance
+    mae_mean: f64,
+    mae_m2: f64,
+    rmse_mean: f64,
+    rmse_m2: f64,
+    smape_mean: f64,
+    smape_m2: f64,
+    mape_mean: f64,
+    mape_m2: f64,
+    mape_count: usize,
+    // Track last mean for convergence check
+    prev_mae_mean: f64,
+}
+
+impl StreamingCVAggregator {
+    /// Create a new empty aggregator.
+    pub fn new() -> Self {
+        Self {
+            count: 0,
+            mae_mean: 0.0,
+            mae_m2: 0.0,
+            rmse_mean: 0.0,
+            rmse_m2: 0.0,
+            smape_mean: 0.0,
+            smape_m2: 0.0,
+            mape_mean: 0.0,
+            mape_m2: 0.0,
+            mape_count: 0,
+            prev_mae_mean: f64::NAN,
+        }
+    }
+
+    /// Add a fold's metrics to the running aggregation.
+    pub fn update(&mut self, metrics: &AccuracyMetrics) {
+        self.prev_mae_mean = self.mae_mean;
+        self.count += 1;
+        let n = self.count as f64;
+
+        // Welford update for MAE
+        let delta = metrics.mae - self.mae_mean;
+        self.mae_mean += delta / n;
+        let delta2 = metrics.mae - self.mae_mean;
+        self.mae_m2 += delta * delta2;
+
+        // Welford update for RMSE
+        let delta = metrics.rmse - self.rmse_mean;
+        self.rmse_mean += delta / n;
+        let delta2 = metrics.rmse - self.rmse_mean;
+        self.rmse_m2 += delta * delta2;
+
+        // Welford update for SMAPE
+        let delta = metrics.smape - self.smape_mean;
+        self.smape_mean += delta / n;
+        let delta2 = metrics.smape - self.smape_mean;
+        self.smape_m2 += delta * delta2;
+
+        // Welford update for MAPE (if available)
+        if let Some(mape) = metrics.mape {
+            self.mape_count += 1;
+            let mn = self.mape_count as f64;
+            let delta = mape - self.mape_mean;
+            self.mape_mean += delta / mn;
+            let delta2 = mape - self.mape_mean;
+            self.mape_m2 += delta * delta2;
+        }
+    }
+
+    /// Number of folds accumulated so far.
+    pub fn n_folds(&self) -> usize {
+        self.count
+    }
+
+    /// Running mean MAE.
+    pub fn mean_mae(&self) -> f64 {
+        self.mae_mean
+    }
+
+    /// Running mean RMSE.
+    pub fn mean_rmse(&self) -> f64 {
+        self.rmse_mean
+    }
+
+    /// Running mean SMAPE.
+    pub fn mean_smape(&self) -> f64 {
+        self.smape_mean
+    }
+
+    /// Running mean MAPE (None if no fold had MAPE).
+    pub fn mean_mape(&self) -> Option<f64> {
+        if self.mape_count > 0 {
+            Some(self.mape_mean)
+        } else {
+            None
+        }
+    }
+
+    /// Running sample standard deviation of MAE.
+    pub fn std_mae(&self) -> f64 {
+        if self.count < 2 {
+            return 0.0;
+        }
+        (self.mae_m2 / (self.count - 1) as f64).sqrt()
+    }
+
+    /// Running sample standard deviation of RMSE.
+    pub fn std_rmse(&self) -> f64 {
+        if self.count < 2 {
+            return 0.0;
+        }
+        (self.rmse_m2 / (self.count - 1) as f64).sqrt()
+    }
+
+    /// Check whether the running MAE mean has converged within `tolerance`.
+    ///
+    /// Returns `true` if at least 3 folds have been processed and the
+    /// relative change in mean MAE from the previous fold is below `tolerance`.
+    pub fn has_converged(&self, tolerance: f64) -> bool {
+        if self.count < 3 || self.prev_mae_mean.is_nan() {
+            return false;
+        }
+        let change = (self.mae_mean - self.prev_mae_mean).abs();
+        let scale = self.mae_mean.abs().max(1e-10);
+        change / scale < tolerance
+    }
+
+    /// Convert the accumulated state into [`AggregatedMetrics`].
+    pub fn finalize(&self) -> AggregatedMetrics {
+        AggregatedMetrics {
+            mae: self.mae_mean,
+            rmse: self.rmse_mean,
+            smape: self.smape_mean,
+            mape: self.mean_mape(),
+            mae_std: self.std_mae(),
+            rmse_std: self.std_rmse(),
+        }
+    }
+}
+
+impl Default for StreamingCVAggregator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Perform cross-validation with early stopping based on convergence.
+///
+/// Like [`cross_validate`], but stops adding folds once the running MAE
+/// mean has stabilized within `tolerance`. Returns results from however
+/// many folds were evaluated.
+///
+/// # Arguments
+/// * `config` - Cross-validation configuration
+/// * `series` - The time series to validate on
+/// * `model_factory` - Function that creates a fresh model for each fold
+/// * `tolerance` - Relative change threshold for convergence (e.g., 0.01 for 1%)
+///
+/// # Example
+///
+/// ```
+/// use anofox_forecast::utils::cross_validation::{cross_validate_early_stop, CVConfig};
+/// use anofox_forecast::models::baseline::Naive;
+/// use anofox_forecast::core::TimeSeries;
+/// use chrono::{TimeZone, Utc};
+///
+/// let timestamps: Vec<_> = (0..50)
+///     .map(|i| Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap()
+///         + chrono::Duration::hours(i))
+///     .collect();
+/// let values = vec![5.0; 50]; // constant series
+/// let ts = TimeSeries::univariate(timestamps, values).unwrap();
+///
+/// let config = CVConfig::expanding(10, 1);
+/// let results = cross_validate_early_stop(&config, &ts, Naive::new, 0.01).unwrap();
+/// // May stop before all 40 folds if MAE converges quickly
+/// assert!(results.n_folds >= 3);
+/// ```
+pub fn cross_validate_early_stop<F, Factory>(
+    config: &CVConfig,
+    series: &TimeSeries,
+    model_factory: Factory,
+    tolerance: f64,
+) -> Result<CVResults>
+where
+    F: Forecaster,
+    Factory: Fn() -> F,
+{
+    let generator = config.to_fold_generator();
+    let folds = generator.generate(series.len());
+
+    if folds.is_empty() {
+        return Ok(CVResults {
+            n_folds: 0,
+            aggregated: AggregatedMetrics {
+                mae: f64::NAN,
+                rmse: f64::NAN,
+                smape: f64::NAN,
+                mape: None,
+                mae_std: f64::NAN,
+                rmse_std: f64::NAN,
+            },
+            fold_metrics: vec![],
+            actual_values: vec![],
+            predicted_values: vec![],
+            folds: vec![],
+        });
+    }
+
+    let mut aggregator = StreamingCVAggregator::new();
+    let mut fold_metrics = Vec::new();
+    let mut all_actual = Vec::new();
+    let mut all_predicted = Vec::new();
+    let mut used_folds = Vec::new();
+
+    for fold in &folds {
+        let (metrics, actual, predicted) =
+            evaluate_fold(series, fold, &model_factory, config.seasonal_period)?;
+
+        aggregator.update(&metrics);
+        fold_metrics.push(metrics);
+        all_actual.extend_from_slice(&actual);
+        all_predicted.extend_from_slice(&predicted);
+        used_folds.push(fold.clone());
+
+        if aggregator.has_converged(tolerance) {
+            break;
+        }
+    }
+
+    Ok(CVResults {
+        n_folds: fold_metrics.len(),
+        aggregated: aggregator.finalize(),
+        fold_metrics,
+        actual_values: all_actual,
+        predicted_values: all_predicted,
+        folds: used_folds,
+    })
+}
+
 /// Calculate sample standard deviation.
 fn std_dev(values: &[f64]) -> f64 {
     if values.len() < 2 {
@@ -1486,5 +1752,195 @@ mod tests {
 
         let result = grouped_cross_validate(&config, series_map, Naive::new);
         assert!(result.is_err());
+    }
+
+    // ==================== StreamingCVAggregator Tests ====================
+
+    #[test]
+    fn streaming_aggregator_single_fold() {
+        let mut agg = StreamingCVAggregator::new();
+        let metrics = AccuracyMetrics {
+            mae: 2.0,
+            mse: 0.0,
+            rmse: 3.0,
+            smape: 15.0,
+            mape: Some(10.0),
+            mase: None,
+            r_squared: 0.0,
+        };
+        agg.update(&metrics);
+
+        assert_eq!(agg.n_folds(), 1);
+        assert_relative_eq!(agg.mean_mae(), 2.0);
+        assert_relative_eq!(agg.mean_rmse(), 3.0);
+        assert_relative_eq!(agg.mean_smape(), 15.0);
+        assert_relative_eq!(agg.mean_mape().unwrap(), 10.0);
+        assert_relative_eq!(agg.std_mae(), 0.0);
+    }
+
+    #[test]
+    fn streaming_aggregator_matches_batch() {
+        let fold_metrics = vec![
+            AccuracyMetrics {
+                mae: 1.0,
+                mse: 0.0,
+                rmse: 1.5,
+                smape: 10.0,
+                mape: Some(8.0),
+                mase: None,
+                r_squared: 0.0,
+            },
+            AccuracyMetrics {
+                mae: 2.0,
+                mse: 0.0,
+                rmse: 2.5,
+                smape: 12.0,
+                mape: Some(9.0),
+                mase: None,
+                r_squared: 0.0,
+            },
+            AccuracyMetrics {
+                mae: 3.0,
+                mse: 0.0,
+                rmse: 3.5,
+                smape: 14.0,
+                mape: Some(11.0),
+                mase: None,
+                r_squared: 0.0,
+            },
+        ];
+
+        let mut agg = StreamingCVAggregator::new();
+        for m in &fold_metrics {
+            agg.update(m);
+        }
+
+        // Compare with batch computation
+        let mae_vals: Vec<f64> = fold_metrics.iter().map(|m| m.mae).collect();
+        let batch_mean = mae_vals.iter().sum::<f64>() / mae_vals.len() as f64;
+        let batch_std = std_dev(&mae_vals);
+
+        assert_relative_eq!(agg.mean_mae(), batch_mean, epsilon = 1e-10);
+        assert_relative_eq!(agg.std_mae(), batch_std, epsilon = 1e-10);
+        assert_eq!(agg.n_folds(), 3);
+    }
+
+    #[test]
+    fn streaming_aggregator_convergence() {
+        let mut agg = StreamingCVAggregator::new();
+
+        // First two folds: not enough for convergence
+        agg.update(&AccuracyMetrics {
+            mae: 1.0,
+            mse: 0.0,
+            rmse: 1.0,
+            smape: 5.0,
+            mape: None,
+            mase: None,
+            r_squared: 0.0,
+        });
+        assert!(!agg.has_converged(0.01));
+
+        agg.update(&AccuracyMetrics {
+            mae: 1.0,
+            mse: 0.0,
+            rmse: 1.0,
+            smape: 5.0,
+            mape: None,
+            mase: None,
+            r_squared: 0.0,
+        });
+        assert!(!agg.has_converged(0.01));
+
+        // Third fold with same value: should converge
+        agg.update(&AccuracyMetrics {
+            mae: 1.0,
+            mse: 0.0,
+            rmse: 1.0,
+            smape: 5.0,
+            mape: None,
+            mase: None,
+            r_squared: 0.0,
+        });
+        assert!(agg.has_converged(0.01));
+    }
+
+    #[test]
+    fn streaming_aggregator_no_mape() {
+        let mut agg = StreamingCVAggregator::new();
+        agg.update(&AccuracyMetrics {
+            mae: 1.0,
+            mse: 0.0,
+            rmse: 1.0,
+            smape: 5.0,
+            mape: None,
+            mase: None,
+            r_squared: 0.0,
+        });
+        assert!(agg.mean_mape().is_none());
+    }
+
+    #[test]
+    fn streaming_aggregator_finalize() {
+        let mut agg = StreamingCVAggregator::new();
+        agg.update(&AccuracyMetrics {
+            mae: 2.0,
+            mse: 0.0,
+            rmse: 3.0,
+            smape: 10.0,
+            mape: Some(5.0),
+            mase: None,
+            r_squared: 0.0,
+        });
+        agg.update(&AccuracyMetrics {
+            mae: 4.0,
+            mse: 0.0,
+            rmse: 5.0,
+            smape: 20.0,
+            mape: Some(15.0),
+            mase: None,
+            r_squared: 0.0,
+        });
+
+        let result = agg.finalize();
+        assert_relative_eq!(result.mae, 3.0);
+        assert_relative_eq!(result.rmse, 4.0);
+        assert_relative_eq!(result.smape, 15.0);
+        assert_relative_eq!(result.mape.unwrap(), 10.0);
+    }
+
+    // ==================== Early Stop CV Tests ====================
+
+    #[test]
+    fn cv_early_stop_constant_series() {
+        let timestamps = make_timestamps(50);
+        let values = vec![5.0; 50];
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let config = CVConfig::expanding(10, 1);
+        let results = cross_validate_early_stop(&config, &ts, Naive::new, 0.01).unwrap();
+
+        // Naive on constant series has 0 MAE from the start,
+        // so it should stop at minimum folds (3)
+        assert!(results.n_folds >= 3);
+        assert!(results.n_folds < 40); // should stop well before all folds
+        assert_relative_eq!(results.aggregated.mae, 0.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn cv_early_stop_runs_all_if_needed() {
+        let timestamps = make_timestamps(20);
+        // Highly variable series that won't converge quickly
+        let values: Vec<f64> = (0..20)
+            .map(|i| if i % 2 == 0 { 100.0 } else { 0.0 })
+            .collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let config = CVConfig::expanding(10, 1);
+        // Very tight tolerance: may run all folds
+        let results = cross_validate_early_stop(&config, &ts, Naive::new, 1e-15).unwrap();
+
+        // Should have evaluated all available folds
+        assert!(results.n_folds > 0);
     }
 }

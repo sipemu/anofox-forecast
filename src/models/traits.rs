@@ -38,6 +38,23 @@ pub trait Forecaster {
         self.predict(horizon)
     }
 
+    /// Convenience method: fit the model and immediately predict.
+    fn fit_predict(&mut self, series: &TimeSeries, horizon: usize) -> Result<Forecast> {
+        self.fit(series)?;
+        self.predict(horizon)
+    }
+
+    /// Convenience method: fit, then predict with confidence intervals.
+    fn fit_predict_with_intervals(
+        &mut self,
+        series: &TimeSeries,
+        horizon: usize,
+        level: f64,
+    ) -> Result<Forecast> {
+        self.fit(series)?;
+        self.predict_with_intervals(horizon, level)
+    }
+
     /// Get the fitted values (in-sample predictions).
     fn fitted_values(&self) -> Option<&[f64]>;
 
@@ -591,5 +608,70 @@ mod tests {
         let mut model = RandomWalkWithDrift::new();
         let err = model.fit(&ts).unwrap_err();
         assert_eq!(err, ForecastError::MissingValues);
+    }
+
+    #[test]
+    fn test_fit_predict_naive() {
+        let mut model = Naive::new();
+        let ts = make_test_series(20);
+
+        let forecast = model.fit_predict(&ts, 5).unwrap();
+        assert_eq!(forecast.horizon(), 5);
+        assert!(model.is_fitted());
+        // Naive predicts last value repeated
+        for &v in forecast.primary() {
+            assert!((v - 20.0).abs() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn test_fit_predict_theta() {
+        let mut model = Theta::new();
+        let ts = make_test_series(30);
+
+        let forecast = model.fit_predict(&ts, 5).unwrap();
+        assert_eq!(forecast.horizon(), 5);
+        assert!(model.is_fitted());
+    }
+
+    #[test]
+    fn test_fit_predict_with_intervals_naive() {
+        let mut model = Naive::new();
+        let ts = make_test_series(20);
+
+        let forecast = model.fit_predict_with_intervals(&ts, 5, 0.95).unwrap();
+        assert_eq!(forecast.horizon(), 5);
+        assert!(model.is_fitted());
+        assert!(forecast.has_lower());
+        assert!(forecast.has_upper());
+    }
+
+    #[test]
+    fn test_fit_predict_with_intervals_theta() {
+        let mut model = Theta::new();
+        let ts = make_test_series(30);
+
+        let forecast = model.fit_predict_with_intervals(&ts, 5, 0.95).unwrap();
+        assert_eq!(forecast.horizon(), 5);
+        assert!(model.is_fitted());
+    }
+
+    #[test]
+    fn test_fit_predict_rejects_nan() {
+        let mut model = Naive::new();
+        let ts = make_nan_series();
+
+        let err = model.fit_predict(&ts, 5).unwrap_err();
+        assert_eq!(err, ForecastError::MissingValues);
+    }
+
+    #[test]
+    fn test_fit_predict_boxed() {
+        let mut model: BoxedForecaster = Box::new(Naive::new());
+        let ts = make_test_series(20);
+
+        let forecast = model.fit_predict(&ts, 5).unwrap();
+        assert_eq!(forecast.horizon(), 5);
+        assert!(model.is_fitted());
     }
 }

@@ -290,6 +290,7 @@ fn quantile_normal(p: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use approx::assert_relative_eq;
     use chrono::{TimeZone, Utc};
 
     fn make_timestamps(n: usize) -> Vec<chrono::DateTime<Utc>> {
@@ -311,30 +312,38 @@ mod tests {
         #[test]
         fn median_is_zero() {
             let z = quantile_normal(0.5);
-            assert!(z.abs() < 1e-10, "z(0.5) should be 0, got {}", z);
+            assert_relative_eq!(z, 0.0, epsilon = 1e-10);
         }
 
         #[test]
         fn symmetric_around_median() {
             let z_low = quantile_normal(0.25);
             let z_high = quantile_normal(0.75);
-            assert!(
-                (z_low + z_high).abs() < 1e-6,
-                "z(0.25) + z(0.75) should be ~0"
-            );
+            assert_relative_eq!(z_low + z_high, 0.0, epsilon = 1e-6);
+        }
+
+        #[test]
+        fn symmetric_around_median_for_tails() {
+            let z_low = quantile_normal(0.1);
+            let z_high = quantile_normal(0.9);
+            assert_relative_eq!(z_low + z_high, 0.0, epsilon = 1e-6);
+        }
+
+        #[test]
+        fn symmetric_around_median_for_extreme_tails() {
+            let z_low = quantile_normal(0.01);
+            let z_high = quantile_normal(0.99);
+            assert_relative_eq!(z_low + z_high, 0.0, epsilon = 1e-4);
         }
 
         #[test]
         fn known_values() {
-            // Standard normal quantiles
-            let z_10 = quantile_normal(0.1);
-            let z_90 = quantile_normal(0.9);
-            let z_95 = quantile_normal(0.95);
-
-            // Expected values from standard tables
-            assert!((z_10 - (-1.2816)).abs() < 0.01, "z(0.1) ≈ -1.28");
-            assert!((z_90 - 1.2816).abs() < 0.01, "z(0.9) ≈ 1.28");
-            assert!((z_95 - 1.6449).abs() < 0.01, "z(0.95) ≈ 1.64");
+            // Standard normal quantiles from tables
+            assert_relative_eq!(quantile_normal(0.1), -1.2816, epsilon = 0.01);
+            assert_relative_eq!(quantile_normal(0.9), 1.2816, epsilon = 0.01);
+            assert_relative_eq!(quantile_normal(0.95), 1.6449, epsilon = 0.01);
+            assert_relative_eq!(quantile_normal(0.025), -1.96, epsilon = 0.01);
+            assert_relative_eq!(quantile_normal(0.975), 1.96, epsilon = 0.01);
         }
 
         #[test]
@@ -358,6 +367,31 @@ mod tests {
             assert!(z_01 < -2.0, "z(0.01) should be < -2");
             assert!(z_99 > 2.0, "z(0.99) should be > 2");
         }
+
+        #[test]
+        fn boundary_returns_infinity() {
+            assert!(quantile_normal(0.0).is_infinite());
+            assert!(quantile_normal(0.0).is_sign_negative());
+            assert!(quantile_normal(1.0).is_infinite());
+            assert!(quantile_normal(1.0).is_sign_positive());
+        }
+
+        #[test]
+        fn fine_grained_monotonicity() {
+            let quantiles: Vec<f64> = (1..100).map(|i| i as f64 / 100.0).collect();
+            let z_scores: Vec<f64> = quantiles.iter().map(|&q| quantile_normal(q)).collect();
+
+            for i in 1..z_scores.len() {
+                assert!(
+                    z_scores[i] > z_scores[i - 1],
+                    "z({}) = {} should be > z({}) = {}",
+                    quantiles[i],
+                    z_scores[i],
+                    quantiles[i - 1],
+                    z_scores[i - 1]
+                );
+            }
+        }
     }
 
     // =========================================================================
@@ -374,6 +408,19 @@ mod tests {
         }
 
         #[test]
+        fn new_single_quantile() {
+            let pred = NormalPredictor::new(vec![0.5]);
+            assert_eq!(pred.quantiles(), &[0.5]);
+        }
+
+        #[test]
+        fn new_many_quantiles() {
+            let quantiles: Vec<f64> = (1..20).map(|i| i as f64 / 20.0).collect();
+            let pred = NormalPredictor::new(quantiles.clone());
+            assert_eq!(pred.quantiles(), &quantiles);
+        }
+
+        #[test]
         #[should_panic(expected = "quantiles must be in (0, 1)")]
         fn new_panics_on_zero_quantile() {
             NormalPredictor::new(vec![0.0, 0.5, 0.9]);
@@ -386,9 +433,27 @@ mod tests {
         }
 
         #[test]
+        #[should_panic(expected = "quantiles must be in (0, 1)")]
+        fn new_panics_on_negative_quantile() {
+            NormalPredictor::new(vec![-0.1, 0.5, 0.9]);
+        }
+
+        #[test]
+        #[should_panic(expected = "quantiles must be in (0, 1)")]
+        fn new_panics_on_quantile_greater_than_one() {
+            NormalPredictor::new(vec![0.1, 0.5, 1.5]);
+        }
+
+        #[test]
         #[should_panic(expected = "quantiles must be sorted")]
         fn new_panics_on_unsorted_quantiles() {
             NormalPredictor::new(vec![0.9, 0.5, 0.1]);
+        }
+
+        #[test]
+        #[should_panic(expected = "quantiles must be sorted")]
+        fn new_panics_on_duplicate_quantiles() {
+            NormalPredictor::new(vec![0.5, 0.5, 0.9]);
         }
 
         #[test]
@@ -396,6 +461,13 @@ mod tests {
             let pred = NormalPredictor::new(vec![0.1, 0.5, 0.9]);
             let cloned = pred.clone();
             assert_eq!(pred.quantiles(), cloned.quantiles());
+        }
+
+        #[test]
+        fn predictor_is_debuggable() {
+            let pred = NormalPredictor::new(vec![0.1, 0.5, 0.9]);
+            let debug_str = format!("{:?}", pred);
+            assert!(debug_str.contains("NormalPredictor"));
         }
     }
 
@@ -424,8 +496,12 @@ mod tests {
             let forecasts = vec![10.0, 11.0, 12.0];
             let actuals = vec![10.5, 11.5];
 
-            let result = pred.fit(&forecasts, &actuals);
-            assert!(result.is_err());
+            let err = pred.fit(&forecasts, &actuals).unwrap_err();
+            assert!(
+                matches!(err, ForecastError::DimensionMismatch { .. }),
+                "Expected DimensionMismatch, got {:?}",
+                err
+            );
         }
 
         #[test]
@@ -434,8 +510,12 @@ mod tests {
             let forecasts: Vec<f64> = vec![];
             let actuals: Vec<f64> = vec![];
 
-            let result = pred.fit(&forecasts, &actuals);
-            assert!(result.is_err());
+            let err = pred.fit(&forecasts, &actuals).unwrap_err();
+            assert!(
+                matches!(err, ForecastError::EmptyData),
+                "Expected EmptyData, got {:?}",
+                err
+            );
         }
 
         #[test]
@@ -444,8 +524,19 @@ mod tests {
             let forecasts = vec![10.0];
             let actuals = vec![10.5];
 
-            let result = pred.fit(&forecasts, &actuals);
-            assert!(result.is_err());
+            let err = pred.fit(&forecasts, &actuals).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    ForecastError::InsufficientData {
+                        needed: 2,
+                        got: 1,
+                        ..
+                    }
+                ),
+                "Expected InsufficientData, got {:?}",
+                err
+            );
         }
 
         #[test]
@@ -457,7 +548,19 @@ mod tests {
             let actuals = vec![11.0, 11.0, 11.0, 11.0, 11.0];
 
             let result = pred.fit(&forecasts, &actuals).unwrap();
-            assert!((result.mean() - 1.0).abs() < 1e-10);
+            assert_relative_eq!(result.mean(), 1.0, epsilon = 1e-10);
+        }
+
+        #[test]
+        fn mean_computed_correctly_for_mixed_errors() {
+            let pred = NormalPredictor::new(vec![0.5]);
+
+            // Errors: -2, -1, 0, 1, 2 -> mean = 0
+            let forecasts = vec![10.0, 10.0, 10.0, 10.0, 10.0];
+            let actuals = vec![8.0, 9.0, 10.0, 11.0, 12.0];
+
+            let result = pred.fit(&forecasts, &actuals).unwrap();
+            assert_relative_eq!(result.mean(), 0.0, epsilon = 1e-10);
         }
 
         #[test]
@@ -469,7 +572,7 @@ mod tests {
             let actuals = vec![11.0, 11.0, 11.0, 11.0, 11.0];
 
             let result = pred.fit(&forecasts, &actuals).unwrap();
-            assert!(result.std_dev().abs() < 1e-10);
+            assert_relative_eq!(result.std_dev(), 0.0, epsilon = 1e-10);
         }
 
         #[test]
@@ -485,6 +588,18 @@ mod tests {
         }
 
         #[test]
+        fn std_dev_uses_sample_formula() {
+            let pred = NormalPredictor::new(vec![0.5]);
+
+            // Errors: -1, 0, 1 -> mean = 0, sample variance = (1+0+1)/2 = 1
+            let forecasts = vec![10.0, 10.0, 10.0];
+            let actuals = vec![9.0, 10.0, 11.0];
+
+            let result = pred.fit(&forecasts, &actuals).unwrap();
+            assert_relative_eq!(result.std_dev(), 1.0, epsilon = 1e-10);
+        }
+
+        #[test]
         fn unbiased_forecasts_have_zero_mean() {
             let pred = NormalPredictor::new(vec![0.5]);
 
@@ -493,7 +608,30 @@ mod tests {
             let actuals = vec![8.0, 9.0, 11.0, 12.0]; // Errors: -2, -1, 1, 2
 
             let result = pred.fit(&forecasts, &actuals).unwrap();
-            assert!(result.mean().abs() < 1e-10);
+            assert_relative_eq!(result.mean(), 0.0, epsilon = 1e-10);
+        }
+
+        #[test]
+        fn z_scores_match_quantile_normal() {
+            let pred = NormalPredictor::new(vec![0.1, 0.5, 0.9]);
+            let forecasts = vec![10.0, 11.0, 12.0, 13.0, 14.0];
+            let actuals = vec![10.5, 11.5, 12.5, 13.5, 14.5];
+
+            let result = pred.fit(&forecasts, &actuals).unwrap();
+
+            assert_relative_eq!(result.z_scores()[0], quantile_normal(0.1), epsilon = 1e-10);
+            assert_relative_eq!(result.z_scores()[1], quantile_normal(0.5), epsilon = 1e-10);
+            assert_relative_eq!(result.z_scores()[2], quantile_normal(0.9), epsilon = 1e-10);
+        }
+
+        #[test]
+        fn fit_with_negative_values() {
+            let pred = NormalPredictor::new(vec![0.5]);
+            let forecasts = vec![-5.0, -3.0, -1.0, 1.0, 3.0];
+            let actuals = vec![-4.5, -2.5, -0.5, 1.5, 3.5];
+
+            let result = pred.fit(&forecasts, &actuals).unwrap();
+            assert_relative_eq!(result.mean(), 0.5, epsilon = 1e-10);
         }
     }
 
@@ -549,6 +687,20 @@ mod tests {
         }
 
         #[test]
+        fn predict_single_value() {
+            let pred = NormalPredictor::new(vec![0.5]);
+            let forecasts = vec![10.0, 10.0, 10.0, 10.0, 10.0];
+            let actuals = vec![11.0, 11.0, 11.0, 11.0, 11.0];
+
+            let result = pred.fit(&forecasts, &actuals).unwrap();
+            let quantiles = pred.predict_values(&result, &[20.0]).unwrap();
+
+            assert_eq!(quantiles.n_times(), 1);
+            assert_eq!(quantiles.n_quantiles(), 1);
+            assert_relative_eq!(quantiles.at_time(0).unwrap()[0], 21.0, epsilon = 1e-10);
+        }
+
+        #[test]
         fn quantile_values_are_monotonic() {
             let pred = NormalPredictor::new(vec![0.1, 0.5, 0.9]);
             let forecasts = vec![10.0, 11.0, 12.0, 13.0, 14.0];
@@ -578,7 +730,7 @@ mod tests {
 
             let median = quantiles.at_time(0).unwrap()[0];
             // Point forecast 20.0 + mean error 1.0 = 21.0
-            assert!((median - 21.0).abs() < 1e-10);
+            assert_relative_eq!(median, 21.0, epsilon = 1e-10);
         }
 
         #[test]
@@ -596,9 +748,9 @@ mod tests {
 
             let row = quantiles.at_time(0).unwrap();
             // With zero std dev, all quantiles should equal point + mean
-            assert!((row[0] - 21.0).abs() < 1e-10);
-            assert!((row[1] - 21.0).abs() < 1e-10);
-            assert!((row[2] - 21.0).abs() < 1e-10);
+            assert_relative_eq!(row[0], 21.0, epsilon = 1e-10);
+            assert_relative_eq!(row[1], 21.0, epsilon = 1e-10);
+            assert_relative_eq!(row[2], 21.0, epsilon = 1e-10);
         }
 
         #[test]
@@ -624,6 +776,67 @@ mod tests {
 
             assert!(width_large > width_small);
         }
+
+        #[test]
+        fn quantile_adjustments_are_symmetric_for_symmetric_quantiles() {
+            let pred = NormalPredictor::new(vec![0.1, 0.5, 0.9]);
+
+            // Symmetric errors: mean=0
+            let forecasts = vec![10.0, 10.0, 10.0, 10.0];
+            let actuals = vec![8.0, 9.0, 11.0, 12.0];
+
+            let result = pred.fit(&forecasts, &actuals).unwrap();
+            let adjustments = result.quantile_adjustments();
+
+            // q0.1 adjustment should be -q0.9 adjustment (symmetric around mean=0)
+            assert_relative_eq!(adjustments[0], -adjustments[2], epsilon = 1e-6);
+            // Median adjustment should be ~0 (mean=0, z=0)
+            assert_relative_eq!(adjustments[1], 0.0, epsilon = 1e-10);
+        }
+
+        #[test]
+        fn predict_returns_finite_values() {
+            let pred = NormalPredictor::new(vec![0.01, 0.5, 0.99]);
+            let forecasts: Vec<f64> = (0..20).map(|i| i as f64 * 10.0).collect();
+            let actuals: Vec<f64> = forecasts
+                .iter()
+                .enumerate()
+                .map(|(i, &f)| f + (i as f64).sin() * 5.0)
+                .collect();
+
+            let result = pred.fit(&forecasts, &actuals).unwrap();
+            let quantiles = pred.predict_values(&result, &[50.0, 100.0]).unwrap();
+
+            for t in 0..2 {
+                let row = quantiles.at_time(t).unwrap();
+                for &val in row {
+                    assert!(val.is_finite(), "All predicted quantiles must be finite");
+                }
+            }
+        }
+
+        #[test]
+        fn predict_and_predict_values_agree() {
+            let pred = NormalPredictor::new(vec![0.1, 0.5, 0.9]);
+            let forecasts = vec![10.0, 11.0, 12.0, 13.0, 14.0];
+            let actuals = vec![10.5, 11.5, 12.5, 13.5, 14.5];
+
+            let result = pred.fit(&forecasts, &actuals).unwrap();
+
+            let values = vec![20.0, 21.0];
+            let q_predict = pred
+                .predict(&result, &PointForecasts::from_values(values.clone()))
+                .unwrap();
+            let q_values = pred.predict_values(&result, &values).unwrap();
+
+            for t in 0..2 {
+                let row_predict = q_predict.at_time(t).unwrap();
+                let row_values = q_values.at_time(t).unwrap();
+                for i in 0..3 {
+                    assert_relative_eq!(row_predict[i], row_values[i], epsilon = 1e-10);
+                }
+            }
+        }
     }
 
     // =========================================================================
@@ -641,7 +854,7 @@ mod tests {
 
             let result = pred.fit(&forecasts, &actuals).unwrap();
 
-            assert!((result.mean() - 0.5).abs() < 1e-10);
+            assert_relative_eq!(result.mean(), 0.5, epsilon = 1e-10);
             assert!(result.std_dev() >= 0.0);
             assert_eq!(result.z_scores().len(), 3);
             assert_eq!(result.quantiles(), &[0.1, 0.5, 0.9]);
@@ -659,7 +872,23 @@ mod tests {
             // Mean = 1.0, std_dev = 0, z(0.5) = 0
             // Adjustment = 1.0 + 0 * 0 = 1.0
             assert_eq!(adjustments.len(), 1);
-            assert!((adjustments[0] - 1.0).abs() < 1e-10);
+            assert_relative_eq!(adjustments[0], 1.0, epsilon = 1e-10);
+        }
+
+        #[test]
+        fn quantile_adjustments_formula_verification() {
+            let pred = NormalPredictor::new(vec![0.1, 0.9]);
+
+            // Errors: -1, 0, 1 -> mean=0, std_dev=1 (sample)
+            let forecasts = vec![10.0, 10.0, 10.0];
+            let actuals = vec![9.0, 10.0, 11.0];
+
+            let result = pred.fit(&forecasts, &actuals).unwrap();
+            let adjustments = result.quantile_adjustments();
+
+            // adj[i] = mean + z_score[i] * std_dev = 0 + z * 1 = z
+            assert_relative_eq!(adjustments[0], quantile_normal(0.1), epsilon = 1e-6);
+            assert_relative_eq!(adjustments[1], quantile_normal(0.9), epsilon = 1e-6);
         }
 
         #[test]
@@ -671,8 +900,21 @@ mod tests {
             let result = pred.fit(&forecasts, &actuals).unwrap();
             let cloned = result.clone();
 
-            assert!((result.mean() - cloned.mean()).abs() < 1e-10);
-            assert!((result.std_dev() - cloned.std_dev()).abs() < 1e-10);
+            assert_relative_eq!(result.mean(), cloned.mean(), epsilon = 1e-10);
+            assert_relative_eq!(result.std_dev(), cloned.std_dev(), epsilon = 1e-10);
+            assert_eq!(result.z_scores(), cloned.z_scores());
+            assert_eq!(result.quantiles(), cloned.quantiles());
+        }
+
+        #[test]
+        fn result_is_debuggable() {
+            let pred = NormalPredictor::new(vec![0.5]);
+            let forecasts = vec![10.0, 12.0, 14.0];
+            let actuals = vec![10.5, 12.5, 14.5];
+
+            let result = pred.fit(&forecasts, &actuals).unwrap();
+            let debug_str = format!("{:?}", result);
+            assert!(debug_str.contains("NormalResult"));
         }
     }
 
@@ -691,6 +933,18 @@ mod tests {
 
             let result = pred.fit(&forecasts, &actuals);
             assert!(result.is_ok());
+        }
+
+        #[test]
+        fn two_data_points_correct_statistics() {
+            let pred = NormalPredictor::new(vec![0.5]);
+            // Errors: 1.0, -1.0 -> mean=0, sample_variance=2/(2-1)=2, std=sqrt(2)
+            let forecasts = vec![10.0, 12.0];
+            let actuals = vec![11.0, 11.0];
+
+            let result = pred.fit(&forecasts, &actuals).unwrap();
+            assert_relative_eq!(result.mean(), 0.0, epsilon = 1e-10);
+            assert_relative_eq!(result.std_dev(), std::f64::consts::SQRT_2, epsilon = 1e-10);
         }
 
         #[test]
@@ -714,6 +968,57 @@ mod tests {
             let q_forecasts = pred.predict_values(&result, &[20.0]).unwrap();
 
             assert_eq!(q_forecasts.n_quantiles(), 9);
+
+            // All quantile values should be monotonically non-decreasing
+            let row = q_forecasts.at_time(0).unwrap();
+            for i in 1..row.len() {
+                assert!(
+                    row[i] >= row[i - 1],
+                    "Quantiles should be monotonic: q[{}]={} < q[{}]={}",
+                    i - 1,
+                    row[i - 1],
+                    i,
+                    row[i]
+                );
+            }
+        }
+
+        #[test]
+        fn identical_forecasts_and_actuals() {
+            let pred = NormalPredictor::new(vec![0.1, 0.5, 0.9]);
+            let forecasts = vec![5.0, 5.0, 5.0, 5.0, 5.0];
+            let actuals = vec![5.0, 5.0, 5.0, 5.0, 5.0];
+
+            let result = pred.fit(&forecasts, &actuals).unwrap();
+            assert_relative_eq!(result.mean(), 0.0, epsilon = 1e-10);
+            assert_relative_eq!(result.std_dev(), 0.0, epsilon = 1e-10);
+
+            // All quantile predictions should equal the point forecast
+            let q = pred.predict_values(&result, &[42.0]).unwrap();
+            let row = q.at_time(0).unwrap();
+            for &val in row {
+                assert_relative_eq!(val, 42.0, epsilon = 1e-10);
+            }
+        }
+
+        #[test]
+        fn large_values() {
+            let pred = NormalPredictor::new(vec![0.5]);
+            let forecasts = vec![1e10, 2e10, 3e10, 4e10, 5e10];
+            let actuals = vec![1.1e10, 2.1e10, 3.1e10, 4.1e10, 5.1e10];
+
+            let result = pred.fit(&forecasts, &actuals).unwrap();
+            assert_relative_eq!(result.mean(), 1e9, epsilon = 1e2);
+        }
+
+        #[test]
+        fn very_small_values() {
+            let pred = NormalPredictor::new(vec![0.5]);
+            let forecasts = vec![1e-10, 2e-10, 3e-10, 4e-10, 5e-10];
+            let actuals = vec![1.1e-10, 2.1e-10, 3.1e-10, 4.1e-10, 5.1e-10];
+
+            let result = pred.fit(&forecasts, &actuals).unwrap();
+            assert_relative_eq!(result.mean(), 1e-11, epsilon = 1e-18);
         }
     }
 }

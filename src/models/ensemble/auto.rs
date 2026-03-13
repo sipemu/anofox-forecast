@@ -189,7 +189,7 @@ impl Forecaster for AutoEnsemble {
         }
 
         if candidates.is_empty() {
-            return Err(ForecastError::ComputationError(
+            return Err(ForecastError::ConvergenceFailure(
                 "No models could be fitted successfully".into(),
             ));
         }

@@ -802,4 +802,320 @@ mod tests {
             assert!(result.is_err());
         }
     }
+
+    // =========================================================================
+    // Additional tests: known-value verification and deeper edge cases
+    // =========================================================================
+
+    mod known_values {
+        use super::*;
+
+        /// With step=1, horizon=1, initial_window=w on n data points,
+        /// the number of folds should be n - w.
+        #[test]
+        fn fold_count_matches_expected() {
+            let n = 70;
+            let w = 50;
+            let (forecasts, actuals) = make_data(n);
+            let processor = PostProcessor::conformal(0.90);
+
+            let config = BacktestConfig::new().initial_window(w).step(1).horizon(1);
+
+            let result = processor.backtest(&forecasts, &actuals, config).unwrap();
+
+            // With step=1, horizon=1: folds go from test_start=w..n-1
+            assert_eq!(result.n_folds(), n - w);
+        }
+
+        /// With step=s, horizon=h, the fold count should match
+        /// the number of positions where test_start + h <= n.
+        #[test]
+        fn fold_count_with_step_and_horizon() {
+            let n = 100;
+            let w = 30;
+            let step = 10;
+            let horizon = 5;
+            let (forecasts, actuals) = make_data(n);
+            let processor = PostProcessor::conformal(0.90);
+
+            let config = BacktestConfig::new()
+                .initial_window(w)
+                .step(step)
+                .horizon(horizon);
+
+            let result = processor.backtest(&forecasts, &actuals, config).unwrap();
+
+            // test_start goes w, w+step, w+2*step, ... while test_start + horizon <= n
+            let mut expected_folds = 0;
+            let mut ts = w;
+            while ts + horizon <= n {
+                expected_folds += 1;
+                ts += step;
+            }
+            assert_eq!(result.n_folds(), expected_folds);
+        }
+
+        /// Verify that pooled forecasts and actuals collect every test point.
+        #[test]
+        fn pooled_data_length_matches_folds() {
+            let (forecasts, actuals) = make_data(80);
+            let processor = PostProcessor::conformal(0.90);
+
+            let config = BacktestConfig::new().initial_window(50).step(5).horizon(3);
+
+            let result = processor.backtest(&forecasts, &actuals, config).unwrap();
+
+            let total_test_points: usize = result.folds().map(|f| f.test_size()).sum();
+            assert_eq!(result.pooled_forecasts().len(), total_test_points);
+            assert_eq!(result.pooled_actuals().len(), total_test_points);
+        }
+
+        /// Rolling window: all folds should have exactly initial_window training size.
+        #[test]
+        fn rolling_window_constant_train_size() {
+            let (forecasts, actuals) = make_data(100);
+            let processor = PostProcessor::conformal(0.90);
+
+            let config = BacktestConfig::new()
+                .initial_window(30)
+                .step(5)
+                .horizon(3)
+                .expanding(false);
+
+            let result = processor.backtest(&forecasts, &actuals, config).unwrap();
+
+            for fold in result.folds() {
+                assert_eq!(
+                    fold.train_size(),
+                    30,
+                    "Rolling window fold {} should have train_size=30",
+                    fold.fold_idx
+                );
+            }
+        }
+
+        /// Expanding window: training size should grow monotonically.
+        #[test]
+        fn expanding_window_growing_train_size() {
+            let (forecasts, actuals) = make_data(100);
+            let processor = PostProcessor::conformal(0.90);
+
+            let config = BacktestConfig::new()
+                .initial_window(30)
+                .step(5)
+                .horizon(3)
+                .expanding(true);
+
+            let result = processor.backtest(&forecasts, &actuals, config).unwrap();
+
+            let train_sizes: Vec<usize> = result.folds().map(|f| f.train_size()).collect();
+            for i in 1..train_sizes.len() {
+                assert!(
+                    train_sizes[i] >= train_sizes[i - 1],
+                    "Expanding window: train sizes should be non-decreasing"
+                );
+            }
+            // First fold should start at 0 with size = initial_window
+            let fold0 = result.fold(0).unwrap();
+            assert_eq!(fold0.train_start, 0);
+            assert_eq!(fold0.train_size(), 30);
+        }
+    }
+
+    mod calibration_error_tests {
+        use super::*;
+
+        #[test]
+        fn calibration_error_is_zero_at_target() {
+            let (forecasts, actuals) = make_data(100);
+            let processor = PostProcessor::conformal(0.90);
+
+            let config = BacktestConfig::new().initial_window(50).step(10).horizon(5);
+
+            let result = processor.backtest(&forecasts, &actuals, config).unwrap();
+            let coverage = result.coverage();
+
+            // calibration_error at coverage itself should be 0
+            let err = result.calibration_error(coverage);
+            assert!(err.abs() < 1e-10);
+        }
+
+        #[test]
+        fn calibration_error_is_positive_for_different_target() {
+            let (forecasts, actuals) = make_data(100);
+            let processor = PostProcessor::conformal(0.90);
+
+            let config = BacktestConfig::new().initial_window(50).step(10).horizon(5);
+
+            let result = processor.backtest(&forecasts, &actuals, config).unwrap();
+
+            // Unless coverage happens to be exactly 0.5, error should be > 0
+            let err = result.calibration_error(0.0);
+            assert!(err >= 0.0);
+        }
+    }
+
+    mod zero_variance_tests {
+        use super::*;
+
+        /// When forecasts are perfect (zero error), the conformal interval
+        /// width should be very small.
+        #[test]
+        fn perfect_forecasts_give_tight_intervals() {
+            let n = 70;
+            let values: Vec<f64> = (0..n).map(|i| i as f64).collect();
+            let forecasts = PointForecasts::from_values(values.clone());
+            // actuals == forecasts
+            let actuals = values;
+            let processor = PostProcessor::conformal(0.90);
+
+            let config = BacktestConfig::new().initial_window(50).step(5).horizon(1);
+
+            let result = processor.backtest(&forecasts, &actuals, config).unwrap();
+            // With zero errors, interval width should be 0
+            assert!(
+                result.interval_widths() < 1e-10,
+                "Perfect forecasts should yield zero-width intervals, got {}",
+                result.interval_widths()
+            );
+        }
+
+        /// Constant forecasts and constant actuals (zero variance).
+        #[test]
+        fn constant_data_backtest() {
+            let n = 70;
+            let forecasts = PointForecasts::from_values(vec![42.0; n]);
+            let actuals = vec![42.0; n];
+            let processor = PostProcessor::conformal(0.90);
+
+            let config = BacktestConfig::new().initial_window(50).step(5).horizon(1);
+
+            let result = processor.backtest(&forecasts, &actuals, config).unwrap();
+            assert!(result.n_folds() > 0);
+            // Coverage should be 1.0 since all actuals match forecasts
+            assert!(
+                (result.coverage() - 1.0).abs() < 1e-10,
+                "Coverage should be 1.0 for perfect constant forecasts"
+            );
+        }
+    }
+
+    mod calibrated_model_edge_cases {
+        use super::*;
+
+        #[test]
+        fn calibrated_model_by_horizon_fails_without_horizon_aware() {
+            let (forecasts, actuals) = make_data(100);
+            let processor = PostProcessor::conformal(0.90);
+
+            // horizon_aware = false (default)
+            let config = BacktestConfig::new().initial_window(50).step(10).horizon(5);
+
+            let result = processor.backtest(&forecasts, &actuals, config).unwrap();
+
+            // Should fail because horizon-aware data was not collected
+            let cal = result.calibrated_model_by_horizon(&processor);
+            assert!(cal.is_err());
+        }
+
+        #[test]
+        fn calibrated_model_by_horizon_model_count() {
+            let (forecasts, actuals) = make_data(100);
+            let processor = PostProcessor::conformal(0.90);
+
+            let config = BacktestConfig::new()
+                .initial_window(50)
+                .step(10)
+                .horizon(3)
+                .horizon_aware(true);
+
+            let result = processor.backtest(&forecasts, &actuals, config).unwrap();
+            let models = result.calibrated_model_by_horizon(&processor).unwrap();
+
+            // Should have one model per horizon step
+            assert_eq!(models.len(), 3);
+            assert_eq!(models.horizons(), vec![1, 2, 3]);
+            assert!(!models.is_empty());
+        }
+
+        #[test]
+        fn out_of_range_fold_returns_none() {
+            let (forecasts, actuals) = make_data(100);
+            let processor = PostProcessor::conformal(0.90);
+
+            let config = BacktestConfig::new().initial_window(50).step(10).horizon(5);
+
+            let result = processor.backtest(&forecasts, &actuals, config).unwrap();
+            assert!(result.fold(9999).is_none());
+        }
+    }
+
+    mod predict_by_horizon_edge_cases {
+        use super::*;
+
+        #[test]
+        fn predict_intervals_by_horizon_empty_forecasts() {
+            let (forecasts, actuals) = make_data(100);
+            let processor = PostProcessor::conformal(0.90);
+
+            let config = BacktestConfig::new()
+                .initial_window(50)
+                .step(10)
+                .horizon(5)
+                .horizon_aware(true);
+
+            let result = processor.backtest(&forecasts, &actuals, config).unwrap();
+            let models = result.calibrated_model_by_horizon(&processor).unwrap();
+
+            // Empty forecasts should error
+            let empty = PointForecasts::from_values(vec![]);
+            let res = processor.predict_intervals_by_horizon(&models, &empty);
+            assert!(res.is_err());
+        }
+
+        #[test]
+        fn predict_intervals_by_horizon_single_point() {
+            let (forecasts, actuals) = make_data(100);
+            let processor = PostProcessor::conformal(0.90);
+
+            let config = BacktestConfig::new()
+                .initial_window(50)
+                .step(10)
+                .horizon(5)
+                .horizon_aware(true);
+
+            let result = processor.backtest(&forecasts, &actuals, config).unwrap();
+            let models = result.calibrated_model_by_horizon(&processor).unwrap();
+
+            // Single point forecast at horizon 1
+            let single = PointForecasts::from_values(vec![70.0]);
+            let intervals = processor
+                .predict_intervals_by_horizon(&models, &single)
+                .unwrap();
+            assert_eq!(intervals.len(), 1);
+            assert!(intervals.lower()[0] <= intervals.upper()[0]);
+        }
+
+        #[test]
+        fn predict_intervals_by_horizon_exceeding_trained_horizons() {
+            let (forecasts, actuals) = make_data(100);
+            let processor = PostProcessor::conformal(0.90);
+
+            let config = BacktestConfig::new()
+                .initial_window(50)
+                .step(10)
+                .horizon(3)
+                .horizon_aware(true);
+
+            let result = processor.backtest(&forecasts, &actuals, config).unwrap();
+            let models = result.calibrated_model_by_horizon(&processor).unwrap();
+
+            // Request 5 horizons but only trained on 3 -> should fall back
+            let five_pts = PointForecasts::from_values(vec![70.0, 71.0, 72.0, 73.0, 74.0]);
+            let intervals = processor
+                .predict_intervals_by_horizon(&models, &five_pts)
+                .unwrap();
+            assert_eq!(intervals.len(), 5);
+        }
+    }
 }

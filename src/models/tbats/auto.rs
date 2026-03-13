@@ -232,7 +232,7 @@ impl Forecaster for AutoTBATS {
         self.try_config(series, model, "TBATS(increased_k)");
 
         if self.best_model.is_none() {
-            return Err(ForecastError::ComputationError(
+            return Err(ForecastError::ConvergenceFailure(
                 "No valid TBATS configuration found".to_string(),
             ));
         }

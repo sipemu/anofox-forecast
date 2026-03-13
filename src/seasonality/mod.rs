@@ -8,4 +8,4 @@ mod mstl;
 mod stl;
 
 pub use mstl::{MSTLResult, MSTL};
-pub use stl::{STLResult, STL};
+pub use stl::{STLResult, StlBuilder, STL};

@@ -786,7 +786,7 @@ impl Forecaster for AutoARIMA {
         self.selected_order = best_order;
 
         if self.selected_model.is_none() {
-            return Err(ForecastError::ComputationError(
+            return Err(ForecastError::ConvergenceFailure(
                 "No valid ARIMA/SARIMA model could be fitted".to_string(),
             ));
         }

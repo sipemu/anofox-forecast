@@ -9,6 +9,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Parallel Batch Processing & AutoForecast**
+  - `fit_predict_many()` — fit one model across many series in parallel
+  - `fit_registry()` — fit all registered models on a series in parallel
+  - `compare_models()` / `compare_registry()` — parallel model comparison
+  - `AutoForecast` candidate model fits run in parallel when `parallel` feature enabled
+  - Bootstrap sampling uses `par_iter` when `parallel` enabled
+
+- **Streaming Cross-Validation**
+  - `StreamingCVAggregator` — online metric aggregation using Welford's algorithm
+  - `cross_validate_early_stop()` — CV with convergence-based early stopping
+  - Eliminates need to store all fold results for aggregation
+
+- **Builder Patterns**
+  - `Pelt::new(CostFunction::L2).min_size(5).penalty(5.0).detect(&data)` — PELT builder
+  - `StlBuilder::new(period).seasonal_window(7).robust(true).decompose(&data)` — STL builder
+
+- **SIMD Correlation & Autocorrelation**
+  - `simd::correlation()` — SIMD-accelerated Pearson correlation
+  - `simd::autocorrelation()` — SIMD-accelerated autocorrelation at a given lag
+
+- **Binary Serialization** (requires `serde` feature)
+  - `to_bincode()` / `from_bincode()` — compact binary serialization via bincode
+  - `save_to_bincode()` / `load_from_bincode()` — file persistence
+
+- **Convenience Methods**
+  - `Forecaster::fit_predict()` — fit and predict in a single call
+  - `Forecaster::fit_predict_with_intervals()` — fit and predict with confidence intervals
+
+- **Specific Error Variants**
+  - `ForecastError::ConvergenceFailure` — optimizer/model convergence failures
+  - `ForecastError::SingularMatrix` — linear algebra singularity errors
+  - `ForecastError::SerializationError` — serialization/deserialization errors
+
+- **WASM/npm Enhancements**
+  - `CalendarAnnotations` — holidays, named regressors, and JSON serialization in JS/TS
+  - `TimeSeries.setCalendar()` / `hasCalendar()` / `clearCalendar()` — calendar integration
+  - Complete TypeScript type definitions (`types.d.ts`) for all 35 exported classes and 21 functions
+  - `package.json` with `"types"` field for TypeScript support
+
+- **CI/CD Improvements**
+  - `cargo audit` step for security advisory checks
+  - `cargo deny` step for license and supply-chain compliance
+  - `deny.toml` configuration for allowed licenses
+
+- **Benchmarks**
+  - `ensemble_benchmark` — AutoEnsemble fit/predict benchmarks
+  - `cv_benchmark` — cross-validation benchmarks with varying folds/horizons/models
+
+- **Documentation**
+  - [Model Selection Guide](docs/model_selection_guide.md) — decision flowchart, model families, common patterns
+
+- **Test Coverage**
+  - Postprocess tests: +42 IDR tests, +22 Normal tests, +316 lines backtest, +211 lines QRA
+  - Streaming CV tests: 8 new tests for aggregator and early stopping
+  - SIMD tests: 18 new tests for correlation and autocorrelation
+
 - **Missing Value Imputation Toolbox**
   - `MissingValuePolicy::BackwardFill` — next-observation-carried-backward
   - `MissingValuePolicy::FillMean` — fill with mean of finite values
@@ -28,6 +84,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `parallel` feature now covers AutoForecast, batch processing, model comparison, bootstrap, and cross-validation (previously only AutoARIMA)
+- `serde` feature now includes bincode for binary serialization alongside JSON
+- Several `ComputationError` uses migrated to specific error variants (`ConvergenceFailure`, `SingularMatrix`)
+- Test coverage increased to 1,565+ tests
 - `MissingValuePolicy` enum has 4 new variants (breaking for exhaustive `match` — acceptable under 0.x semver)
 
 ## [0.4.1] - 2026-01-16
