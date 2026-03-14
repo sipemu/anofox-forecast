@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Composable Seasonality & Trend Components** (`seasonality` module)
+  - `SeasonalComponent` / `TrendComponent` traits — dual-purpose: standalone (fit/predict) and feature extraction
+  - `DummySeasonality` — one-hot (dummy variable) seasonal encoding for arbitrary seasonal shapes
+  - `SeasonalDifference` — standalone seasonal differencing transform with inverse, strength, and variance-reduction features
+  - `HodrickPrescottFilter` — smooth trend extraction with cycle decomposition (quarterly/monthly/annual presets)
+  - `PiecewiseLinearTrend` — PELT-based changepoint detection with per-segment linear regression
+  - Standalone feature functions: `dummy_seasonal_strength`, `dummy_seasonal_amplitude`, `seasonal_diff_strength`, `seasonal_diff_variance_reduction`, `hp_trend_strength`, `hp_cycle_variance_ratio`, `piecewise_n_segments`, `piecewise_trend_features`
+
 ## [0.4.6] - 2026-03-14
 
 ### Added

@@ -38,6 +38,8 @@ console.log(forecast.values);
 
 ## Features
 
+### Forecasting
+
 - **Forecasting Models (40+)**
   - ARIMA, SARIMA, and AutoARIMA with automatic order selection
   - Exponential Smoothing: SES, Holt's Linear, Holt-Winters, SeasonalES
@@ -60,18 +62,55 @@ console.log(forecast.values);
   - Builder API: `AutoForecast::builder().seasonal_period(12).include_arima(true).build()`
   - `fit_predict()` convenience method on all models
 
-- **Batch Processing & Parallelism**
-  - `fit_predict_many()`: Fit one model across many series (parallel with `parallel` feature)
-  - `fit_registry()`: Fit all registered models on a series (parallel)
-  - `compare_models()` / `compare_registry()`: Parallel model comparison
-  - Cross-validation folds run in parallel when `parallel` feature is enabled
-  - Bootstrap sampling uses `par_iter` when `parallel` is enabled
-
 - **Ensemble Methods**
   - Mean, Median, Weighted MSE, InverseAIC, Stacking, HorizonAdaptive combination strategies
   - Widest-envelope interval combination for ensemble prediction intervals
   - Automatic ensemble construction from model registry
   - `ensemble_best_k()`: Auto-select top-k models by holdout performance
+
+- **Hierarchical Forecasting**
+  - `HierarchyTree`: Define parent-children structure for grouped series
+  - Bottom-up, top-down, MiddleOut, MinTrace OLS, and MinTrace Shrink (Ledoit-Wolf) reconciliation
+  - Ensures coherent forecasts across hierarchical levels
+
+### Analysis & Decomposition
+
+- **Seasonality & Decomposition**
+  - `SeasonalComponent` / `TrendComponent` traits — composable, dual-purpose (standalone + feature extraction)
+  - STL (Seasonal-Trend decomposition using LOESS) with `StlBuilder` for ergonomic configuration
+  - MSTL (Multiple Seasonal-Trend decomposition) for complex seasonality
+  - Prophet-style Fourier seasonality (`FourierSeasonality`) with flexible harmonic modeling
+  - Dummy (one-hot) seasonality (`DummySeasonality`) — captures arbitrary seasonal shapes without smoothness assumptions
+  - Seasonal differencing (`SeasonalDifference`) — standalone transform with strength/variance-reduction features
+  - Hodrick-Prescott filter (`HodrickPrescottFilter`) — smooth trend extraction with cycle decomposition
+  - Piecewise linear trend (`PiecewiseLinearTrend`) — PELT-based changepoint detection + per-segment regression
+  - `TimeSeries::seasonal_strength()` / `trend_strength()` — quick strength assessment
+  - Convenience: `deseasonalize()`, `detrend()`, `seasonal_adjust()`, `recompose()`
+
+- **Time Series Feature Extraction (76+ features)**
+  - Basic statistics (mean, variance, quantiles, energy, etc.)
+  - Distribution features (skewness, kurtosis, symmetry)
+  - Autocorrelation and partial autocorrelation
+  - Entropy features (approximate, sample, permutation, binned, Fourier)
+  - Complexity measures (C3, CID, Lempel-Ziv)
+  - Trend analysis and stationarity tests (ADF, KPSS)
+  - Automated feature selection (variance threshold, correlation filter, top-K)
+
+- **Spectral Analysis**
+  - Welch's periodogram for reduced variance spectral estimation
+  - For comprehensive periodicity detection, see [fdars](https://crates.io/crates/fdars-core)
+
+- **Changepoint Detection**
+  - PELT algorithm with O(n) average complexity
+  - Builder API: `Pelt::new(CostFunction::L2).min_size(5).penalty(5.0).detect(&data)`
+  - Multiple cost functions: L1, L2, Normal, Poisson, LinearTrend, MeanVariance, Cusum
+
+- **Anomaly Detection & Outlier Handling**
+  - Statistical methods (IQR, z-score, modified z-score)
+  - Automatic threshold selection
+  - `TimeSeries::with_outliers_replaced()` — automatic outlier replacement with local median
+
+### Evaluation & Uncertainty
 
 - **Model Comparison & Evaluation**
   - `compare_models()`: Side-by-side model evaluation with timing
@@ -86,6 +125,31 @@ console.log(forecast.values);
   - `ModelDiagnostics`: Ljung-Box, Jarque-Bera, Breusch-Pagan residual diagnostics
   - `IntermittentDiagnostics`: Syntetos-Boylan demand classification (Smooth/Erratic/Intermittent/Lumpy)
   - `AidAnalyzer`: Automatic Identification of Demand — distribution fitting, demand type classification, and per-observation anomaly detection (stockouts, lifecycle events, outliers)
+
+- **Probabilistic Postprocessing**
+  - Conformal Prediction: Distribution-free intervals with coverage guarantees
+  - Historical Simulation: Non-parametric empirical error distribution
+  - Normal Predictor: Gaussian error assumption baseline
+  - IDR: Isotonic Distributional Regression (state-of-the-art calibration)
+  - QRA: Quantile Regression Averaging for ensemble combining
+  - Backtesting: Rolling/expanding window evaluation with horizon-aware calibration
+
+- **Bootstrap Confidence Intervals**
+  - Residual bootstrap and block bootstrap methods
+  - Empirical confidence intervals for any model
+  - Configurable sample size and reproducibility
+
+- **Forecast Constraints**
+  - `NonNegative`, `LowerBound`, `UpperBound`, `Bounds`, `IntegerRound`, `Custom`
+  - Convenience methods: `forecast.non_negative()`, `.clamp(lo, hi)`, `.round_to_integer()`
+  - Constraints apply to point forecasts and prediction intervals
+
+- **Forecast Explainability**
+  - `Explainable` trait with `ForecastExplanation` (level, trend, seasonal, residual, named components)
+  - Implemented for ETS, Theta, and MSTL models
+  - Components sum to forecast values for verification
+
+### Data Processing & Pipeline
 
 - **Orchestration / Agent Forecasting** (`orchestration` module)
   - `DataProfile`: Automated data profiling — stationarity (ADF), trend direction, seasonality, ACF, quality score
@@ -105,82 +169,18 @@ console.log(forecast.values);
   - `QualityFloor`: Superior Predictive Ability test — does any model beat the benchmark? (Hansen 2005)
   - `ExecutionMetadata` / `ExecutionTimer`: Fit/predict timing and convergence tracking
 
-- **Time Series Feature Extraction (76+ features)**
-  - Basic statistics (mean, variance, quantiles, energy, etc.)
-  - Distribution features (skewness, kurtosis, symmetry)
-  - Autocorrelation and partial autocorrelation
-  - Entropy features (approximate, sample, permutation, binned, Fourier)
-  - Complexity measures (C3, CID, Lempel-Ziv)
-  - Trend analysis and stationarity tests (ADF, KPSS)
-  - Automated feature selection (variance threshold, correlation filter, top-K)
+- **Batch Processing & Parallelism**
+  - `fit_predict_many()`: Fit one model across many series (parallel with `parallel` feature)
+  - `fit_registry()`: Fit all registered models on a series (parallel)
+  - `compare_models()` / `compare_registry()`: Parallel model comparison
+  - Cross-validation folds run in parallel when `parallel` feature is enabled
+  - Bootstrap sampling uses `par_iter` when `parallel` is enabled
 
-- **Spectral Analysis**
-  - Welch's periodogram for reduced variance spectral estimation
-  - For comprehensive periodicity detection, see [fdars](https://crates.io/crates/fdars-core)
-
-- **Seasonality & Decomposition**
-  - STL (Seasonal-Trend decomposition using LOESS) with `StlBuilder` for ergonomic configuration
-  - MSTL (Multiple Seasonal-Trend decomposition) for complex seasonality
-  - Prophet-style Fourier seasonality (`FourierSeasonality`) with flexible harmonic modeling
-  - `TimeSeries::seasonal_strength()` / `trend_strength()` — quick strength assessment
-  - Convenience: `deseasonalize()`, `detrend()`, `seasonal_adjust()`, `recompose()`
-
-- **Hierarchical Forecasting**
-  - `HierarchyTree`: Define parent-children structure for grouped series
-  - Bottom-up, top-down, MiddleOut, MinTrace OLS, and MinTrace Shrink (Ledoit-Wolf) reconciliation
-  - Ensures coherent forecasts across hierarchical levels
-
-- **Changepoint Detection**
-  - PELT algorithm with O(n) average complexity
-  - Builder API: `Pelt::new(CostFunction::L2).min_size(5).penalty(5.0).detect(&data)`
-  - Multiple cost functions: L1, L2, Normal, Poisson, LinearTrend, MeanVariance, Cusum
-
-- **Anomaly Detection & Outlier Handling**
-  - Statistical methods (IQR, z-score, modified z-score)
-  - Automatic threshold selection
-  - `TimeSeries::with_outliers_replaced()` — automatic outlier replacement with local median
-
-- **Forecast Constraints**
-  - `NonNegative`, `LowerBound`, `UpperBound`, `Bounds`, `IntegerRound`, `Custom`
-  - Convenience methods: `forecast.non_negative()`, `.clamp(lo, hi)`, `.round_to_integer()`
-  - Constraints apply to point forecasts and prediction intervals
-
-- **Model Warm-Starting**
-  - `ETS::with_initial_states()` — start from pre-fitted level/trend/seasonal states
-  - `SES::with_alpha()` — use pre-fitted smoothing parameter
-  - `ARIMA::with_coefficients()` — use pre-fitted AR/MA coefficients
-  - `Theta::with_theta_value()` — use specified theta parameter
-  - `Forecaster::fitted_params()` — extract fitted parameters for transfer
-
-- **Forecast Explainability**
-  - `Explainable` trait with `ForecastExplanation` (level, trend, seasonal, residual, named components)
-  - Implemented for ETS, Theta, and MSTL models
-  - Components sum to forecast values for verification
-
-- **TimeSeries Temporal Aggregation**
-  - `aggregate(period, method)` — Sum, Mean, Median, First, Last, Min, Max
-  - `downsample(factor)` — decimation with timestamp preservation
-  - `upsample(factor, method)` — Linear, ForwardFill, BackwardFill, Zero interpolation
-  - `sliding_window_aggregate(window, step, method)` — configurable sliding windows
-
-- **Bootstrap Confidence Intervals**
-  - Residual bootstrap and block bootstrap methods
-  - Empirical confidence intervals for any model
-  - Configurable sample size and reproducibility
-
-- **Probabilistic Postprocessing**
-  - Conformal Prediction: Distribution-free intervals with coverage guarantees
-  - Historical Simulation: Non-parametric empirical error distribution
-  - Normal Predictor: Gaussian error assumption baseline
-  - IDR: Isotonic Distributional Regression (state-of-the-art calibration)
-  - QRA: Quantile Regression Averaging for ensemble combining
-  - Backtesting: Rolling/expanding window evaluation with horizon-aware calibration
-
-- **Model Serialization** (optional `serde` feature)
-  - Save/load models to JSON with `to_json()`/`from_json()`
-  - Binary serialization with `to_bincode()`/`from_bincode()` for compact storage
-  - File persistence with `save_to_file()`/`load_from_file()`
-  - Round-trip serialization for all major model families
+- **Data Transformations**
+  - Scaling: standardization, min-max, robust scaling
+  - Box-Cox transformation with automatic lambda selection
+  - Window functions: rolling mean, std, min, max, median
+  - Exponential weighted moving averages
 
 - **Missing Value Imputation**
   - Policy-based: Drop, Fill, ForwardFill, BackwardFill, FillMean, FillMedian, Interpolate
@@ -188,11 +188,26 @@ console.log(forecast.values);
   - Convenience: forward-backward fill, regressor imputation
   - Metadata: missing mask, per-dimension missing counts
 
-- **Data Transformations**
-  - Scaling: standardization, min-max, robust scaling
-  - Box-Cox transformation with automatic lambda selection
-  - Window functions: rolling mean, std, min, max, median
-  - Exponential weighted moving averages
+- **TimeSeries Temporal Aggregation**
+  - `aggregate(period, method)` — Sum, Mean, Median, First, Last, Min, Max
+  - `downsample(factor)` — decimation with timestamp preservation
+  - `upsample(factor, method)` — Linear, ForwardFill, BackwardFill, Zero interpolation
+  - `sliding_window_aggregate(window, step, method)` — configurable sliding windows
+
+### Persistence & Interoperability
+
+- **Model Serialization** (optional `serde` feature)
+  - Save/load models to JSON with `to_json()`/`from_json()`
+  - Binary serialization with `to_bincode()`/`from_bincode()` for compact storage
+  - File persistence with `save_to_file()`/`load_from_file()`
+  - Round-trip serialization for all major model families
+
+- **Model Warm-Starting**
+  - `ETS::with_initial_states()` — start from pre-fitted level/trend/seasonal states
+  - `SES::with_alpha()` — use pre-fitted smoothing parameter
+  - `ARIMA::with_coefficients()` — use pre-fitted AR/MA coefficients
+  - `Theta::with_theta_value()` — use specified theta parameter
+  - `Forecaster::fitted_params()` — extract fitted parameters for transfer
 
 ## Installation
 
@@ -450,6 +465,11 @@ println!("Upper: {:?}", intervals.upper());
 | `fit_all_and_compare()` | Fit all registry models, rank by holdout accuracy |
 | `cross_validate_all()` | CV all registry models with aggregated metrics |
 | `ensemble_best_k()` | Auto-select top-k models into an ensemble |
+| `SeasonalComponent` / `TrendComponent` | Composable traits for seasonal/trend components (standalone + features) |
+| `DummySeasonality` | One-hot seasonal encoding — arbitrary seasonal shapes |
+| `SeasonalDifference` | Standalone seasonal differencing with strength/variance features |
+| `HodrickPrescottFilter` | Smooth trend extraction with cycle decomposition |
+| `PiecewiseLinearTrend` | PELT-based piecewise linear trend with per-segment regression |
 | `deseasonalize()` / `seasonal_adjust()` | Remove seasonal component from data or TimeSeries |
 | `select_features()` | Automated feature selection (variance, correlation, top-K) |
 | `to_json()` / `from_json()` | Serialization for models, `Forecast`, and `TimeSeries` (requires `serde` feature) |
@@ -464,7 +484,8 @@ println!("Upper: {:?}", intervals.upper());
 | Autocorrelation | `autocorrelation`, `partial_autocorrelation` |
 | Entropy | `approximate_entropy`, `sample_entropy`, `permutation_entropy` |
 | Complexity | `c3`, `cid_ce`, `lempel_ziv_complexity` |
-| Trend | `linear_trend`, `adf_test`, `ar_coefficient` |
+| Trend | `linear_trend`, `adf_test`, `ar_coefficient`, `hp_trend_strength`, `piecewise_n_segments` |
+| Seasonality | `dummy_seasonal_strength`, `seasonal_diff_strength`, `seasonal_diff_variance_reduction` |
 | Selection | `select_features`, `rank_features` |
 
 ### Postprocessing Types
