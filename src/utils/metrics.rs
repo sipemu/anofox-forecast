@@ -235,7 +235,7 @@ pub fn wape(actual: &[f64], forecast: &[f64]) -> f64 {
 /// Mean Directional Accuracy.
 ///
 /// Fraction of times the forecast correctly predicts the direction of change.
-/// Compares sign(forecast[i] - actual[i-1]) vs sign(actual[i] - actual[i-1]).
+/// Compares sign(forecast\[i\] - actual\[i-1\]) vs sign(actual\[i\] - actual\[i-1\]).
 ///
 /// Returns `NaN` if fewer than 2 data points or mismatched lengths.
 pub fn mda(actual: &[f64], forecast: &[f64]) -> f64 {
@@ -276,7 +276,7 @@ pub fn theils_u1(actual: &[f64], forecast: &[f64]) -> f64 {
 
 /// Theil's U2 statistic.
 ///
-/// U2 = RMSE(forecast) / RMSE(naive), where naive[i] = actual[i-1].
+/// U2 = RMSE(forecast) / RMSE(naive), where naive\[i\] = actual\[i-1\].
 ///
 /// Returns `NaN` if fewer than 2 data points, mismatched lengths, or naive RMSE is zero.
 pub fn theils_u2(actual: &[f64], forecast: &[f64]) -> f64 {

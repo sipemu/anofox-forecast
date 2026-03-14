@@ -3,7 +3,7 @@
 //! A [`FallbackChain`] wraps a list of model factory closures. When
 //! [`FallbackChain::execute`] is called with a [`TimeSeries`], it tries each
 //! model in order until one succeeds (fit + predict). Successes and failures
-//! can be recorded in a [`DecisionLog`].
+//! can be recorded in a [`DecisionLog`](super::DecisionLog).
 
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};

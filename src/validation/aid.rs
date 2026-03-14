@@ -258,7 +258,7 @@ impl AidResult {
 
 /// Builder / entry point for running the AID classifier on demand data.
 ///
-/// Wraps [`AidClassifier`](anofox_regression::solvers::AidClassifier) with
+/// Wraps [`AidClassifier`] with
 /// an API that accepts `&[f64]` (converting to `faer::Col<f64>` internally).
 ///
 /// # Example
