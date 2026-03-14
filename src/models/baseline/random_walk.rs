@@ -13,6 +13,8 @@ use crate::models::{validate_series_complete, Forecaster};
 #[derive(Debug, Clone, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct RandomWalkWithDrift {
+    /// If set, drift is computed from this index onwards.
+    changepoint: Option<usize>,
     last_value: Option<f64>,
     drift: Option<f64>,
     #[cfg_attr(feature = "serde", serde(with = "crate::utils::persistence::nan_vec"))]
@@ -26,6 +28,21 @@ pub struct RandomWalkWithDrift {
 impl RandomWalkWithDrift {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Set the last changepoint index (builder-style).
+    ///
+    /// When set, the drift is computed from `values[changepoint]` to
+    /// `values[n-1]` rather than from `values[0]`. This ensures the drift
+    /// reflects the current regime rather than averaging across a regime change.
+    pub fn with_changepoint(mut self, changepoint: usize) -> Self {
+        self.changepoint = Some(changepoint);
+        self
+    }
+
+    /// Get the changepoint index, if set.
+    pub fn changepoint(&self) -> Option<usize> {
+        self.changepoint
     }
 
     /// Get the estimated drift parameter.
@@ -48,9 +65,19 @@ impl Forecaster for RandomWalkWithDrift {
 
         self.last_value = Some(*values.last().ok_or(ForecastError::EmptyData)?);
 
-        // Calculate drift as average of first differences
+        // Calculate drift as average of first differences.
+        // If a changepoint is set, compute drift from that index onwards.
         let n = values.len();
-        let drift = (values[n - 1] - values[0]) / (n - 1) as f64;
+        let drift_start = self
+            .changepoint
+            .map(|cp| cp.min(n.saturating_sub(2)))
+            .unwrap_or(0);
+        let drift_span = (n - 1) - drift_start;
+        let drift = if drift_span > 0 {
+            (values[n - 1] - values[drift_start]) / drift_span as f64
+        } else {
+            0.0
+        };
         self.drift = Some(drift);
 
         // Fitted values: y_hat[t] = y[t-1] + drift
@@ -346,5 +373,62 @@ mod tests {
     fn random_walk_name_is_correct() {
         let model = RandomWalkWithDrift::new();
         assert_eq!(model.name(), "RandomWalkWithDrift");
+    }
+
+    // =======================================================================
+    // Changepoint-aware RWD tests
+    // =======================================================================
+
+    #[test]
+    fn random_walk_changepoint_drift() {
+        // Slope +3 until index 7, then slope -2
+        let timestamps = make_timestamps(10);
+        let values: Vec<f64> = (0..10)
+            .map(|i| {
+                if i < 7 {
+                    3.0 * i as f64
+                } else {
+                    3.0 * 7.0 - 2.0 * (i - 7) as f64
+                }
+            })
+            .collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        // Without changepoint: drift from values[0]=0 to values[9]=15
+        let mut without = RandomWalkWithDrift::new();
+        without.fit(&ts).unwrap();
+        // drift = (15 - 0) / 9 ≈ 1.67
+        assert!(without.drift().unwrap() > 0.0);
+
+        // With changepoint at 7: drift from values[7]=21 to values[9]=17
+        // drift = (17 - 21) / 2 = -2.0
+        let mut with_cp = RandomWalkWithDrift::new().with_changepoint(7);
+        with_cp.fit(&ts).unwrap();
+        assert_relative_eq!(with_cp.drift().unwrap(), -2.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn random_walk_changepoint_forecast_direction() {
+        // Level shift at index 5: low → high
+        let timestamps = make_timestamps(10);
+        let values: Vec<f64> = (0..10)
+            .map(|i| {
+                if i < 5 {
+                    10.0
+                } else {
+                    10.0 + 2.0 * (i - 5) as f64
+                }
+            })
+            .collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        // With CP at 5: drift computed from upward segment only
+        let mut model = RandomWalkWithDrift::new().with_changepoint(5);
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(3).unwrap();
+        // Should continue upward (drift = 2.0)
+        assert_relative_eq!(model.drift().unwrap(), 2.0, epsilon = 1e-10);
+        assert!(forecast.primary()[0] > 18.0); // last=18, so 18 + 2 = 20
     }
 }

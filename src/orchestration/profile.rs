@@ -3,6 +3,8 @@
 //! Provides [`DataProfile`], a comprehensive summary of a time series
 //! that an agent can use to select and configure forecasting models.
 
+use crate::changepoint::pelt::Pelt;
+use crate::changepoint::CostFunction;
 use crate::core::TimeSeries;
 use crate::features::{
     approximate_entropy, autocorrelation, kurtosis, lempel_ziv_complexity, linear_trend, maximum,
@@ -113,6 +115,12 @@ pub struct DataProfile {
     /// Whether the series is classified as intermittent (zero_fraction > 0.1).
     pub is_intermittent: bool,
 
+    // ---- Changepoints ----
+    /// Detected changepoint indices (via PELT with LinearTrend cost).
+    pub changepoints: Vec<usize>,
+    /// Index of the last (most recent) detected changepoint, if any.
+    pub last_changepoint: Option<usize>,
+
     // ---- Overall quality ----
     /// Heuristic data-quality score in [0.0, 1.0].
     pub quality_score: f64,
@@ -209,6 +217,19 @@ impl DataProfile {
         };
         let is_intermittent = zero_fraction > 0.1;
 
+        // ---- Changepoint detection ----
+        let (changepoints, last_changepoint) = if clean.len() >= 10 {
+            let penalty = (clean.len() as f64).ln();
+            let result = Pelt::new(CostFunction::LinearTrend)
+                .penalty(penalty)
+                .min_size(5)
+                .detect(&clean);
+            let last = result.changepoints.last().copied();
+            (result.changepoints, last)
+        } else {
+            (Vec::new(), None)
+        };
+
         // ---- Quality score ----
         // Simple heuristic: penalise missing data and outliers.
         let has_outliers = if std_dev > 0.0 && !std_dev.is_nan() {
@@ -258,6 +279,9 @@ impl DataProfile {
 
             zero_fraction,
             is_intermittent,
+
+            changepoints,
+            last_changepoint,
 
             quality_score,
         }
@@ -330,6 +354,15 @@ impl DataProfile {
             },
             self.lempel_ziv,
         ));
+        if !self.changepoints.is_empty() {
+            s.push_str(&format!(
+                "  Changepoints: {} detected, last at index {}\n",
+                self.changepoints.len(),
+                self.last_changepoint.unwrap_or(0),
+            ));
+        } else {
+            s.push_str("  Changepoints: none detected\n");
+        }
         s
     }
 }

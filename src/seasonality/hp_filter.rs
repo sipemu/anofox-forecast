@@ -27,7 +27,7 @@
 //! let forecast = hp.predict_trend(12);
 //! ```
 
-use super::traits::TrendComponent;
+use super::traits::{Recency, TrendComponent};
 use crate::error::{ForecastError, Result};
 
 /// Hodrick-Prescott filter for trend-cycle decomposition.
@@ -44,6 +44,8 @@ use crate::error::{ForecastError, Result};
 pub struct HodrickPrescottFilter {
     /// Smoothing parameter. Common values: 1600 (quarterly), 129600 (monthly), 6.25 (annual).
     lambda: f64,
+    /// Recency window for fitting.
+    recency: Recency,
     /// Fitted trend values.
     fitted: Vec<f64>,
     /// Cycle component (data - trend).
@@ -64,6 +66,7 @@ impl HodrickPrescottFilter {
         }
         Ok(Self {
             lambda,
+            recency: Recency::Full,
             fitted: Vec::new(),
             cycle: Vec::new(),
         })
@@ -73,6 +76,7 @@ impl HodrickPrescottFilter {
     pub fn quarterly() -> Self {
         Self {
             lambda: 1600.0,
+            recency: Recency::Full,
             fitted: Vec::new(),
             cycle: Vec::new(),
         }
@@ -82,6 +86,7 @@ impl HodrickPrescottFilter {
     pub fn monthly() -> Self {
         Self {
             lambda: 129600.0,
+            recency: Recency::Full,
             fitted: Vec::new(),
             cycle: Vec::new(),
         }
@@ -91,9 +96,16 @@ impl HodrickPrescottFilter {
     pub fn annual() -> Self {
         Self {
             lambda: 6.25,
+            recency: Recency::Full,
             fitted: Vec::new(),
             cycle: Vec::new(),
         }
+    }
+
+    /// Set the recency window for fitting (builder-style).
+    pub fn with_recency(mut self, recency: Recency) -> Self {
+        self.recency = recency;
+        self
     }
 
     /// Return the cycle component (data minus trend).
@@ -252,7 +264,37 @@ impl TrendComponent for HodrickPrescottFilter {
             return Err(ForecastError::EmptyData);
         }
 
-        self.fitted = Self::solve_pentadiagonal(values, self.lambda);
+        let n = values.len();
+        let (rec_start, rec_end) = self.recency.resolve_with_data(values);
+        let window = &values[rec_start..rec_end];
+
+        let window_trend = Self::solve_pentadiagonal(window, self.lambda);
+
+        if rec_start == 0 {
+            // Full data — no backwards extrapolation needed.
+            self.fitted = window_trend;
+        } else {
+            // Backwards-extrapolate using the slope at the start of the window.
+            let mut fitted = vec![0.0; n];
+
+            // Copy window trend into the right position.
+            for (i, &t) in window_trend.iter().enumerate() {
+                fitted[rec_start + i] = t;
+            }
+
+            // Extrapolate backwards from the start of the window.
+            let slope = if window_trend.len() >= 2 {
+                window_trend[1] - window_trend[0]
+            } else {
+                0.0
+            };
+            for i in (0..rec_start).rev() {
+                fitted[i] = fitted[i + 1] - slope;
+            }
+
+            self.fitted = fitted;
+        }
+
         self.cycle = values
             .iter()
             .zip(self.fitted.iter())
@@ -329,6 +371,10 @@ impl TrendComponent for HodrickPrescottFilter {
 
     fn trend_name(&self) -> &str {
         "HodrickPrescottFilter"
+    }
+
+    fn n_params(&self) -> usize {
+        1 // lambda
     }
 }
 

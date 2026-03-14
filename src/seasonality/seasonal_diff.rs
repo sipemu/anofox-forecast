@@ -196,6 +196,10 @@ impl SeasonalComponent for SeasonalDifference {
     fn seasonal_name(&self) -> &str {
         "seasonal_difference"
     }
+
+    fn n_params(&self) -> usize {
+        self.period
+    }
 }
 
 // ── Helper functions ────────────────────────────────────────────────────────

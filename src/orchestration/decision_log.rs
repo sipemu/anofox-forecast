@@ -30,6 +30,9 @@ pub enum DecisionCategory {
     Postprocessing,
     Constraint,
     Fallback,
+    TrendSelection,
+    SeasonalSelection,
+    ChangepointAdaptation,
 }
 
 /// Outcome of a pipeline decision.
@@ -192,6 +195,9 @@ impl fmt::Display for DecisionCategory {
             DecisionCategory::Postprocessing => "Postprocessing",
             DecisionCategory::Constraint => "Constraint",
             DecisionCategory::Fallback => "Fallback",
+            DecisionCategory::TrendSelection => "Trend Selection",
+            DecisionCategory::SeasonalSelection => "Seasonal Selection",
+            DecisionCategory::ChangepointAdaptation => "Changepoint Adaptation",
         };
         write!(f, "{}", s)
     }

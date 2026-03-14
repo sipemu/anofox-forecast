@@ -17,6 +17,9 @@ use crate::models::{validate_series_complete, Forecaster};
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SimpleMovingAverage {
     window: usize, // 0 means use all data
+    /// If set, constrains the effective window to at most `n - changepoint`
+    /// so that only post-changepoint observations are averaged.
+    changepoint: Option<usize>,
     last_mean: Option<f64>,
     #[cfg_attr(feature = "serde", serde(with = "crate::utils::persistence::nan_vec"))]
     fitted: Option<Vec<f64>>,
@@ -29,6 +32,7 @@ pub struct SimpleMovingAverage {
 #[derive(Debug, Clone, Default)]
 pub struct SmaBuilder {
     window: usize,
+    changepoint: Option<usize>,
 }
 
 impl SmaBuilder {
@@ -42,9 +46,17 @@ impl SmaBuilder {
         self
     }
 
+    /// Set the changepoint index. The effective window will be constrained
+    /// to `min(window, n - changepoint)`.
+    pub fn changepoint(mut self, cp: usize) -> Self {
+        self.changepoint = Some(cp);
+        self
+    }
+
     pub fn build(self) -> Result<SimpleMovingAverage> {
         Ok(SimpleMovingAverage {
             window: self.window,
+            changepoint: self.changepoint,
             last_mean: None,
             fitted: None,
             residuals: None,
@@ -59,11 +71,38 @@ impl SimpleMovingAverage {
     pub fn new(window: usize) -> Self {
         Self {
             window,
+            changepoint: None,
             last_mean: None,
             fitted: None,
             residuals: None,
             residual_variance: None,
         }
+    }
+
+    /// Set the last changepoint index (builder-style).
+    ///
+    /// When set, the effective averaging window is constrained to
+    /// `min(window, n - changepoint)` so that only post-changepoint
+    /// observations contribute to the forecast. This avoids averaging
+    /// across regime changes without requiring data truncation.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use anofox_forecast::models::baseline::SimpleMovingAverage;
+    ///
+    /// // SMA(50) but data has a changepoint at index 180 in 200 observations.
+    /// // Effective window becomes min(50, 200-180) = 20.
+    /// let model = SimpleMovingAverage::new(50).with_changepoint(180);
+    /// ```
+    pub fn with_changepoint(mut self, changepoint: usize) -> Self {
+        self.changepoint = Some(changepoint);
+        self
+    }
+
+    /// Get the changepoint index, if set.
+    pub fn changepoint(&self) -> Option<usize> {
+        self.changepoint
     }
 
     /// Create a builder for more complex configuration.
@@ -95,7 +134,7 @@ impl SimpleMovingAverage {
 
 impl Default for SimpleMovingAverage {
     fn default() -> Self {
-        Self::new(0) // Full history mean
+        Self::new(0) // Full history mean (no changepoint constraint)
     }
 }
 
@@ -127,7 +166,16 @@ impl Forecaster for SimpleMovingAverage {
         let n = values.len();
 
         // Calculate the forecast value (mean of last window)
-        let actual_window = if self.window == 0 { n } else { self.window };
+        let mut actual_window = if self.window == 0 { n } else { self.window };
+
+        // Constrain window to post-changepoint data if changepoint is set
+        if let Some(cp) = self.changepoint {
+            if cp < n {
+                let post_cp = n - cp;
+                actual_window = actual_window.min(post_cp);
+            }
+        }
+
         self.last_mean =
             Some(values[n - actual_window..].iter().sum::<f64>() / actual_window as f64);
 
@@ -757,5 +805,106 @@ mod tests {
         let forecast = model.predict_with_intervals(3, 0.95).unwrap();
         assert!(forecast.has_lower());
         assert!(forecast.has_upper());
+    }
+
+    // =======================================================================
+    // Changepoint-aware SMA tests
+    // =======================================================================
+
+    #[test]
+    fn sma_changepoint_constrains_window() {
+        // Regime: 10 values of 100.0, then 10 values of 0.0
+        // Changepoint at index 10
+        let timestamps = make_timestamps(20);
+        let mut values = vec![100.0; 10];
+        values.extend(vec![0.0; 10]);
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        // Without changepoint: SMA(0) averages all 20 → 50.0
+        let mut model = SimpleMovingAverage::new(0);
+        model.fit(&ts).unwrap();
+        let forecast = model.predict(1).unwrap();
+        assert_relative_eq!(forecast.primary()[0], 50.0, epsilon = 1e-10);
+
+        // With changepoint at 10: effective window = 10, averages post-CP → 0.0
+        let mut model = SimpleMovingAverage::new(0).with_changepoint(10);
+        model.fit(&ts).unwrap();
+        let forecast = model.predict(1).unwrap();
+        assert_relative_eq!(forecast.primary()[0], 0.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn sma_changepoint_window_already_smaller() {
+        // If window is already smaller than post-CP data, changepoint has no effect
+        let timestamps = make_timestamps(20);
+        let mut values = vec![100.0; 10];
+        values.extend(vec![0.0; 10]);
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        // SMA(3) with CP at 10: window=3 < post_cp=10, no constraint
+        let mut model = SimpleMovingAverage::new(3).with_changepoint(10);
+        model.fit(&ts).unwrap();
+        let forecast = model.predict(1).unwrap();
+        // Mean of last 3 zeros
+        assert_relative_eq!(forecast.primary()[0], 0.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn sma_changepoint_constrains_large_window() {
+        // SMA(15) with CP at 15: should only use last 5 observations
+        let timestamps = make_timestamps(20);
+        let mut values = vec![100.0; 15];
+        values.extend(vec![10.0; 5]);
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = SimpleMovingAverage::new(15).with_changepoint(15);
+        model.fit(&ts).unwrap();
+        let forecast = model.predict(1).unwrap();
+        assert_relative_eq!(forecast.primary()[0], 10.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn sma_builder_with_changepoint() {
+        let model = SimpleMovingAverage::builder()
+            .window(50)
+            .changepoint(180)
+            .build()
+            .unwrap();
+        assert_eq!(model.window(), 50);
+        assert_eq!(model.changepoint(), Some(180));
+    }
+
+    #[test]
+    fn sma_changepoint_regime_change_slope() {
+        // Slope +3 until index 15, then slope -2
+        let timestamps = make_timestamps(20);
+        let values: Vec<f64> = (0..20)
+            .map(|i| {
+                if i < 15 {
+                    3.0 * i as f64
+                } else {
+                    3.0 * 15.0 - 2.0 * (i - 15) as f64
+                }
+            })
+            .collect();
+        let ts = TimeSeries::univariate(timestamps, values.clone()).unwrap();
+
+        // Without CP: averages across both regimes
+        let mut without = SimpleMovingAverage::new(0);
+        without.fit(&ts).unwrap();
+        let fc_without = without.predict(1).unwrap();
+
+        // With CP at 15: averages only post-CP (5 values)
+        let mut with_cp = SimpleMovingAverage::new(0).with_changepoint(15);
+        with_cp.fit(&ts).unwrap();
+        let fc_with = with_cp.predict(1).unwrap();
+
+        let post_cp_mean: f64 = values[15..].iter().sum::<f64>() / 5.0;
+        assert_relative_eq!(fc_with.primary()[0], post_cp_mean, epsilon = 1e-10);
+        // The CP-aware forecast should be closer to recent values
+        assert!(
+            (fc_with.primary()[0] - values[19]).abs()
+                < (fc_without.primary()[0] - values[19]).abs()
+        );
     }
 }

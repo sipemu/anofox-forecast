@@ -215,8 +215,17 @@ path = "examples/postprocess/unified_api.rs"
 name = "postprocess_backtest"
 path = "examples/postprocess/backtest.rs"
 
+# Trend Components
+[[example]]
+name = "trend_components"
+path = "examples/trend_components.rs"
+
 # Orchestration
 [[example]]
 name = "orchestration"
 path = "examples/orchestration.rs"
+
+[[example]]
+name = "recency_sensitivity"
+path = "examples/recency_sensitivity.rs"
 

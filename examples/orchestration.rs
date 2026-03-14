@@ -295,6 +295,10 @@ fn main() {
         metric_strategy: MetricStrategy::default(),
         ensemble_mode: EnsembleMode::default(),
         postprocess_coverage: 0.0,
+        trend_mode: TrendMode::default(),
+        trend_integration: TrendIntegration::default(),
+        seasonal_mode: SeasonalMode::default(),
+        changepoint_mode: ChangepointMode::default(),
     };
     println!("  Config: {:?}\n", config);
 

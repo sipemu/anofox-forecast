@@ -329,6 +329,8 @@ mod tests {
             preprocess: None,
             ensemble_weights: None,
             metric_scores: None,
+            trend_selection: None,
+            seasonal_selection: None,
         };
 
         let output = explain_result(ExplainResultInput {

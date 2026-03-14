@@ -7,6 +7,7 @@
 //!
 //! Pipeline configurations can be replayed on new data via [`PipelineConfig`].
 
+use std::collections::HashMap;
 use std::fmt;
 
 use crate::core::{Forecast, TimeSeries};
@@ -14,6 +15,9 @@ use crate::error::{ForecastError, Result};
 use crate::models::baseline::{Naive, SimpleMovingAverage};
 use crate::models::ensemble::{CombinationMethod, Ensemble};
 use crate::models::{Forecaster, ModelRegistry};
+use crate::seasonality::auto_trend::AutoTrend;
+use crate::seasonality::polynomial::PolynomialTrend;
+use crate::seasonality::traits::Recency;
 
 use super::confidence::{ModelConfidenceSet, QualityFloor, SelectionConfidence};
 use super::decision_log::{DecisionCategory, DecisionLog, DecisionOutcome};
@@ -26,6 +30,112 @@ use super::preprocess::{
 };
 use super::profile::DataProfile;
 use super::report::PipelineReport;
+use super::trend_integration::TrendIntegrationState;
+
+/// How trend decomposition should be handled in the pipeline.
+#[derive(Debug, Clone, Default)]
+pub enum TrendMode {
+    /// No trend decomposition (default).
+    #[default]
+    None,
+    /// Automatically select the best trend component via IC criteria.
+    Auto,
+    /// Use a specific named trend component.
+    Fixed(String),
+}
+
+/// How changepoint detection should inform model training.
+///
+/// When enabled, the pipeline uses detected changepoints to adapt how
+/// models are trained. The adaptation is context-aware: models are only
+/// trained on post-changepoint data when there is enough data for the
+/// model class (e.g., seasonal models need at least 2 full cycles).
+///
+/// # Example
+///
+/// ```ignore
+/// use anofox_forecast::orchestration::ChangepointMode;
+///
+/// let pipeline = PipelineBuilder::new()
+///     .changepoint(ChangepointMode::Auto)
+///     .build();
+/// ```
+#[derive(Debug, Clone, Default)]
+pub enum ChangepointMode {
+    /// Ignore changepoints — train on all data (default).
+    #[default]
+    None,
+    /// Automatically adapt training based on detected changepoints.
+    ///
+    /// The pipeline will:
+    /// - Detect changepoints during profiling (via PELT with LinearTrend cost)
+    /// - If enough post-changepoint data exists (≥ `min_observations` and
+    ///   ≥ `2 × seasonal_period`), train models on post-changepoint data only
+    /// - Otherwise, train on all data (preserving seasonal model viability)
+    /// - Log the decision in the audit trail
+    Auto,
+    /// Train models only on data after the given index.
+    ///
+    /// Use this when you know the changepoint location from domain knowledge.
+    /// The pipeline will still check that enough data remains for training.
+    FitFrom(usize),
+}
+
+/// How seasonal decomposition should be handled in the pipeline.
+#[derive(Debug, Clone, Default)]
+pub enum SeasonalMode {
+    /// No seasonal decomposition (default).
+    #[default]
+    None,
+    /// Automatically select the best seasonal component via IC criteria.
+    Auto,
+    /// Use a specific named seasonal component.
+    Fixed(String),
+}
+
+/// How a fitted trend component integrates with the forecasting models.
+///
+/// When a trend component is selected (via `TrendMode::Auto` or `TrendMode::Fixed`),
+/// `TrendIntegration` controls whether the trend is removed before forecasting
+/// (classical decomposition) or passed as a feature to the models.
+///
+/// # Example
+///
+/// ```ignore
+/// use anofox_forecast::orchestration::{TrendMode, TrendIntegration, PipelineBuilder};
+///
+/// // Decompose: detrend → forecast residuals → recompose
+/// let pipeline = PipelineBuilder::new()
+///     .trend(TrendMode::Auto)
+///     .trend_integration(TrendIntegration::Decompose)
+///     .build();
+///
+/// // Regressor: pass trend as exogenous feature (models with exog support)
+/// let pipeline = PipelineBuilder::new()
+///     .trend(TrendMode::Auto)
+///     .trend_integration(TrendIntegration::Regressor)
+///     .build();
+/// ```
+#[derive(Debug, Clone, Default)]
+pub enum TrendIntegration {
+    /// No trend integration — trend component is computed but not used in forecasting (default).
+    /// Useful when you only want trend features for analysis.
+    #[default]
+    None,
+    /// Detrend → forecast residuals → recompose.
+    ///
+    /// The fitted trend is subtracted from the series before model training.
+    /// After forecasting, the predicted trend is added back. Works with **all**
+    /// models regardless of exogenous variable support.
+    Decompose,
+    /// Pass the fitted trend as an exogenous regressor.
+    ///
+    /// The trend values are added to the TimeSeries as a regressor named `"__trend"`.
+    /// Models with `supports_exog()` will use it during fitting and receive
+    /// predicted trend values during forecasting. Models without exog support
+    /// will ignore it.
+    Regressor,
+}
 
 /// How ensemble construction should be handled.
 #[derive(Debug, Clone, Default)]
@@ -70,6 +180,14 @@ pub struct PipelineConfig {
     pub ensemble_mode: EnsembleMode,
     /// Conformal postprocessing coverage (0 = disabled).
     pub postprocess_coverage: f64,
+    /// Trend decomposition mode.
+    pub trend_mode: TrendMode,
+    /// How the trend integrates with forecasting models.
+    pub trend_integration: TrendIntegration,
+    /// Seasonal decomposition mode.
+    pub seasonal_mode: SeasonalMode,
+    /// Changepoint adaptation mode.
+    pub changepoint_mode: ChangepointMode,
 }
 
 impl Default for PipelineConfig {
@@ -89,6 +207,10 @@ impl Default for PipelineConfig {
             metric_strategy: MetricStrategy::default(),
             ensemble_mode: EnsembleMode::None,
             postprocess_coverage: 0.0,
+            trend_mode: TrendMode::None,
+            trend_integration: TrendIntegration::None,
+            seasonal_mode: SeasonalMode::None,
+            changepoint_mode: ChangepointMode::None,
         }
     }
 }
@@ -120,6 +242,32 @@ pub struct PipelineResult {
     pub ensemble_weights: Option<Vec<(String, f64)>>,
     /// Per-model metric scores from multi-metric evaluation.
     pub metric_scores: Option<Vec<(String, MetricScores)>>,
+    /// Trend component selection result (if trend mode was Auto).
+    pub trend_selection: Option<TrendSelectionResult>,
+    /// Seasonal component selection result (if seasonal mode was Auto).
+    pub seasonal_selection: Option<SeasonalSelectionResult>,
+}
+
+/// Result of automatic trend component selection.
+#[derive(Debug, Clone)]
+pub struct TrendSelectionResult {
+    /// Name of the selected component.
+    pub selected: String,
+    /// Criterion used for selection.
+    pub criterion: String,
+    /// All candidates ranked by score (name, score).
+    pub scores: Vec<(String, f64)>,
+}
+
+/// Result of automatic seasonal component selection.
+#[derive(Debug, Clone)]
+pub struct SeasonalSelectionResult {
+    /// Name of the selected component.
+    pub selected: String,
+    /// Criterion used for selection.
+    pub criterion: String,
+    /// All candidates ranked by score (name, score).
+    pub scores: Vec<(String, f64)>,
 }
 
 impl PipelineResult {
@@ -281,6 +429,36 @@ impl PipelineBuilder {
         self
     }
 
+    /// Set the trend decomposition mode.
+    pub fn trend(mut self, mode: TrendMode) -> Self {
+        self.config.trend_mode = mode;
+        self
+    }
+
+    /// Set how a fitted trend component integrates with forecasting models.
+    ///
+    /// Requires `TrendMode::Auto` or `TrendMode::Fixed` to have an effect.
+    pub fn trend_integration(mut self, mode: TrendIntegration) -> Self {
+        self.config.trend_integration = mode;
+        self
+    }
+
+    /// Set the seasonal decomposition mode.
+    pub fn seasonal(mut self, mode: SeasonalMode) -> Self {
+        self.config.seasonal_mode = mode;
+        self
+    }
+
+    /// Set the changepoint adaptation mode.
+    ///
+    /// When set to `ChangepointMode::Auto`, the pipeline will detect changepoints
+    /// during profiling and train models only on post-changepoint data when
+    /// sufficient data is available.
+    pub fn changepoint(mut self, mode: ChangepointMode) -> Self {
+        self.config.changepoint_mode = mode;
+        self
+    }
+
     /// Enable conformal postprocessing at the given coverage level (e.g. 0.90).
     #[cfg(feature = "postprocess")]
     pub fn postprocess(mut self, coverage: f64) -> Self {
@@ -344,11 +522,20 @@ impl Pipeline {
             let timer = ExecutionTimer::start();
             let p = DataProfile::from_series(ts);
             let dur = timer.stop();
+            let cp_info = if let Some(last_cp) = p.last_changepoint {
+                format!(
+                    ", changepoints={} (last at {})",
+                    p.changepoints.len(),
+                    last_cp
+                )
+            } else {
+                String::new()
+            };
             log.record_timed(
                 DecisionCategory::DataProfiling,
                 format!(
-                    "Profiled {} observations: trend={}, stationary={}",
-                    p.n_observations, p.trend_direction, p.adf_is_stationary
+                    "Profiled {} observations: trend={}, stationary={}{}",
+                    p.n_observations, p.trend_direction, p.adf_is_stationary, cp_info
                 ),
                 DecisionOutcome::Success,
                 dur,
@@ -375,6 +562,14 @@ impl Pipeline {
                 preprocess_result.steps_applied.join(", "),
             );
         }
+
+        // ── Step 2b: Changepoint-aware data adaptation ──────────────
+        let working_ts =
+            self.apply_changepoint_adaptation(&working_ts, profile.as_ref(), &mut log)?;
+
+        // ── Step 2c: Trend integration ──────────────────────────────
+        let (working_ts, trend_state, trend_selection) =
+            self.apply_trend_integration(&working_ts, effective_horizon, &mut log)?;
 
         // ── Step 3: Model selection via registry ────────────────────
         let registry = match &self.registry {
@@ -440,12 +635,46 @@ impl Pipeline {
         let mut scored: Vec<(String, f64, MetricScores)> = Vec::new();
         let mut per_obs_losses: Vec<(String, Vec<f64>)> = Vec::new();
 
+        // Build future regressors for holdout evaluation in Regressor mode
+        let holdout_future_regs = trend_state.as_ref().and_then(|ts_state| {
+            if matches!(self.config.trend_integration, TrendIntegration::Regressor) {
+                // For holdout eval, the "future" trend is the fitted trend for the holdout period
+                // We need to use the tail of the fitted trend for the test portion
+                let fitted = ts_state.fitted_trend();
+                if fitted.len() >= holdout {
+                    let holdout_trend = fitted[fitted.len() - holdout..].to_vec();
+                    let mut regs = HashMap::new();
+                    regs.insert(
+                        super::trend_integration::TREND_REGRESSOR_NAME.to_string(),
+                        holdout_trend,
+                    );
+                    Some(regs)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        });
+
         for spec in registry.iter() {
             let timer = ExecutionTimer::start();
             let mut model = spec.create();
             let name = model.name().to_string();
 
-            match model.fit(&train_ts).and_then(|_| model.predict(holdout)) {
+            let predict_result = model.fit(&train_ts).and_then(|_| {
+                if let Some(ref regs) = holdout_future_regs {
+                    if model.supports_exog() && model.has_exog() {
+                        model.predict_with_exog(holdout, regs)
+                    } else {
+                        model.predict(holdout)
+                    }
+                } else {
+                    model.predict(holdout)
+                }
+            });
+
+            match predict_result {
                 Ok(forecast) => {
                     let dur = timer.stop();
                     let preds = forecast.primary();
@@ -627,6 +856,7 @@ impl Pipeline {
             effective_horizon,
             &scored,
             &model_confidence_set,
+            trend_state.as_ref(),
             &mut log,
         )?;
 
@@ -657,6 +887,24 @@ impl Pipeline {
                     "Selected model failed on full data".into(),
                 ));
             }
+        };
+
+        // ── Recompose trend (Decompose mode) ─────────────────────────
+        let forecast = if matches!(self.config.trend_integration, TrendIntegration::Decompose) {
+            if let Some(ref state) = trend_state {
+                let mut f = forecast;
+                state.recompose_forecast(&mut f);
+                log.record(
+                    DecisionCategory::TrendSelection,
+                    "Recomposed trend onto forecast",
+                    DecisionOutcome::Success,
+                );
+                f
+            } else {
+                forecast
+            }
+        } else {
+            forecast
         };
 
         // ── Postprocessing (conformal calibration) ──────────────────
@@ -715,6 +963,8 @@ impl Pipeline {
             },
             ensemble_weights,
             metric_scores: Some(all_metric_scores),
+            trend_selection,
+            seasonal_selection: None,
         })
     }
 
@@ -726,8 +976,18 @@ impl Pipeline {
         horizon: usize,
         scored: &[(String, f64, MetricScores)],
         mcs: &Option<ModelConfidenceSet>,
+        trend_state: Option<&TrendIntegrationState>,
         log: &mut DecisionLog,
     ) -> Result<(Option<Forecast>, String, Option<Vec<(String, f64)>>)> {
+        // Build future regressors for Regressor mode
+        let future_regs = trend_state.and_then(|state| {
+            if matches!(self.config.trend_integration, TrendIntegration::Regressor) {
+                Some(state.future_regressors(horizon, None))
+            } else {
+                None
+            }
+        });
+
         match &self.config.ensemble_mode {
             EnsembleMode::None => {
                 let winner_name = scored[0].0.clone();
@@ -743,7 +1003,14 @@ impl Pipeline {
                     ),
                 );
 
-                let forecast = self.fit_and_predict_model(registry, &winner_name, ts, horizon, log);
+                let forecast = self.fit_and_predict_model(
+                    registry,
+                    &winner_name,
+                    ts,
+                    horizon,
+                    future_regs.as_ref(),
+                    log,
+                );
                 match forecast {
                     Ok(f) => Ok((Some(f), winner_name, None)),
                     Err(_) => Ok((None, winner_name, None)),
@@ -764,7 +1031,14 @@ impl Pipeline {
                         DecisionOutcome::Success,
                         format!("{}", scored[0].2),
                     );
-                    let forecast = self.fit_and_predict_model(registry, &winner, ts, horizon, log);
+                    let forecast = self.fit_and_predict_model(
+                        registry,
+                        &winner,
+                        ts,
+                        horizon,
+                        future_regs.as_ref(),
+                        log,
+                    );
                     match forecast {
                         Ok(f) => Ok((Some(f), winner, None)),
                         Err(_) => Ok((None, winner, None)),
@@ -776,13 +1050,22 @@ impl Pipeline {
                         horizon,
                         &ensemble_names,
                         CombinationMethod::WeightedMSE,
+                        future_regs.as_ref(),
                         log,
                     )
                 }
             }
             EnsembleMode::Fixed(method) => {
                 let names: Vec<&str> = scored.iter().map(|(n, _, _)| n.as_str()).collect();
-                self.build_ensemble(registry, ts, horizon, &names, *method, log)
+                self.build_ensemble(
+                    registry,
+                    ts,
+                    horizon,
+                    &names,
+                    *method,
+                    future_regs.as_ref(),
+                    log,
+                )
             }
         }
     }
@@ -795,6 +1078,7 @@ impl Pipeline {
         horizon: usize,
         names: &[&str],
         method: CombinationMethod,
+        future_regs: Option<&HashMap<String, Vec<f64>>>,
         log: &mut DecisionLog,
     ) -> Result<(Option<Forecast>, String, Option<Vec<(String, f64)>>)> {
         let mut models: Vec<Box<dyn Forecaster>> = Vec::new();
@@ -819,7 +1103,16 @@ impl Pipeline {
 
         if models.len() == 1 {
             let name = used_names[0].clone();
-            let forecast = models.remove(0).predict(horizon);
+            let model = &models[0];
+            let forecast = if let Some(regs) = future_regs {
+                if model.supports_exog() && model.has_exog() {
+                    model.predict_with_exog(horizon, regs)
+                } else {
+                    model.predict(horizon)
+                }
+            } else {
+                model.predict(horizon)
+            };
             match forecast {
                 Ok(f) => return Ok((Some(f), name, None)),
                 Err(_) => return Ok((None, name, None)),
@@ -831,6 +1124,9 @@ impl Pipeline {
         let n_models = models.len();
         let mut ensemble = Ensemble::new(models).with_method(method);
         ensemble.fit(ts)?;
+        // Note: Ensemble.predict() delegates to individual model predict() calls.
+        // For Regressor mode, regressors are already embedded in the TimeSeries,
+        // so models that picked them up during fit will use them via their internal state.
         let forecast = ensemble.predict(horizon)?;
 
         let weights: Vec<(String, f64)> = used_names
@@ -920,6 +1216,237 @@ impl Pipeline {
         forecast.clone()
     }
 
+    /// Apply trend integration to the working time series.
+    ///
+    /// Depending on `TrendMode` and `TrendIntegration`, this:
+    /// - Fits a trend component (Auto or Fixed)
+    /// - For Decompose: detrends the series (subtract fitted trend)
+    /// - For Regressor: adds fitted trend as an exogenous regressor `"__trend"`
+    /// - Returns the (possibly modified) series, the trend state, and selection result
+    fn apply_trend_integration(
+        &self,
+        ts: &TimeSeries,
+        horizon: usize,
+        log: &mut DecisionLog,
+    ) -> Result<(
+        TimeSeries,
+        Option<TrendIntegrationState>,
+        Option<TrendSelectionResult>,
+    )> {
+        // Check if trend mode is enabled
+        if matches!(self.config.trend_mode, TrendMode::None) {
+            return Ok((ts.clone(), None, None));
+        }
+
+        let values = ts.values(0)?;
+        let timer = ExecutionTimer::start();
+
+        // Fit the trend component
+        let (state, selection_result) = match &self.config.trend_mode {
+            TrendMode::Auto => {
+                let mut auto = AutoTrend::new();
+                let trend_state =
+                    TrendIntegrationState::from_component(&mut auto, values, horizon)?;
+                let dur = timer.stop();
+
+                let sel = auto.selection_result().map(|r| {
+                    let scores_desc: String = r
+                        .scores
+                        .iter()
+                        .take(3)
+                        .map(|(n, s)| format!("{}={:.1}", n, s))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    log.record_full(
+                        DecisionCategory::TrendSelection,
+                        format!("Selected {} ({:?})", r.selected, r.criterion),
+                        DecisionOutcome::Success,
+                        Some(scores_desc),
+                        Some(dur),
+                    );
+                    TrendSelectionResult {
+                        selected: r.selected.clone(),
+                        criterion: format!("{:?}", r.criterion),
+                        scores: r.scores.clone(),
+                    }
+                });
+
+                (trend_state, sel)
+            }
+            TrendMode::Fixed(name) => {
+                // For now, Fixed mode supports polynomial trends by degree
+                // e.g., "linear" → degree 1, "quadratic" → degree 2
+                let degree = match name.to_lowercase().as_str() {
+                    "linear" | "poly1" => 1,
+                    "quadratic" | "poly2" => 2,
+                    "cubic" | "poly3" => 3,
+                    _ => {
+                        // Try parsing as a number for degree
+                        name.parse::<usize>().unwrap_or(1)
+                    }
+                };
+                let mut poly = PolynomialTrend::new(degree).with_recency(Recency::Fraction(0.3));
+                let trend_state =
+                    TrendIntegrationState::from_component(&mut poly, values, horizon)?;
+                let dur = timer.stop();
+                log.record_full(
+                    DecisionCategory::TrendSelection,
+                    format!("Fitted fixed trend: {} (degree {})", name, degree),
+                    DecisionOutcome::Success,
+                    None,
+                    Some(dur),
+                );
+                (
+                    trend_state,
+                    Some(TrendSelectionResult {
+                        selected: name.clone(),
+                        criterion: "Fixed".to_string(),
+                        scores: vec![],
+                    }),
+                )
+            }
+            TrendMode::None => unreachable!(),
+        };
+
+        // Apply integration mode
+        let modified_ts = match &self.config.trend_integration {
+            TrendIntegration::None => {
+                log.record(
+                    DecisionCategory::TrendSelection,
+                    "Trend fitted but not integrated (analysis only)",
+                    DecisionOutcome::Success,
+                );
+                ts.clone()
+            }
+            TrendIntegration::Decompose => {
+                let detrended = state.detrend_series(ts)?;
+                log.record_with_detail(
+                    DecisionCategory::TrendSelection,
+                    "Detrended series (Decompose mode)",
+                    DecisionOutcome::Success,
+                    format!("Removed trend from {} observations", detrended.len()),
+                );
+                detrended
+            }
+            TrendIntegration::Regressor => {
+                let with_reg = state.add_trend_regressor(ts)?;
+                log.record_with_detail(
+                    DecisionCategory::TrendSelection,
+                    "Added trend as regressor (Regressor mode)",
+                    DecisionOutcome::Success,
+                    format!(
+                        "Added '{}' regressor ({} values)",
+                        super::trend_integration::TREND_REGRESSOR_NAME,
+                        with_reg.len()
+                    ),
+                );
+                with_reg
+            }
+        };
+
+        Ok((modified_ts, Some(state), selection_result))
+    }
+
+    /// Apply changepoint-aware data adaptation.
+    ///
+    /// If a changepoint was detected and there is enough post-changepoint data,
+    /// returns a sliced TimeSeries starting from the last changepoint.
+    /// Otherwise returns the input unchanged.
+    ///
+    /// "Enough data" means:
+    /// - At least 30 observations (absolute minimum for most models)
+    /// - At least `2 × seasonal_period` observations (if seasonal period is set)
+    /// - At least `horizon + holdout` observations (need room for evaluation)
+    fn apply_changepoint_adaptation(
+        &self,
+        ts: &TimeSeries,
+        profile: Option<&DataProfile>,
+        log: &mut DecisionLog,
+    ) -> Result<TimeSeries> {
+        let fit_from = match &self.config.changepoint_mode {
+            ChangepointMode::None => {
+                return Ok(ts.clone());
+            }
+            ChangepointMode::Auto => {
+                // Use profiled changepoints
+                match profile.and_then(|p| p.last_changepoint) {
+                    Some(cp) => cp,
+                    None => {
+                        log.record(
+                            DecisionCategory::ChangepointAdaptation,
+                            "No changepoints detected, using full data",
+                            DecisionOutcome::Skipped,
+                        );
+                        return Ok(ts.clone());
+                    }
+                }
+            }
+            ChangepointMode::FitFrom(idx) => *idx,
+        };
+
+        let n = ts.len();
+        if fit_from >= n {
+            log.record_with_detail(
+                DecisionCategory::ChangepointAdaptation,
+                "Changepoint index beyond data length, using full data",
+                DecisionOutcome::Skipped,
+                format!("fit_from={}, n={}", fit_from, n),
+            );
+            return Ok(ts.clone());
+        }
+
+        let post_cp_len = n - fit_from;
+
+        // Minimum data requirements
+        let min_abs = 30; // Absolute minimum for robust fitting
+        let min_seasonal = if self.config.seasonal_period > 0 {
+            2 * self.config.seasonal_period // Need at least 2 full cycles
+        } else {
+            0
+        };
+        let holdout = if self.config.holdout > 0 {
+            self.config.holdout
+        } else {
+            self.config.horizon
+        };
+        let min_for_eval = holdout + 10; // Need holdout + some training data
+        let min_required = min_abs.max(min_seasonal).max(min_for_eval);
+
+        if post_cp_len < min_required {
+            log.record_with_detail(
+                DecisionCategory::ChangepointAdaptation,
+                format!(
+                    "Changepoint at {} but only {} post-CP observations (need ≥{}), using full data",
+                    fit_from, post_cp_len, min_required
+                ),
+                DecisionOutcome::Skipped,
+                format!(
+                    "min_abs={}, min_seasonal={}, min_eval={}",
+                    min_abs, min_seasonal, min_for_eval
+                ),
+            );
+            return Ok(ts.clone());
+        }
+
+        // Enough data — truncate
+        let sliced = ts.slice(fit_from, n)?;
+        log.record_with_detail(
+            DecisionCategory::ChangepointAdaptation,
+            format!(
+                "Training from changepoint at index {} ({} observations, was {})",
+                fit_from, post_cp_len, n
+            ),
+            DecisionOutcome::Success,
+            format!(
+                "Dropped {} pre-changepoint observations ({:.0}% of data)",
+                fit_from,
+                fit_from as f64 / n as f64 * 100.0
+            ),
+        );
+
+        Ok(sliced)
+    }
+
     /// Fallback-only path when no registry or all models fail.
     fn execute_fallback_only(
         &self,
@@ -968,6 +1495,8 @@ impl Pipeline {
             preprocess,
             ensemble_weights: None,
             metric_scores: None,
+            trend_selection: None,
+            seasonal_selection: None,
         })
     }
 
@@ -978,14 +1507,24 @@ impl Pipeline {
         name: &str,
         ts: &TimeSeries,
         horizon: usize,
+        future_regs: Option<&HashMap<String, Vec<f64>>>,
         _log: &mut DecisionLog,
     ) -> Result<Forecast> {
         for spec in registry.iter() {
             let mut model = spec.create();
             if model.name() == name {
                 model.fit(ts)?;
+                let use_exog = future_regs.is_some() && model.supports_exog() && model.has_exog();
                 let forecast = if self.config.interval_level > 0.0 {
-                    model.predict_with_intervals(horizon, self.config.interval_level)?
+                    // predict_with_intervals doesn't have an exog variant,
+                    // so we fall back to predict_with_exog when exog is needed
+                    if use_exog {
+                        model.predict_with_exog(horizon, future_regs.unwrap())?
+                    } else {
+                        model.predict_with_intervals(horizon, self.config.interval_level)?
+                    }
+                } else if use_exog {
+                    model.predict_with_exog(horizon, future_regs.unwrap())?
                 } else {
                     model.predict(horizon)?
                 };
@@ -1393,5 +1932,129 @@ mod tests {
         assert!(result.preprocess.is_some());
         let pp = result.preprocess.unwrap();
         assert!(pp.boxcox_lambda.is_some());
+    }
+
+    /// Helper: make a trending time series for trend integration tests.
+    fn make_trending_ts(n: usize) -> TimeSeries {
+        // y = 2*t + 10 + small noise
+        let values: Vec<f64> = (0..n)
+            .map(|i| 2.0 * i as f64 + 10.0 + 0.1 * (i as f64 * 0.7).sin())
+            .collect();
+        let start = Utc::now();
+        let timestamps: Vec<_> = (0..n).map(|i| start + Duration::days(i as i64)).collect();
+        TimeSeriesBuilder::new()
+            .timestamps(timestamps)
+            .values(values)
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn pipeline_trend_decompose_mode() {
+        let ts = make_trending_ts(80);
+        let reg = make_registry();
+        let result = PipelineBuilder::new()
+            .registry(reg)
+            .trend(TrendMode::Auto)
+            .trend_integration(TrendIntegration::Decompose)
+            .build()
+            .execute(&ts, 5)
+            .unwrap();
+
+        assert_eq!(result.forecast.primary().len(), 5);
+        // With strong upward trend, forecast should continue upward
+        let last_actual = ts.values(0).unwrap().last().copied().unwrap();
+        let first_pred = result.forecast.primary()[0];
+        // Forecast should be in a reasonable range of the last value
+        assert!(
+            (first_pred - last_actual).abs() < 20.0,
+            "Decompose forecast too far from last value: pred={}, last={}",
+            first_pred,
+            last_actual
+        );
+        // Trend selection should be populated
+        assert!(result.trend_selection.is_some());
+        // Decision log should contain trend entries
+        let trend_decisions = result.log.by_category(DecisionCategory::TrendSelection);
+        assert!(
+            trend_decisions.len() >= 2,
+            "Expected trend selection + detrend + recompose decisions, got {}",
+            trend_decisions.len()
+        );
+    }
+
+    #[test]
+    fn pipeline_trend_regressor_mode() {
+        let ts = make_trending_ts(80);
+        let reg = make_registry();
+        let result = PipelineBuilder::new()
+            .registry(reg)
+            .trend(TrendMode::Auto)
+            .trend_integration(TrendIntegration::Regressor)
+            .build()
+            .execute(&ts, 5)
+            .unwrap();
+
+        assert_eq!(result.forecast.primary().len(), 5);
+        assert!(result.trend_selection.is_some());
+        let trend_decisions = result.log.by_category(DecisionCategory::TrendSelection);
+        assert!(
+            !trend_decisions.is_empty(),
+            "Expected trend selection decisions"
+        );
+    }
+
+    #[test]
+    fn pipeline_trend_fixed_linear() {
+        let ts = make_trending_ts(80);
+        let reg = make_registry();
+        let result = PipelineBuilder::new()
+            .registry(reg)
+            .trend(TrendMode::Fixed("linear".to_string()))
+            .trend_integration(TrendIntegration::Decompose)
+            .build()
+            .execute(&ts, 5)
+            .unwrap();
+
+        assert_eq!(result.forecast.primary().len(), 5);
+        let sel = result.trend_selection.unwrap();
+        assert_eq!(sel.selected, "linear");
+        assert_eq!(sel.criterion, "Fixed");
+    }
+
+    #[test]
+    fn pipeline_trend_none_integration() {
+        let ts = make_trending_ts(80);
+        let reg = make_registry();
+        let result = PipelineBuilder::new()
+            .registry(reg)
+            .trend(TrendMode::Auto)
+            .trend_integration(TrendIntegration::None)
+            .build()
+            .execute(&ts, 5)
+            .unwrap();
+
+        // Should still have selection result but series was not modified
+        assert!(result.trend_selection.is_some());
+        let trend_decisions = result.log.by_category(DecisionCategory::TrendSelection);
+        // Should have "analysis only" entry
+        let analysis_only = trend_decisions
+            .iter()
+            .any(|d| d.action.contains("analysis only"));
+        assert!(analysis_only, "Expected 'analysis only' decision");
+    }
+
+    #[test]
+    fn pipeline_trend_mode_none_skips() {
+        let ts = make_trending_ts(50);
+        let reg = make_registry();
+        let result = PipelineBuilder::new()
+            .registry(reg)
+            .trend(TrendMode::None)
+            .build()
+            .execute(&ts, 5)
+            .unwrap();
+
+        assert!(result.trend_selection.is_none());
     }
 }

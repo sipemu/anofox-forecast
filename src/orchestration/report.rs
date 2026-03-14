@@ -95,6 +95,42 @@ impl PipelineReport {
             }
         }
 
+        // 4a. Trend/Seasonal Selection
+        if let Some(ref ts) = result.trend_selection {
+            let rows: Vec<Vec<String>> = ts
+                .scores
+                .iter()
+                .map(|(name, score)| {
+                    let marker = if *name == ts.selected { " *" } else { "" };
+                    vec![format!("{}{}", name, marker), format!("{:.4}", score)]
+                })
+                .collect();
+            sections.push(ReportSection {
+                heading: "Trend Selection".into(),
+                content: ReportContent::Table {
+                    headers: vec!["Component".into(), ts.criterion.clone()],
+                    rows,
+                },
+            });
+        }
+        if let Some(ref ss) = result.seasonal_selection {
+            let rows: Vec<Vec<String>> = ss
+                .scores
+                .iter()
+                .map(|(name, score)| {
+                    let marker = if *name == ss.selected { " *" } else { "" };
+                    vec![format!("{}{}", name, marker), format!("{:.4}", score)]
+                })
+                .collect();
+            sections.push(ReportSection {
+                heading: "Seasonal Selection".into(),
+                content: ReportContent::Table {
+                    headers: vec!["Component".into(), ss.criterion.clone()],
+                    rows,
+                },
+            });
+        }
+
         // 4. Model Selection
         {
             let mut kv = Vec::new();
@@ -356,6 +392,8 @@ mod tests {
             preprocess: None,
             ensemble_weights: None,
             metric_scores: None,
+            trend_selection: None,
+            seasonal_selection: None,
         }
     }
 

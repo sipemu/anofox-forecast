@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Recency-Aware Trend Components** (`seasonality` module)
+  - `Recency` enum — fit on recent data only (`Window(N)`, `Fraction(0.3)`, `Full`, `Auto`) for trend-aware forecasting
+  - `Recency::Auto` — PELT-based changepoint detection to automatically determine fitting window
+  - `PolynomialTrend` — polynomial trend (degree 1-3) with Vandermonde + Cholesky solve, recency-aware
+  - `ExponentialTrend` — log-linear exponential growth/decay trend estimation, recency-aware
+  - `LogisticTrend` — logistic S-curve fitting with auto or fixed capacity, recency-aware
+  - `TheilSenTrend` — robust Theil-Sen median-of-pairwise-slopes estimator, recency-aware, subsampled for large data
+  - `AutoTrend` — automatic selection of best trend component via AICc/BIC/holdout (enum dispatch)
+  - `AutoSeasonal` — automatic selection of best seasonal component via AICc/BIC
+  - `n_params()` method added to `TrendComponent` and `SeasonalComponent` traits (for IC-based selection)
+  - `with_recency()` builder methods on `PiecewiseLinearTrend` and `HodrickPrescottFilter`
+  - `trend_components` example demonstrating all components and AutoTrend selection
+
+- **Trend Integration & Changepoint-Aware Pipeline** (`orchestration` module)
+  - `TrendIntegration` enum — `Decompose` (detrend → forecast residuals → recompose) or `Regressor` (trend as exogenous `"__trend"` feature)
+  - `TrendIntegrationState` — holds fitted/future trend values with helpers for both integration modes
+  - `ChangepointMode` enum — `Auto` (PELT-based from DataProfile) or `FitFrom(index)` with safety checks (min 30 obs, 2× seasonal period, holdout room)
+  - `TrendMode` / `SeasonalMode` enums for pipeline trend/seasonal component selection
+  - `TrendSelectionResult` / `SeasonalSelectionResult` structs in pipeline results
+  - `DecisionCategory::TrendSelection` / `SeasonalSelection` / `ChangepointAdaptation` for decision logging
+  - `.trend()`, `.trend_integration()`, `.seasonal()`, `.changepoint()` builder methods on `PipelineBuilder`
+  - Pipeline now supports end-to-end trend workflows: fit trend → transform data → train models → predict → recompose/exog
+  - Regressor mode threads future trend values through holdout evaluation, single-model, and ensemble prediction paths
+  - `DataProfile` now includes PELT changepoint detection results (`changepoints`, `last_changepoint`)
+  - Changepoint-aware baseline models: `SMA::with_changepoint()` constrains window, `RandomWalkWithDrift::with_changepoint()` constrains drift
+  - Trend/seasonal selection section in `PipelineReport`
+
 - **Composable Seasonality & Trend Components** (`seasonality` module)
   - `SeasonalComponent` / `TrendComponent` traits — dual-purpose: standalone (fit/predict) and feature extraction
   - `DummySeasonality` — one-hot (dummy variable) seasonal encoding for arbitrary seasonal shapes

@@ -23,7 +23,7 @@
 //! assert!(!features.is_empty());
 //! ```
 
-use super::traits::TrendComponent;
+use super::traits::{Recency, TrendComponent};
 use crate::changepoint::{CostFunction, Pelt};
 use crate::error::{ForecastError, Result};
 
@@ -50,6 +50,8 @@ pub struct PiecewiseLinearTrend {
     min_segment_length: usize,
     /// Penalty parameter for PELT (higher = fewer changepoints).
     penalty: f64,
+    /// Recency window for fitting.
+    recency: Recency,
     /// Fitted segments: linear regression per segment.
     segments: Option<Vec<Segment>>,
     /// Fitted trend values.
@@ -66,6 +68,7 @@ impl PiecewiseLinearTrend {
         Self {
             min_segment_length: 5,
             penalty: 10.0,
+            recency: Recency::Full,
             segments: None,
             fitted: Vec::new(),
             n_train: 0,
@@ -82,6 +85,12 @@ impl PiecewiseLinearTrend {
     /// Set the minimum segment length (builder-style).
     pub fn with_min_segment_length(mut self, len: usize) -> Self {
         self.min_segment_length = len;
+        self
+    }
+
+    /// Set the recency window for fitting (builder-style).
+    pub fn with_recency(mut self, recency: Recency) -> Self {
+        self.recency = recency;
         self
     }
 
@@ -181,24 +190,38 @@ impl TrendComponent for PiecewiseLinearTrend {
             return Ok(());
         }
 
-        // Run PELT changepoint detection.
+        let (rec_start, rec_end) = self.recency.resolve_with_data(values);
+        let window = &values[rec_start..rec_end];
+
+        // Run PELT changepoint detection on recency window.
         let pelt = Pelt::new(CostFunction::LinearTrend)
             .penalty(self.penalty)
             .min_size(self.min_segment_length);
-        let result = pelt.detect(values);
+        let result = pelt.detect(window);
 
-        // Fit OLS per segment.
+        // Fit OLS per segment (indices are relative to window, shift to absolute).
         let segments: Vec<Segment> = result
             .segments
             .iter()
-            .map(|&(s, e)| fit_segment_ols(values, s, e))
+            .map(|&(s, e)| fit_segment_ols(values, s + rec_start, e + rec_start))
             .collect();
 
-        // Compute fitted values.
+        // Compute fitted values — extrapolate backwards for pre-window portion.
         let mut fitted = vec![0.0; n];
+
+        // Fill the recency window and beyond from segments.
         for seg in &segments {
             for i in seg.start..seg.end {
                 fitted[i] = segment_value(seg, i);
+            }
+        }
+
+        // Backwards-extrapolate: use the first segment's model for indices before rec_start.
+        if rec_start > 0 {
+            if let Some(first_seg) = segments.first() {
+                for i in 0..rec_start {
+                    fitted[i] = segment_value(first_seg, i);
+                }
             }
         }
 
@@ -292,6 +315,11 @@ impl TrendComponent for PiecewiseLinearTrend {
 
     fn trend_name(&self) -> &str {
         "piecewise_linear"
+    }
+
+    fn n_params(&self) -> usize {
+        // 2 params (slope + intercept) per segment
+        self.segments.as_ref().map_or(0, |s| 2 * s.len())
     }
 }
 

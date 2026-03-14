@@ -84,6 +84,13 @@ console.log(forecast.values);
   - Seasonal differencing (`SeasonalDifference`) — standalone transform with strength/variance-reduction features
   - Hodrick-Prescott filter (`HodrickPrescottFilter`) — smooth trend extraction with cycle decomposition
   - Piecewise linear trend (`PiecewiseLinearTrend`) — PELT-based changepoint detection + per-segment regression
+  - Polynomial trend (`PolynomialTrend`) — degree 1-3, Vandermonde + Cholesky solve
+  - Exponential trend (`ExponentialTrend`) — log-linear regression for growth/decay
+  - Logistic trend (`LogisticTrend`) — S-curve fitting with auto or fixed capacity
+  - Theil-Sen trend (`TheilSenTrend`) — robust median-of-pairwise-slopes estimator
+  - `AutoTrend` — automatic selection of best trend component via AICc/BIC
+  - `AutoSeasonal` — automatic selection of best seasonal component via AICc/BIC
+  - `Recency` — fit on recent data only (last N, last X%, full, or Auto via PELT changepoint detection) for trend-aware forecasting
   - `TimeSeries::seasonal_strength()` / `trend_strength()` — quick strength assessment
   - Convenience: `deseasonalize()`, `detrend()`, `seasonal_adjust()`, `recompose()`
 
@@ -152,12 +159,14 @@ console.log(forecast.values);
 ### Data Processing & Pipeline
 
 - **Orchestration / Agent Forecasting** (`orchestration` module)
-  - `DataProfile`: Automated data profiling — stationarity (ADF), trend direction, seasonality, ACF, quality score
-  - `PipelineBuilder`: Declarative pipeline — profile → preprocess → model selection → cross-validation → ensemble → postprocess → constraints
+  - `DataProfile`: Automated data profiling — stationarity (ADF), trend direction, seasonality, ACF, quality score, changepoint detection
+  - `PipelineBuilder`: Declarative pipeline — profile → preprocess → changepoint → trend → model selection → cross-validation → ensemble → postprocess → constraints
   - `Pipeline::from_config()`: Replay a pipeline from saved `PipelineConfig`
   - `PreprocessMode`: Automatic preprocessing — Box-Cox for skewed data, outlier replacement for low-quality data
   - `MetricStrategy`: Data-aware multi-metric model selection — Auto, Single, or weighted Composite of MAE/MSE/RMSE/SMAPE/WAPE/MDA
   - `EnsembleMode`: Auto (MCS-based), Fixed (specify combination method), or None (single best)
+  - `TrendIntegration`: Decompose (detrend → forecast residuals → recompose) or Regressor (trend as exogenous feature `"__trend"`)
+  - `ChangepointMode`: Auto (PELT-based) or FitFrom(index) — adapt training to regime changes with safety checks
   - `PipelineReport`: Multi-section structured report from pipeline results (summary, profile, forecast, decision log, etc.)
   - `PipelineStore` trait: Abstract storage backend with `Value` IR — `InMemoryStore` included, swap in DuckDB/SQLite
   - Structured tool functions: `profile_data`, `select_models`, `run_pipeline`, `explain_result` — MCP-ready with typed I/O
@@ -470,6 +479,15 @@ println!("Upper: {:?}", intervals.upper());
 | `SeasonalDifference` | Standalone seasonal differencing with strength/variance features |
 | `HodrickPrescottFilter` | Smooth trend extraction with cycle decomposition |
 | `PiecewiseLinearTrend` | PELT-based piecewise linear trend with per-segment regression |
+| `PolynomialTrend` | Polynomial trend (degree 1-3) with Cholesky solve |
+| `ExponentialTrend` | Log-linear exponential growth/decay trend |
+| `LogisticTrend` | Logistic S-curve trend with auto/fixed capacity |
+| `TheilSenTrend` | Robust Theil-Sen median-slope trend estimator |
+| `AutoTrend` | Automatic best-trend selection via AICc/BIC/holdout |
+| `AutoSeasonal` | Automatic best-seasonal selection via AICc/BIC |
+| `Recency` | Fit on recent data only (Window, Fraction, Full, Auto via PELT) |
+| `TrendIntegration` | Decompose (detrend/recompose) or Regressor (trend as exog feature) |
+| `ChangepointMode` | Auto (PELT) or FitFrom — regime-aware training with safety checks |
 | `deseasonalize()` / `seasonal_adjust()` | Remove seasonal component from data or TimeSeries |
 | `select_features()` | Automated feature selection (variance, correlation, top-K) |
 | `to_json()` / `from_json()` | Serialization for models, `Forecast`, and `TimeSeries` (requires `serde` feature) |

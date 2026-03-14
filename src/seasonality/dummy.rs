@@ -229,6 +229,10 @@ impl SeasonalComponent for DummySeasonality {
     fn seasonal_name(&self) -> &str {
         "DummySeasonality"
     }
+
+    fn n_params(&self) -> usize {
+        self.period.unwrap_or(0)
+    }
 }
 
 // ── Standalone feature functions ────────────────────────────────────────

@@ -43,6 +43,7 @@ pub mod profile;
 pub mod report;
 pub mod store;
 pub mod tools;
+pub mod trend_integration;
 
 // Re-export primary types
 pub use confidence::{ModelConfidenceSet, QualityFloor, SelectionConfidence, SelectionVerdict};
@@ -51,11 +52,15 @@ pub use fallback::{FallbackChain, FallbackResult};
 pub use horizon::{HorizonAnalysis, HorizonStep};
 pub use metadata::{ExecutionMetadata, ExecutionTimer};
 pub use metric_strategy::{Metric, MetricScores, MetricStrategy};
-pub use pipeline::{EnsembleMode, Pipeline, PipelineBuilder, PipelineConfig, PipelineResult};
+pub use pipeline::{
+    ChangepointMode, EnsembleMode, Pipeline, PipelineBuilder, PipelineConfig, PipelineResult,
+    SeasonalMode, SeasonalSelectionResult, TrendIntegration, TrendMode, TrendSelectionResult,
+};
 pub use preprocess::{PreprocessMode, PreprocessResult, PreprocessSteps};
 pub use profile::{DataProfile, TrendDirection};
 pub use report::PipelineReport;
 pub use store::{InMemoryStore, PipelineRecord, PipelineStore, RecordKind, Storable, Value};
+pub use trend_integration::TrendIntegrationState;
 
 /// Convenience prelude for orchestration types.
 pub mod prelude {
@@ -68,10 +73,12 @@ pub mod prelude {
     pub use super::metadata::{ExecutionMetadata, ExecutionTimer};
     pub use super::metric_strategy::{Metric, MetricScores, MetricStrategy};
     pub use super::pipeline::{
-        EnsembleMode, Pipeline, PipelineBuilder, PipelineConfig, PipelineResult,
+        ChangepointMode, EnsembleMode, Pipeline, PipelineBuilder, PipelineConfig, PipelineResult,
+        SeasonalMode, TrendIntegration, TrendMode,
     };
     pub use super::preprocess::{PreprocessMode, PreprocessResult};
     pub use super::profile::{DataProfile, TrendDirection};
     pub use super::report::PipelineReport;
     pub use super::store::{PipelineStore, Storable, Value};
+    pub use super::trend_integration::TrendIntegrationState;
 }
