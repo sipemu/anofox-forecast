@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-03-14
+
 ### Added
 
 - **Orchestration Module** (`orchestration` module)
@@ -46,6 +48,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - `run_pipeline()` — end-to-end pipeline execution
     - `explain_result()` — human-readable explanation (Brief/Normal/Detailed)
   - `PipelineBuilder::preprocess()`, `.metric()`, `.ensemble()` builder methods
+
+- **WASM/npm Orchestration Bindings**
+  - `JsDataProfile` — full data profiling with 30+ property getters, `toJSON()`, `fromSeries()`, `fromValues()`
+  - `JsPipelineBuilder` — fluent builder: `profile()`, `preprocess()`, `metric()`, `ensemble()`, `addModel()`, `execute()`
+  - `JsPipelineResult` — forecast, model name, decision log, quality floor, MCS, ensemble weights, metric scores
+  - `JsPipelineReport` — `title`, `sectionCount`, `toString()`, `toJSON()` with typed sections
+  - `selectModels(profile, availableModels?)` — model recommendation tool function
+  - `explainResult(result, verbosity)` — human-readable explanation (brief/normal/detailed)
 
 - **Forecasting Metrics**
   - `bias()` — signed forecast bias (mean error)
