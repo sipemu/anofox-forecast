@@ -54,6 +54,7 @@ console.log(forecast.values);
   - VAR (Vector Autoregression) for multivariate forecasting with Granger causality
   - Kalman filter / state-space models (local level, local linear trend, custom)
   - Exogenous regressor support across model families
+  - `RegressionForecaster`: OLS from `anofox-regression` as a `Forecaster` — trend, AR lags, exogenous features, recursive multi-step prediction
 
 - **Automatic Model Selection**
   - `AutoForecast`: Unified selection across ARIMA, ETS, and Theta families (parallel with `parallel` feature)
@@ -488,6 +489,8 @@ println!("Upper: {:?}", intervals.upper());
 | `Recency` | Fit on recent data only (Window, Fraction, Full, Auto via PELT) |
 | `TrendIntegration` | Decompose (detrend/recompose) or Regressor (trend as exog feature) |
 | `ChangepointMode` | Auto (PELT) or FitFrom — regime-aware training with safety checks |
+| `RegressionForecaster` | OLS adapter — trend index, AR lags, exogenous regressors, recursive multi-step |
+| `RegressionFeatures` | Feature builder for regression models (trend, lags, exog) |
 | `deseasonalize()` / `seasonal_adjust()` | Remove seasonal component from data or TimeSeries |
 | `select_features()` | Automated feature selection (variance, correlation, top-K) |
 | `to_json()` / `from_json()` | Serialization for models, `Forecast`, and `TimeSeries` (requires `serde` feature) |

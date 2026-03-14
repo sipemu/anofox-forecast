@@ -36,6 +36,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Changepoint-aware baseline models: `SMA::with_changepoint()` constrains window, `RandomWalkWithDrift::with_changepoint()` constrains drift
   - Trend/seasonal selection section in `PipelineReport`
 
+- **Regression Forecaster** (`models::regression` module, requires `postprocess` feature)
+  - `RegressionForecaster` — wraps `OlsRegressor` from `anofox-regression` behind the `Forecaster` trait
+  - `RegressionFeatures` — configurable feature engineering: linear trend index, autoregressive lags, exogenous regressors
+  - Convenience constructors: `linear_trend()`, `ar(lags)`, `trend_ar(lags)`, `ols(features)`
+  - Full `Forecaster` trait implementation: `fit`, `predict`, `predict_with_exog`, `fitted_values`, `residuals`, `supports_exog`
+  - Recursive multi-step prediction for AR models (feeds predictions back as lag features)
+  - Access to fitted OLS statistics (R², coefficients) via `fitted_ols()`
+  - Compatible with `ModelRegistry`, pipelines, ensembles, and cross-validation
+
 - **Composable Seasonality & Trend Components** (`seasonality` module)
   - `SeasonalComponent` / `TrendComponent` traits — dual-purpose: standalone (fit/predict) and feature extraction
   - `DummySeasonality` — one-hot (dummy variable) seasonal encoding for arbitrary seasonal shapes

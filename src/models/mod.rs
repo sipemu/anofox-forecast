@@ -16,6 +16,7 @@ pub mod kalman;
 pub mod kalman_forecaster;
 pub mod mfles;
 pub mod mstl_forecaster;
+pub mod regression;
 pub mod tbats;
 pub mod theta;
 pub mod var;
