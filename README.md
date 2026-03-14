@@ -87,6 +87,18 @@ console.log(forecast.values);
   - `IntermittentDiagnostics`: Syntetos-Boylan demand classification (Smooth/Erratic/Intermittent/Lumpy)
   - `AidAnalyzer`: Automatic Identification of Demand — distribution fitting, demand type classification, and per-observation anomaly detection (stockouts, lifecycle events, outliers)
 
+- **Orchestration / Agent Forecasting** (`orchestration` module)
+  - `DataProfile`: Automated data profiling — stationarity (ADF), trend direction, seasonality, ACF, quality score
+  - `PipelineBuilder`: Declarative pipeline — profile → model selection → cross-validation → fallback → constraints
+  - `Pipeline::from_config()`: Replay a pipeline from saved `PipelineConfig`
+  - `DecisionLog`: Structured audit trail with categories, outcomes, and timing
+  - `FallbackChain`: Ordered model failover with automatic recovery
+  - `HorizonAnalysis`: Per-step-ahead error decomposition (RMSE, MAE, bias per horizon)
+  - `SelectionConfidence`: Diebold-Mariano pairwise test for forecast accuracy comparison
+  - `ModelConfidenceSet`: Bootstrap-based set of statistically best models (Hansen et al. 2011)
+  - `QualityFloor`: Superior Predictive Ability test — does any model beat the benchmark? (Hansen 2005)
+  - `ExecutionMetadata` / `ExecutionTimer`: Fit/predict timing and convergence tracking
+
 - **Time Series Feature Extraction (76+ features)**
   - Basic statistics (mean, variance, quantiles, energy, etc.)
   - Distribution features (skewness, kurtosis, symmetry)
@@ -416,6 +428,13 @@ println!("Upper: {:?}", intervals.upper());
 | `ModelDiagnostics` | Comprehensive diagnostics: Ljung-Box, Jarque-Bera, Breusch-Pagan |
 | `IntermittentDiagnostics` | Syntetos-Boylan demand classification with model recommendations |
 | `AidAnalyzer` | Automatic Identification of Demand: distribution fitting, anomaly detection |
+| `PipelineBuilder` | Declarative forecasting pipeline with profiling, selection, fallback |
+| `DataProfile` | Automated data profiling (stationarity, trend, seasonality, quality) |
+| `SelectionConfidence` | Diebold-Mariano pairwise forecast comparison |
+| `ModelConfidenceSet` | Bootstrap model confidence set (Hansen et al. 2011) |
+| `QualityFloor` | Superior Predictive Ability test vs benchmark |
+| `HorizonAnalysis` | Per-step-ahead error decomposition |
+| `bias()` / `periods_in_stock()` | Signed bias and inventory-focused PIS metric |
 | `ForecastMetrics::compute()` | All 10 metrics in one call (MAE through Theil's U) |
 | `fit_all_and_compare()` | Fit all registry models, rank by holdout accuracy |
 | `cross_validate_all()` | CV all registry models with aggregated metrics |
@@ -455,6 +474,7 @@ println!("Upper: {:?}", intervals.upper());
 
 - [chrono](https://crates.io/crates/chrono) - Date and time handling
 - [trueno](https://crates.io/crates/trueno) - Linear algebra operations
+- [anofox-statistics](https://crates.io/crates/anofox-statistics) - Statistical hypothesis tests (DM, MCS, SPA)
 - [statrs](https://crates.io/crates/statrs) - Statistical distributions and functions
 - [thiserror](https://crates.io/crates/thiserror) - Error handling
 - [rand](https://crates.io/crates/rand) - Random number generation

@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Orchestration Module** (`orchestration` module)
+  - `DataProfile` — automated data profiling (stationarity, trend, seasonality, quality score, ACF statistics)
+  - `PipelineBuilder` — declarative pipeline construction with model selection, cross-validation, fallback chains, and forecast constraints
+  - `Pipeline` / `PipelineConfig` — end-to-end pipeline execution and replay from saved configuration
+  - `PipelineResult` — forecast with full diagnostics (profile, decision log, confidence metrics, horizon analysis)
+  - `DecisionLog` — structured audit trail of pipeline decisions with categories, outcomes, and timing
+  - `FallbackChain` — ordered model failover with automatic recovery
+  - `HorizonAnalysis` — per-step-ahead error decomposition (RMSE, MAE, bias per horizon step)
+  - `ExecutionMetadata` / `ExecutionTimer` — fit/predict timing and convergence tracking
+  - `SelectionConfidence` — Diebold-Mariano pairwise forecast accuracy test (via `anofox-statistics`)
+  - `ModelConfidenceSet` — Hansen-Lunde-Nason (2011) model confidence set procedure (bootstrap-based)
+  - `QualityFloor` — Hansen (2005) Superior Predictive Ability test vs benchmark model
+  - Orchestration prelude (`orchestration::prelude::*`) for convenient imports
+
+- **Forecasting Metrics**
+  - `bias()` — signed forecast bias (mean error)
+  - `periods_in_stock()` — Periods-in-Stock metric for inventory forecasting
+
 - **Automatic Identification of Demand (AID)**
   - `AidAnalyzer` — wraps `anofox-regression`'s AID classifier with `&[f64]`/`TimeSeries` input
   - Summary statistics: demand type (Regular/Intermittent), best-fitting distribution (Poisson, NegBin, Normal, Gamma, LogNormal, etc.), fitted parameters, zero proportion

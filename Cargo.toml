@@ -32,6 +32,7 @@ thiserror = "2.0"
 rand = "0.8"
 rustfft = "6.2"
 anofox-regression = { version = "0.5.0", optional = true }
+anofox-statistics = "0.4"
 faer = { version = "0.23", optional = true, default-features = false, features = ["std", "linalg"] }
 serde = { version = "1.0", features = ["derive"], optional = true }
 serde_json = { version = "1.0", optional = true }
@@ -213,4 +214,9 @@ path = "examples/postprocess/unified_api.rs"
 [[example]]
 name = "postprocess_backtest"
 path = "examples/postprocess/backtest.rs"
+
+# Orchestration
+[[example]]
+name = "orchestration"
+path = "examples/orchestration.rs"
 

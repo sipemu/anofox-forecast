@@ -369,6 +369,50 @@ pub fn skill_score(metric_model: f64, metric_baseline: f64) -> f64 {
     1.0 - metric_model / metric_baseline
 }
 
+/// Forecast bias (mean error).
+///
+/// `bias = mean(forecast - actual)`
+///
+/// Positive bias indicates systematic over-forecasting, negative indicates
+/// under-forecasting. Unlike `IntermittentDiagnostics::bias` which only
+/// considers non-zero actual periods, this computes bias over all observations.
+///
+/// Returns `NaN` for empty or mismatched slices.
+pub fn bias(actual: &[f64], forecast: &[f64]) -> f64 {
+    if actual.len() != forecast.len() || actual.is_empty() {
+        return f64::NAN;
+    }
+    let n = actual.len() as f64;
+    actual
+        .iter()
+        .zip(forecast.iter())
+        .map(|(a, f)| f - a)
+        .sum::<f64>()
+        / n
+}
+
+/// Periods-In-Stock (PIS).
+///
+/// Cumulative sum of `(forecast[i] - actual[i])` at each time step.
+/// Positive values indicate cumulative over-forecasting (overstock),
+/// negative values indicate cumulative under-forecasting (stockout risk).
+///
+/// Returns an empty vector for empty or mismatched slices.
+pub fn periods_in_stock(actual: &[f64], forecast: &[f64]) -> Vec<f64> {
+    if actual.len() != forecast.len() || actual.is_empty() {
+        return Vec::new();
+    }
+    let mut cum = 0.0;
+    actual
+        .iter()
+        .zip(forecast.iter())
+        .map(|(a, f)| {
+            cum += f - a;
+            cum
+        })
+        .collect()
+}
+
 /// Comprehensive forecast metrics combining point-forecast accuracy measures.
 #[derive(Debug, Clone)]
 pub struct ForecastMetrics {
@@ -831,5 +875,101 @@ mod tests {
         assert!(fm.mae.is_finite());
         assert!(fm.smape.is_finite());
         assert!(fm.wape.is_finite());
+    }
+
+    // --- Bias tests ---
+
+    #[test]
+    fn bias_perfect() {
+        let actual = vec![1.0, 2.0, 3.0];
+        assert_relative_eq!(bias(&actual, &actual), 0.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn bias_overforecast() {
+        let actual = vec![1.0, 2.0, 3.0];
+        let forecast = vec![2.0, 3.0, 4.0]; // always +1
+        assert_relative_eq!(bias(&actual, &forecast), 1.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn bias_underforecast() {
+        let actual = vec![5.0, 5.0, 5.0];
+        let forecast = vec![3.0, 3.0, 3.0]; // always -2
+        assert_relative_eq!(bias(&actual, &forecast), -2.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn bias_cancels_out() {
+        let actual = vec![10.0, 10.0];
+        let forecast = vec![12.0, 8.0]; // +2 then -2
+        assert_relative_eq!(bias(&actual, &forecast), 0.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn bias_empty() {
+        assert!(bias(&[], &[]).is_nan());
+    }
+
+    #[test]
+    fn bias_mismatched() {
+        assert!(bias(&[1.0], &[1.0, 2.0]).is_nan());
+    }
+
+    // --- PIS tests ---
+
+    #[test]
+    fn pis_perfect() {
+        let actual = vec![5.0, 3.0, 4.0];
+        let pis = periods_in_stock(&actual, &actual);
+        assert_eq!(pis.len(), 3);
+        for &v in &pis {
+            assert_relative_eq!(v, 0.0, epsilon = 1e-10);
+        }
+    }
+
+    #[test]
+    fn pis_constant_overforecast() {
+        let actual = vec![3.0, 3.0, 3.0, 3.0];
+        let forecast = vec![5.0, 5.0, 5.0, 5.0]; // +2 each step
+        let pis = periods_in_stock(&actual, &forecast);
+        assert_eq!(pis.len(), 4);
+        assert_relative_eq!(pis[0], 2.0, epsilon = 1e-10);
+        assert_relative_eq!(pis[1], 4.0, epsilon = 1e-10);
+        assert_relative_eq!(pis[2], 6.0, epsilon = 1e-10);
+        assert_relative_eq!(pis[3], 8.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn pis_underforecast() {
+        let actual = vec![5.0, 5.0, 5.0];
+        let forecast = vec![4.0, 4.0, 4.0]; // -1 each step
+        let pis = periods_in_stock(&actual, &forecast);
+        assert_relative_eq!(pis[0], -1.0, epsilon = 1e-10);
+        assert_relative_eq!(pis[1], -2.0, epsilon = 1e-10);
+        assert_relative_eq!(pis[2], -3.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn pis_mixed() {
+        let actual = vec![10.0, 5.0, 8.0];
+        let forecast = vec![8.0, 7.0, 6.0];
+        // step 0: 8-10 = -2
+        // step 1: -2 + (7-5) = 0
+        // step 2: 0 + (6-8) = -2
+        let pis = periods_in_stock(&actual, &forecast);
+        assert_relative_eq!(pis[0], -2.0, epsilon = 1e-10);
+        assert_relative_eq!(pis[1], 0.0, epsilon = 1e-10);
+        assert_relative_eq!(pis[2], -2.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn pis_empty() {
+        assert!(periods_in_stock(&[], &[]).is_empty());
+    }
+
+    #[test]
+    fn pis_mismatched() {
+        assert!(periods_in_stock(&[1.0], &[1.0, 2.0]).is_empty());
     }
 }

@@ -31,6 +31,7 @@ name = "anofox-forecast"
 version = "0.4.5"
 dependencies = [
  "anofox-regression",
+ "anofox-statistics",
  "approx",
  "bincode",
  "chrono",
@@ -72,6 +73,18 @@ dependencies = [
  "argmin-math",
  "faer",
  "getrandom 0.3.4",
+ "statrs",
+ "thiserror 2.0.17",
+]
+
+[[package]]
+name = "anofox-statistics"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4248509e270e5fb61677e7a4909ea44c33ec4177c61feb9f438fd36566e834bf"
+dependencies = [
+ "rand 0.8.5",
+ "rand_chacha 0.3.1",
  "statrs",
  "thiserror 2.0.17",
 ]

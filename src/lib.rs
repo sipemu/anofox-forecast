@@ -35,6 +35,7 @@ pub mod error;
 pub mod features;
 pub mod hierarchy;
 pub mod models;
+pub mod orchestration;
 #[cfg(feature = "postprocess")]
 pub mod postprocess;
 pub mod seasonality;
