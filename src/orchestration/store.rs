@@ -1,8 +1,7 @@
 //! Abstract storage layer for orchestration types.
 //!
 //! Provides a [`PipelineStore`] trait decoupled from any specific serialization
-//! format. A default JSON file implementation is in [`super::store_json`].
-//! Future backends (DuckDB, SQLite, etc.) only need to implement this trait.
+//! format. Future backends (DuckDB, SQLite, etc.) only need to implement this trait.
 
 use std::collections::BTreeMap;
 use std::fmt;
