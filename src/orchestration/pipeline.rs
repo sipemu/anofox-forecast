@@ -2,25 +2,42 @@
 //!
 //! A [`PipelineBuilder`] chains configuration steps into a [`Pipeline`] that
 //! can be executed against a [`TimeSeries`]. The result captures the forecast,
-//! data profile, decision log, execution metadata, and per-horizon analysis.
+//! data profile, decision log, execution metadata, per-horizon analysis,
+//! preprocessing info, ensemble weights, and multi-metric scores.
 //!
-//! Pipeline configurations can be serialized to JSON and replayed on new data
-//! via [`PipelineConfig`].
+//! Pipeline configurations can be replayed on new data via [`PipelineConfig`].
 
 use std::fmt;
 
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
 use crate::models::baseline::{Naive, SimpleMovingAverage};
+use crate::models::ensemble::{CombinationMethod, Ensemble};
 use crate::models::{Forecaster, ModelRegistry};
-use crate::utils::metrics::mae;
 
 use super::confidence::{ModelConfidenceSet, QualityFloor, SelectionConfidence};
 use super::decision_log::{DecisionCategory, DecisionLog, DecisionOutcome};
 use super::fallback::FallbackChain;
 use super::horizon::HorizonAnalysis;
 use super::metadata::{ExecutionMetadata, ExecutionTimer};
+use super::metric_strategy::{MetricScores, MetricStrategy};
+use super::preprocess::{
+    apply_preprocessing, invert_boxcox_forecast, PreprocessMode, PreprocessResult,
+};
 use super::profile::DataProfile;
+use super::report::PipelineReport;
+
+/// How ensemble construction should be handled.
+#[derive(Debug, Clone, Default)]
+pub enum EnsembleMode {
+    /// Ensemble the models in the Model Confidence Set (if > 1 model).
+    Auto,
+    /// Always ensemble top-k with the given method.
+    Fixed(CombinationMethod),
+    /// No ensemble — pick the single best model (default).
+    #[default]
+    None,
+}
 
 /// Serializable pipeline configuration for replay on new data.
 #[derive(Debug, Clone)]
@@ -45,6 +62,14 @@ pub struct PipelineConfig {
     pub horizon_analysis: bool,
     /// Seasonal period hint (0 = none).
     pub seasonal_period: usize,
+    /// Preprocessing mode.
+    pub preprocess: PreprocessMode,
+    /// Metric strategy for model selection.
+    pub metric_strategy: MetricStrategy,
+    /// Ensemble construction mode.
+    pub ensemble_mode: EnsembleMode,
+    /// Conformal postprocessing coverage (0 = disabled).
+    pub postprocess_coverage: f64,
 }
 
 impl Default for PipelineConfig {
@@ -60,6 +85,10 @@ impl Default for PipelineConfig {
             non_negative: false,
             horizon_analysis: false,
             seasonal_period: 0,
+            preprocess: PreprocessMode::None,
+            metric_strategy: MetricStrategy::default(),
+            ensemble_mode: EnsembleMode::None,
+            postprocess_coverage: 0.0,
         }
     }
 }
@@ -85,6 +114,19 @@ pub struct PipelineResult {
     pub model_confidence_set: Option<ModelConfidenceSet>,
     /// Quality floor check (SPA test vs Naive).
     pub quality_floor: Option<QualityFloor>,
+    /// Preprocessing info (if preprocessing was applied).
+    pub preprocess: Option<PreprocessResult>,
+    /// Ensemble model weights (if ensemble mode was used).
+    pub ensemble_weights: Option<Vec<(String, f64)>>,
+    /// Per-model metric scores from multi-metric evaluation.
+    pub metric_scores: Option<Vec<(String, MetricScores)>>,
+}
+
+impl PipelineResult {
+    /// Build a structured report from this result.
+    pub fn report(&self) -> PipelineReport {
+        PipelineReport::from_result(self)
+    }
 }
 
 impl fmt::Display for PipelineResult {
@@ -100,6 +142,11 @@ impl fmt::Display for PipelineResult {
         if let Some(ref profile) = self.profile {
             writeln!(f, "Series length: {}", profile.n_observations)?;
         }
+        if let Some(ref pp) = self.preprocess {
+            if !pp.steps_applied.is_empty() {
+                writeln!(f, "{}", pp)?;
+            }
+        }
         if let Some(ref qf) = self.quality_floor {
             writeln!(f, "{}", qf)?;
         }
@@ -108,6 +155,13 @@ impl fmt::Display for PipelineResult {
         }
         if let Some(ref mcs) = self.model_confidence_set {
             writeln!(f, "{}", mcs)?;
+        }
+        if let Some(ref weights) = self.ensemble_weights {
+            let parts: Vec<String> = weights
+                .iter()
+                .map(|(n, w)| format!("{}({:.2})", n, w))
+                .collect();
+            writeln!(f, "Ensemble: {}", parts.join(" + "))?;
         }
         writeln!(f, "\n{}", self.log)?;
         Ok(())
@@ -209,6 +263,31 @@ impl PipelineBuilder {
         self
     }
 
+    /// Set the preprocessing mode.
+    pub fn preprocess(mut self, mode: PreprocessMode) -> Self {
+        self.config.preprocess = mode;
+        self
+    }
+
+    /// Set the metric strategy for model selection.
+    pub fn metric(mut self, strategy: MetricStrategy) -> Self {
+        self.config.metric_strategy = strategy;
+        self
+    }
+
+    /// Set the ensemble mode.
+    pub fn ensemble(mut self, mode: EnsembleMode) -> Self {
+        self.config.ensemble_mode = mode;
+        self
+    }
+
+    /// Enable conformal postprocessing at the given coverage level (e.g. 0.90).
+    #[cfg(feature = "postprocess")]
+    pub fn postprocess(mut self, coverage: f64) -> Self {
+        self.config.postprocess_coverage = coverage;
+        self
+    }
+
     /// Build the pipeline from the current configuration.
     pub fn build(self) -> Pipeline {
         Pipeline {
@@ -284,17 +363,34 @@ impl Pipeline {
             None
         };
 
-        // ── Step 2: Model selection via registry ───────────────────
+        // ── Step 2: Preprocessing ───────────────────────────────────
+        let (working_ts, preprocess_result) =
+            apply_preprocessing(ts, &self.config.preprocess, profile.as_ref())?;
+        let has_preprocess = !preprocess_result.steps_applied.is_empty();
+        if has_preprocess {
+            log.record_with_detail(
+                DecisionCategory::Preprocessing,
+                format!("Applied {}", preprocess_result),
+                DecisionOutcome::Success,
+                preprocess_result.steps_applied.join(", "),
+            );
+        }
+
+        // ── Step 3: Model selection via registry ────────────────────
         let registry = match &self.registry {
             Some(r) if !r.is_empty() => r,
             _ => {
-                // No registry — use fallback chain directly
                 return self.execute_fallback_only(
-                    ts,
+                    &working_ts,
                     effective_horizon,
                     log,
                     model_metadata,
                     profile,
+                    if has_preprocess {
+                        Some(preprocess_result)
+                    } else {
+                        None
+                    },
                 );
             }
         };
@@ -304,20 +400,44 @@ impl Pipeline {
         } else {
             effective_horizon
         };
-        let n = ts.len();
+        let n = working_ts.len();
 
         if n <= holdout {
-            return self.execute_fallback_only(ts, effective_horizon, log, model_metadata, profile);
+            return self.execute_fallback_only(
+                &working_ts,
+                effective_horizon,
+                log,
+                model_metadata,
+                profile,
+                if has_preprocess {
+                    Some(preprocess_result)
+                } else {
+                    None
+                },
+            );
         }
 
         // Train/test split for holdout evaluation
-        let train_ts = ts.slice(0, n - holdout)?;
-        let test_values = ts.values(0)?;
+        let train_ts = working_ts.slice(0, n - holdout)?;
+        let test_values = working_ts.values(0)?;
         let test_actual = &test_values[n - holdout..];
 
-        // Evaluate all registry models on holdout.
-        // Track per-observation absolute errors for DM/MCS/SPA.
-        let mut scored: Vec<(String, f64)> = Vec::new();
+        // Resolve metric strategy
+        let is_intermittent = profile.as_ref().is_some_and(|p| p.is_intermittent);
+        let has_negatives = profile.as_ref().is_some_and(|p| p.has_negatives);
+        let metric_desc = self
+            .config
+            .metric_strategy
+            .description(is_intermittent, has_negatives);
+        log.record_with_detail(
+            DecisionCategory::ModelSelection,
+            "Metric strategy resolved",
+            DecisionOutcome::Success,
+            &metric_desc,
+        );
+
+        // Evaluate all registry models on holdout
+        let mut scored: Vec<(String, f64, MetricScores)> = Vec::new();
         let mut per_obs_losses: Vec<(String, Vec<f64>)> = Vec::new();
 
         for spec in registry.iter() {
@@ -329,8 +449,12 @@ impl Pipeline {
                 Ok(forecast) => {
                     let dur = timer.stop();
                     let preds = forecast.primary();
-                    let score = mae(test_actual, preds);
-                    // Per-observation absolute errors for statistical tests
+                    let ms = self.config.metric_strategy.score(
+                        test_actual,
+                        preds,
+                        is_intermittent,
+                        has_negatives,
+                    );
                     let obs_losses: Vec<f64> = test_actual
                         .iter()
                         .zip(preds.iter())
@@ -340,7 +464,7 @@ impl Pipeline {
                         DecisionCategory::ModelFitting,
                         format!("Fitted {}", name),
                         DecisionOutcome::Success,
-                        Some(format!("MAE={:.4}", score)),
+                        Some(format!("{}", ms)),
                         Some(dur),
                     );
                     model_metadata.push(
@@ -351,7 +475,7 @@ impl Pipeline {
                             .with_convergence(true),
                     );
                     per_obs_losses.push((name.clone(), obs_losses));
-                    scored.push((name, score));
+                    scored.push((name, ms.primary, ms));
                 }
                 Err(e) => {
                     let dur = timer.stop();
@@ -373,7 +497,7 @@ impl Pipeline {
             }
         }
 
-        // Sort by score (lower MAE is better)
+        // Sort by composite score (lower is better)
         scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
         if scored.is_empty() {
@@ -382,19 +506,36 @@ impl Pipeline {
                 "All models failed, using fallback",
                 DecisionOutcome::FallbackUsed,
             );
-            return self.execute_fallback_only(ts, effective_horizon, log, model_metadata, profile);
+            return self.execute_fallback_only(
+                &working_ts,
+                effective_horizon,
+                log,
+                model_metadata,
+                profile,
+                if has_preprocess {
+                    Some(preprocess_result)
+                } else {
+                    None
+                },
+            );
         }
+
+        // Collect metric scores before truncation
+        let all_metric_scores: Vec<(String, MetricScores)> = scored
+            .iter()
+            .map(|(name, _, ms)| (name.clone(), ms.clone()))
+            .collect();
 
         // Select top-k if configured
         if self.config.select_top_k > 0 {
             let top_k = self.config.select_top_k.min(scored.len());
             let top_names: std::collections::HashSet<&str> =
-                scored[..top_k].iter().map(|(n, _)| n.as_str()).collect();
+                scored[..top_k].iter().map(|(n, _, _)| n.as_str()).collect();
             per_obs_losses.retain(|(n, _)| top_names.contains(n.as_str()));
             scored.truncate(top_k);
         }
 
-        // ── Quality floor: SPA test vs Naive ─────────────────────────
+        // ── Quality floor: SPA test vs Naive ────────────────────────
         let quality_floor = {
             let mut naive = Naive::new();
             if let Ok(()) = naive.fit(&train_ts) {
@@ -434,7 +575,7 @@ impl Pipeline {
             }
         };
 
-        // ── Model Confidence Set ─────────────────────────────────────
+        // ── Model Confidence Set ────────────────────────────────────
         let model_confidence_set = if per_obs_losses.len() >= 2 {
             let mcs = ModelConfidenceSet::from_cv_scores(per_obs_losses.clone(), 0.10);
             if let Some(ref mcs) = mcs {
@@ -450,7 +591,7 @@ impl Pipeline {
             None
         };
 
-        // ── Selection confidence (DM test, top-2) ────────────────────
+        // ── Selection confidence (DM test, top-2) ───────────────────
         let selection_confidence = if scored.len() >= 2 {
             let best_name = &scored[0].0;
             let runner_up_name = &scored[1].0;
@@ -479,43 +620,70 @@ impl Pipeline {
             None
         };
 
-        // ── Select winner and produce final forecast ────────────────
-        let winner_name = scored[0].0.clone();
-        log.record_with_detail(
-            DecisionCategory::ModelSelection,
-            format!("Selected {}", winner_name),
-            DecisionOutcome::Success,
-            format!(
-                "MAE={:.4}, {} of {} models succeeded",
-                scored[0].1,
-                scored.len(),
-                registry.len()
-            ),
-        );
+        // ── Decide: ensemble or single winner ───────────────────────
+        let (forecast, final_model_name, ensemble_weights) = self.produce_forecast(
+            registry,
+            &working_ts,
+            effective_horizon,
+            &scored,
+            &model_confidence_set,
+            &mut log,
+        )?;
 
-        // Re-fit winner on full data and predict
-        let timer = ExecutionTimer::start();
-        let forecast =
-            self.fit_and_predict_model(registry, &winner_name, ts, effective_horizon, &mut log);
-        let _dur = timer.stop();
-
-        let forecast = match forecast {
-            Ok(f) => f,
-            Err(_) if self.config.use_fallback => {
+        // Handle forecast failure with fallback
+        let (forecast, final_model_name, ensemble_weights) = match forecast {
+            Some(f) => (f, final_model_name, ensemble_weights),
+            None if self.config.use_fallback => {
                 log.record(
                     DecisionCategory::Fallback,
-                    format!("Winner {} failed on full data, using fallback", winner_name),
+                    "Winner failed on full data, using fallback",
                     DecisionOutcome::FallbackUsed,
                 );
                 return self.execute_fallback_only(
-                    ts,
+                    &working_ts,
                     effective_horizon,
                     log,
                     model_metadata,
                     profile,
+                    if has_preprocess {
+                        Some(preprocess_result)
+                    } else {
+                        None
+                    },
                 );
             }
-            Err(e) => return Err(e),
+            None => {
+                return Err(ForecastError::ComputationError(
+                    "Selected model failed on full data".into(),
+                ));
+            }
+        };
+
+        // ── Postprocessing (conformal calibration) ──────────────────
+        #[cfg(feature = "postprocess")]
+        let forecast = if self.config.postprocess_coverage > 0.0 {
+            self.apply_postprocessing(
+                &working_ts,
+                &forecast,
+                &final_model_name,
+                registry,
+                &mut log,
+            )
+        } else {
+            forecast
+        };
+
+        // ── Invert preprocessing on forecast ────────────────────────
+        let forecast = if let Some(lambda) = preprocess_result.boxcox_lambda {
+            let inverted = invert_boxcox_forecast(forecast.primary(), lambda);
+            log.record(
+                DecisionCategory::Postprocessing,
+                "Inverted Box-Cox on forecast",
+                DecisionOutcome::Success,
+            );
+            Forecast::from_values(inverted)
+        } else {
+            forecast
         };
 
         // ── Apply constraints ───────────────────────────────────────
@@ -532,7 +700,7 @@ impl Pipeline {
 
         Ok(PipelineResult {
             forecast,
-            model_name: winner_name,
+            model_name: final_model_name,
             profile,
             log,
             model_metadata,
@@ -540,7 +708,216 @@ impl Pipeline {
             selection_confidence,
             model_confidence_set,
             quality_floor,
+            preprocess: if has_preprocess {
+                Some(preprocess_result)
+            } else {
+                None
+            },
+            ensemble_weights,
+            metric_scores: Some(all_metric_scores),
         })
+    }
+
+    /// Produce the final forecast — either single model or ensemble.
+    fn produce_forecast(
+        &self,
+        registry: &ModelRegistry,
+        ts: &TimeSeries,
+        horizon: usize,
+        scored: &[(String, f64, MetricScores)],
+        mcs: &Option<ModelConfidenceSet>,
+        log: &mut DecisionLog,
+    ) -> Result<(Option<Forecast>, String, Option<Vec<(String, f64)>>)> {
+        match &self.config.ensemble_mode {
+            EnsembleMode::None => {
+                let winner_name = scored[0].0.clone();
+                log.record_with_detail(
+                    DecisionCategory::ModelSelection,
+                    format!("Selected {}", winner_name),
+                    DecisionOutcome::Success,
+                    format!(
+                        "{}, {} of {} models succeeded",
+                        scored[0].2,
+                        scored.len(),
+                        registry.len()
+                    ),
+                );
+
+                let forecast = self.fit_and_predict_model(registry, &winner_name, ts, horizon, log);
+                match forecast {
+                    Ok(f) => Ok((Some(f), winner_name, None)),
+                    Err(_) => Ok((None, winner_name, None)),
+                }
+            }
+            EnsembleMode::Auto => {
+                // Use MCS included models if > 1, otherwise single winner
+                let ensemble_names: Vec<&str> = match mcs {
+                    Some(mcs) if mcs.len() > 1 => mcs.included.iter().map(|s| s.as_str()).collect(),
+                    _ => vec![scored[0].0.as_str()],
+                };
+
+                if ensemble_names.len() <= 1 {
+                    let winner = ensemble_names[0].to_string();
+                    log.record_with_detail(
+                        DecisionCategory::ModelSelection,
+                        format!("Selected {} (MCS single winner)", winner),
+                        DecisionOutcome::Success,
+                        format!("{}", scored[0].2),
+                    );
+                    let forecast = self.fit_and_predict_model(registry, &winner, ts, horizon, log);
+                    match forecast {
+                        Ok(f) => Ok((Some(f), winner, None)),
+                        Err(_) => Ok((None, winner, None)),
+                    }
+                } else {
+                    self.build_ensemble(
+                        registry,
+                        ts,
+                        horizon,
+                        &ensemble_names,
+                        CombinationMethod::WeightedMSE,
+                        log,
+                    )
+                }
+            }
+            EnsembleMode::Fixed(method) => {
+                let names: Vec<&str> = scored.iter().map(|(n, _, _)| n.as_str()).collect();
+                self.build_ensemble(registry, ts, horizon, &names, *method, log)
+            }
+        }
+    }
+
+    /// Build and run an ensemble from named models.
+    fn build_ensemble(
+        &self,
+        registry: &ModelRegistry,
+        ts: &TimeSeries,
+        horizon: usize,
+        names: &[&str],
+        method: CombinationMethod,
+        log: &mut DecisionLog,
+    ) -> Result<(Option<Forecast>, String, Option<Vec<(String, f64)>>)> {
+        let mut models: Vec<Box<dyn Forecaster>> = Vec::new();
+        let mut used_names: Vec<String> = Vec::new();
+
+        for &name in names {
+            for spec in registry.iter() {
+                let mut model = spec.create();
+                if model.name() == name {
+                    if model.fit(ts).is_ok() {
+                        used_names.push(name.to_string());
+                        models.push(model);
+                    }
+                    break;
+                }
+            }
+        }
+
+        if models.is_empty() {
+            return Ok((None, "Ensemble(empty)".into(), None));
+        }
+
+        if models.len() == 1 {
+            let name = used_names[0].clone();
+            let forecast = models.remove(0).predict(horizon);
+            match forecast {
+                Ok(f) => return Ok((Some(f), name, None)),
+                Err(_) => return Ok((None, name, None)),
+            }
+        }
+
+        let ensemble_name = format!("Ensemble({})", used_names.join("+"));
+
+        let n_models = models.len();
+        let mut ensemble = Ensemble::new(models).with_method(method);
+        ensemble.fit(ts)?;
+        let forecast = ensemble.predict(horizon)?;
+
+        let weights: Vec<(String, f64)> = used_names
+            .iter()
+            .zip(ensemble.weights().iter())
+            .map(|(n, &w)| (n.clone(), w))
+            .collect();
+
+        log.record_with_detail(
+            DecisionCategory::Ensembling,
+            format!("Built ensemble of {} models", n_models),
+            DecisionOutcome::Success,
+            weights
+                .iter()
+                .map(|(n, w)| format!("{}={:.3}", n, w))
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+
+        Ok((Some(forecast), ensemble_name, Some(weights)))
+    }
+
+    /// Apply conformal postprocessing to a forecast.
+    #[cfg(feature = "postprocess")]
+    fn apply_postprocessing(
+        &self,
+        ts: &TimeSeries,
+        forecast: &Forecast,
+        model_name: &str,
+        registry: &ModelRegistry,
+        log: &mut DecisionLog,
+    ) -> Forecast {
+        use crate::postprocess::{ConformalPredictor, PointForecasts};
+
+        // Re-fit model and get in-sample residuals for calibration
+        let n = ts.len();
+        let horizon = forecast.primary().len();
+        if n <= horizon + 10 {
+            return forecast.clone();
+        }
+
+        // Use a holdout to generate calibration residuals
+        let cal_size = (n / 4).max(horizon).min(n / 2);
+        let cal_train = match ts.slice(0, n - cal_size) {
+            Ok(t) => t,
+            Err(_) => return forecast.clone(),
+        };
+
+        // Fit the model on calibration training set
+        for spec in registry.iter() {
+            let mut model = spec.create();
+            if model.name() == model_name {
+                if model.fit(&cal_train).is_ok() {
+                    if let Ok(cal_fc) = model.predict(cal_size) {
+                        let cal_actual = match ts.values(0) {
+                            Ok(v) => &v[n - cal_size..],
+                            Err(_) => return forecast.clone(),
+                        };
+
+                        let cp = ConformalPredictor::split(self.config.postprocess_coverage);
+                        if let Ok(result) = cp.fit(cal_fc.primary(), cal_actual) {
+                            let pf = PointForecasts::from_values(forecast.primary().to_vec());
+                            let intervals = cp.predict(&result, &pf);
+
+                            log.record_with_detail(
+                                DecisionCategory::Postprocessing,
+                                format!(
+                                    "Applied conformal calibration ({:.0}%)",
+                                    self.config.postprocess_coverage * 100.0
+                                ),
+                                DecisionOutcome::Success,
+                                format!("quantile={:.4}", result.quantile_value()),
+                            );
+
+                            return Forecast::from_values_with_intervals(
+                                forecast.primary().to_vec(),
+                                intervals.lower().to_vec(),
+                                intervals.upper().to_vec(),
+                            );
+                        }
+                    }
+                }
+                break;
+            }
+        }
+
+        forecast.clone()
     }
 
     /// Fallback-only path when no registry or all models fail.
@@ -551,6 +928,7 @@ impl Pipeline {
         mut log: DecisionLog,
         model_metadata: Vec<ExecutionMetadata>,
         profile: Option<DataProfile>,
+        preprocess: Option<PreprocessResult>,
     ) -> Result<PipelineResult> {
         if !self.config.use_fallback {
             return Err(ForecastError::ComputationError(
@@ -587,6 +965,9 @@ impl Pipeline {
             selection_confidence: None,
             model_confidence_set: None,
             quality_floor: None,
+            preprocess,
+            ensemble_weights: None,
+            metric_scores: None,
         })
     }
 
@@ -624,6 +1005,7 @@ mod tests {
     use crate::core::TimeSeriesBuilder;
     use crate::models::baseline::HistoricAverage;
     use crate::models::ModelSpec;
+    use crate::orchestration::metric_strategy::Metric;
     use chrono::{Duration, Utc};
 
     fn make_ts(n: usize) -> TimeSeries {
@@ -711,7 +1093,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.forecast.primary().len(), 5);
-        // Should have used Naive or SMA from fallback
         assert!(
             result.model_name == "Naive" || result.model_name == "SMA(5)",
             "Expected fallback model, got: {}",
@@ -771,7 +1152,6 @@ mod tests {
             .execute(&ts, 5)
             .unwrap();
 
-        // quality_floor (SPA test) should be populated
         assert!(result.quality_floor.is_some());
     }
 
@@ -785,7 +1165,6 @@ mod tests {
             .execute(&ts, 5)
             .unwrap();
 
-        // MCS should be populated when multiple models succeed
         assert!(result.model_confidence_set.is_some());
         let mcs = result.model_confidence_set.unwrap();
         assert!(!mcs.is_empty());
@@ -801,7 +1180,6 @@ mod tests {
             .execute(&ts, 5)
             .unwrap();
 
-        // DM-based selection confidence should be populated
         assert!(result.selection_confidence.is_some());
         let conf = result.selection_confidence.unwrap();
         assert!(!conf.best_model.is_empty());
@@ -832,7 +1210,6 @@ mod tests {
             .execute(&ts, 5)
             .unwrap();
 
-        // Should have profiling + model fitting + selection decisions
         assert!(result.log.len() >= 3);
         assert!(!result
             .log
@@ -882,18 +1259,7 @@ mod tests {
     #[test]
     fn pipeline_from_config() {
         let ts = make_ts(50);
-        let config = PipelineConfig {
-            profile: true,
-            select_top_k: 0,
-            cv_folds: 0,
-            horizon: 5,
-            holdout: 5,
-            use_fallback: true,
-            interval_level: 0.0,
-            non_negative: false,
-            horizon_analysis: false,
-            seasonal_period: 0,
-        };
+        let config = PipelineConfig::default();
         let reg = make_registry();
         let result = Pipeline::from_config(config)
             .with_registry(reg)
@@ -910,5 +1276,122 @@ mod tests {
         assert!(config.use_fallback);
         assert_eq!(config.select_top_k, 0);
         assert_eq!(config.cv_folds, 0);
+    }
+
+    #[test]
+    fn pipeline_multi_metric_scoring() {
+        let ts = make_ts(50);
+        let reg = make_registry();
+        let result = PipelineBuilder::new()
+            .registry(reg)
+            .metric(MetricStrategy::Composite(vec![
+                (Metric::MAE, 0.5),
+                (Metric::SMAPE, 0.5),
+            ]))
+            .build()
+            .execute(&ts, 5)
+            .unwrap();
+
+        assert!(result.metric_scores.is_some());
+        let scores = result.metric_scores.unwrap();
+        assert!(!scores.is_empty());
+        // Each model should have component scores
+        for (_, ms) in &scores {
+            assert_eq!(ms.components.len(), 2);
+        }
+    }
+
+    #[test]
+    fn pipeline_auto_metric_strategy() {
+        let ts = make_ts(50);
+        let reg = make_registry();
+        let result = PipelineBuilder::new()
+            .registry(reg)
+            .metric(MetricStrategy::Auto)
+            .build()
+            .execute(&ts, 5)
+            .unwrap();
+
+        assert!(result.metric_scores.is_some());
+    }
+
+    #[test]
+    fn pipeline_ensemble_fixed() {
+        let ts = make_ts(50);
+        let reg = make_registry();
+        let result = PipelineBuilder::new()
+            .registry(reg)
+            .ensemble(EnsembleMode::Fixed(CombinationMethod::Mean))
+            .build()
+            .execute(&ts, 5)
+            .unwrap();
+
+        assert_eq!(result.forecast.primary().len(), 5);
+        // Should have ensemble weights
+        assert!(result.ensemble_weights.is_some());
+    }
+
+    #[test]
+    fn pipeline_ensemble_auto() {
+        let ts = make_ts(50);
+        let reg = make_registry();
+        let result = PipelineBuilder::new()
+            .registry(reg)
+            .ensemble(EnsembleMode::Auto)
+            .build()
+            .execute(&ts, 5)
+            .unwrap();
+
+        assert_eq!(result.forecast.primary().len(), 5);
+    }
+
+    #[test]
+    fn pipeline_report() {
+        let ts = make_ts(50);
+        let reg = make_registry();
+        let result = PipelineBuilder::new()
+            .profile()
+            .registry(reg)
+            .build()
+            .execute(&ts, 5)
+            .unwrap();
+
+        let report = result.report();
+        assert!(report.title.contains(&result.model_name));
+        let text = format!("{}", report);
+        assert!(text.contains("Summary"));
+        assert!(text.contains("Forecast"));
+    }
+
+    #[test]
+    fn pipeline_preprocess_manual() {
+        // Exponential data suitable for Box-Cox
+        let values: Vec<f64> = (1..=50).map(|i| (i as f64 * 0.1).exp()).collect();
+        let start = Utc::now();
+        let timestamps: Vec<_> = (0..50).map(|i| start + Duration::days(i as i64)).collect();
+        let ts = TimeSeriesBuilder::new()
+            .timestamps(timestamps)
+            .values(values)
+            .build()
+            .unwrap();
+        let reg = make_registry();
+
+        let result = PipelineBuilder::new()
+            .registry(reg)
+            .preprocess(PreprocessMode::Manual(
+                crate::orchestration::preprocess::PreprocessSteps {
+                    boxcox: true,
+                    outlier_treatment: false,
+                    outlier_window: 5,
+                },
+            ))
+            .build()
+            .execute(&ts, 5)
+            .unwrap();
+
+        // Should have preprocess info
+        assert!(result.preprocess.is_some());
+        let pp = result.preprocess.unwrap();
+        assert!(pp.boxcox_lambda.is_some());
     }
 }

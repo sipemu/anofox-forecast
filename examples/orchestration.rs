@@ -10,6 +10,9 @@ use anofox_forecast::models::baseline::{
 use anofox_forecast::models::exponential::SimpleExponentialSmoothing;
 use anofox_forecast::models::{Forecaster, ModelRegistry, ModelSpec};
 use anofox_forecast::orchestration::prelude::*;
+use anofox_forecast::orchestration::report::PipelineReport;
+use anofox_forecast::orchestration::store::{InMemoryStore, PipelineStore, RecordKind};
+use anofox_forecast::orchestration::tools;
 use chrono::{Duration, TimeZone, Utc};
 
 /// Build a sample time series with trend + seasonality.
@@ -244,6 +247,9 @@ fn main() {
 
     let result = PipelineBuilder::new()
         .profile()
+        .preprocess(PreprocessMode::Auto)
+        .metric(MetricStrategy::Auto)
+        .ensemble(EnsembleMode::Auto)
         .registry(registry)
         .select_models(3)
         .with_fallback()
@@ -285,6 +291,10 @@ fn main() {
         non_negative: true,
         horizon_analysis: false,
         seasonal_period: 0,
+        preprocess: PreprocessMode::default(),
+        metric_strategy: MetricStrategy::default(),
+        ensemble_mode: EnsembleMode::default(),
+        postprocess_coverage: 0.0,
     };
     println!("  Config: {:?}\n", config);
 
@@ -305,6 +315,97 @@ fn main() {
 
     println!("  Replay model: {}", replay.model_name);
     println!("  Replay forecast: {:?}", &replay.forecast.primary()[..3]);
+
+    // ───────────────────────────────────────────────────────────
+    // 9. Pipeline Report
+    // ───────────────────────────────────────────────────────────
+    println!("\n─── 9. Pipeline Report ───\n");
+
+    let report = PipelineReport::from_result(&result);
+    println!("{}", report);
+
+    // ───────────────────────────────────────────────────────────
+    // 10. Multi-Metric Selection
+    // ───────────────────────────────────────────────────────────
+    println!("─── 10. Multi-Metric Selection ───\n");
+
+    // Auto strategy selects metrics based on data characteristics
+    let auto_strat = MetricStrategy::Auto;
+    println!(
+        "  Auto (non-intermittent, non-negative): {}",
+        auto_strat.description(false, false)
+    );
+    println!(
+        "  Auto (intermittent):                   {}",
+        auto_strat.description(true, false)
+    );
+    println!(
+        "  Auto (general, has negatives):          {}",
+        auto_strat.description(false, true)
+    );
+
+    // Custom composite strategy
+    let custom = MetricStrategy::Composite(vec![
+        (Metric::MAE, 0.4),
+        (Metric::RMSE, 0.3),
+        (Metric::MDA, 0.3),
+    ]);
+    let actual = vec![10.0, 20.0, 30.0, 40.0, 50.0];
+    let predicted = vec![12.0, 18.0, 33.0, 38.0, 52.0];
+    let scores = custom.score(&actual, &predicted, false, false);
+    println!("  Custom score: {}\n", scores);
+
+    // ───────────────────────────────────────────────────────────
+    // 11. Structured Tools (MCP-ready)
+    // ───────────────────────────────────────────────────────────
+    println!("─── 11. Structured Tools ───\n");
+
+    // Profile data tool
+    let prof_output = tools::profile_data(tools::ProfileDataInput { series: &ts });
+    println!(
+        "  profile_data → {} observations, quality={:.2}",
+        prof_output.profile.n_observations, prof_output.profile.quality_score
+    );
+
+    // Select models tool
+    let sel_output = tools::select_models(tools::SelectModelsInput {
+        profile: &prof_output.profile,
+        available_models: &[],
+    });
+    println!("  select_models → {:?}", sel_output.recommended);
+    for reason in &sel_output.reasoning {
+        println!("    - {}", reason);
+    }
+
+    // ───────────────────────────────────────────────────────────
+    // 12. Abstract Storage (InMemoryStore)
+    // ───────────────────────────────────────────────────────────
+    println!("\n─── 12. Abstract Storage ───\n");
+
+    let store = InMemoryStore::new();
+    let record = anofox_forecast::orchestration::store::PipelineRecord {
+        id: "run-001".into(),
+        timestamp: chrono::Utc::now(),
+        kind: RecordKind::Result,
+        fields: Value::map_from(vec![
+            ("model", Value::String("SES".into())),
+            ("horizon", Value::Int(7)),
+            ("score", Value::Float(4.32)),
+        ]),
+    };
+    store.save(&record).unwrap();
+
+    let ids = store.list(None).unwrap();
+    println!("  Stored records: {:?}", ids);
+
+    let loaded = store.load("run-001").unwrap();
+    if let Some(rec) = loaded {
+        println!(
+            "  Loaded: kind={}, model={:?}",
+            rec.kind,
+            rec.fields.get("model")
+        );
+    }
 
     println!("\n=== Done ===");
 }

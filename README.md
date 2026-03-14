@@ -89,8 +89,14 @@ console.log(forecast.values);
 
 - **Orchestration / Agent Forecasting** (`orchestration` module)
   - `DataProfile`: Automated data profiling — stationarity (ADF), trend direction, seasonality, ACF, quality score
-  - `PipelineBuilder`: Declarative pipeline — profile → model selection → cross-validation → fallback → constraints
+  - `PipelineBuilder`: Declarative pipeline — profile → preprocess → model selection → cross-validation → ensemble → postprocess → constraints
   - `Pipeline::from_config()`: Replay a pipeline from saved `PipelineConfig`
+  - `PreprocessMode`: Automatic preprocessing — Box-Cox for skewed data, outlier replacement for low-quality data
+  - `MetricStrategy`: Data-aware multi-metric model selection — Auto, Single, or weighted Composite of MAE/MSE/RMSE/SMAPE/WAPE/MDA
+  - `EnsembleMode`: Auto (MCS-based), Fixed (specify combination method), or None (single best)
+  - `PipelineReport`: Multi-section structured report from pipeline results (summary, profile, forecast, decision log, etc.)
+  - `PipelineStore` trait: Abstract storage backend with `Value` IR — `InMemoryStore` included, swap in DuckDB/SQLite
+  - Structured tool functions: `profile_data`, `select_models`, `run_pipeline`, `explain_result` — MCP-ready with typed I/O
   - `DecisionLog`: Structured audit trail with categories, outcomes, and timing
   - `FallbackChain`: Ordered model failover with automatic recovery
   - `HorizonAnalysis`: Per-step-ahead error decomposition (RMSE, MAE, bias per horizon)
@@ -428,8 +434,13 @@ println!("Upper: {:?}", intervals.upper());
 | `ModelDiagnostics` | Comprehensive diagnostics: Ljung-Box, Jarque-Bera, Breusch-Pagan |
 | `IntermittentDiagnostics` | Syntetos-Boylan demand classification with model recommendations |
 | `AidAnalyzer` | Automatic Identification of Demand: distribution fitting, anomaly detection |
-| `PipelineBuilder` | Declarative forecasting pipeline with profiling, selection, fallback |
+| `PipelineBuilder` | Declarative forecasting pipeline with profiling, preprocessing, multi-metric selection, ensemble, fallback |
 | `DataProfile` | Automated data profiling (stationarity, trend, seasonality, quality) |
+| `PreprocessMode` | Auto/Manual preprocessing (Box-Cox, outlier replacement) |
+| `MetricStrategy` | Data-aware multi-metric model selection (Auto/Single/Composite) |
+| `EnsembleMode` | Auto (MCS-based) / Fixed / None ensemble construction |
+| `PipelineReport` | Multi-section structured report from pipeline results |
+| `PipelineStore` | Abstract storage trait with `Value` IR — backend-agnostic persistence |
 | `SelectionConfidence` | Diebold-Mariano pairwise forecast comparison |
 | `ModelConfidenceSet` | Bootstrap model confidence set (Hansen et al. 2011) |
 | `QualityFloor` | Superior Predictive Ability test vs benchmark |

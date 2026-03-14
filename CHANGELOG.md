@@ -22,6 +22,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `ModelConfidenceSet` — Hansen-Lunde-Nason (2011) model confidence set procedure (bootstrap-based)
   - `QualityFloor` — Hansen (2005) Superior Predictive Ability test vs benchmark model
   - Orchestration prelude (`orchestration::prelude::*`) for convenient imports
+  - `PreprocessMode` — automatic preprocessing pipeline (Box-Cox for skewed data, outlier replacement for low-quality data)
+  - `PreprocessSteps` — explicit control: `boxcox`, `outlier_treatment`, `outlier_window`
+  - `MetricStrategy` — data-aware multi-metric model selection
+    - `Auto`: intermittent → MAE+SMAPE, non-negative → MAE+WAPE, general → MAE+SMAPE+MDA
+    - `Single(Metric)` / `Composite(Vec<(Metric, f64)>)` for custom weighting
+    - MDA (higher-is-better) automatically inverted in composite scores
+  - `EnsembleMode` — configurable ensemble construction
+    - `Auto`: ensemble models from MCS when > 1 model included
+    - `Fixed(CombinationMethod)`: always ensemble with specified method
+    - `None`: single best model (default)
+  - `PipelineReport` — multi-section structured report from `PipelineResult`
+    - Sections: Summary, Data Profile, Preprocessing, Model Selection, Ensemble, Forecast, Horizon Analysis, Decision Log, Execution Metadata
+    - `Display` impl with column-aligned table formatting
+  - `PipelineStore` trait — abstract storage backend decoupled from serde
+    - `Value` IR enum (Null, Bool, Int, Float, String, List, Map) for backend-agnostic serialization
+    - `Storable` trait for converting orchestration types to/from `Value`
+    - `InMemoryStore` — thread-safe in-memory implementation for testing
+    - `RecordKind`: Profile, Config, Result, DecisionLog, HorizonAnalysis, Report
+  - Structured tool functions for MCP / agent integration (`orchestration::tools`)
+    - `profile_data()` — profile a time series with typed I/O
+    - `select_models()` — heuristic model recommendation from data profile
+    - `run_pipeline()` — end-to-end pipeline execution
+    - `explain_result()` — human-readable explanation (Brief/Normal/Detailed)
+  - `PipelineBuilder::preprocess()`, `.metric()`, `.ensemble()` builder methods
 
 - **Forecasting Metrics**
   - `bias()` — signed forecast bias (mean error)
