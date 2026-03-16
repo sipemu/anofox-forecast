@@ -35,7 +35,11 @@ mod ols_impl {
     use std::sync::Arc;
 
     use anofox_regression::core::IntervalType;
-    use anofox_regression::solvers::{FittedRegressor, OlsRegressor, Regressor};
+    use anofox_regression::solvers::{
+        BlsRegressor, ElasticNetRegressor, FittedRegressor, InformationCriterion,
+        LmDynamicRegressor, OlsRegressor, PoissonRegressor, QuantileRegressor, Regressor,
+        RidgeRegressor, RlsRegressor, TweedieRegressor, WlsRegressor,
+    };
     use faer::{Col, Mat};
 
     use crate::core::{Forecast, TimeSeries};
@@ -207,6 +211,239 @@ mod ols_impl {
 
         fn name(&self) -> &str {
             "ChangepointFeature"
+        }
+    }
+
+    // ── Regression backend ────────────────────────────────────────────
+
+    /// Strategy for generating observation weights in WLS.
+    #[derive(Debug, Clone)]
+    pub enum WeightStrategy {
+        /// Exponential decay: `w_i = decay^(n-1-i)`. Most recent observation
+        /// gets weight 1.0, oldest gets `decay^(n-1)`.
+        ExponentialDecay(f64),
+        /// Custom weight vector (must match training row count after lag offset).
+        Custom(Vec<f64>),
+    }
+
+    /// Specifies which regression estimator backs the forecaster.
+    ///
+    /// All backends share the same feature engineering ([`RegressionFeatures`]),
+    /// design matrix construction, and recursive prediction logic. They differ
+    /// only in the loss function / regularization applied during coefficient
+    /// estimation.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,ignore
+    /// use anofox_forecast::models::regression::*;
+    ///
+    /// // Ridge with λ = 0.1
+    /// let model = RegressionForecaster::ridge(0.1, RegressionFeatures::new().trend().fourier(7, 3));
+    ///
+    /// // Quantile regression at the median
+    /// let model = RegressionForecaster::quantile(0.5, RegressionFeatures::new().trend());
+    /// ```
+    #[derive(Debug, Clone, Default)]
+    pub enum RegressionBackend {
+        /// Ordinary Least Squares (default).
+        #[default]
+        Ols,
+        /// Ridge regression (L2 regularization).
+        Ridge {
+            /// Regularization strength (λ ≥ 0).
+            lambda: f64,
+        },
+        /// Elastic Net (L1 + L2 regularization).
+        ElasticNet {
+            /// Combined regularization strength.
+            lambda: f64,
+            /// Mixing parameter: 0 = pure Ridge, 1 = pure Lasso.
+            alpha: f64,
+        },
+        /// Quantile regression — estimate a specific conditional quantile.
+        Quantile {
+            /// Quantile to estimate (0 < τ < 1). 0.5 = median.
+            tau: f64,
+        },
+        /// Weighted Least Squares — down-weight older or less reliable observations.
+        Wls {
+            /// How observation weights are generated.
+            strategy: WeightStrategy,
+        },
+        /// Recursive Least Squares — adaptive coefficients via forgetting factor.
+        Rls {
+            /// Exponential forgetting (0 < λ ≤ 1). 1.0 = equal weights, <1 = recent emphasis.
+            forgetting_factor: f64,
+        },
+        /// Tweedie GLM — handles count, continuous, and zero-inflated data.
+        Tweedie {
+            /// Variance power: 0 = Gaussian, 1 = Poisson, 2 = Gamma, 3 = Inv-Gaussian.
+            var_power: f64,
+            /// Link function power: None = canonical. 0 = log, 1 = identity.
+            link_power: Option<f64>,
+        },
+        /// Poisson GLM — for count data (non-negative integers).
+        Poisson,
+        /// Bounded Least Squares — box constraints on coefficients.
+        Bls {
+            /// Lower bound for all coefficients (None = unconstrained).
+            lower: Option<f64>,
+            /// Upper bound for all coefficients (None = unconstrained).
+            upper: Option<f64>,
+        },
+        /// Dynamic linear model — time-varying parameters via IC-weighted model averaging.
+        ///
+        /// Automatically generates candidate models from variable subsets, fits each,
+        /// and computes observation-level IC weights. Coefficients vary over time,
+        /// giving the model the ability to adapt to structural changes.
+        Dynamic {
+            /// Information criterion for model weighting (default: AICc).
+            ic: InformationCriterion,
+            /// LOWESS smoothing span for weights (None = no smoothing).
+            lowess_span: Option<f64>,
+        },
+    }
+
+    impl RegressionBackend {
+        /// Human-readable name for this backend.
+        fn name(&self) -> &str {
+            match self {
+                Self::Ols => "OLS",
+                Self::Ridge { .. } => "Ridge",
+                Self::ElasticNet { .. } => "ElasticNet",
+                Self::Quantile { .. } => "Quantile",
+                Self::Wls { .. } => "WLS",
+                Self::Rls { .. } => "RLS",
+                Self::Tweedie { .. } => "Tweedie",
+                Self::Poisson => "Poisson",
+                Self::Bls { .. } => "BLS",
+                Self::Dynamic { .. } => "Dynamic",
+            }
+        }
+
+        /// Fit the backend to data, returning a boxed fitted regressor.
+        fn fit_to(
+            &self,
+            x: &Mat<f64>,
+            y: &Col<f64>,
+        ) -> std::result::Result<Box<dyn FittedRegressor + Send>, String> {
+            match self {
+                Self::Ols => {
+                    let model = OlsRegressor::builder().with_intercept(true).build();
+                    let fitted = model.fit(x, y).map_err(|e| format!("OLS: {}", e))?;
+                    Ok(Box::new(fitted))
+                }
+                Self::Ridge { lambda } => {
+                    let model = RidgeRegressor::builder()
+                        .with_intercept(true)
+                        .lambda(*lambda)
+                        .build();
+                    let fitted = model.fit(x, y).map_err(|e| format!("Ridge: {}", e))?;
+                    Ok(Box::new(fitted))
+                }
+                Self::ElasticNet { lambda, alpha } => {
+                    let model = ElasticNetRegressor::builder()
+                        .with_intercept(true)
+                        .lambda(*lambda)
+                        .alpha(*alpha)
+                        .build();
+                    let fitted = model.fit(x, y).map_err(|e| format!("ElasticNet: {}", e))?;
+                    Ok(Box::new(fitted))
+                }
+                Self::Quantile { tau } => {
+                    let model = QuantileRegressor::builder()
+                        .with_intercept(true)
+                        .tau(*tau)
+                        .build();
+                    let fitted = model.fit(x, y).map_err(|e| format!("Quantile: {}", e))?;
+                    Ok(Box::new(fitted))
+                }
+                Self::Wls { strategy } => {
+                    let n = y.nrows();
+                    let weights = match strategy {
+                        WeightStrategy::ExponentialDecay(decay) => {
+                            let mut w = Col::zeros(n);
+                            for i in 0..n {
+                                w[i] = decay.powi((n - 1 - i) as i32);
+                            }
+                            w
+                        }
+                        WeightStrategy::Custom(v) => {
+                            if v.len() != n {
+                                return Err(format!(
+                                    "WLS: weight vector length {} != training rows {}",
+                                    v.len(),
+                                    n
+                                ));
+                            }
+                            let mut w = Col::zeros(n);
+                            for (i, &val) in v.iter().enumerate() {
+                                w[i] = val;
+                            }
+                            w
+                        }
+                    };
+                    let model = WlsRegressor::builder()
+                        .with_intercept(true)
+                        .weights(weights)
+                        .build();
+                    let fitted = model.fit(x, y).map_err(|e| format!("WLS: {}", e))?;
+                    Ok(Box::new(fitted))
+                }
+                Self::Rls { forgetting_factor } => {
+                    let model = RlsRegressor::builder()
+                        .with_intercept(true)
+                        .forgetting_factor(*forgetting_factor)
+                        .build();
+                    let fitted = model.fit(x, y).map_err(|e| format!("RLS: {}", e))?;
+                    Ok(Box::new(fitted))
+                }
+                Self::Tweedie {
+                    var_power,
+                    link_power,
+                } => {
+                    let mut builder = TweedieRegressor::builder()
+                        .with_intercept(true)
+                        .var_power(*var_power);
+                    if let Some(lp) = link_power {
+                        builder = builder.link_power(*lp);
+                    }
+                    let model = builder.build();
+                    let fitted = model.fit(x, y).map_err(|e| format!("Tweedie: {}", e))?;
+                    Ok(Box::new(fitted))
+                }
+                Self::Poisson => {
+                    let model = PoissonRegressor::builder().with_intercept(true).build();
+                    let fitted = model.fit(x, y).map_err(|e| format!("Poisson: {}", e))?;
+                    Ok(Box::new(fitted))
+                }
+                Self::Bls { lower, upper } => {
+                    let mut builder = BlsRegressor::builder().with_intercept(true);
+                    if let Some(lb) = lower {
+                        builder = builder.lower_bound_all(*lb);
+                    }
+                    if let Some(ub) = upper {
+                        builder = builder.upper_bound_all(*ub);
+                    }
+                    let model = builder.build();
+                    let fitted = model.fit(x, y).map_err(|e| format!("BLS: {}", e))?;
+                    Ok(Box::new(fitted))
+                }
+                Self::Dynamic { ic, lowess_span } => {
+                    let mut builder = LmDynamicRegressor::builder()
+                        .with_intercept(true)
+                        .ic(*ic);
+                    if let Some(span) = lowess_span {
+                        builder = builder.lowess_span(*span);
+                    } else {
+                        builder = builder.no_smoothing();
+                    }
+                    let model = builder.build();
+                    let fitted = model.fit(x, y).map_err(|e| format!("Dynamic: {}", e))?;
+                    Ok(Box::new(fitted))
+                }
+            }
         }
     }
 
@@ -847,10 +1084,9 @@ mod ols_impl {
     // ── Fitted state ────────────────────────────────────────────────
 
     /// Internal state stored after fitting.
-    #[derive(Debug)]
     struct FittedState {
-        /// The fitted OLS model from anofox-regression.
-        model: anofox_regression::solvers::FittedOls,
+        /// The fitted regression model (any backend).
+        model: Box<dyn FittedRegressor + Send>,
         /// Feature configuration used.
         features: RegressionFeatures,
         /// Number of observations in the full series.
@@ -867,39 +1103,180 @@ mod ols_impl {
         components: Vec<FittedComponentState>,
     }
 
+    impl std::fmt::Debug for FittedState {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("FittedState")
+                .field("n_total", &self.n_total)
+                .field("n_features", &self.features.feature_names(&self.exog_names).len())
+                .field("r_squared", &self.model.r_squared())
+                .finish()
+        }
+    }
+
     // ── RegressionForecaster ────────────────────────────────────────
 
     /// A forecasting model backed by an external regression estimator.
     ///
-    /// Wraps `OlsRegressor` from `anofox-regression` behind the [`Forecaster`]
-    /// trait, enabling it to participate in pipelines, registries, ensembles,
-    /// and cross-validation just like any built-in model.
+    /// Wraps regression estimators from `anofox-regression` behind the
+    /// [`Forecaster`] trait, enabling them to participate in pipelines,
+    /// registries, ensembles, and cross-validation.
+    ///
+    /// # Backends
+    ///
+    /// | Backend | Use case |
+    /// |---|---|
+    /// | [`Ols`](RegressionBackend::Ols) | Default — unregularized |
+    /// | [`Ridge`](RegressionBackend::Ridge) | L2 regularization — many features |
+    /// | [`ElasticNet`](RegressionBackend::ElasticNet) | L1+L2 — feature selection |
+    /// | [`Quantile`](RegressionBackend::Quantile) | Conditional quantile estimation |
+    /// | [`Wls`](RegressionBackend::Wls) | Observation weighting / recency |
+    /// | [`Rls`](RegressionBackend::Rls) | Adaptive / online coefficients |
+    /// | [`Tweedie`](RegressionBackend::Tweedie) | GLM for count / continuous data |
+    /// | [`Poisson`](RegressionBackend::Poisson) | GLM for count data |
+    /// | [`Bls`](RegressionBackend::Bls) | Box-constrained coefficients |
     ///
     /// # Example
     ///
     /// ```rust,ignore
     /// use anofox_forecast::models::regression::{RegressionForecaster, RegressionFeatures};
     ///
+    /// // OLS with trend + 3 lags
     /// let mut model = RegressionForecaster::ols(
     ///     RegressionFeatures::new().trend().lags(3),
     /// );
-    /// model.fit(&ts)?;
-    /// let forecast = model.predict(12)?;
+    ///
+    /// // Ridge with Fourier seasonality
+    /// let mut model = RegressionForecaster::ridge(
+    ///     0.1,
+    ///     RegressionFeatures::new().trend().fourier(7, 3),
+    /// );
     /// ```
     #[derive(Debug)]
     pub struct RegressionForecaster {
         features: RegressionFeatures,
+        backend: RegressionBackend,
         state: Option<FittedState>,
     }
 
     impl RegressionForecaster {
-        /// Create a regression forecaster using OLS with the given features.
-        pub fn ols(features: RegressionFeatures) -> Self {
+        /// Create a regression forecaster with the given backend and features.
+        pub fn new(backend: RegressionBackend, features: RegressionFeatures) -> Self {
             Self {
                 features,
+                backend,
                 state: None,
             }
         }
+
+        /// Create a regression forecaster using OLS with the given features.
+        pub fn ols(features: RegressionFeatures) -> Self {
+            Self::new(RegressionBackend::Ols, features)
+        }
+
+        /// Create a Ridge regression forecaster (L2 regularization).
+        pub fn ridge(lambda: f64, features: RegressionFeatures) -> Self {
+            Self::new(RegressionBackend::Ridge { lambda }, features)
+        }
+
+        /// Create an Elastic Net forecaster (L1 + L2 regularization).
+        ///
+        /// `alpha` controls the L1/L2 mix: 0 = pure Ridge, 1 = pure Lasso.
+        pub fn elastic_net(lambda: f64, alpha: f64, features: RegressionFeatures) -> Self {
+            Self::new(RegressionBackend::ElasticNet { lambda, alpha }, features)
+        }
+
+        /// Create a quantile regression forecaster.
+        ///
+        /// `tau` is the quantile to estimate (0.5 = median).
+        pub fn quantile(tau: f64, features: RegressionFeatures) -> Self {
+            Self::new(RegressionBackend::Quantile { tau }, features)
+        }
+
+        /// Create a WLS forecaster with exponential decay weighting.
+        ///
+        /// `decay` controls recency emphasis (e.g., 0.95 = moderate, 0.99 = mild).
+        pub fn wls_decay(decay: f64, features: RegressionFeatures) -> Self {
+            Self::new(
+                RegressionBackend::Wls {
+                    strategy: WeightStrategy::ExponentialDecay(decay),
+                },
+                features,
+            )
+        }
+
+        /// Create a WLS forecaster with custom weights.
+        pub fn wls(weights: Vec<f64>, features: RegressionFeatures) -> Self {
+            Self::new(
+                RegressionBackend::Wls {
+                    strategy: WeightStrategy::Custom(weights),
+                },
+                features,
+            )
+        }
+
+        /// Create a Recursive Least Squares forecaster (adaptive coefficients).
+        ///
+        /// `forgetting_factor` controls adaptation speed (0 < λ ≤ 1).
+        /// 1.0 = equal weights, 0.95 = moderate adaptation.
+        pub fn rls(forgetting_factor: f64, features: RegressionFeatures) -> Self {
+            Self::new(RegressionBackend::Rls { forgetting_factor }, features)
+        }
+
+        /// Create a Tweedie GLM forecaster.
+        ///
+        /// `var_power`: 0 = Gaussian, 1 = Poisson, 2 = Gamma, 3 = Inv-Gaussian.
+        pub fn tweedie(var_power: f64, features: RegressionFeatures) -> Self {
+            Self::new(
+                RegressionBackend::Tweedie {
+                    var_power,
+                    link_power: None,
+                },
+                features,
+            )
+        }
+
+        /// Create a Poisson GLM forecaster (for count data).
+        pub fn poisson(features: RegressionFeatures) -> Self {
+            Self::new(RegressionBackend::Poisson, features)
+        }
+
+        /// Create a Bounded Least Squares forecaster (box-constrained coefficients).
+        pub fn bls(lower: Option<f64>, upper: Option<f64>, features: RegressionFeatures) -> Self {
+            Self::new(RegressionBackend::Bls { lower, upper }, features)
+        }
+
+        /// Create a Non-Negative Least Squares forecaster (all coefficients ≥ 0).
+        pub fn nnls(features: RegressionFeatures) -> Self {
+            Self::bls(Some(0.0), None, features)
+        }
+
+        /// Create a Dynamic Linear Model forecaster (time-varying parameters).
+        ///
+        /// Automatically generates candidate models from variable subsets and
+        /// computes observation-level IC weights. Use `lowess_span` to smooth
+        /// the weights over time (e.g., 0.3), or `None` for no smoothing.
+        pub fn dynamic(features: RegressionFeatures) -> Self {
+            Self::new(
+                RegressionBackend::Dynamic {
+                    ic: InformationCriterion::AICc,
+                    lowess_span: None,
+                },
+                features,
+            )
+        }
+
+        /// Create a Dynamic Linear Model with LOWESS-smoothed weights.
+        pub fn dynamic_smoothed(lowess_span: f64, features: RegressionFeatures) -> Self {
+            Self::new(
+                RegressionBackend::Dynamic {
+                    ic: InformationCriterion::AICc,
+                    lowess_span: Some(lowess_span),
+                },
+                features,
+            )
+        }
+
+        // ── OLS convenience constructors (backward-compatible) ──────
 
         /// Create a trend-only OLS forecaster (linear regression on time index).
         pub fn linear_trend() -> Self {
@@ -931,9 +1308,19 @@ mod ols_impl {
             &self.features
         }
 
-        /// Get the fitted OLS result (coefficients, R², etc.) if fitted.
-        pub fn fitted_ols(&self) -> Option<&anofox_regression::solvers::FittedOls> {
-            self.state.as_ref().map(|s| &s.model)
+        /// Get the backend configuration.
+        pub fn backend(&self) -> &RegressionBackend {
+            &self.backend
+        }
+
+        /// Get the regression result (coefficients, R², etc.) if fitted.
+        pub fn fitted_result(&self) -> Option<&anofox_regression::core::RegressionResult> {
+            self.state.as_ref().map(|s| s.model.result())
+        }
+
+        /// Get R² of the fitted model.
+        pub fn r_squared(&self) -> Option<f64> {
+            self.state.as_ref().map(|s| s.model.r_squared())
         }
 
         /// Recursive multi-step prediction for models with lag features.
@@ -988,9 +1375,10 @@ mod ols_impl {
 
     impl Clone for RegressionForecaster {
         fn clone(&self) -> Self {
-            // State is not Clone (FittedOls), so we only clone config
+            // State is not Clone (Box<dyn FittedRegressor>), so we only clone config
             Self {
                 features: self.features.clone(),
+                backend: self.backend.clone(),
                 state: None,
             }
         }
@@ -1004,15 +1392,14 @@ mod ols_impl {
 
             let (x, y, n_train, exog_names, components) = self.features.build_matrices(series)?;
 
-            // Fit OLS via anofox-regression
-            let ols = OlsRegressor::builder()
-                .with_intercept(true)
-                .build()
-                .fit(&x, &y)
-                .map_err(|e| ForecastError::ComputationError(format!("OLS fit failed: {}", e)))?;
+            // Fit via the configured backend
+            let fitted = self
+                .backend
+                .fit_to(&x, &y)
+                .map_err(|e| ForecastError::ComputationError(format!("{} fit failed: {}", self.backend.name(), e)))?;
 
             // In-sample predictions
-            let in_sample_preds = ols.predict(&x);
+            let in_sample_preds = fitted.predict(&x);
 
             // Build full-length fitted values (NaN-padded for lag offset)
             let offset = self.features.lag_offset();
@@ -1028,7 +1415,7 @@ mod ols_impl {
             let tail_values = values[n.saturating_sub(tail_len)..].to_vec();
 
             self.state = Some(FittedState {
-                model: ols,
+                model: fitted,
                 features: self.features.clone(),
                 n_total: n,
                 tail_values,
@@ -1182,7 +1569,7 @@ mod ols_impl {
         }
 
         fn name(&self) -> &str {
-            "OLS"
+            self.backend.name()
         }
     }
 
@@ -1429,8 +1816,7 @@ mod ols_impl {
             let mut model = RegressionForecaster::linear_trend();
             model.fit(&ts).unwrap();
 
-            let ols = model.fitted_ols().unwrap();
-            let r2 = ols.r_squared();
+            let r2 = model.r_squared().unwrap();
             assert!(
                 r2 > 0.99,
                 "R² should be near 1.0 for linear data, got {}",
@@ -1521,7 +1907,7 @@ mod ols_impl {
             }
 
             // R² should be high since y = trend + sin is well modeled by Fourier + trend
-            let r2 = model.fitted_ols().unwrap().r_squared();
+            let r2 = model.r_squared().unwrap();
             assert!(
                 r2 > 0.95,
                 "R² should be > 0.95 for sinusoidal data, got {}",
@@ -1649,7 +2035,7 @@ mod ols_impl {
             );
             model.fit(&ts).unwrap();
 
-            let r2 = model.fitted_ols().unwrap().r_squared();
+            let r2 = model.r_squared().unwrap();
             assert!(r2 > 0.85, "R² should be high for dual-seasonal data, got {}", r2);
 
             let forecast = model.predict(12).unwrap();
@@ -1810,7 +2196,7 @@ mod ols_impl {
             );
             model.fit(&ts).unwrap();
 
-            let r2 = model.fitted_ols().unwrap().r_squared();
+            let r2 = model.r_squared().unwrap();
             assert!(r2 > 0.99, "R² should be high with changepoint step, got {}", r2);
 
             let forecast = model.predict(5).unwrap();
@@ -1905,11 +2291,276 @@ mod ols_impl {
                 assert!(v < 50.0, "predicted {} should not include outlier", v);
             }
         }
+
+        // ── Backend tests ───────────────────────────────────────────
+
+        #[test]
+        fn backend_ridge_fit_predict() {
+            let ts = make_linear_ts(50);
+            let mut model = RegressionForecaster::ridge(
+                0.1,
+                RegressionFeatures::new().trend().no_exog(),
+            );
+            model.fit(&ts).unwrap();
+            assert_eq!(model.name(), "Ridge");
+
+            let forecast = model.predict(5).unwrap();
+            assert_eq!(forecast.primary().len(), 5);
+            // Ridge on clean linear data should track closely
+            for (h, &pred) in forecast.primary().iter().enumerate() {
+                let expected = 2.0 * (50 + h) as f64 + 10.0;
+                assert_relative_eq!(pred, expected, epsilon = 2.0);
+            }
+        }
+
+        #[test]
+        fn backend_ridge_fourier() {
+            let ts = make_seasonal_ts(100, 7);
+            let mut model = RegressionForecaster::ridge(
+                0.01,
+                RegressionFeatures::new().trend().fourier(7, 3).no_exog(),
+            );
+            model.fit(&ts).unwrap();
+            let r2 = model.r_squared().unwrap();
+            assert!(r2 > 0.90, "Ridge R² = {} should be high", r2);
+        }
+
+        #[test]
+        fn backend_elastic_net_fit_predict() {
+            let ts = make_linear_ts(60);
+            let mut model = RegressionForecaster::elastic_net(
+                0.01,
+                0.5,
+                RegressionFeatures::new().trend().fourier(7, 2).no_exog(),
+            );
+            model.fit(&ts).unwrap();
+            assert_eq!(model.name(), "ElasticNet");
+
+            let forecast = model.predict(5).unwrap();
+            assert_eq!(forecast.primary().len(), 5);
+            for &v in forecast.primary() {
+                assert!(v.is_finite());
+            }
+        }
+
+        #[test]
+        fn backend_quantile_median() {
+            let ts = make_linear_ts(60);
+            let mut model = RegressionForecaster::quantile(
+                0.5,
+                RegressionFeatures::new().trend().no_exog(),
+            );
+            model.fit(&ts).unwrap();
+            assert_eq!(model.name(), "Quantile");
+
+            let forecast = model.predict(5).unwrap();
+            assert_eq!(forecast.primary().len(), 5);
+            // Median of near-linear data should track the trend
+            for (h, &pred) in forecast.primary().iter().enumerate() {
+                let expected = 2.0 * (60 + h) as f64 + 10.0;
+                assert_relative_eq!(pred, expected, epsilon = 3.0);
+            }
+        }
+
+        #[test]
+        fn backend_quantile_upper() {
+            let ts = make_linear_ts(60);
+            let mut m50 = RegressionForecaster::quantile(
+                0.5,
+                RegressionFeatures::new().trend().no_exog(),
+            );
+            let mut m90 = RegressionForecaster::quantile(
+                0.9,
+                RegressionFeatures::new().trend().no_exog(),
+            );
+            m50.fit(&ts).unwrap();
+            m90.fit(&ts).unwrap();
+
+            let f50 = m50.predict(1).unwrap();
+            let f90 = m90.predict(1).unwrap();
+            // For near-linear data, q90 ≥ q50 (approximately)
+            assert!(
+                f90.primary()[0] >= f50.primary()[0] - 1.0,
+                "q90={} should be ≥ q50={}",
+                f90.primary()[0],
+                f50.primary()[0],
+            );
+        }
+
+        #[test]
+        fn backend_wls_decay() {
+            let ts = make_linear_ts(60);
+            let mut model = RegressionForecaster::wls_decay(
+                0.95,
+                RegressionFeatures::new().trend().no_exog(),
+            );
+            model.fit(&ts).unwrap();
+            assert_eq!(model.name(), "WLS");
+
+            let forecast = model.predict(5).unwrap();
+            assert_eq!(forecast.primary().len(), 5);
+            for &v in forecast.primary() {
+                assert!(v.is_finite());
+            }
+        }
+
+        #[test]
+        fn backend_rls_fit_predict() {
+            let ts = make_linear_ts(60);
+            let mut model = RegressionForecaster::rls(
+                0.99,
+                RegressionFeatures::new().trend().no_exog(),
+            );
+            model.fit(&ts).unwrap();
+            assert_eq!(model.name(), "RLS");
+
+            let forecast = model.predict(5).unwrap();
+            assert_eq!(forecast.primary().len(), 5);
+            for &v in forecast.primary() {
+                assert!(v.is_finite());
+            }
+        }
+
+        #[test]
+        fn backend_tweedie_gaussian() {
+            // var_power=0 is Gaussian — should behave like OLS
+            let ts = make_linear_ts(50);
+            let mut model = RegressionForecaster::tweedie(
+                0.0,
+                RegressionFeatures::new().trend().no_exog(),
+            );
+            model.fit(&ts).unwrap();
+            assert_eq!(model.name(), "Tweedie");
+
+            let forecast = model.predict(5).unwrap();
+            for (h, &pred) in forecast.primary().iter().enumerate() {
+                let expected = 2.0 * (50 + h) as f64 + 10.0;
+                assert_relative_eq!(pred, expected, epsilon = 2.0);
+            }
+        }
+
+        #[test]
+        fn backend_poisson_count_data() {
+            // y = exp(0.02*t + 1) — count-like data
+            let n = 60;
+            let values: Vec<f64> = (0..n)
+                .map(|i| (0.02 * i as f64 + 1.0).exp().round().max(1.0))
+                .collect();
+            let ts = TimeSeries::univariate(make_timestamps(n), values).unwrap();
+
+            let mut model = RegressionForecaster::poisson(
+                RegressionFeatures::new().trend().no_exog(),
+            );
+            model.fit(&ts).unwrap();
+            assert_eq!(model.name(), "Poisson");
+
+            let forecast = model.predict(5).unwrap();
+            for &v in forecast.primary() {
+                assert!(v.is_finite());
+                assert!(v > 0.0, "Poisson should predict positive, got {}", v);
+            }
+        }
+
+        #[test]
+        fn backend_bls_nonnegative() {
+            let ts = make_linear_ts(50);
+            let mut model = RegressionForecaster::nnls(
+                RegressionFeatures::new().trend().no_exog(),
+            );
+            model.fit(&ts).unwrap();
+            assert_eq!(model.name(), "BLS");
+
+            let forecast = model.predict(5).unwrap();
+            for &v in forecast.primary() {
+                assert!(v.is_finite());
+            }
+        }
+
+        #[test]
+        fn backend_new_generic_constructor() {
+            let ts = make_linear_ts(40);
+            let mut model = RegressionForecaster::new(
+                RegressionBackend::Ridge { lambda: 0.5 },
+                RegressionFeatures::new().trend().no_exog(),
+            );
+            model.fit(&ts).unwrap();
+            assert_eq!(model.name(), "Ridge");
+            assert!(model.r_squared().unwrap() > 0.9);
+        }
+
+        #[test]
+        fn backend_model_registry_integration() {
+            use crate::models::{ModelRegistry, ModelSpec};
+
+            let mut reg = ModelRegistry::new();
+            reg.register(ModelSpec::new(
+                "OLS",
+                || Box::new(RegressionForecaster::linear_trend()),
+                false,
+            ));
+            reg.register(ModelSpec::new(
+                "Ridge(0.1)",
+                || Box::new(RegressionForecaster::ridge(0.1, RegressionFeatures::new().trend().no_exog())),
+                false,
+            ));
+            reg.register(ModelSpec::new(
+                "Quantile(0.5)",
+                || Box::new(RegressionForecaster::quantile(0.5, RegressionFeatures::new().trend().no_exog())),
+                false,
+            ));
+
+            let ts = make_linear_ts(50);
+            for spec in reg.iter() {
+                let mut model = spec.create();
+                model.fit(&ts).unwrap();
+                if !model.has_exog() {
+                    let fc = model.predict(5).unwrap();
+                    assert_eq!(fc.primary().len(), 5);
+                }
+            }
+        }
+
+        #[test]
+        fn backend_dynamic_fit_predict() {
+            let ts = make_linear_ts(60);
+            let mut model = RegressionForecaster::dynamic(
+                RegressionFeatures::new().trend().no_exog(),
+            );
+            model.fit(&ts).unwrap();
+            assert_eq!(model.name(), "Dynamic");
+
+            let forecast = model.predict(5).unwrap();
+            assert_eq!(forecast.primary().len(), 5);
+            for &v in forecast.primary() {
+                assert!(v.is_finite());
+            }
+        }
+
+        #[test]
+        fn backend_dynamic_smoothed() {
+            let ts = make_seasonal_ts(100, 7);
+            let mut model = RegressionForecaster::dynamic_smoothed(
+                0.3,
+                RegressionFeatures::new().trend().fourier(7, 2).no_exog(),
+            );
+            model.fit(&ts).unwrap();
+
+            let forecast = model.predict(7).unwrap();
+            assert_eq!(forecast.primary().len(), 7);
+            for &v in forecast.primary() {
+                assert!(v.is_finite());
+            }
+        }
     }
 }
 
 #[cfg(feature = "postprocess")]
 pub use ols_impl::{
-    ChangepointEncoding, ChangepointFeature, FeatureSafety, RegressionFeatures,
-    RegressionForecaster, SeasonalSpec, StructuralFeature, TrendType,
+    ChangepointEncoding, ChangepointFeature, FeatureSafety, RegressionBackend,
+    RegressionFeatures, RegressionForecaster, SeasonalSpec, StructuralFeature, TrendType,
+    WeightStrategy,
 };
+// Re-export InformationCriterion so users can configure Dynamic backend without
+// depending on anofox-regression directly.
+#[cfg(feature = "postprocess")]
+pub use anofox_regression::solvers::InformationCriterion;

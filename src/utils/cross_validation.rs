@@ -592,7 +592,17 @@ fn evaluate_fold<F: Forecaster>(
     let train_series = series.slice(fold.train_start, fold.train_end)?;
     let mut model = model_factory();
     model.fit(&train_series)?;
-    let forecast = model.predict(fold.test_size())?;
+
+    let horizon = fold.test_size();
+    let forecast = if model.has_exog() {
+        // Extract future regressor values from the test portion of the series
+        let test_series = series.slice(fold.test_start, fold.test_end)?;
+        let future_regs = test_series.all_regressors();
+        model.predict_with_exog(horizon, &future_regs)?
+    } else {
+        model.predict(horizon)?
+    };
+
     let predicted = forecast.primary();
     // Use direct slice to avoid collecting a Vec just for metrics computation
     let actual_slice = &series.primary_values()[fold.test_start..fold.test_end];

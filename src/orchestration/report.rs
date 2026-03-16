@@ -407,6 +407,8 @@ mod tests {
             trend_selection: None,
             seasonal_selection: None,
             structural_break_in_holdout: false,
+            holdout_forecasts: None,
+            holdout_actual: None,
         }
     }
 

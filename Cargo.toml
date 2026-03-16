@@ -103,6 +103,14 @@ name = "theta"
 path = "examples/forecasting/theta.rs"
 
 [[example]]
+name = "regression"
+path = "examples/forecasting/regression.rs"
+
+[[example]]
+name = "regression_exog_changepoints"
+path = "examples/forecasting/regression_exog_changepoints.rs"
+
+[[example]]
 name = "intermittent"
 path = "examples/forecasting/intermittent.rs"
 
@@ -113,6 +121,22 @@ path = "examples/forecasting/ensemble.rs"
 [[example]]
 name = "batch"
 path = "examples/forecasting/batch.rs"
+
+[[example]]
+name = "var"
+path = "examples/forecasting/var.rs"
+
+[[example]]
+name = "kalman"
+path = "examples/forecasting/kalman.rs"
+
+[[example]]
+name = "hierarchy"
+path = "examples/forecasting/hierarchy.rs"
+
+[[example]]
+name = "constraints"
+path = "examples/forecasting/constraints.rs"
 
 [[example]]
 name = "basic_features"
@@ -179,6 +203,10 @@ name = "diagnostics"
 path = "examples/validation/diagnostics.rs"
 
 [[example]]
+name = "bootstrap"
+path = "examples/validation/bootstrap.rs"
+
+[[example]]
 name = "forecast_export"
 path = "examples/validation/forecast_export.rs"
 
@@ -215,6 +243,15 @@ path = "examples/postprocess/unified_api.rs"
 name = "postprocess_backtest"
 path = "examples/postprocess/backtest.rs"
 
+[[example]]
+name = "temporal_aggregation"
+path = "examples/transform/temporal_aggregation.rs"
+
+[[example]]
+name = "serialization"
+path = "examples/validation/serialization.rs"
+required-features = ["serde"]
+
 # Trend Components
 [[example]]
 name = "trend_components"
@@ -228,4 +265,12 @@ path = "examples/orchestration.rs"
 [[example]]
 name = "recency_sensitivity"
 path = "examples/recency_sensitivity.rs"
+
+[[example]]
+name = "explainability"
+path = "examples/forecasting/explainability.rs"
+
+[[example]]
+name = "aid"
+path = "examples/validation/aid.rs"
 

@@ -12,7 +12,7 @@
 
 Time series forecasting library for Rust.
 
-Provides 40+ forecasting models, 76+ statistical features, automatic model selection, ensemble methods, seasonality decomposition, changepoint detection, anomaly detection, hierarchical reconciliation, and model serialization.
+Provides 50+ forecasting models, 76+ statistical features, automatic model selection, ensemble methods, seasonality decomposition, changepoint detection, anomaly detection, hierarchical reconciliation, and model serialization.
 
 ## Use Cases
 
@@ -40,7 +40,7 @@ console.log(forecast.values);
 
 ### Forecasting
 
-- **Forecasting Models (40+)**
+- **Forecasting Models (50+)**
   - ARIMA, SARIMA, and AutoARIMA with automatic order selection
   - Exponential Smoothing: SES, Holt's Linear, Holt-Winters, SeasonalES
   - ETS (Error-Trend-Seasonal) state-space framework with AutoETS
@@ -54,7 +54,7 @@ console.log(forecast.values);
   - VAR (Vector Autoregression) for multivariate forecasting with Granger causality
   - Kalman filter / state-space models (local level, local linear trend, custom)
   - Exogenous regressor support across model families
-  - `RegressionForecaster`: OLS from `anofox-regression` as a `Forecaster` — trend, AR lags, exogenous features, recursive multi-step prediction
+  - `RegressionForecaster`: `anofox-regression` backends as `Forecaster` — 11 regression backends (OLS, Ridge, ElasticNet, Quantile, WLS, RLS, Tweedie, Poisson, BLS, NNLS, Dynamic), configurable trend/seasonal/structural features, recursive multi-step prediction
 
 - **Automatic Model Selection**
   - `AutoForecast`: Unified selection across ARIMA, ETS, and Theta families (parallel with `parallel` feature)
@@ -441,6 +441,7 @@ println!("Upper: {:?}", intervals.upper());
 | **Multivariate** | `VAR` (Vector Autoregression) |
 | **State-Space** | `KalmanFilter`, `StateSpaceModel` (local level, local linear trend) |
 | **Ensemble** | `Ensemble` (Mean, Median, Weighted MSE, InverseAIC, Stacking, HorizonAdaptive) |
+| **Regression** | `RegressionForecaster` (OLS, Ridge, ElasticNet, Quantile, WLS, RLS, Tweedie, Poisson, BLS, Dynamic) |
 | **Hierarchical** | `HierarchyTree` (BottomUp, TopDown, MiddleOut, MinTraceOls, MinTraceShrink) |
 
 ### Utilities
@@ -489,8 +490,12 @@ println!("Upper: {:?}", intervals.upper());
 | `Recency` | Fit on recent data only (Window, Fraction, Full, Auto via PELT) |
 | `TrendIntegration` | Decompose (detrend/recompose) or Regressor (trend as exog feature) |
 | `ChangepointMode` | Auto (PELT) or FitFrom — regime-aware training with safety checks |
-| `RegressionForecaster` | OLS adapter — trend index, AR lags, exogenous regressors, recursive multi-step |
-| `RegressionFeatures` | Feature builder for regression models (trend, lags, exog) |
+| `RegressionForecaster` | Multi-backend regression: OLS, Ridge, ElasticNet, Quantile, WLS, RLS, Tweedie, Poisson, BLS, Dynamic |
+| `RegressionBackend` | Backend selection enum with convenience constructors (`ridge()`, `quantile()`, `wls_decay()`, etc.) |
+| `RegressionFeatures` | Feature builder for regression models (trend, seasonal, lags, structural, exog) |
+| `FeatureSafety` | Feature leakage classification: Deterministic, DataDependent, Structural, External |
+| `StructuralFeature` | Trait for forward-filled features during prediction (changepoints, outlier indicators) |
+| `ChangepointFeature` | Structural feature for regime indicators (StepFunctions, RegimeIndex, CumulativeCount) |
 | `deseasonalize()` / `seasonal_adjust()` | Remove seasonal component from data or TimeSeries |
 | `select_features()` | Automated feature selection (variance, correlation, top-K) |
 | `to_json()` / `from_json()` | Serialization for models, `Forecast`, and `TimeSeries` (requires `serde` feature) |

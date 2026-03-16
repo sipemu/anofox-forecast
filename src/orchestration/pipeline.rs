@@ -252,6 +252,11 @@ pub struct PipelineResult {
     /// evaluated across a regime change. Consider excluding such series from
     /// aggregated performance summaries.
     pub structural_break_in_holdout: bool,
+    /// Per-model holdout forecasts: `(model_name, predicted_values)`.
+    /// Contains the predicted values each model produced on the holdout window.
+    pub holdout_forecasts: Option<Vec<(String, Vec<f64>)>>,
+    /// The actual values in the holdout window (for comparison with holdout_forecasts).
+    pub holdout_actual: Option<Vec<f64>>,
 }
 
 /// Result of automatic trend component selection.
@@ -666,6 +671,7 @@ impl Pipeline {
         // Evaluate all registry models on holdout
         let mut scored: Vec<(String, f64, MetricScores)> = Vec::new();
         let mut per_obs_losses: Vec<(String, Vec<f64>)> = Vec::new();
+        let mut holdout_forecasts: Vec<(String, Vec<f64>)> = Vec::new();
 
         // Build future regressors for holdout evaluation in Regressor mode
         let holdout_future_regs = trend_state.as_ref().and_then(|ts_state| {
@@ -735,6 +741,7 @@ impl Pipeline {
                             .with_horizon(holdout)
                             .with_convergence(true),
                     );
+                    holdout_forecasts.push((name.clone(), preds.to_vec()));
                     per_obs_losses.push((name.clone(), obs_losses));
                     scored.push((name, ms.primary, ms));
                 }
@@ -1009,6 +1016,8 @@ impl Pipeline {
             trend_selection,
             seasonal_selection: None,
             structural_break_in_holdout,
+            holdout_forecasts: Some(holdout_forecasts),
+            holdout_actual: Some(test_actual.to_vec()),
         })
     }
 
@@ -1549,6 +1558,8 @@ impl Pipeline {
             trend_selection: None,
             seasonal_selection: None,
             structural_break_in_holdout: false,
+            holdout_forecasts: None,
+            holdout_actual: None,
         })
     }
 

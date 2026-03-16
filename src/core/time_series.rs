@@ -633,6 +633,23 @@ impl TimeSeries {
             .map(|dim| dim[start..end].to_vec())
             .collect();
 
+        // Slice calendar regressors to match the sliced range
+        let calendar = self.calendar.as_ref().map(|cal| {
+            let mut sliced_cal =
+                CalendarAnnotations::new().with_holidays(cal.holidays().to_vec());
+            for (name, vals) in cal.regressors() {
+                let sliced_vals = if vals.len() >= end {
+                    vals[start..end].to_vec()
+                } else if vals.len() > start {
+                    vals[start..].to_vec()
+                } else {
+                    Vec::new()
+                };
+                sliced_cal = sliced_cal.with_regressor(name.clone(), sliced_vals);
+            }
+            sliced_cal
+        });
+
         Ok(TimeSeries {
             timestamps,
             values,
@@ -641,7 +658,7 @@ impl TimeSeries {
             dimension_metadata: self.dimension_metadata.clone(),
             timezone: self.timezone.clone(),
             frequency: self.frequency,
-            calendar: self.calendar.clone(),
+            calendar,
         })
     }
 

@@ -37,13 +37,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Trend/seasonal selection section in `PipelineReport`
 
 - **Regression Forecaster** (`models::regression` module, requires `postprocess` feature)
-  - `RegressionForecaster` — wraps `OlsRegressor` from `anofox-regression` behind the `Forecaster` trait
-  - `RegressionFeatures` — configurable feature engineering: linear trend index, autoregressive lags, exogenous regressors
-  - Convenience constructors: `linear_trend()`, `ar(lags)`, `trend_ar(lags)`, `ols(features)`
+  - `RegressionForecaster` — wraps `anofox-regression` backends behind the `Forecaster` trait
+  - `RegressionBackend` enum — 11 backends: OLS (default), Ridge, ElasticNet, Quantile, WLS, RLS, Tweedie, Poisson, BLS, NNLS, Dynamic
+  - `RegressionFeatures` — configurable feature engineering: trend types, seasonal specs, AR lags, structural features, exogenous regressors
+  - Convenience constructors: `linear_trend()`, `ar(lags)`, `trend_ar(lags)`, `ols(features)`, `ridge()`, `elastic_net()`, `quantile()`, `wls_decay()`, `wls()`, `rls()`, `tweedie()`, `poisson()`, `bls()`, `nnls()`, `dynamic()`, `dynamic_smoothed()`
+  - `WeightStrategy` enum for WLS — `ExponentialDecay(f64)` or `Custom(Vec<f64>)`
   - Full `Forecaster` trait implementation: `fit`, `predict`, `predict_with_exog`, `fitted_values`, `residuals`, `supports_exog`
   - Recursive multi-step prediction for AR models (feeds predictions back as lag features)
-  - Access to fitted OLS statistics (R², coefficients) via `fitted_ols()`
+  - Access to fitted statistics (R², coefficients) via `r_squared()`, `fitted_result()`
+  - Generalized fitted model storage via `Box<dyn FittedRegressor>` for backend-agnostic prediction
+  - `InformationCriterion` re-exported from `anofox-regression` for Dynamic backend configuration
   - Compatible with `ModelRegistry`, pipelines, ensembles, and cross-validation
+
+- **Feature Safety Classification** (`models::regression` module)
+  - `FeatureSafety` enum — classifies features by cross-validation leakage risk: `Deterministic`, `DataDependent`, `Structural`, `External`
+  - `classify_features()` method on `RegressionFeatures` — returns per-column safety classification
+  - Trend types classified as `DataDependent`, Fourier terms as `Deterministic`, structural features as `Structural`
+
+- **Structural Features** (`models::regression` module)
+  - `StructuralFeature` trait — general interface for features that are forward-filled during prediction
+  - `ChangepointFeature` — encodes detected changepoints as regression features
+  - `ChangepointEncoding` enum — `StepFunctions` (k binary columns), `RegimeIndex` (1 ordinal column), `CumulativeCount` (1 additive column)
+  - Forward-fill prediction: model continues in last known regime during forecast period
+  - Builder methods: `with_structural()`, `with_changepoint_steps()`, `with_changepoints()`
+
+- **Structural Break Detection in Pipeline** (`orchestration` module)
+  - `structural_break_in_holdout` flag on `PipelineResult` — flags series with changepoints in holdout period
+  - Automatic detection: pipeline logs structural breaks and sets flag for downstream filtering
+  - `partition_by_structural_break()` batch helper — separates clean vs flagged results by index
+  - Warning section in `PipelineReport` when structural break detected
 
 - **Composable Seasonality & Trend Components** (`seasonality` module)
   - `SeasonalComponent` / `TrendComponent` traits — dual-purpose: standalone (fit/predict) and feature extraction
@@ -52,6 +74,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `HodrickPrescottFilter` — smooth trend extraction with cycle decomposition (quarterly/monthly/annual presets)
   - `PiecewiseLinearTrend` — PELT-based changepoint detection with per-segment linear regression
   - Standalone feature functions: `dummy_seasonal_strength`, `dummy_seasonal_amplitude`, `seasonal_diff_strength`, `seasonal_diff_variance_reduction`, `hp_trend_strength`, `hp_cycle_variance_ratio`, `piecewise_n_segments`, `piecewise_trend_features`
+
+### Fixed
+
+- ETS: replaced unsafe `unwrap()` calls with heuristic fallbacks for edge cases (constant data, zero variance)
+- `cross_validate_all` / `fit_all_and_compare`: reduced cognitive complexity with early returns and helper closures
+- `TimeSeries::missing_mask()`: fixed panic on empty-dimension series
+- Conformal prediction: added SAFETY comments documenting invariants for `expect()` calls
+- `RegressionForecaster::predict_with_intervals`: fixed missing `components` argument in `build_future_matrix` call
 
 ## [0.4.6] - 2026-03-14
 
