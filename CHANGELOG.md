@@ -75,6 +75,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `PiecewiseLinearTrend` — PELT-based changepoint detection with per-segment linear regression
   - Standalone feature functions: `dummy_seasonal_strength`, `dummy_seasonal_amplitude`, `seasonal_diff_strength`, `seasonal_diff_variance_reduction`, `hp_trend_strength`, `hp_cycle_variance_ratio`, `piecewise_n_segments`, `piecewise_trend_features`
 
+- **Comprehensive Examples** (48 examples with `.md` documentation)
+  - 10 new examples: `regression` (11 backends), `regression_exog_changepoints` (exog + changepoint + CV + pipeline), `hierarchy`, `var`, `kalman`, `constraints`, `explainability`, `aid`, `bootstrap`, `temporal_aggregation`, `serialization`
+  - `.md` companion documentation for all 48 examples with section descriptions, key types, and run commands
+  - `examples/README.md` — categorized index of all examples
+
 ### Fixed
 
 - ETS: replaced unsafe `unwrap()` calls with heuristic fallbacks for edge cases (constant data, zero variance)
@@ -82,6 +87,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `TimeSeries::missing_mask()`: fixed panic on empty-dimension series
 - Conformal prediction: added SAFETY comments documenting invariants for `expect()` calls
 - `RegressionForecaster::predict_with_intervals`: fixed missing `components` argument in `build_future_matrix` call
+- `TimeSeries::slice()`: fixed calendar regressors not being sliced — caused regressor/value misalignment during cross-validation with exogenous features
+- `cross_validate`: fixed `evaluate_fold` to call `predict_with_exog()` when model has exogenous regressors (previously always called `predict()`, which errors on exog models)
 
 ## [0.4.6] - 2026-03-14
 

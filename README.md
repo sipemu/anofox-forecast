@@ -524,6 +524,20 @@ println!("Upper: {:?}", intervals.upper());
 | `IDRPredictor` | Isotonic Distributional Regression |
 | `QRAPredictor` | Quantile Regression Averaging |
 
+## Examples
+
+48 runnable examples covering all major features, each with a companion `.md` description. See [examples/README.md](examples/README.md) for the full categorized index.
+
+```bash
+cargo run --example quickstart              # End-to-end forecasting
+cargo run --example arima                   # ARIMA family
+cargo run --example regression              # 11 regression backends
+cargo run --example regression_exog_changepoints  # Exog + changepoints + CV
+cargo run --example orchestration           # Full pipeline
+cargo run --example cross_validation        # Time series CV
+cargo run --example postprocess_conformal   # Conformal prediction intervals
+```
+
 ## Guides
 
 - [Model Selection Guide](docs/model_selection_guide.md) — Which model to use for your data

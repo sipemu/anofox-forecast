@@ -41,9 +41,15 @@ pub struct PolynomialTrend {
     degree: usize,
     /// Controls which portion of data is used for fitting.
     recency: Recency,
-    /// Fitted polynomial coefficients `[c0, c1, ..., c_degree]` such that
-    /// `y(t) = c0 + c1*t + c2*t^2 + ...`.
+    /// Fitted polynomial coefficients in raw index space `[c0, c1, ..., c_degree]`
+    /// such that `y(t) = c0 + c1*t + c2*t^2 + ...`.
     coefficients: Option<Vec<f64>>,
+    /// Fitted coefficients in the centered/scaled basis (for prediction).
+    norm_coefficients: Option<Vec<f64>>,
+    /// Center of the normalization transform: `u = (t - t_center) / t_scale`.
+    t_center: f64,
+    /// Scale of the normalization transform.
+    t_scale: f64,
     /// Fitted trend values (same length as training data).
     fitted: Vec<f64>,
     /// Length of training data.
@@ -62,6 +68,9 @@ impl PolynomialTrend {
             degree: degree.clamp(1, 3),
             recency: Recency::Fraction(0.3),
             coefficients: None,
+            norm_coefficients: None,
+            t_center: 0.0,
+            t_scale: 1.0,
             fitted: Vec::new(),
             n_train: 0,
             r_squared: 0.0,
@@ -106,6 +115,36 @@ fn vandermonde_row(t: f64, degree: usize) -> Vec<f64> {
         power *= t;
     }
     row
+}
+
+/// Back-transform polynomial coefficients from normalized space `u = (t - center) / scale`
+/// to raw index space `t`.
+///
+/// Given `y(u) = a0 + a1*u + a2*u^2 + a3*u^3`, express as `y(t) = b0 + b1*t + b2*t^2 + b3*t^3`
+/// using the binomial expansion of `((t - center) / scale)^k`.
+fn denormalize_coefficients(norm_coeffs: &[f64], center: f64, scale: f64) -> Vec<f64> {
+    let d = norm_coeffs.len(); // degree + 1
+    let mut raw = vec![0.0; d];
+
+    // For each normalized coefficient a_k (of u^k),
+    // expand u^k = ((t - center)/scale)^k using binomial theorem:
+    //   u^k = Σ_{j=0}^{k} C(k,j) * (t/scale)^j * (-center/scale)^(k-j)
+    // Then a_k * u^k contributes a_k * C(k,j) * (-center)^(k-j) / scale^k to raw[j].
+    for k in 0..d {
+        let a_k = norm_coeffs[k];
+        let inv_scale_k = 1.0 / scale.powi(k as i32);
+        let mut binom = 1.0; // C(k, j), starting at C(k, 0) = 1
+        for j in 0..=k {
+            let neg_center_pow = (-center).powi((k - j) as i32);
+            raw[j] += a_k * binom * neg_center_pow * inv_scale_k;
+            // Update binomial coefficient: C(k, j+1) = C(k, j) * (k - j) / (j + 1)
+            if j < k {
+                binom *= (k - j) as f64 / (j + 1) as f64;
+            }
+        }
+    }
+
+    raw
 }
 
 /// Solve the system `A * x = b` where `A` is symmetric positive definite,
@@ -171,6 +210,9 @@ impl TrendComponent for PolynomialTrend {
 
         if n == 1 {
             self.coefficients = Some(vec![values[0]]);
+            self.norm_coefficients = Some(vec![values[0]]);
+            self.t_center = 0.0;
+            self.t_scale = 1.0;
             self.fitted = vec![values[0]];
             self.n_train = 1;
             self.r_squared = 1.0;
@@ -185,13 +227,23 @@ impl TrendComponent for PolynomialTrend {
         let eff_degree = self.degree.min(window_len.saturating_sub(1));
         let p = eff_degree + 1; // number of parameters
 
-        // Build X'X and X'y from the recency window.
+        // Center and scale the time index to [-1, 1] over the recency window.
+        // This dramatically improves the conditioning of the Vandermonde matrix
+        // for higher degrees and large indices.
+        let t_center = (rec_start + rec_end - 1) as f64 / 2.0;
+        let t_scale = if window_len > 1 {
+            (window_len - 1) as f64 / 2.0
+        } else {
+            1.0
+        };
+
+        // Build X'X and X'y from the recency window using normalized indices.
         let mut xtx = vec![0.0; p * p];
         let mut xty = vec![0.0; p];
 
         for idx in rec_start..rec_end {
-            let t = idx as f64;
-            let row = vandermonde_row(t, eff_degree);
+            let u = (idx as f64 - t_center) / t_scale;
+            let row = vandermonde_row(u, eff_degree);
             let y = values[idx];
 
             for i in 0..p {
@@ -202,16 +254,19 @@ impl TrendComponent for PolynomialTrend {
             }
         }
 
-        let coeffs = cholesky_solve(&xtx, &xty, p)?;
+        let norm_coeffs = cholesky_solve(&xtx, &xty, p)?;
 
-        // Compute fitted values for ALL indices 0..n.
-        let fitted: Vec<f64> = (0..n).map(|i| poly_eval(&coeffs, i as f64)).collect();
+        // Compute fitted values for ALL indices 0..n using normalized indices.
+        let fitted: Vec<f64> = (0..n)
+            .map(|i| {
+                let u = (i as f64 - t_center) / t_scale;
+                poly_eval(&norm_coeffs, u)
+            })
+            .collect();
 
         // Compute R-squared over the recency window.
         let window_vals = &values[rec_start..rec_end];
-        let window_fitted: Vec<f64> = (rec_start..rec_end)
-            .map(|i| poly_eval(&coeffs, i as f64))
-            .collect();
+        let window_fitted = &fitted[rec_start..rec_end];
 
         let mean = window_vals.iter().sum::<f64>() / window_len as f64;
         let ss_tot: f64 = window_vals.iter().map(|&v| (v - mean).powi(2)).sum();
@@ -231,12 +286,18 @@ impl TrendComponent for PolynomialTrend {
             1.0 - ss_res / ss_tot
         };
 
-        // Pad coefficients vector to full degree+1 length if effective degree
-        // was reduced (fill higher-order terms with 0).
-        let mut full_coeffs = coeffs;
-        full_coeffs.resize(self.degree + 1, 0.0);
+        // Pad normalized coefficients to full degree+1 length if effective
+        // degree was reduced (fill higher-order terms with 0).
+        let mut full_norm = norm_coeffs;
+        full_norm.resize(self.degree + 1, 0.0);
 
-        self.coefficients = Some(full_coeffs);
+        // Back-transform to raw index space for the public accessor.
+        let raw_coeffs = denormalize_coefficients(&full_norm, t_center, t_scale);
+
+        self.norm_coefficients = Some(full_norm);
+        self.coefficients = Some(raw_coeffs);
+        self.t_center = t_center;
+        self.t_scale = t_scale;
         self.fitted = fitted;
         self.n_train = n;
 
@@ -248,13 +309,16 @@ impl TrendComponent for PolynomialTrend {
     }
 
     fn predict_trend(&self, n_ahead: usize) -> Vec<f64> {
-        let coeffs = match &self.coefficients {
+        let norm_coeffs = match &self.norm_coefficients {
             Some(c) => c,
             None => return vec![f64::NAN; n_ahead],
         };
 
         (0..n_ahead)
-            .map(|i| poly_eval(coeffs, (self.n_train + i) as f64))
+            .map(|i| {
+                let u = ((self.n_train + i) as f64 - self.t_center) / self.t_scale;
+                poly_eval(norm_coeffs, u)
+            })
             .collect()
     }
 
@@ -656,5 +720,141 @@ mod tests {
         trend.fit_trend(&values).unwrap();
         assert!(trend.coefficients().is_some());
         assert_eq!(trend.coefficients().unwrap().len(), 2);
+    }
+
+    // ── Numerical conditioning ────────────────────────────────────────
+
+    #[test]
+    fn cubic_large_series_coefficient_accuracy() {
+        // y = 0.001*t^3 - 0.5*t^2 + 3*t + 100
+        // With n=500 and raw indices, the Vandermonde Gram matrix
+        // has entries up to Σt^6 ≈ 10^16, stressing double-precision.
+        let n = 500;
+        let values: Vec<f64> = (0..n)
+            .map(|t| {
+                let t = t as f64;
+                0.001 * t.powi(3) - 0.5 * t.powi(2) + 3.0 * t + 100.0
+            })
+            .collect();
+
+        let mut trend = PolynomialTrend::new(3).with_recency(Recency::Full);
+        trend.fit_trend(&values).unwrap();
+
+        let coeffs = trend.coefficients().unwrap();
+        // Check that coefficients are recovered with reasonable accuracy
+        let c0_err = (coeffs[0] - 100.0).abs();
+        let c1_err = (coeffs[1] - 3.0).abs();
+        let c2_err = (coeffs[2] - (-0.5)).abs();
+        let c3_err = (coeffs[3] - 0.001).abs();
+
+        eprintln!("n={n}, cubic with raw indices:");
+        eprintln!("  c0={:.10} (expected 100.0,  err={c0_err:.2e})", coeffs[0]);
+        eprintln!("  c1={:.10} (expected 3.0,    err={c1_err:.2e})", coeffs[1]);
+        eprintln!("  c2={:.10} (expected -0.5,   err={c2_err:.2e})", coeffs[2]);
+        eprintln!("  c3={:.10} (expected 0.001,  err={c3_err:.2e})", coeffs[3]);
+
+        assert!(c0_err < 1.0, "c0 error {c0_err:.2e} too large");
+        assert!(c1_err < 0.01, "c1 error {c1_err:.2e} too large");
+        assert!(c2_err < 1e-4, "c2 error {c2_err:.2e} too large");
+        assert!(c3_err < 1e-6, "c3 error {c3_err:.2e} too large");
+    }
+
+    #[test]
+    fn cubic_recency_window_high_offset() {
+        // Recency window at indices 700..1000: raw t^6 reaches ~10^17.
+        // This is the worst case for numerical conditioning.
+        let n = 1000;
+        let values: Vec<f64> = (0..n)
+            .map(|t| {
+                let t = t as f64;
+                0.001 * t.powi(3) - 0.5 * t.powi(2) + 3.0 * t + 100.0
+            })
+            .collect();
+
+        let mut trend = PolynomialTrend::new(3).with_recency(Recency::Fraction(0.3));
+        trend.fit_trend(&values).unwrap();
+
+        let coeffs = trend.coefficients().unwrap();
+        let c0_err = (coeffs[0] - 100.0).abs();
+        let c1_err = (coeffs[1] - 3.0).abs();
+        let c2_err = (coeffs[2] - (-0.5)).abs();
+        let c3_err = (coeffs[3] - 0.001).abs();
+
+        eprintln!("n={n}, recency=0.3 (indices ~700..1000):");
+        eprintln!("  c0={:.10} (expected 100.0,  err={c0_err:.2e})", coeffs[0]);
+        eprintln!("  c1={:.10} (expected 3.0,    err={c1_err:.2e})", coeffs[1]);
+        eprintln!("  c2={:.10} (expected -0.5,   err={c2_err:.2e})", coeffs[2]);
+        eprintln!("  c3={:.10} (expected 0.001,  err={c3_err:.2e})", coeffs[3]);
+
+        assert!(c0_err < 1.0, "c0 error {c0_err:.2e} too large");
+        assert!(c1_err < 0.01, "c1 error {c1_err:.2e} too large");
+        assert!(c2_err < 1e-4, "c2 error {c2_err:.2e} too large");
+        assert!(c3_err < 1e-6, "c3 error {c3_err:.2e} too large");
+    }
+
+    #[test]
+    fn cubic_very_large_series_recency() {
+        // n=5000 with recency=0.3 → fitting on indices ~3500..5000.
+        // t^6 reaches ~10^22, severely stressing conditioning.
+        let n = 5000;
+        let values: Vec<f64> = (0..n)
+            .map(|t| {
+                let t = t as f64;
+                0.001 * t.powi(3) - 0.5 * t.powi(2) + 3.0 * t + 100.0
+            })
+            .collect();
+
+        let mut trend = PolynomialTrend::new(3).with_recency(Recency::Fraction(0.3));
+        trend.fit_trend(&values).unwrap();
+
+        let coeffs = trend.coefficients().unwrap();
+        let c0_err = (coeffs[0] - 100.0).abs();
+        let c3_err = (coeffs[3] - 0.001).abs();
+
+        eprintln!("n={n}, recency=0.3 (indices ~3500..5000):");
+        eprintln!("  c0={:.6} (expected 100.0,  err={c0_err:.2e})", coeffs[0]);
+        eprintln!("  c1={:.6} (expected 3.0,    err={:.2e})", coeffs[1], (coeffs[1] - 3.0).abs());
+        eprintln!("  c2={:.6} (expected -0.5,   err={:.2e})", coeffs[2], (coeffs[2] - (-0.5)).abs());
+        eprintln!("  c3={:.10} (expected 0.001,  err={c3_err:.2e})", coeffs[3]);
+
+        // Test prediction accuracy (what actually matters for forecasting)
+        let pred = trend.predict_trend(10);
+        let max_pred_err: f64 = (0..10)
+            .map(|i| {
+                let t = (n + i) as f64;
+                let expected = 0.001 * t.powi(3) - 0.5 * t.powi(2) + 3.0 * t + 100.0;
+                (pred[i] - expected).abs() / expected.abs()
+            })
+            .fold(0.0_f64, f64::max);
+
+        eprintln!("  max relative prediction error: {max_pred_err:.2e}");
+    }
+
+    #[test]
+    fn quadratic_noisy_data_prediction_accuracy() {
+        // Noisy quadratic: y = t^2 + 2t + 1 + noise
+        // Validates that the fit produces usable predictions despite noise.
+        let n = 200;
+        let values: Vec<f64> = (0..n)
+            .map(|t| {
+                let t = t as f64;
+                let signal = t * t + 2.0 * t + 1.0;
+                let noise = 50.0 * ((t * 0.7).cos()); // deterministic "noise"
+                signal + noise
+            })
+            .collect();
+
+        let mut trend = PolynomialTrend::new(2).with_recency(Recency::Full);
+        trend.fit_trend(&values).unwrap();
+
+        let coeffs = trend.coefficients().unwrap();
+        eprintln!("n={n}, noisy quadratic (Recency::Full):");
+        eprintln!("  c0={:.4} (true 1.0)", coeffs[0]);
+        eprintln!("  c1={:.4} (true 2.0)", coeffs[1]);
+        eprintln!("  c2={:.6} (true 1.0)", coeffs[2]);
+        eprintln!("  R²={:.6}", trend.trend_features().iter().find(|(n, _)| *n == "polynomial_r_squared").unwrap().1);
+
+        // c2 (quadratic term) should be close to 1.0 since noise is bounded
+        assert!((coeffs[2] - 1.0).abs() < 0.05, "c2 should be near 1.0, got {}", coeffs[2]);
     }
 }
