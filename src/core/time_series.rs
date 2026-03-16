@@ -857,10 +857,10 @@ impl TimeSeries {
 
     /// Returns a boolean mask: true where value is NaN or Inf (primary dimension).
     pub fn missing_mask(&self) -> Vec<bool> {
-        self.values[0]
-            .iter()
-            .map(|v| v.is_nan() || v.is_infinite())
-            .collect()
+        match self.values.first() {
+            Some(dim) => dim.iter().map(|v| v.is_nan() || v.is_infinite()).collect(),
+            None => vec![],
+        }
     }
 
     /// Count of missing values per dimension.
@@ -1336,6 +1336,7 @@ impl TimeSeries {
         }
 
         let start = self.timestamps[0];
+        // SAFETY: `self.is_empty()` and `self.len() == 1` are handled above, so timestamps has >= 2 elements.
         let end = *self.timestamps.last().unwrap();
 
         // Generate the expected timestamps based on frequency
@@ -1918,6 +1919,7 @@ impl fmt::Display for TimeSeries {
         }
 
         if len > 0 {
+            // SAFETY: `len > 0` guarantees timestamps is non-empty.
             let first = self.timestamps.first().unwrap();
             let last = self.timestamps.last().unwrap();
             write!(

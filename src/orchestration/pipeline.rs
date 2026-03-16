@@ -246,6 +246,12 @@ pub struct PipelineResult {
     pub trend_selection: Option<TrendSelectionResult>,
     /// Seasonal component selection result (if seasonal mode was Auto).
     pub seasonal_selection: Option<SeasonalSelectionResult>,
+    /// Whether a structural break (changepoint) was detected in the holdout period.
+    ///
+    /// When `true`, accuracy metrics may be unreliable because the model was
+    /// evaluated across a regime change. Consider excluding such series from
+    /// aggregated performance summaries.
+    pub structural_break_in_holdout: bool,
 }
 
 /// Result of automatic trend component selection.
@@ -617,6 +623,32 @@ impl Pipeline {
         let test_values = working_ts.values(0)?;
         let test_actual = &test_values[n - holdout..];
 
+        // Detect structural breaks in holdout period
+        let holdout_start = n - holdout;
+        let structural_break_in_holdout = profile.as_ref().is_some_and(|prof| {
+            let cps_in_holdout: Vec<_> = prof
+                .changepoints
+                .iter()
+                .filter(|&&cp| cp >= holdout_start)
+                .collect();
+            if !cps_in_holdout.is_empty() {
+                log.record_with_detail(
+                    DecisionCategory::ChangepointAdaptation,
+                    "Structural break detected in holdout period",
+                    DecisionOutcome::Failed,
+                    format!(
+                        "{} changepoint(s) in holdout [{}, {}); metrics may be unreliable",
+                        cps_in_holdout.len(),
+                        holdout_start,
+                        n
+                    ),
+                );
+                true
+            } else {
+                false
+            }
+        });
+
         // Resolve metric strategy
         let is_intermittent = profile.as_ref().is_some_and(|p| p.is_intermittent);
         let has_negatives = profile.as_ref().is_some_and(|p| p.has_negatives);
@@ -929,7 +961,18 @@ impl Pipeline {
                 "Inverted Box-Cox on forecast",
                 DecisionOutcome::Success,
             );
-            Forecast::from_values(inverted)
+            // Preserve prediction intervals by also inverting lower/upper bounds
+            if forecast.has_lower() && forecast.has_upper() {
+                if let (Ok(lo), Ok(hi)) = (forecast.lower_series(0), forecast.upper_series(0)) {
+                    let lo_inv = invert_boxcox_forecast(lo, lambda);
+                    let hi_inv = invert_boxcox_forecast(hi, lambda);
+                    Forecast::from_values_with_intervals(inverted, lo_inv, hi_inv)
+                } else {
+                    Forecast::from_values(inverted)
+                }
+            } else {
+                Forecast::from_values(inverted)
+            }
         } else {
             forecast
         };
@@ -965,6 +1008,7 @@ impl Pipeline {
             metric_scores: Some(all_metric_scores),
             trend_selection,
             seasonal_selection: None,
+            structural_break_in_holdout,
         })
     }
 
@@ -1107,9 +1151,13 @@ impl Pipeline {
             let forecast = if let Some(regs) = future_regs {
                 if model.supports_exog() && model.has_exog() {
                     model.predict_with_exog(horizon, regs)
+                } else if self.config.interval_level > 0.0 {
+                    model.predict_with_intervals(horizon, self.config.interval_level)
                 } else {
                     model.predict(horizon)
                 }
+            } else if self.config.interval_level > 0.0 {
+                model.predict_with_intervals(horizon, self.config.interval_level)
             } else {
                 model.predict(horizon)
             };
@@ -1124,10 +1172,13 @@ impl Pipeline {
         let n_models = models.len();
         let mut ensemble = Ensemble::new(models).with_method(method);
         ensemble.fit(ts)?;
-        // Note: Ensemble.predict() delegates to individual model predict() calls.
-        // For Regressor mode, regressors are already embedded in the TimeSeries,
-        // so models that picked them up during fit will use them via their internal state.
-        let forecast = ensemble.predict(horizon)?;
+        // Use predict_with_intervals when interval_level is set, so the ensemble
+        // produces prediction intervals (widest-envelope of component models).
+        let forecast = if self.config.interval_level > 0.0 {
+            ensemble.predict_with_intervals(horizon, self.config.interval_level)?
+        } else {
+            ensemble.predict(horizon)?
+        };
 
         let weights: Vec<(String, f64)> = used_names
             .iter()
@@ -1497,6 +1548,7 @@ impl Pipeline {
             metric_scores: None,
             trend_selection: None,
             seasonal_selection: None,
+            structural_break_in_holdout: false,
         })
     }
 

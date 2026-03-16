@@ -202,6 +202,7 @@ fn compute_conformal_adjustments(
         let mut coverage_count = 0;
 
         for t in 0..n_calib {
+            // SAFETY: t < n_calib == calib_forecasts.n_times(), validated by caller
             let predicted_q = calib_forecasts.at_time(t).unwrap()[q_idx];
             let actual = calib_actuals[t];
 
@@ -248,6 +249,7 @@ fn apply_conformal_adjustments(
     let mut new_values: Vec<Vec<f64>> = Vec::with_capacity(n_times);
 
     for t in 0..n_times {
+        // SAFETY: t < n_times == forecasts.n_times()
         let row = forecasts.at_time(t).unwrap();
         let mut adjusted_row = Vec::with_capacity(n_quantiles);
 

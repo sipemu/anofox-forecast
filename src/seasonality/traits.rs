@@ -47,6 +47,23 @@ impl Default for AutoRecencyConfig {
 /// before the recency window is filled by evaluating the fitted model at
 /// earlier indices — backwards extrapolation).
 ///
+/// # Cross-validation and data leakage
+///
+/// When using data-dependent recency modes (`Auto`, or any component fitted
+/// on data that extends beyond the current CV training fold), **changepoint
+/// locations and fitted parameters can leak information from future
+/// observations** into the training features. This produces optimistically
+/// biased CV scores.
+///
+/// **Safe practice**: in time-series CV, always re-fit trend/seasonal
+/// components within each fold using only the training portion. Series with
+/// structural breaks in the test period are particularly dangerous — the
+/// model may "know" about a regime change it hasn't yet observed, inflating
+/// accuracy. Consider flagging such series for separate evaluation or
+/// using deterministic features (e.g., Fourier terms, polynomial of time
+/// index) that are functions of the time index only and carry no data
+/// leakage risk.
+///
 /// # Examples
 ///
 /// ```
@@ -82,6 +99,13 @@ pub enum Recency {
     ///
     /// Runs PELT on the data and fits from the last detected changepoint.
     /// Falls back to a fraction if no changepoints are found.
+    ///
+    /// **Warning**: In time-series cross-validation, this mode must be
+    /// re-applied within each fold using only the training portion.
+    /// If the full series (including test observations) is passed to
+    /// `resolve_with_data`, changepoint locations leak future information
+    /// into the training features. See the [cross-validation
+    /// note](Recency#cross-validation-and-data-leakage) on the enum docs.
     Auto(AutoRecencyConfig),
 }
 
@@ -250,6 +274,19 @@ pub trait SeasonalComponent {
 /// A composable trend component.
 ///
 /// Implementations extract and model the trend in a time series.
+///
+/// # Cross-validation note
+///
+/// Trend components learn data-dependent parameters (slope, changepoints,
+/// growth rate). When used as features in a supervised model during
+/// time-series cross-validation, the component must be **re-fit within
+/// each CV fold** using only the training portion. Fitting on the full
+/// series and then splitting introduces leakage — the model gains
+/// information about future regime changes, inflating CV accuracy.
+///
+/// Deterministic alternatives like raw polynomial features of the time
+/// index (t, t², t³) or Fourier basis vectors are immune to this issue
+/// because they depend only on the time index, not on observed values.
 ///
 /// # Example
 ///

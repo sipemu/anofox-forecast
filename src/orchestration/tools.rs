@@ -331,6 +331,7 @@ mod tests {
             metric_scores: None,
             trend_selection: None,
             seasonal_selection: None,
+            structural_break_in_holdout: false,
         };
 
         let output = explain_result(ExplainResultInput {

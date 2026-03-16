@@ -1066,7 +1066,17 @@ impl ETS {
                 }
             }
 
-            let result = best_result.unwrap();
+            // SAFETY: alpha_starts is non-empty and nelder_mead always returns a
+            // result, so at least one iteration sets best_result. Fall back to
+            // heuristic initial states if every starting point yields f64::MAX
+            // (degenerate data where the likelihood surface is flat).
+            let result = match best_result {
+                Some(r) => r,
+                None => {
+                    let (init_level, init_trend, _) = self.initialize_state(values);
+                    return (0.3, Some(0.1), None, None, init_level, init_trend, None);
+                }
+            };
             return (
                 result.optimal_point[0].clamp(0.0001, 0.9999),
                 Some(result.optimal_point[1].clamp(0.0001, 0.9999)),
@@ -1156,7 +1166,22 @@ impl ETS {
                         }
                     }
 
-                    let r = best_result.unwrap();
+                    // Fall back to heuristic states when optimisation
+                    // cannot improve on f64::MAX (degenerate data).
+                    let r = match best_result {
+                        Some(r) => r,
+                        None => {
+                            return (
+                                0.3,
+                                None,
+                                Some(0.1),
+                                None,
+                                init_level,
+                                init_trend,
+                                Some(init_seasonals.clone()),
+                            );
+                        }
+                    };
                     let opt_seasonals = r[3..3 + period].to_vec();
                     (
                         r[0].clamp(0.0001, 0.9999),
@@ -1216,7 +1241,22 @@ impl ETS {
                         }
                     }
 
-                    let r = best_result.unwrap();
+                    // Fall back to heuristic states when optimisation
+                    // cannot improve on f64::MAX (degenerate data).
+                    let r = match best_result {
+                        Some(r) => r,
+                        None => {
+                            return (
+                                0.3,
+                                Some(0.1),
+                                Some(0.1),
+                                None,
+                                init_level,
+                                init_trend,
+                                Some(init_seasonals.clone()),
+                            );
+                        }
+                    };
                     let opt_seasonals = r[5..5 + period].to_vec();
                     (
                         r[0].clamp(0.0001, 0.9999),
@@ -1278,7 +1318,22 @@ impl ETS {
                         }
                     }
 
-                    let r = best_result.unwrap();
+                    // Fall back to heuristic states when optimisation
+                    // cannot improve on f64::MAX (degenerate data).
+                    let r = match best_result {
+                        Some(r) => r,
+                        None => {
+                            return (
+                                0.3,
+                                Some(0.1),
+                                Some(0.1),
+                                Some(0.98),
+                                init_level,
+                                init_trend,
+                                Some(init_seasonals.clone()),
+                            );
+                        }
+                    };
                     let opt_seasonals = r[6..6 + period].to_vec();
                     (
                         r[0].clamp(0.0001, 0.9999),
@@ -1905,12 +1960,14 @@ impl Explainable for ETS {
                     trend_component_vec.push(trend_component);
                 }
                 SeasonalType::Additive => {
+                    // SAFETY: seasonals_ref is Some when spec.seasonal != None (set above).
                     let s = seasonals_ref.unwrap()[(self.n + h - 1) % period];
                     level_component.push(level_val);
                     trend_component_vec.push(trend_component);
                     seasonal_component_vec.push(s);
                 }
                 SeasonalType::Multiplicative => {
+                    // SAFETY: seasonals_ref is Some when spec.seasonal != None (set above).
                     let s = seasonals_ref.unwrap()[(self.n + h - 1) % period];
                     let base = level_val + trend_component;
                     level_component.push(level_val);

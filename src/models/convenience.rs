@@ -96,86 +96,20 @@ pub fn fit_all_and_compare(
     }
 
     let n = ts.len();
-    // If holdout >= n we cannot split; mark every model as failed.
     if holdout >= n || holdout == 0 {
-        let mut results: Vec<ModelResult> = registry
-            .iter()
-            .map(|spec| ModelResult {
-                name: spec.name.to_string(),
-                mae: f64::NAN,
-                rmse: f64::NAN,
-                mape: f64::NAN,
-                fit_succeeded: false,
-            })
-            .collect();
-        results.sort_by(cmp_model_result);
-        return ModelComparison { results };
+        return all_models_failed(registry);
     }
 
     let split = n - holdout;
     let train = match ts.slice(0, split) {
         Ok(t) => t,
-        Err(_) => {
-            let mut results: Vec<ModelResult> = registry
-                .iter()
-                .map(|spec| ModelResult {
-                    name: spec.name.to_string(),
-                    mae: f64::NAN,
-                    rmse: f64::NAN,
-                    mape: f64::NAN,
-                    fit_succeeded: false,
-                })
-                .collect();
-            results.sort_by(cmp_model_result);
-            return ModelComparison { results };
-        }
+        Err(_) => return all_models_failed(registry),
     };
     let actual = &ts.primary_values()[split..];
 
     let specs: Vec<_> = registry.iter().collect();
-
     let evaluate = |spec: &&crate::models::traits::ModelSpec| -> ModelResult {
-        let mut model = spec.create();
-        let name = spec.name.to_string();
-
-        match model.fit(&train) {
-            Ok(()) => match model.predict(holdout) {
-                Ok(forecast) => {
-                    let predicted = forecast.primary();
-                    let m = calculate_metrics(actual, predicted, None);
-                    match m {
-                        Ok(metrics) => ModelResult {
-                            name,
-                            mae: metrics.mae,
-                            rmse: metrics.rmse,
-                            mape: metrics.mape.unwrap_or(f64::NAN),
-                            fit_succeeded: true,
-                        },
-                        Err(_) => ModelResult {
-                            name,
-                            mae: mae(actual, predicted),
-                            rmse: rmse(actual, predicted),
-                            mape: f64::NAN,
-                            fit_succeeded: true,
-                        },
-                    }
-                }
-                Err(_) => ModelResult {
-                    name,
-                    mae: f64::NAN,
-                    rmse: f64::NAN,
-                    mape: f64::NAN,
-                    fit_succeeded: false,
-                },
-            },
-            Err(_) => ModelResult {
-                name,
-                mae: f64::NAN,
-                rmse: f64::NAN,
-                mape: f64::NAN,
-                fit_succeeded: false,
-            },
-        }
+        evaluate_single_model(spec, &train, actual, holdout)
     };
 
     #[cfg(feature = "parallel")]
@@ -186,6 +120,64 @@ pub fn fit_all_and_compare(
 
     results.sort_by(cmp_model_result);
     ModelComparison { results }
+}
+
+/// Mark every model in the registry as failed and return a sorted comparison.
+fn all_models_failed(registry: &ModelRegistry) -> ModelComparison {
+    let mut results: Vec<ModelResult> = registry
+        .iter()
+        .map(|spec| failed_model_result(spec.name))
+        .collect();
+    results.sort_by(cmp_model_result);
+    ModelComparison { results }
+}
+
+/// Construct a `ModelResult` with NaN metrics and `fit_succeeded = false`.
+fn failed_model_result(name: &str) -> ModelResult {
+    ModelResult {
+        name: name.to_string(),
+        mae: f64::NAN,
+        rmse: f64::NAN,
+        mape: f64::NAN,
+        fit_succeeded: false,
+    }
+}
+
+/// Evaluate a single model: fit on `train`, predict `horizon` steps, compare to `actual`.
+fn evaluate_single_model(
+    spec: &crate::models::traits::ModelSpec,
+    train: &TimeSeries,
+    actual: &[f64],
+    horizon: usize,
+) -> ModelResult {
+    let mut model = spec.create();
+    let name = spec.name.to_string();
+
+    if model.fit(train).is_err() {
+        return failed_model_result(&name);
+    }
+    let forecast = match model.predict(horizon) {
+        Ok(f) => f,
+        Err(_) => return failed_model_result(&name),
+    };
+
+    let predicted = forecast.primary();
+    match calculate_metrics(actual, predicted, None) {
+        Ok(metrics) => ModelResult {
+            name,
+            mae: metrics.mae,
+            rmse: metrics.rmse,
+            mape: metrics.mape.unwrap_or(f64::NAN),
+            fit_succeeded: true,
+        },
+        Err(_) => ModelResult {
+            name,
+            mae: mae(actual, predicted),
+            rmse: rmse(actual, predicted),
+            mape: f64::NAN,
+            fit_succeeded: true,
+        },
+    }
 }
 
 /// Sort helper: succeeded models first (by MAE ascending), then failed models.
@@ -282,100 +274,17 @@ pub fn cross_validate_all(
         };
     }
 
-    // Compute initial_window and step_size so we get approximately n_folds folds.
-    let series_len = ts.len();
-    let (initial_window, step_size) = if n_folds == 0 || horizon == 0 || series_len < horizon + 2 {
-        (series_len, 1) // Will produce 0 folds
-    } else {
-        // initial_window + n_folds * step_size + horizon - step_size <= series_len
-        // We want the biggest initial_window while fitting n_folds folds.
-        let needed_for_folds = n_folds * horizon;
-        if needed_for_folds >= series_len {
-            // Reduce step_size to 1 and compute initial_window
-            let iw = series_len.saturating_sub(n_folds + horizon - 1).max(2);
-            (iw, 1)
-        } else {
-            let iw = series_len.saturating_sub(needed_for_folds).max(2);
-            (iw, horizon)
-        }
-    };
+    let (initial_window, step_size) = compute_cv_fold_params(ts.len(), n_folds, horizon);
 
     let generator = CvFoldGenerator::new()
         .initial_window(initial_window)
         .horizon(horizon)
         .step_size(step_size);
-    let folds = generator.generate(series_len);
+    let folds = generator.generate(ts.len());
 
     let specs: Vec<_> = registry.iter().collect();
-
-    let evaluate = |spec: &&crate::models::traits::ModelSpec| -> CVModelResult {
-        let name = spec.name.to_string();
-
-        if folds.is_empty() {
-            return CVModelResult {
-                name,
-                mean_mae: f64::NAN,
-                mean_rmse: f64::NAN,
-                std_mae: f64::NAN,
-            };
-        }
-
-        let mut fold_maes = Vec::with_capacity(folds.len());
-        let mut fold_rmses = Vec::with_capacity(folds.len());
-
-        for fold in &folds {
-            let train = match ts.slice(fold.train_start, fold.train_end) {
-                Ok(t) => t,
-                Err(_) => continue,
-            };
-            let mut model = spec.create();
-            if model.fit(&train).is_err() {
-                continue;
-            }
-            let forecast = match model.predict(fold.test_size()) {
-                Ok(f) => f,
-                Err(_) => continue,
-            };
-            let actual_slice = &ts.primary_values()[fold.test_start..fold.test_end];
-            let predicted = forecast.primary();
-            let fold_mae = mae(actual_slice, predicted);
-            let fold_rmse = rmse(actual_slice, predicted);
-            if fold_mae.is_finite() && fold_rmse.is_finite() {
-                fold_maes.push(fold_mae);
-                fold_rmses.push(fold_rmse);
-            }
-        }
-
-        if fold_maes.is_empty() {
-            return CVModelResult {
-                name,
-                mean_mae: f64::NAN,
-                mean_rmse: f64::NAN,
-                std_mae: f64::NAN,
-            };
-        }
-
-        let n = fold_maes.len() as f64;
-        let mean_mae = fold_maes.iter().sum::<f64>() / n;
-        let mean_rmse = fold_rmses.iter().sum::<f64>() / n;
-        let std_mae = if fold_maes.len() > 1 {
-            let variance = fold_maes
-                .iter()
-                .map(|v| (v - mean_mae).powi(2))
-                .sum::<f64>()
-                / (n - 1.0);
-            variance.sqrt()
-        } else {
-            0.0
-        };
-
-        CVModelResult {
-            name,
-            mean_mae,
-            mean_rmse,
-            std_mae,
-        }
-    };
+    let evaluate =
+        |spec: &&crate::models::traits::ModelSpec| -> CVModelResult { cv_single_model(spec, ts, &folds) };
 
     #[cfg(feature = "parallel")]
     let mut results: Vec<CVModelResult> = specs.par_iter().map(evaluate).collect();
@@ -383,21 +292,138 @@ pub fn cross_validate_all(
     #[cfg(not(feature = "parallel"))]
     let mut results: Vec<CVModelResult> = specs.iter().map(evaluate).collect();
 
-    results.sort_by(|a, b| {
-        let fa = a.mean_mae.is_finite();
-        let fb = b.mean_mae.is_finite();
-        match (fa, fb) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            (false, false) => a.name.cmp(&b.name),
-            (true, true) => a
-                .mean_mae
-                .partial_cmp(&b.mean_mae)
-                .unwrap_or(std::cmp::Ordering::Equal),
-        }
-    });
-
+    results.sort_by(cmp_cv_result);
     CVComparison { results }
+}
+
+/// Compute the initial window size and step size for cross-validation folds.
+///
+/// Given the series length, desired number of folds, and forecast horizon,
+/// returns `(initial_window, step_size)` that fit approximately `n_folds`
+/// folds within the series.
+fn compute_cv_fold_params(series_len: usize, n_folds: usize, horizon: usize) -> (usize, usize) {
+    if n_folds == 0 || horizon == 0 || series_len < horizon + 2 {
+        return (series_len, 1); // Will produce 0 folds
+    }
+
+    let needed_for_folds = n_folds * horizon;
+    if needed_for_folds >= series_len {
+        let iw = series_len.saturating_sub(n_folds + horizon - 1).max(2);
+        (iw, 1)
+    } else {
+        let iw = series_len.saturating_sub(needed_for_folds).max(2);
+        (iw, horizon)
+    }
+}
+
+/// Construct a `CVModelResult` with NaN metrics (used when no folds succeed).
+fn failed_cv_result(name: String) -> CVModelResult {
+    CVModelResult {
+        name,
+        mean_mae: f64::NAN,
+        mean_rmse: f64::NAN,
+        std_mae: f64::NAN,
+    }
+}
+
+/// Run cross-validation for a single model across all folds.
+fn cv_single_model(
+    spec: &crate::models::traits::ModelSpec,
+    ts: &TimeSeries,
+    folds: &[crate::utils::cross_validation::Fold],
+) -> CVModelResult {
+    let name = spec.name.to_string();
+
+    if folds.is_empty() {
+        return failed_cv_result(name);
+    }
+
+    let (fold_maes, fold_rmses) = collect_fold_metrics(spec, ts, folds);
+
+    if fold_maes.is_empty() {
+        return failed_cv_result(name);
+    }
+
+    aggregate_fold_metrics(name, &fold_maes, &fold_rmses)
+}
+
+/// Evaluate a model on each fold and collect per-fold MAE and RMSE values.
+///
+/// Folds where the model fails to fit/predict or produces non-finite metrics
+/// are silently skipped.
+fn collect_fold_metrics(
+    spec: &crate::models::traits::ModelSpec,
+    ts: &TimeSeries,
+    folds: &[crate::utils::cross_validation::Fold],
+) -> (Vec<f64>, Vec<f64>) {
+    let mut fold_maes = Vec::with_capacity(folds.len());
+    let mut fold_rmses = Vec::with_capacity(folds.len());
+
+    for fold in folds {
+        let train = match ts.slice(fold.train_start, fold.train_end) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        let mut model = spec.create();
+        if model.fit(&train).is_err() {
+            continue;
+        }
+        let forecast = match model.predict(fold.test_size()) {
+            Ok(f) => f,
+            Err(_) => continue,
+        };
+        let actual_slice = &ts.primary_values()[fold.test_start..fold.test_end];
+        let predicted = forecast.primary();
+        let fold_mae = mae(actual_slice, predicted);
+        let fold_rmse = rmse(actual_slice, predicted);
+        if fold_mae.is_finite() && fold_rmse.is_finite() {
+            fold_maes.push(fold_mae);
+            fold_rmses.push(fold_rmse);
+        }
+    }
+
+    (fold_maes, fold_rmses)
+}
+
+/// Aggregate per-fold MAE and RMSE into mean and standard deviation.
+///
+/// Assumes `fold_maes` is non-empty.
+fn aggregate_fold_metrics(name: String, fold_maes: &[f64], fold_rmses: &[f64]) -> CVModelResult {
+    let n = fold_maes.len() as f64;
+    let mean_mae = fold_maes.iter().sum::<f64>() / n;
+    let mean_rmse = fold_rmses.iter().sum::<f64>() / n;
+    let std_mae = if fold_maes.len() > 1 {
+        let variance = fold_maes
+            .iter()
+            .map(|v| (v - mean_mae).powi(2))
+            .sum::<f64>()
+            / (n - 1.0);
+        variance.sqrt()
+    } else {
+        0.0
+    };
+
+    CVModelResult {
+        name,
+        mean_mae,
+        mean_rmse,
+        std_mae,
+    }
+}
+
+/// Sort helper: finite-metric models first (by mean MAE ascending), then NaN models.
+fn cmp_cv_result(a: &CVModelResult, b: &CVModelResult) -> std::cmp::Ordering {
+    let fa = a.mean_mae.is_finite();
+    let fb = b.mean_mae.is_finite();
+    match (fa, fb) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        (false, false) => a.name.cmp(&b.name),
+        (true, true) => a
+            .mean_mae
+            .partial_cmp(&b.mean_mae)
+            .unwrap_or(std::cmp::Ordering::Equal),
+    }
 }
 
 // ---------------------------------------------------------------------------

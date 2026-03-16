@@ -53,6 +53,18 @@ impl PipelineReport {
             ]),
         });
 
+        // 1b. Structural break warning
+        if result.structural_break_in_holdout {
+            sections.push(ReportSection {
+                heading: "Warnings".into(),
+                content: ReportContent::Text(
+                    "Structural break detected in holdout period. Accuracy metrics \
+                     may be unreliable. Consider excluding from aggregated summaries."
+                        .into(),
+                ),
+            });
+        }
+
         // 2. Data Profile
         if let Some(ref profile) = result.profile {
             sections.push(ReportSection {
@@ -394,6 +406,7 @@ mod tests {
             metric_scores: None,
             trend_selection: None,
             seasonal_selection: None,
+            structural_break_in_holdout: false,
         }
     }
 
@@ -424,5 +437,23 @@ mod tests {
         let text = format!("{}", report);
         assert!(text.contains("Ensemble"));
         assert!(text.contains("SES"));
+    }
+
+    #[test]
+    fn report_structural_break_warning() {
+        let mut result = make_result();
+        result.structural_break_in_holdout = true;
+        let report = PipelineReport::from_result(&result);
+        let text = format!("{}", report);
+        assert!(text.contains("Warnings"));
+        assert!(text.contains("Structural break"));
+    }
+
+    #[test]
+    fn report_no_warning_when_clean() {
+        let result = make_result();
+        let report = PipelineReport::from_result(&result);
+        let text = format!("{}", report);
+        assert!(!text.contains("Warnings"));
     }
 }
