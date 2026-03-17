@@ -41,13 +41,14 @@ fn periodogram(signal: &[f64]) -> Vec<(usize, f64)> {
     let fft_result = fft_real(signal);
     let n_f64 = n as f64;
 
-    // Convert to power spectral density
-    // Skip DC component (k=0) and frequencies beyond Nyquist
-    let mut result = Vec::with_capacity(n / 2);
+    // Aggregate power by rounded period so adjacent bins whose true
+    // frequency maps to the same integer period get their power summed.
+    let mut power_by_period: std::collections::BTreeMap<usize, f64> =
+        std::collections::BTreeMap::new();
 
     for (k, complex) in fft_result.iter().enumerate().skip(1) {
-        // Period = N / frequency_index
-        let period = n / k;
+        // Period = N / frequency_index (round to nearest integer)
+        let period = (n as f64 / k as f64).round() as usize;
         if period < 2 {
             break;
         }
@@ -55,10 +56,11 @@ fn periodogram(signal: &[f64]) -> Vec<(usize, f64)> {
         // Power = |X[k]|^2 / N
         let power = (complex.re * complex.re + complex.im * complex.im) / n_f64;
 
-        result.push((period, power));
+        *power_by_period.entry(period).or_insert(0.0) += power;
     }
 
     // Sort by period (largest first for consistency)
+    let mut result: Vec<(usize, f64)> = power_by_period.into_iter().collect();
     result.sort_by(|a, b| b.0.cmp(&a.0));
     result
 }
@@ -156,20 +158,16 @@ mod tests {
     #[test]
     fn welch_periodogram_basic() {
         let signal = generate_sine(256, 12);
-        let psd = welch_periodogram(&signal, 64, 0.5);
+        let psd = welch_periodogram(&signal, 128, 0.5);
 
         assert!(!psd.is_empty());
 
-        // Should find period near 12
+        // Should find period exactly 12
         let peak = psd.iter().max_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
         assert!(peak.is_some());
 
         let (period, _) = peak.unwrap();
-        assert!(
-            (10..=14).contains(period),
-            "Expected period near 12, got {}",
-            period
-        );
+        assert_eq!(*period, 12, "Expected dominant period 12, got {}", period);
     }
 
     #[test]
