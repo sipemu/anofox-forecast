@@ -501,7 +501,7 @@ println!("Upper: {:?}", intervals.upper());
 
 ## Examples
 
-48 runnable examples covering all major features, each with a companion `.md` description. See [examples/README.md](examples/README.md) for the full categorized index.
+45 runnable examples covering all major features, each with a companion `.md` description. See [examples/README.md](examples/README.md) for the full categorized index.
 
 ```bash
 cargo run --example quickstart              # End-to-end forecasting

@@ -22,8 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `with_recency()` builder methods on `PiecewiseLinearTrend` and `HodrickPrescottFilter`
   - `trend_components` example demonstrating all components and AutoTrend selection
 
-- **Trend Integration & Changepoint-Aware Pipeline** (moved to `anofox-orchestration`)
-  - Changepoint-aware baseline models: `SMA::with_changepoint()` constrains window, `RandomWalkWithDrift::with_changepoint()` constrains drift
+- **Changepoint-Aware Baseline Models**
+  - `SMA::with_changepoint()` — constrains window to post-changepoint data
+  - `RandomWalkWithDrift::with_changepoint()` — constrains drift estimation to post-changepoint data
 
 - **Regression Forecaster** (`models::regression` module, requires `postprocess` feature)
   - `RegressionForecaster` — wraps `anofox-regression` backends behind the `Forecaster` trait
