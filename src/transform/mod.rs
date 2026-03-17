@@ -20,7 +20,9 @@
 //! ```
 
 pub mod boxcox;
+pub mod pipeline;
 pub mod scale;
+pub mod transforms;
 pub mod window;
 
 // Re-export from scale
@@ -30,6 +32,15 @@ pub use scale::{center, normalize, robust_scale, scale_to_range, standardize, Sc
 pub use boxcox::{
     boxcox, boxcox_auto, boxcox_lambda, boxcox_shifted, inv_boxcox, is_boxcox_suitable,
     BoxCoxResult,
+};
+
+// Re-export from pipeline
+pub use pipeline::{InverseMode, Pipeline, PipelineBuilder, Transform};
+
+// Re-export from transforms
+pub use transforms::{
+    BoxCoxTransform, DifferenceTransform, LogTransform, ScaleMethod, ScaleTransform,
+    SeasonalDifferenceTransform,
 };
 
 // Re-export from window
