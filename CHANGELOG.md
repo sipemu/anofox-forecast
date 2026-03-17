@@ -50,15 +50,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Forward-fill prediction: model continues in last known regime during forecast period
   - Builder methods: `with_structural()`, `with_changepoint_steps()`, `with_changepoints()`
 
-
 - **Binned Conformal Prediction** (`postprocess` module)
   - `BinnedConformalPredictor` — heteroscedastic prediction intervals that bin calibration residuals by predicted magnitude
   - Quantile-based bin edges with per-bin conformal quantiles — wider intervals where forecast uncertainty is larger
   - Graceful fallback: bins with < 3 residuals merge with neighbors; insufficient data falls back to single global quantile
   - `BinnedConformalResult` — bin edges, per-bin quantiles, global fallback quantile, coverage level
-  - `binned_intervals` config flag on `PipelineConfig` — switches `apply_postprocessing` to use binned conformal instead of standard conformal
-  - `PipelineBuilder::binned_intervals()` builder method
-
 
 - **Pre-Regression MSTL Decomposition** (`seasonality` + `models` modules)
   - `MSTL::decompose_with_regressors()` — regress out exogenous effects (OLS: y ~ X) before STL decomposition, preventing regressors correlated with trend/seasonality from distorting the decomposition
