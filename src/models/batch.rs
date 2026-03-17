@@ -679,5 +679,4 @@ mod tests {
         assert!(result.error.is_some());
         assert!(!result.model.is_fitted());
     }
-
 }

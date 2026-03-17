@@ -44,10 +44,7 @@ fn main() {
     let lower = forecast.lower_series(0).unwrap();
     let upper = forecast.upper_series(0).unwrap();
 
-    println!(
-        "{:>4} {:>10} {:>10} {:>10}",
-        "h", "Lower", "Point", "Upper"
-    );
+    println!("{:>4} {:>10} {:>10} {:>10}", "h", "Lower", "Point", "Upper");
     println!("{:-<38}", "");
     for i in 0..forecast.horizon() {
         println!(
@@ -63,27 +60,19 @@ fn main() {
     // 1. NonNegative constraint
     // -----------------------------------------------------------------------
     println!("\n--- ForecastConstraint::NonNegative ---");
-    let nn = ConstrainedForecast::apply(
-        &forecast,
-        &[ForecastConstraint::NonNegative],
-    );
+    let nn = ConstrainedForecast::apply(&forecast, &[ForecastConstraint::NonNegative]);
 
     let nn_point = nn.primary();
     let nn_lower = nn.lower_series(0).unwrap();
-    println!(
-        "{:>4} {:>10} {:>10}",
-        "h", "Point", "Lower"
-    );
+    println!("{:>4} {:>10} {:>10}", "h", "Point", "Lower");
     println!("{:-<26}", "");
     for i in 0..nn.horizon() {
-        println!(
-            "{:>4} {:>10.2} {:>10.2}",
-            i + 1,
-            nn_point[i],
-            nn_lower[i]
-        );
+        println!("{:>4} {:>10.2} {:>10.2}", i + 1, nn_point[i], nn_lower[i]);
     }
-    println!("All lower bounds >= 0: {}", nn_lower.iter().all(|v| *v >= 0.0));
+    println!(
+        "All lower bounds >= 0: {}",
+        nn_lower.iter().all(|v| *v >= 0.0)
+    );
 
     // -----------------------------------------------------------------------
     // 2. LowerBound and UpperBound
@@ -130,18 +119,12 @@ fn main() {
     // 4. IntegerRound
     // -----------------------------------------------------------------------
     println!("\n--- ForecastConstraint::IntegerRound ---");
-    let rounded = ConstrainedForecast::apply(
-        &forecast,
-        &[ForecastConstraint::IntegerRound],
-    );
+    let rounded = ConstrainedForecast::apply(&forecast, &[ForecastConstraint::IntegerRound]);
 
     let r_point = rounded.primary();
     let r_lower = rounded.lower_series(0).unwrap();
     let r_upper = rounded.upper_series(0).unwrap();
-    println!(
-        "{:>4} {:>10} {:>10} {:>10}",
-        "h", "Lower", "Point", "Upper"
-    );
+    println!("{:>4} {:>10} {:>10} {:>10}", "h", "Lower", "Point", "Upper");
     println!("{:-<38}", "");
     for i in 0..rounded.horizon() {
         println!(
@@ -181,12 +164,7 @@ fn main() {
     println!("{:>4} {:>10} {:>10}", "h", "Original", "Snapped");
     println!("{:-<26}", "");
     for i in 0..custom.horizon() {
-        println!(
-            "{:>4} {:>10.2} {:>10.0}",
-            i + 1,
-            point[i],
-            cu_point[i]
-        );
+        println!("{:>4} {:>10.2} {:>10.0}", i + 1, point[i], cu_point[i]);
     }
 
     // -----------------------------------------------------------------------
@@ -205,10 +183,7 @@ fn main() {
     let clamped2 = forecast.clamp(1.0, 20.0);
     println!(
         "clamp(1, 20)   - all in range: {}",
-        clamped2
-            .primary()
-            .iter()
-            .all(|v| *v >= 1.0 && *v <= 20.0)
+        clamped2.primary().iter().all(|v| *v >= 1.0 && *v <= 20.0)
     );
 
     // .round_to_integer()
@@ -238,10 +213,7 @@ fn main() {
     let comp_lower = composed.lower_series(0).unwrap();
     let comp_upper = composed.upper_series(0).unwrap();
 
-    println!(
-        "{:>4} {:>10} {:>10} {:>10}",
-        "h", "Lower", "Point", "Upper"
-    );
+    println!("{:>4} {:>10} {:>10} {:>10}", "h", "Lower", "Point", "Upper");
     println!("{:-<38}", "");
     for i in 0..composed.horizon() {
         println!(
@@ -268,7 +240,10 @@ fn main() {
 
     let constrained = point_only.non_negative();
     println!("Non-negative:  {:?}", constrained.primary());
-    println!("Has intervals: {}", constrained.has_lower() || constrained.has_upper());
+    println!(
+        "Has intervals: {}",
+        constrained.has_lower() || constrained.has_upper()
+    );
 
     let constrained = point_only.clamp(0.0, 10.0);
     println!("Clamped [0,10]: {:?}", constrained.primary());

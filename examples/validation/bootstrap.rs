@@ -52,9 +52,7 @@ fn main() {
     println!("  block_size: {:?}", default_config.block_size);
     println!("  seed:       {:?}", default_config.seed);
 
-    let custom_config = BootstrapConfig::new(500)
-        .with_block_size(5)
-        .with_seed(42);
+    let custom_config = BootstrapConfig::new(500).with_block_size(5).with_seed(42);
     println!("\nCustom config:");
     println!("  n_samples:  {}", custom_config.n_samples);
     println!("  block_size: {:?}", custom_config.block_size);
@@ -73,7 +71,10 @@ fn main() {
 
     let result = bootstrap_intervals(&naive, &ts, horizon, 0.95, &config).unwrap();
 
-    println!("Naive model - 95% bootstrap intervals ({} samples):", result.n_samples);
+    println!(
+        "Naive model - 95% bootstrap intervals ({} samples):",
+        result.n_samples
+    );
     println!("  Level: {:.0}%", result.level * 100.0);
     println!("\n  {:>4}  {:>10}  {:>10}", "Step", "Lower", "Upper");
     println!("  {:-<30}", "");
@@ -133,7 +134,10 @@ fn main() {
     let r2 = bootstrap_intervals(&naive, &ts, 5, 0.95, &config_seeded).unwrap();
 
     println!("Same seed (42) produces identical results:");
-    println!("  {:>4}  {:>12}  {:>12}  {:>10}", "Step", "Run 1 Lower", "Run 2 Lower", "Match?");
+    println!(
+        "  {:>4}  {:>12}  {:>12}  {:>10}",
+        "Step", "Run 1 Lower", "Run 2 Lower", "Match?"
+    );
     println!("  {:-<50}", "");
     for i in 0..5 {
         let matches = (r1.lower[i] - r2.lower[i]).abs() < 1e-10;

@@ -32,11 +32,7 @@ fn print_explanation(explanation: &ForecastExplanation, forecast_point: &[f64]) 
     println!("{:-<width$}", "", width = header.len());
 
     for i in 0..n {
-        let mut row = format!(
-            "{:>4} {:>10.4}",
-            i + 1,
-            explanation.level[i]
-        );
+        let mut row = format!("{:>4} {:>10.4}", i + 1, explanation.level[i]);
         if let Some(ref trend) = explanation.trend {
             row.push_str(&format!(" {:>10.4}", trend[i]));
         }
@@ -94,10 +90,7 @@ fn main() {
         .fold(0.0_f64, f64::max);
 
     println!("\nMax reconstruction error: {:.2e}", max_error);
-    println!(
-        "Components sum to forecast: {}",
-        max_error < 1e-6
-    );
+    println!("Components sum to forecast: {}", max_error < 1e-6);
 
     // Check component presence
     println!("\nComponent presence:");
@@ -140,9 +133,7 @@ fn main() {
 
     let n2 = 50;
     let timestamps2: Vec<_> = (0..n2)
-        .map(|i| {
-            Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap() + Duration::hours(i as i64)
-        })
+        .map(|i| Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap() + Duration::hours(i as i64))
         .collect();
 
     let values2: Vec<f64> = (0..n2)
@@ -169,7 +160,14 @@ fn main() {
         .fold(0.0_f64, f64::max);
 
     println!("\nMax reconstruction error: {:.2e}", max_error2);
-    println!("Seasonal component: {}", if explanation2.seasonal.is_some() { "present" } else { "absent" });
+    println!(
+        "Seasonal component: {}",
+        if explanation2.seasonal.is_some() {
+            "present"
+        } else {
+            "absent"
+        }
+    );
 
     // -----------------------------------------------------------------------
     // 3. ETS(A,N,N) - level only (Simple Exponential Smoothing)
@@ -178,9 +176,7 @@ fn main() {
 
     let n3 = 40;
     let timestamps3: Vec<_> = (0..n3)
-        .map(|i| {
-            Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap() + Duration::hours(i as i64)
-        })
+        .map(|i| Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap() + Duration::hours(i as i64))
         .collect();
 
     let values3: Vec<f64> = (0..n3)
@@ -207,8 +203,22 @@ fn main() {
         .fold(0.0_f64, f64::max);
 
     println!("\nMax reconstruction error: {:.2e}", max_error3);
-    println!("Trend component:    {}", if explanation3.trend.is_some() { "present" } else { "absent" });
-    println!("Seasonal component: {}", if explanation3.seasonal.is_some() { "present" } else { "absent" });
+    println!(
+        "Trend component:    {}",
+        if explanation3.trend.is_some() {
+            "present"
+        } else {
+            "absent"
+        }
+    );
+    println!(
+        "Seasonal component: {}",
+        if explanation3.seasonal.is_some() {
+            "present"
+        } else {
+            "absent"
+        }
+    );
 
     // -----------------------------------------------------------------------
     // 4. Validate lengths with has_correct_lengths

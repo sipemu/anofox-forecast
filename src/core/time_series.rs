@@ -635,8 +635,7 @@ impl TimeSeries {
 
         // Slice calendar regressors to match the sliced range
         let calendar = self.calendar.as_ref().map(|cal| {
-            let mut sliced_cal =
-                CalendarAnnotations::new().with_holidays(cal.holidays().to_vec());
+            let mut sliced_cal = CalendarAnnotations::new().with_holidays(cal.holidays().to_vec());
             for (name, vals) in cal.regressors() {
                 let sliced_vals = if vals.len() >= end {
                     vals[start..end].to_vec()

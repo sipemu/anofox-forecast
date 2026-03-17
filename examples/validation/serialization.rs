@@ -25,9 +25,7 @@ fn serialization_demo() {
     use anofox_forecast::core::{Forecast, TimeSeries};
     use anofox_forecast::models::baseline::Naive;
     use anofox_forecast::models::Forecaster;
-    use anofox_forecast::utils::persistence::{
-        from_bincode, from_json, to_bincode, to_json,
-    };
+    use anofox_forecast::utils::persistence::{from_bincode, from_json, to_bincode, to_json};
     use chrono::{Duration, TimeZone, Utc};
 
     println!("=== Model and Data Serialization Example ===\n");
@@ -193,7 +191,10 @@ fn serialization_demo() {
     println!("  Match:        {}", forecast == fc_restored_bin);
 
     // Show the round-tripped values
-    println!("\n  {:>4}  {:>8}  {:>8}  {:>8}", "Step", "Lower", "Point", "Upper");
+    println!(
+        "\n  {:>4}  {:>8}  {:>8}  {:>8}",
+        "Step", "Lower", "Point", "Upper"
+    );
     println!("  {:-<36}", "");
     let p = fc_restored.primary();
     let lo = fc_restored.lower_series(0).unwrap();

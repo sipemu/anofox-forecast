@@ -47,7 +47,11 @@ fn main() {
 
     let agg_sum = ts.aggregate(4, AggregationMethod::Sum);
 
-    println!("Result: {} groups from {} observations", agg_sum.len(), ts.len());
+    println!(
+        "Result: {} groups from {} observations",
+        agg_sum.len(),
+        ts.len()
+    );
     for i in 0..agg_sum.len() {
         let start_hour = i * 4;
         let end_hour = ((i + 1) * 4).min(n);
@@ -66,7 +70,11 @@ fn main() {
 
     let agg_mean = ts.aggregate(6, AggregationMethod::Mean);
 
-    println!("Result: {} groups from {} observations", agg_mean.len(), ts.len());
+    println!(
+        "Result: {} groups from {} observations",
+        agg_mean.len(),
+        ts.len()
+    );
     for i in 0..agg_mean.len() {
         let start_hour = i * 6;
         let end_hour = ((i + 1) * 6).min(n);
@@ -121,14 +129,8 @@ fn main() {
 
     let downsampled = ts.downsample(3);
 
-    println!(
-        "Original:    {} points",
-        ts.len()
-    );
-    println!(
-        "Downsampled: {} points (factor=3)\n",
-        downsampled.len()
-    );
+    println!("Original:    {} points", ts.len());
+    println!("Downsampled: {} points (factor=3)\n", downsampled.len());
     println!(
         "  {:>6}  {:>10}  {:>10}",
         "Index", "Original", "Downsampled"
@@ -152,9 +154,7 @@ fn main() {
     // Use a small series for clarity
     let small_ts = TimeSeries::univariate(
         (0..5)
-            .map(|i| {
-                Utc.with_ymd_and_hms(2024, 6, 1, 0, 0, 0).unwrap() + Duration::hours(i as i64)
-            })
+            .map(|i| Utc.with_ymd_and_hms(2024, 6, 1, 0, 0, 0).unwrap() + Duration::hours(i as i64))
             .collect(),
         vec![10.0, 20.0, 15.0, 25.0, 30.0],
     )
@@ -167,10 +167,7 @@ fn main() {
         small_ts.len(),
         upsampled_linear.len()
     );
-    println!(
-        "  {:>4}  {:>10}  {:>8}",
-        "Idx", "Value", "Source"
-    );
+    println!("  {:>4}  {:>10}  {:>8}", "Idx", "Value", "Source");
     println!("  {:-<26}", "");
     for (i, &v) in upsampled_linear.primary_values().iter().enumerate() {
         let source = if i % 3 == 0 { "original" } else { "interp" };
@@ -184,10 +181,7 @@ fn main() {
 
     let upsampled_ff = small_ts.upsample(3, InterpolationMethod::ForwardFill);
 
-    println!(
-        "  {:>4}  {:>10}  {:>10}",
-        "Idx", "Linear", "FwdFill"
-    );
+    println!("  {:>4}  {:>10}  {:>10}", "Idx", "Linear", "FwdFill");
     println!("  {:-<34}", "");
     for i in 0..upsampled_linear.len() {
         println!(

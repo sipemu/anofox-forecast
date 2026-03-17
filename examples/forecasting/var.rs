@@ -102,9 +102,7 @@ fn main() {
         }
     );
     println!();
-    println!(
-        "(True DGP: y1->y2 coupling is 0.05, y2->y1 coupling is 0.10)"
-    );
+    println!("(True DGP: y1->y2 coupling is 0.05, y2->y1 coupling is 0.10)");
 
     // -----------------------------------------------------------------------
     // 3. Multi-step forecasting
@@ -113,10 +111,7 @@ fn main() {
     let horizon = 10;
     let forecasts = model.predict(horizon).unwrap();
 
-    println!(
-        "{:>4} {:>12} {:>12}",
-        "h", "y1_hat", "y2_hat"
-    );
+    println!("{:>4} {:>12} {:>12}", "h", "y1_hat", "y2_hat");
     println!("{:-<30}", "");
     for h in 0..horizon {
         println!(
@@ -192,9 +187,7 @@ fn main() {
     println!("\n--- VARForecaster (Forecaster Trait Adapter) ---");
 
     let timestamps: Vec<_> = (0..n)
-        .map(|i| {
-            Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap() + Duration::hours(i as i64)
-        })
+        .map(|i| Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap() + Duration::hours(i as i64))
         .collect();
 
     // Build a TimeSeries with y1 as primary and y2 as a regressor

@@ -283,8 +283,9 @@ pub fn cross_validate_all(
     let folds = generator.generate(ts.len());
 
     let specs: Vec<_> = registry.iter().collect();
-    let evaluate =
-        |spec: &&crate::models::traits::ModelSpec| -> CVModelResult { cv_single_model(spec, ts, &folds) };
+    let evaluate = |spec: &&crate::models::traits::ModelSpec| -> CVModelResult {
+        cv_single_model(spec, ts, &folds)
+    };
 
     #[cfg(feature = "parallel")]
     let mut results: Vec<CVModelResult> = specs.par_iter().map(evaluate).collect();

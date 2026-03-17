@@ -6,9 +6,7 @@
 //!
 //! Run with: cargo run --example aid
 
-use anofox_forecast::validation::aid::{
-    AidAnalyzer, AidAnomalyLabel, AidInformationCriterion,
-};
+use anofox_forecast::validation::aid::{AidAnalyzer, AidAnomalyLabel, AidInformationCriterion};
 
 fn main() {
     println!("=== AID Demand Classification Example ===\n");
@@ -147,8 +145,14 @@ fn main() {
         .map(|(_, v)| *v)
         .sum();
 
-    println!("Anomaly alpha = 0.01 (strict):  {} anomalies", strict_anomalies);
-    println!("Anomaly alpha = 0.20 (lenient): {} anomalies", lenient_anomalies);
+    println!(
+        "Anomaly alpha = 0.01 (strict):  {} anomalies",
+        strict_anomalies
+    );
+    println!(
+        "Anomaly alpha = 0.20 (lenient): {} anomalies",
+        lenient_anomalies
+    );
 
     // Custom intermittent threshold
     let data_25pct_zeros: Vec<f64> = (0..100)

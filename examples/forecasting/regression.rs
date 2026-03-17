@@ -34,7 +34,10 @@ fn main() {
 
     let ts = TimeSeries::univariate(timestamps, values).unwrap();
     let horizon = 14;
-    println!("Data: {} observations, forecasting {} steps ahead\n", n, horizon);
+    println!(
+        "Data: {} observations, forecasting {} steps ahead\n",
+        n, horizon
+    );
 
     // ─────────────────────────────────────────────────────────────────
     // 1. OLS — trend + lags
@@ -185,7 +188,10 @@ fn main() {
         .no_exog();
     let mut theilsen = RegressionForecaster::ols(features);
     theilsen.fit(&ts).unwrap();
-    println!("  Theil-Sen trend R² = {:.4}", theilsen.r_squared().unwrap());
+    println!(
+        "  Theil-Sen trend R² = {:.4}",
+        theilsen.r_squared().unwrap()
+    );
 
     // ─────────────────────────────────────────────────────────────────
     // 13. Dummy seasonality (one-hot encoding)
@@ -227,7 +233,10 @@ fn main() {
     let mut cp_model = RegressionForecaster::ols(features);
     cp_model.fit(&shift_ts).unwrap();
     let forecast = cp_model.predict(horizon).unwrap();
-    println!("  R² = {:.4} (with changepoint at index 60)", cp_model.r_squared().unwrap());
+    println!(
+        "  R² = {:.4} (with changepoint at index 60)",
+        cp_model.r_squared().unwrap()
+    );
     print_forecast(&forecast.primary()[..5]);
 
     // ─────────────────────────────────────────────────────────────────
@@ -243,7 +252,10 @@ fn main() {
     let mut regime_model = RegressionForecaster::ols(features);
     regime_model.fit(&ts).unwrap();
     let forecast = regime_model.predict(horizon).unwrap();
-    println!("  R² = {:.4} (2 changepoints, regime index)", regime_model.r_squared().unwrap());
+    println!(
+        "  R² = {:.4} (2 changepoints, regime index)",
+        regime_model.r_squared().unwrap()
+    );
     print_forecast(&forecast.primary()[..5]);
 
     // ─────────────────────────────────────────────────────────────────

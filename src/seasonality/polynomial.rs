@@ -813,8 +813,16 @@ mod tests {
 
         eprintln!("n={n}, recency=0.3 (indices ~3500..5000):");
         eprintln!("  c0={:.6} (expected 100.0,  err={c0_err:.2e})", coeffs[0]);
-        eprintln!("  c1={:.6} (expected 3.0,    err={:.2e})", coeffs[1], (coeffs[1] - 3.0).abs());
-        eprintln!("  c2={:.6} (expected -0.5,   err={:.2e})", coeffs[2], (coeffs[2] - (-0.5)).abs());
+        eprintln!(
+            "  c1={:.6} (expected 3.0,    err={:.2e})",
+            coeffs[1],
+            (coeffs[1] - 3.0).abs()
+        );
+        eprintln!(
+            "  c2={:.6} (expected -0.5,   err={:.2e})",
+            coeffs[2],
+            (coeffs[2] - (-0.5)).abs()
+        );
         eprintln!("  c3={:.10} (expected 0.001,  err={c3_err:.2e})", coeffs[3]);
 
         // Test prediction accuracy (what actually matters for forecasting)
@@ -852,9 +860,21 @@ mod tests {
         eprintln!("  c0={:.4} (true 1.0)", coeffs[0]);
         eprintln!("  c1={:.4} (true 2.0)", coeffs[1]);
         eprintln!("  c2={:.6} (true 1.0)", coeffs[2]);
-        eprintln!("  R²={:.6}", trend.trend_features().iter().find(|(n, _)| *n == "polynomial_r_squared").unwrap().1);
+        eprintln!(
+            "  R²={:.6}",
+            trend
+                .trend_features()
+                .iter()
+                .find(|(n, _)| *n == "polynomial_r_squared")
+                .unwrap()
+                .1
+        );
 
         // c2 (quadratic term) should be close to 1.0 since noise is bounded
-        assert!((coeffs[2] - 1.0).abs() < 0.05, "c2 should be near 1.0, got {}", coeffs[2]);
+        assert!(
+            (coeffs[2] - 1.0).abs() < 0.05,
+            "c2 should be near 1.0, got {}",
+            coeffs[2]
+        );
     }
 }

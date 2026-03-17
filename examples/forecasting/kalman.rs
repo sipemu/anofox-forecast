@@ -30,10 +30,11 @@ fn main() {
         .collect();
 
     let model_ll = StateSpaceModel::local_level(1.0, 0.01);
+    println!("State-space model: F=[1], H=[1], Q=[0.01], R=[1.0]");
     println!(
-        "State-space model: F=[1], H=[1], Q=[0.01], R=[1.0]"
+        "True level: {:.1}, {} observations with noise\n",
+        true_level, n
     );
-    println!("True level: {:.1}, {} observations with noise\n", true_level, n);
 
     let mut kf_ll = KalmanFilter::new(model_ll.clone()).unwrap();
     let filtered_ll = kf_ll.filter(&data_ll).unwrap();
@@ -210,9 +211,7 @@ fn main() {
     for (h, pred) in predictions.iter().enumerate() {
         println!("{:>4} {:>12.4}", h + 1, pred[0]);
     }
-    println!(
-        "\n(Local level model predicts a constant -- the last filtered state)"
-    );
+    println!("\n(Local level model predicts a constant -- the last filtered state)");
 
     // Also predict from the trend model
     let preds_trend = kf_llt.predict(horizon).unwrap();
@@ -232,9 +231,7 @@ fn main() {
     println!("\n--- KalmanForecaster (Forecaster Trait Adapter) ---");
 
     let timestamps: Vec<_> = (0..n)
-        .map(|i| {
-            Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap() + Duration::hours(i as i64)
-        })
+        .map(|i| Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap() + Duration::hours(i as i64))
         .collect();
     let values: Vec<f64> = data_ll.iter().map(|obs| obs[0]).collect();
     let ts = TimeSeries::univariate(timestamps.clone(), values).unwrap();
@@ -256,9 +253,7 @@ fn main() {
     println!("\nLocal linear trend forecaster:");
     let trend_values: Vec<f64> = data_llt.iter().map(|obs| obs[0]).collect();
     let trend_timestamps: Vec<_> = (0..n_trend)
-        .map(|i| {
-            Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap() + Duration::hours(i as i64)
-        })
+        .map(|i| Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap() + Duration::hours(i as i64))
         .collect();
     let ts_trend = TimeSeries::univariate(trend_timestamps, trend_values).unwrap();
 

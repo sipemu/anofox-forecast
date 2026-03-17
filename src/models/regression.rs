@@ -199,11 +199,16 @@ mod ols_impl {
                 ChangepointEncoding::StepFunctions => self
                     .indices
                     .iter()
-                    .map(|&cp| if n_train > 0 && cp < n_train { 1.0 } else { 0.0 })
+                    .map(|&cp| {
+                        if n_train > 0 && cp < n_train {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    })
                     .collect(),
                 ChangepointEncoding::RegimeIndex | ChangepointEncoding::CumulativeCount => {
-                    let count =
-                        self.indices.iter().filter(|&&cp| cp < n_train).count() as f64;
+                    let count = self.indices.iter().filter(|&&cp| cp < n_train).count() as f64;
                     vec![count]
                 }
             }
@@ -431,9 +436,7 @@ mod ols_impl {
                     Ok(Box::new(fitted))
                 }
                 Self::Dynamic { ic, lowess_span } => {
-                    let mut builder = LmDynamicRegressor::builder()
-                        .with_intercept(true)
-                        .ic(*ic);
+                    let mut builder = LmDynamicRegressor::builder().with_intercept(true).ic(*ic);
                     if let Some(span) = lowess_span {
                         builder = builder.lowess_span(*span);
                     } else {
@@ -530,7 +533,10 @@ mod ols_impl {
         Exponential(ExponentialTrend),
         TheilSen(TheilSenTrend),
         Dummy(DummySeasonality),
-        Fourier { period: usize, order: usize },
+        Fourier {
+            period: usize,
+            order: usize,
+        },
         /// Structural feature — forward-filled during prediction.
         Structural {
             /// Prediction fill values — one per column, repeated for every forecast step.
@@ -543,10 +549,9 @@ mod ols_impl {
         #[allow(dead_code)]
         fn safety(&self) -> FeatureSafety {
             match self {
-                Self::Polynomial(_)
-                | Self::Exponential(_)
-                | Self::TheilSen(_)
-                | Self::Dummy(_) => FeatureSafety::DataDependent,
+                Self::Polynomial(_) | Self::Exponential(_) | Self::TheilSen(_) | Self::Dummy(_) => {
+                    FeatureSafety::DataDependent
+                }
                 Self::Fourier { .. } => FeatureSafety::Deterministic,
                 Self::Structural { .. } => FeatureSafety::Structural,
             }
@@ -563,14 +568,12 @@ mod ols_impl {
                 Self::TheilSen(t) => vec![t.predict_trend(horizon)],
                 Self::Dummy(d) => vec![d.predict_seasonal(horizon)],
                 Self::Fourier { period, order } => {
-                    let timestamps: Vec<f64> =
-                        (0..horizon).map(|h| (n_train + h) as f64).collect();
+                    let timestamps: Vec<f64> = (0..horizon).map(|h| (n_train + h) as f64).collect();
                     fourier_terms(&timestamps, *period as f64, *order).unwrap_or_default()
                 }
-                Self::Structural { fill_values } => fill_values
-                    .iter()
-                    .map(|&v| vec![v; horizon])
-                    .collect(),
+                Self::Structural { fill_values } => {
+                    fill_values.iter().map(|&v| vec![v; horizon]).collect()
+                }
             }
         }
     }
@@ -688,11 +691,7 @@ mod ols_impl {
         }
 
         /// Add changepoint features with specified encoding (convenience).
-        pub fn with_changepoints(
-            self,
-            indices: Vec<usize>,
-            encoding: ChangepointEncoding,
-        ) -> Self {
+        pub fn with_changepoints(self, indices: Vec<usize>, encoding: ChangepointEncoding) -> Self {
             self.with_structural(Arc::new(ChangepointFeature::new(indices, encoding)))
         }
 
@@ -810,7 +809,13 @@ mod ols_impl {
         fn build_matrices(
             &self,
             series: &TimeSeries,
-        ) -> Result<(Mat<f64>, Col<f64>, usize, Vec<String>, Vec<FittedComponentState>)> {
+        ) -> Result<(
+            Mat<f64>,
+            Col<f64>,
+            usize,
+            Vec<String>,
+            Vec<FittedComponentState>,
+        )> {
             let values = series.primary_values();
             let n = values.len();
             let offset = self.lag_offset();
@@ -982,9 +987,7 @@ mod ols_impl {
                     }
                     col_idx += 1;
                 }
-                fitted_components.push(FittedComponentState::Structural {
-                    fill_values: fill,
-                });
+                fitted_components.push(FittedComponentState::Structural { fill_values: fill });
             }
 
             // Exogenous regressors (sliced to match after lag offset)
@@ -1107,7 +1110,10 @@ mod ols_impl {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             f.debug_struct("FittedState")
                 .field("n_total", &self.n_total)
-                .field("n_features", &self.features.feature_names(&self.exog_names).len())
+                .field(
+                    "n_features",
+                    &self.features.feature_names(&self.exog_names).len(),
+                )
                 .field("r_squared", &self.model.r_squared())
                 .finish()
         }
@@ -1393,10 +1399,13 @@ mod ols_impl {
             let (x, y, n_train, exog_names, components) = self.features.build_matrices(series)?;
 
             // Fit via the configured backend
-            let fitted = self
-                .backend
-                .fit_to(&x, &y)
-                .map_err(|e| ForecastError::ComputationError(format!("{} fit failed: {}", self.backend.name(), e)))?;
+            let fitted = self.backend.fit_to(&x, &y).map_err(|e| {
+                ForecastError::ComputationError(format!(
+                    "{} fit failed: {}",
+                    self.backend.name(),
+                    e
+                ))
+            })?;
 
             // In-sample predictions
             let in_sample_preds = fitted.predict(&x);
@@ -1486,11 +1495,10 @@ mod ols_impl {
                 &state.components,
             )?;
 
-            let pred_result = state.model.predict_with_interval(
-                &x_future,
-                Some(IntervalType::Prediction),
-                level,
-            );
+            let pred_result =
+                state
+                    .model
+                    .predict_with_interval(&x_future, Some(IntervalType::Prediction), level);
 
             let values: Vec<f64> = pred_result.fit.iter().copied().collect();
             let lower: Vec<f64> = pred_result.lower.iter().copied().collect();
@@ -1780,12 +1788,16 @@ mod ols_impl {
                 assert!(
                     lower[0][h] < forecast.primary()[h],
                     "lower[{}] = {} should be < point = {}",
-                    h, lower[0][h], forecast.primary()[h],
+                    h,
+                    lower[0][h],
+                    forecast.primary()[h],
                 );
                 assert!(
                     forecast.primary()[h] < upper[0][h],
                     "point = {} should be < upper[{}] = {}",
-                    forecast.primary()[h], h, upper[0][h],
+                    forecast.primary()[h],
+                    h,
+                    upper[0][h],
                 );
             }
         }
@@ -1885,10 +1897,7 @@ mod ols_impl {
             let values: Vec<f64> = (0..n)
                 .map(|i| {
                     let t = i as f64;
-                    2.0 * t
-                        + 10.0
-                            * (2.0 * std::f64::consts::PI * t / period as f64).sin()
-                        + 5.0
+                    2.0 * t + 10.0 * (2.0 * std::f64::consts::PI * t / period as f64).sin() + 5.0
                 })
                 .collect();
             TimeSeries::univariate(make_timestamps(n), values).unwrap()
@@ -1919,7 +1928,10 @@ mod ols_impl {
         fn ols_dummy_seasonal() {
             let ts = make_seasonal_ts(56, 7); // 8 full weeks
             let mut model = RegressionForecaster::ols(
-                RegressionFeatures::new().trend().dummy_seasonal(7).no_exog(),
+                RegressionFeatures::new()
+                    .trend()
+                    .dummy_seasonal(7)
+                    .no_exog(),
             );
             model.fit(&ts).unwrap();
 
@@ -1951,9 +1963,7 @@ mod ols_impl {
         fn ols_exponential_trend_component() {
             // y = exp(0.05 * t)
             let n = 60;
-            let values: Vec<f64> = (0..n)
-                .map(|i| (0.05 * i as f64).exp())
-                .collect();
+            let values: Vec<f64> = (0..n).map(|i| (0.05 * i as f64).exp()).collect();
             let ts = TimeSeries::univariate(make_timestamps(n), values).unwrap();
 
             let mut model = RegressionForecaster::ols(
@@ -2036,7 +2046,11 @@ mod ols_impl {
             model.fit(&ts).unwrap();
 
             let r2 = model.r_squared().unwrap();
-            assert!(r2 > 0.85, "R² should be high for dual-seasonal data, got {}", r2);
+            assert!(
+                r2 > 0.85,
+                "R² should be high for dual-seasonal data, got {}",
+                r2
+            );
 
             let forecast = model.predict(12).unwrap();
             assert_eq!(forecast.primary().len(), 12);
@@ -2067,14 +2081,13 @@ mod ols_impl {
 
         #[test]
         fn classify_features_deterministic_only() {
-            let features = RegressionFeatures::new()
-                .trend()
-                .fourier(7, 2)
-                .no_exog();
+            let features = RegressionFeatures::new().trend().fourier(7, 2).no_exog();
             let classified = features.classify_features(&[]);
             // __trend + 4 Fourier columns = 5 total
             assert_eq!(classified.len(), 5);
-            assert!(classified.iter().all(|(_, s)| *s == FeatureSafety::Deterministic));
+            assert!(classified
+                .iter()
+                .all(|(_, s)| *s == FeatureSafety::Deterministic));
         }
 
         #[test]
@@ -2093,13 +2106,34 @@ mod ols_impl {
             // __fourier_p7_sin_1 (D) + __fourier_p7_cos_1 (D) + __seasonal_12 (DD) +
             // __cp_step_1 (S) + __cp_step_2 (S) = 9
             assert_eq!(classified.len(), 9);
-            assert_eq!(classified[0], ("__trend".into(), FeatureSafety::Deterministic));
-            assert_eq!(classified[1], ("__lag_1".into(), FeatureSafety::Deterministic));
-            assert_eq!(classified[3], ("__theilsen_trend".into(), FeatureSafety::DataDependent));
-            assert_eq!(classified[4], ("__fourier_p7_sin_1".into(), FeatureSafety::Deterministic));
-            assert_eq!(classified[6], ("__seasonal_12".into(), FeatureSafety::DataDependent));
-            assert_eq!(classified[7], ("__cp_step_1".into(), FeatureSafety::Structural));
-            assert_eq!(classified[8], ("__cp_step_2".into(), FeatureSafety::Structural));
+            assert_eq!(
+                classified[0],
+                ("__trend".into(), FeatureSafety::Deterministic)
+            );
+            assert_eq!(
+                classified[1],
+                ("__lag_1".into(), FeatureSafety::Deterministic)
+            );
+            assert_eq!(
+                classified[3],
+                ("__theilsen_trend".into(), FeatureSafety::DataDependent)
+            );
+            assert_eq!(
+                classified[4],
+                ("__fourier_p7_sin_1".into(), FeatureSafety::Deterministic)
+            );
+            assert_eq!(
+                classified[6],
+                ("__seasonal_12".into(), FeatureSafety::DataDependent)
+            );
+            assert_eq!(
+                classified[7],
+                ("__cp_step_1".into(), FeatureSafety::Structural)
+            );
+            assert_eq!(
+                classified[8],
+                ("__cp_step_2".into(), FeatureSafety::Structural)
+            );
         }
 
         #[test]
@@ -2133,10 +2167,10 @@ mod ols_impl {
             assert_eq!(cp.column_names(), vec!["__cp_regime"]);
             let cols = cp.compute(100);
             assert_eq!(cols.len(), 1);
-            assert_eq!(cols[0][0], 0.0);   // before any CP
-            assert_eq!(cols[0][10], 1.0);  // after first CP
-            assert_eq!(cols[0][49], 1.0);  // still in regime 1
-            assert_eq!(cols[0][50], 2.0);  // after second CP
+            assert_eq!(cols[0][0], 0.0); // before any CP
+            assert_eq!(cols[0][10], 1.0); // after first CP
+            assert_eq!(cols[0][49], 1.0); // still in regime 1
+            assert_eq!(cols[0][50], 2.0); // after second CP
             assert_eq!(cols[0][99], 2.0);
         }
 
@@ -2183,7 +2217,11 @@ mod ols_impl {
             let values: Vec<f64> = (0..n)
                 .map(|i| {
                     let base = 2.0 * i as f64 + 10.0;
-                    if i >= 30 { base + 20.0 } else { base }
+                    if i >= 30 {
+                        base + 20.0
+                    } else {
+                        base
+                    }
                 })
                 .collect();
             let ts = TimeSeries::univariate(make_timestamps(n), values).unwrap();
@@ -2197,7 +2235,11 @@ mod ols_impl {
             model.fit(&ts).unwrap();
 
             let r2 = model.r_squared().unwrap();
-            assert!(r2 > 0.99, "R² should be high with changepoint step, got {}", r2);
+            assert!(
+                r2 > 0.99,
+                "R² should be high with changepoint step, got {}",
+                r2
+            );
 
             let forecast = model.predict(5).unwrap();
             for &v in forecast.primary() {
@@ -2213,7 +2255,13 @@ mod ols_impl {
             let n = 60;
             let values: Vec<f64> = (0..n)
                 .map(|i| {
-                    let regime = if i < 20 { 0.0 } else if i < 40 { 1.0 } else { 2.0 };
+                    let regime = if i < 20 {
+                        0.0
+                    } else if i < 40 {
+                        1.0
+                    } else {
+                        2.0
+                    };
                     5.0 * regime + 0.01 * (i as f64 * 0.5).sin()
                 })
                 .collect();
@@ -2231,7 +2279,11 @@ mod ols_impl {
             for &v in forecast.primary() {
                 assert!(v.is_finite());
                 // Should predict near 10.0 (regime 2 * 5.0)
-                assert!((v - 10.0).abs() < 1.0, "predicted {} should be near 10.0", v);
+                assert!(
+                    (v - 10.0).abs() < 1.0,
+                    "predicted {} should be near 10.0",
+                    v
+                );
             }
         }
 
@@ -2267,7 +2319,11 @@ mod ols_impl {
             let values: Vec<f64> = (0..n)
                 .map(|i| {
                     let base = 0.5 * i as f64;
-                    if i == 25 { base + 100.0 } else { base }
+                    if i == 25 {
+                        base + 100.0
+                    } else {
+                        base
+                    }
                 })
                 .collect();
             let ts = TimeSeries::univariate(make_timestamps(n), values).unwrap();
@@ -2297,10 +2353,8 @@ mod ols_impl {
         #[test]
         fn backend_ridge_fit_predict() {
             let ts = make_linear_ts(50);
-            let mut model = RegressionForecaster::ridge(
-                0.1,
-                RegressionFeatures::new().trend().no_exog(),
-            );
+            let mut model =
+                RegressionForecaster::ridge(0.1, RegressionFeatures::new().trend().no_exog());
             model.fit(&ts).unwrap();
             assert_eq!(model.name(), "Ridge");
 
@@ -2346,10 +2400,8 @@ mod ols_impl {
         #[test]
         fn backend_quantile_median() {
             let ts = make_linear_ts(60);
-            let mut model = RegressionForecaster::quantile(
-                0.5,
-                RegressionFeatures::new().trend().no_exog(),
-            );
+            let mut model =
+                RegressionForecaster::quantile(0.5, RegressionFeatures::new().trend().no_exog());
             model.fit(&ts).unwrap();
             assert_eq!(model.name(), "Quantile");
 
@@ -2365,14 +2417,10 @@ mod ols_impl {
         #[test]
         fn backend_quantile_upper() {
             let ts = make_linear_ts(60);
-            let mut m50 = RegressionForecaster::quantile(
-                0.5,
-                RegressionFeatures::new().trend().no_exog(),
-            );
-            let mut m90 = RegressionForecaster::quantile(
-                0.9,
-                RegressionFeatures::new().trend().no_exog(),
-            );
+            let mut m50 =
+                RegressionForecaster::quantile(0.5, RegressionFeatures::new().trend().no_exog());
+            let mut m90 =
+                RegressionForecaster::quantile(0.9, RegressionFeatures::new().trend().no_exog());
             m50.fit(&ts).unwrap();
             m90.fit(&ts).unwrap();
 
@@ -2390,10 +2438,8 @@ mod ols_impl {
         #[test]
         fn backend_wls_decay() {
             let ts = make_linear_ts(60);
-            let mut model = RegressionForecaster::wls_decay(
-                0.95,
-                RegressionFeatures::new().trend().no_exog(),
-            );
+            let mut model =
+                RegressionForecaster::wls_decay(0.95, RegressionFeatures::new().trend().no_exog());
             model.fit(&ts).unwrap();
             assert_eq!(model.name(), "WLS");
 
@@ -2407,10 +2453,8 @@ mod ols_impl {
         #[test]
         fn backend_rls_fit_predict() {
             let ts = make_linear_ts(60);
-            let mut model = RegressionForecaster::rls(
-                0.99,
-                RegressionFeatures::new().trend().no_exog(),
-            );
+            let mut model =
+                RegressionForecaster::rls(0.99, RegressionFeatures::new().trend().no_exog());
             model.fit(&ts).unwrap();
             assert_eq!(model.name(), "RLS");
 
@@ -2425,10 +2469,8 @@ mod ols_impl {
         fn backend_tweedie_gaussian() {
             // var_power=0 is Gaussian — should behave like OLS
             let ts = make_linear_ts(50);
-            let mut model = RegressionForecaster::tweedie(
-                0.0,
-                RegressionFeatures::new().trend().no_exog(),
-            );
+            let mut model =
+                RegressionForecaster::tweedie(0.0, RegressionFeatures::new().trend().no_exog());
             model.fit(&ts).unwrap();
             assert_eq!(model.name(), "Tweedie");
 
@@ -2448,9 +2490,8 @@ mod ols_impl {
                 .collect();
             let ts = TimeSeries::univariate(make_timestamps(n), values).unwrap();
 
-            let mut model = RegressionForecaster::poisson(
-                RegressionFeatures::new().trend().no_exog(),
-            );
+            let mut model =
+                RegressionForecaster::poisson(RegressionFeatures::new().trend().no_exog());
             model.fit(&ts).unwrap();
             assert_eq!(model.name(), "Poisson");
 
@@ -2464,9 +2505,7 @@ mod ols_impl {
         #[test]
         fn backend_bls_nonnegative() {
             let ts = make_linear_ts(50);
-            let mut model = RegressionForecaster::nnls(
-                RegressionFeatures::new().trend().no_exog(),
-            );
+            let mut model = RegressionForecaster::nnls(RegressionFeatures::new().trend().no_exog());
             model.fit(&ts).unwrap();
             assert_eq!(model.name(), "BLS");
 
@@ -2500,12 +2539,22 @@ mod ols_impl {
             ));
             reg.register(ModelSpec::new(
                 "Ridge(0.1)",
-                || Box::new(RegressionForecaster::ridge(0.1, RegressionFeatures::new().trend().no_exog())),
+                || {
+                    Box::new(RegressionForecaster::ridge(
+                        0.1,
+                        RegressionFeatures::new().trend().no_exog(),
+                    ))
+                },
                 false,
             ));
             reg.register(ModelSpec::new(
                 "Quantile(0.5)",
-                || Box::new(RegressionForecaster::quantile(0.5, RegressionFeatures::new().trend().no_exog())),
+                || {
+                    Box::new(RegressionForecaster::quantile(
+                        0.5,
+                        RegressionFeatures::new().trend().no_exog(),
+                    ))
+                },
                 false,
             ));
 
@@ -2523,9 +2572,8 @@ mod ols_impl {
         #[test]
         fn backend_dynamic_fit_predict() {
             let ts = make_linear_ts(60);
-            let mut model = RegressionForecaster::dynamic(
-                RegressionFeatures::new().trend().no_exog(),
-            );
+            let mut model =
+                RegressionForecaster::dynamic(RegressionFeatures::new().trend().no_exog());
             model.fit(&ts).unwrap();
             assert_eq!(model.name(), "Dynamic");
 
@@ -2556,9 +2604,8 @@ mod ols_impl {
 
 #[cfg(feature = "postprocess")]
 pub use ols_impl::{
-    ChangepointEncoding, ChangepointFeature, FeatureSafety, RegressionBackend,
-    RegressionFeatures, RegressionForecaster, SeasonalSpec, StructuralFeature, TrendType,
-    WeightStrategy,
+    ChangepointEncoding, ChangepointFeature, FeatureSafety, RegressionBackend, RegressionFeatures,
+    RegressionForecaster, SeasonalSpec, StructuralFeature, TrendType, WeightStrategy,
 };
 // Re-export InformationCriterion so users can configure Dynamic backend without
 // depending on anofox-regression directly.

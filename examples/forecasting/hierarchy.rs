@@ -32,9 +32,18 @@ fn main() {
 
     println!("Nodes (BFS order): {:?}", tree.node_names());
     println!("Node count: {}", tree.len());
-    println!("Children of Total: {:?}", tree.children_of("Total").unwrap());
-    println!("Children of North: {:?}", tree.children_of("North").unwrap());
-    println!("Children of South: {:?}", tree.children_of("South").unwrap());
+    println!(
+        "Children of Total: {:?}",
+        tree.children_of("Total").unwrap()
+    );
+    println!(
+        "Children of North: {:?}",
+        tree.children_of("North").unwrap()
+    );
+    println!(
+        "Children of South: {:?}",
+        tree.children_of("South").unwrap()
+    );
 
     // -----------------------------------------------------------------------
     // Base forecasts (incoherent -- they don't add up)
@@ -51,9 +60,7 @@ fn main() {
     ];
 
     println!("\n--- Base Forecasts (Incoherent) ---");
-    println!(
-        "These forecasts were generated independently and do NOT add up.\n"
-    );
+    println!("These forecasts were generated independently and do NOT add up.\n");
     print_forecasts(&base_forecasts, horizon);
     println!();
     print_coherence_check(&base_forecasts, horizon);
