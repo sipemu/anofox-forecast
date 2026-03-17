@@ -31,6 +31,8 @@
 //! ```
 
 use super::welch_periodogram;
+use crate::features::autocorrelation::autocorrelation;
+use crate::seasonality::seasonal_diff::seasonal_diff_strength;
 
 /// Configuration for period detection.
 #[derive(Debug, Clone)]
@@ -47,6 +49,15 @@ pub struct PeriodDetectionConfig {
     /// Welch window size. `None` picks a sensible default based on series
     /// length (default: `None`).
     pub window_size: Option<usize>,
+    /// Minimum seasonal differencing strength for a period to be accepted.
+    /// Ranges 0–1; values near 1 mean strong seasonality. Set to 0 to
+    /// disable (default). Note: strength can be low for secondary periods
+    /// in multi-period signals; use this only when you need a single
+    /// dominant period.
+    pub min_strength: f64,
+    /// Minimum number of complete cycles required in the signal for a period
+    /// to be considered reliable (default: 2).
+    pub min_cycles: usize,
 }
 
 impl Default for PeriodDetectionConfig {
@@ -57,24 +68,42 @@ impl Default for PeriodDetectionConfig {
             max_periods: 5,
             min_power_ratio: 3.0,
             window_size: None,
+            min_strength: 0.0,
+            min_cycles: 2,
         }
     }
 }
 
-/// A detected seasonal period with metadata.
+/// A detected seasonal period with validation metadata.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Period {
     /// The detected period (integer number of observations per cycle).
     pub period: usize,
     /// Spectral power at this period.
     pub power: f64,
+    /// Seasonal differencing strength (0–1). Values > 0.6 indicate strong
+    /// seasonality; < 0.3 is weak.
+    pub strength: f64,
+    /// Autocorrelation at the detected lag. Positive values confirm a
+    /// repeating pattern.
+    pub acf: f64,
+    /// Number of complete cycles of this period in the signal.
+    pub n_cycles: usize,
 }
 
 /// Detect seasonal periods in a time series.
 ///
 /// Returns up to `config.max_periods` periods sorted by strength
-/// (strongest first). Spectral leakage side-lobes adjacent to
-/// stronger peaks are suppressed.
+/// (strongest first). Each candidate is validated with:
+///
+/// - **Seasonal differencing strength** — measures variance explained by the
+///   period; candidates below `config.min_strength` are rejected.
+/// - **Minimum cycles** — candidates where the signal contains fewer than
+///   `config.min_cycles` complete cycles are rejected.
+/// - **ACF confirmation** — the autocorrelation at the candidate lag is
+///   recorded (positive values confirm a repeating pattern).
+///
+/// Spectral leakage side-lobes adjacent to stronger peaks are suppressed.
 ///
 /// With feature `seasonal-detection`: uses SAZED ensemble from fdars-core.
 /// Without: uses Welch periodogram with local-maxima + leakage suppression.
@@ -86,14 +115,14 @@ pub fn detect_periods(signal: &[f64], config: &PeriodDetectionConfig) -> Vec<Per
     // With fdars-core available, use SAZED for primary detection and
     // fall back to Welch for additional periods.
     #[cfg(feature = "seasonal-detection")]
-    {
-        detect_periods_sazed(signal, config)
-    }
+    let mut candidates = detect_periods_sazed(signal, config);
 
     #[cfg(not(feature = "seasonal-detection"))]
-    {
-        detect_periods_welch(signal, config)
-    }
+    let mut candidates = detect_periods_welch(signal, config);
+
+    // Validate and enrich each candidate, then filter.
+    validate_periods(signal, &mut candidates, config);
+    candidates
 }
 
 /// Convenience: detect the single dominant period.
@@ -105,6 +134,31 @@ pub fn detect_dominant_period(signal: &[f64]) -> Option<usize> {
         ..Default::default()
     };
     detect_periods(signal, &config).first().map(|p| p.period)
+}
+
+// ── Validation ──────────────────────────────────────────────────────────────
+
+/// Validate detected periods: compute strength / ACF / n_cycles,
+/// then remove candidates that fail the thresholds.
+fn validate_periods(signal: &[f64], periods: &mut Vec<Period>, config: &PeriodDetectionConfig) {
+    let n = signal.len();
+
+    for p in periods.iter_mut() {
+        p.n_cycles = n / p.period;
+        p.strength = seasonal_diff_strength(signal, p.period);
+        p.acf = autocorrelation(signal, p.period);
+    }
+
+    periods.retain(|p| p.n_cycles >= config.min_cycles && p.strength >= config.min_strength);
+
+    // Sort by strength first (most meaningful), then by power as tiebreaker.
+    periods.sort_by(|a, b| {
+        b.strength
+            .partial_cmp(&a.strength)
+            .unwrap()
+            .then_with(|| b.power.partial_cmp(&a.power).unwrap())
+    });
+    periods.truncate(config.max_periods);
 }
 
 // ── fdars-core SAZED backend ────────────────────────────────────────────────
@@ -129,6 +183,9 @@ fn detect_periods_sazed(signal: &[f64], config: &PeriodDetectionConfig) -> Vec<P
         periods.push(Period {
             period: sazed_period,
             power: sazed_result.confidence,
+            strength: 0.0,
+            acf: 0.0,
+            n_cycles: 0,
         });
     }
 
@@ -150,6 +207,9 @@ fn detect_periods_sazed(signal: &[f64], config: &PeriodDetectionConfig) -> Vec<P
             periods.push(Period {
                 period: p_int,
                 power: conf,
+                strength: 0.0,
+                acf: 0.0,
+                n_cycles: 0,
             });
         }
     }
@@ -262,7 +322,7 @@ fn detect_periods_welch(signal: &[f64], config: &PeriodDetectionConfig) -> Vec<P
     kept.truncate(config.max_periods);
     kept
         .into_iter()
-        .map(|(period, power)| Period { period, power })
+        .map(|(period, power)| Period { period, power, strength: 0.0, acf: 0.0, n_cycles: 0 })
         .collect()
 }
 
@@ -462,5 +522,75 @@ mod tests {
         for p in &periods {
             assert!(p.period <= 20, "Period {} is above max_period 20", p.period);
         }
+    }
+
+    // ── Validation fields ───────────────────────────────────────────────
+
+    #[test]
+    fn validation_fields_populated() {
+        let signal: Vec<f64> = (0..144)
+            .map(|i| 100.0 + 10.0 * (2.0 * std::f64::consts::PI * i as f64 / 12.0).sin())
+            .collect();
+        let periods = detect_periods(&signal, &PeriodDetectionConfig::default());
+
+        let p12 = periods.iter().find(|p| p.period == 12).unwrap();
+        assert!(p12.strength > 0.5, "strength should be high, got {}", p12.strength);
+        assert!(p12.acf > 0.5, "acf(12) should be positive, got {}", p12.acf);
+        assert_eq!(p12.n_cycles, 12); // 144 / 12
+    }
+
+    #[test]
+    fn min_strength_filters_weak_periods() {
+        // Period 12 with noise — add a spurious candidate by setting
+        // min_power_ratio low, then use min_strength to filter.
+        let signal: Vec<f64> = (0..144)
+            .map(|i| 100.0 + 10.0 * (2.0 * std::f64::consts::PI * i as f64 / 12.0).sin())
+            .collect();
+        let config = PeriodDetectionConfig {
+            min_strength: 0.5,
+            ..Default::default()
+        };
+        let periods = detect_periods(&signal, &config);
+        for p in &periods {
+            assert!(
+                p.strength >= 0.5,
+                "Period {} has strength {} below threshold 0.5",
+                p.period, p.strength
+            );
+        }
+    }
+
+    #[test]
+    fn min_cycles_filters_unreliable_periods() {
+        // 30 observations with period 12 → only 2.5 cycles.
+        // With min_cycles=3, period 12 should be rejected.
+        let signal: Vec<f64> = (0..30)
+            .map(|i| (2.0 * std::f64::consts::PI * i as f64 / 12.0).sin())
+            .collect();
+        let config = PeriodDetectionConfig {
+            min_cycles: 3,
+            ..Default::default()
+        };
+        let periods = detect_periods(&signal, &config);
+        for p in &periods {
+            assert!(
+                p.n_cycles >= 3,
+                "Period {} has only {} cycles, below min_cycles=3",
+                p.period, p.n_cycles
+            );
+        }
+    }
+
+    #[test]
+    fn dominant_period_returns_strongest() {
+        // Ensure detect_dominant_period returns the period with highest strength.
+        let signal: Vec<f64> = (0..240)
+            .map(|i| 100.0 + 10.0 * (2.0 * std::f64::consts::PI * i as f64 / 12.0).sin())
+            .collect();
+        let dominant = detect_dominant_period(&signal);
+        assert_eq!(dominant, Some(12));
+
+        let all = detect_periods(&signal, &PeriodDetectionConfig::default());
+        assert_eq!(all[0].period, 12);
     }
 }
