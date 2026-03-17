@@ -22,19 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `with_recency()` builder methods on `PiecewiseLinearTrend` and `HodrickPrescottFilter`
   - `trend_components` example demonstrating all components and AutoTrend selection
 
-- **Trend Integration & Changepoint-Aware Pipeline** (`orchestration` module)
-  - `TrendIntegration` enum — `Decompose` (detrend → forecast residuals → recompose) or `Regressor` (trend as exogenous `"__trend"` feature)
-  - `TrendIntegrationState` — holds fitted/future trend values with helpers for both integration modes
-  - `ChangepointMode` enum — `Auto` (PELT-based from DataProfile) or `FitFrom(index)` with safety checks (min 30 obs, 2× seasonal period, holdout room)
-  - `TrendMode` / `SeasonalMode` enums for pipeline trend/seasonal component selection
-  - `TrendSelectionResult` / `SeasonalSelectionResult` structs in pipeline results
-  - `DecisionCategory::TrendSelection` / `SeasonalSelection` / `ChangepointAdaptation` for decision logging
-  - `.trend()`, `.trend_integration()`, `.seasonal()`, `.changepoint()` builder methods on `PipelineBuilder`
-  - Pipeline now supports end-to-end trend workflows: fit trend → transform data → train models → predict → recompose/exog
-  - Regressor mode threads future trend values through holdout evaluation, single-model, and ensemble prediction paths
-  - `DataProfile` now includes PELT changepoint detection results (`changepoints`, `last_changepoint`)
+- **Trend Integration & Changepoint-Aware Pipeline** (moved to `anofox-orchestration`)
   - Changepoint-aware baseline models: `SMA::with_changepoint()` constrains window, `RandomWalkWithDrift::with_changepoint()` constrains drift
-  - Trend/seasonal selection section in `PipelineReport`
 
 - **Regression Forecaster** (`models::regression` module, requires `postprocess` feature)
   - `RegressionForecaster` — wraps `anofox-regression` backends behind the `Forecaster` trait
@@ -61,11 +50,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Forward-fill prediction: model continues in last known regime during forecast period
   - Builder methods: `with_structural()`, `with_changepoint_steps()`, `with_changepoints()`
 
-- **Structural Break Detection in Pipeline** (`orchestration` module)
-  - `structural_break_in_holdout` flag on `PipelineResult` — flags series with changepoints in holdout period
-  - Automatic detection: pipeline logs structural breaks and sets flag for downstream filtering
-  - `partition_by_structural_break()` batch helper — separates clean vs flagged results by index
-  - Warning section in `PipelineReport` when structural break detected
+
+- **Binned Conformal Prediction** (`postprocess` module)
+  - `BinnedConformalPredictor` — heteroscedastic prediction intervals that bin calibration residuals by predicted magnitude
+  - Quantile-based bin edges with per-bin conformal quantiles — wider intervals where forecast uncertainty is larger
+  - Graceful fallback: bins with < 3 residuals merge with neighbors; insufficient data falls back to single global quantile
+  - `BinnedConformalResult` — bin edges, per-bin quantiles, global fallback quantile, coverage level
+  - `binned_intervals` config flag on `PipelineConfig` — switches `apply_postprocessing` to use binned conformal instead of standard conformal
+  - `PipelineBuilder::binned_intervals()` builder method
+
+
+- **Pre-Regression MSTL Decomposition** (`seasonality` + `models` modules)
+  - `MSTL::decompose_with_regressors()` — regress out exogenous effects (OLS: y ~ X) before STL decomposition, preventing regressors correlated with trend/seasonality from distorting the decomposition
+  - `MSTLResult` now stores `regressor_coefficients` (OLS result) and `regressor_effect` (X*β) for reconstruction
+  - `MSTLForecaster` automatically uses pre-regression when `TimeSeries` has calendar regressors
+  - Full `Forecaster` exog support: `supports_exog()`, `has_exog()`, `exog_names()`, `predict_with_exog()`
+  - `predict()` guards against missing exog when model was fit with regressors
 
 - **Composable Seasonality & Trend Components** (`seasonality` module)
   - `SeasonalComponent` / `TrendComponent` traits — dual-purpose: standalone (fit/predict) and feature extraction
@@ -75,10 +75,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `PiecewiseLinearTrend` — PELT-based changepoint detection with per-segment linear regression
   - Standalone feature functions: `dummy_seasonal_strength`, `dummy_seasonal_amplitude`, `seasonal_diff_strength`, `seasonal_diff_variance_reduction`, `hp_trend_strength`, `hp_cycle_variance_ratio`, `piecewise_n_segments`, `piecewise_trend_features`
 
-- **Comprehensive Examples** (48 examples with `.md` documentation)
-  - 10 new examples: `regression` (11 backends), `regression_exog_changepoints` (exog + changepoint + CV + pipeline), `hierarchy`, `var`, `kalman`, `constraints`, `explainability`, `aid`, `bootstrap`, `temporal_aggregation`, `serialization`
-  - `.md` companion documentation for all 48 examples with section descriptions, key types, and run commands
+- **Comprehensive Examples** (45 examples with `.md` documentation)
+  - 10 new examples: `regression` (11 backends), `hierarchy`, `var`, `kalman`, `constraints`, `explainability`, `aid`, `bootstrap`, `temporal_aggregation`, `serialization`
+  - `.md` companion documentation for all examples with section descriptions, key types, and run commands
   - `examples/README.md` — categorized index of all examples
+
+### Removed
+
+- **Orchestration module extracted to [`anofox-orchestration`](https://github.com/sipemu/anofox-orchestration)** (private repo)
+  - Moved: `DataProfile`, `PipelineBuilder`, `Pipeline`, `PipelineConfig`, `PipelineResult`, `PipelineReport`, `PipelineStore`, `DecisionLog`, `FallbackChain`, `HorizonAnalysis`, `SelectionConfidence`, `ModelConfidenceSet`, `QualityFloor`, `MetricStrategy`, `EnsembleMode`, `PreprocessMode`, `TrendIntegration`, `ChangepointMode`, `DriftConfig`/`DriftReport`, `ExploreBuilder`, `BacktestBuilder`, structured tool functions
+  - Moved: `partition_by_structural_break()` batch helper
+  - Moved examples: `orchestration`, `explore`, `regression_exog_changepoints`
+  - `anofox-forecast` remains the open-source foundation; `anofox-orchestration` depends on it via git
 
 ### Fixed
 
@@ -430,7 +438,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ETS uses `Cow<[f64]>` to avoid cloning series values when no regressors are present
 - Cross-validation uses direct slice references to avoid intermediate allocations per fold
 - Ensemble `predict_with_intervals()` produces widest-envelope combined intervals
-- Test coverage increased to 2,000+ tests
+- Test coverage increased to 2,480+ tests
 - `MissingValuePolicy` enum has 4 new variants (breaking for exhaustive `match` — acceptable under 0.x semver)
 
 ## [0.4.1] - 2026-01-16

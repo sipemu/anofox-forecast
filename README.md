@@ -49,7 +49,7 @@ console.log(forecast.values);
   - Intermittent demand: Croston, ADIDA, TSB, IMAPA
   - TBATS/AutoTBATS for complex seasonality
   - MFLES (Multiple Frequency Locally Estimated Scatterplot)
-  - MSTL-based forecasting with configurable trend/seasonal methods
+  - MSTL-based forecasting with configurable trend/seasonal methods and pre-regression exogenous support
   - GARCH for volatility modeling
   - VAR (Vector Autoregression) for multivariate forecasting with Granger causality
   - Kalman filter / state-space models (local level, local linear trend, custom)
@@ -79,7 +79,7 @@ console.log(forecast.values);
 - **Seasonality & Decomposition**
   - `SeasonalComponent` / `TrendComponent` traits — composable, dual-purpose (standalone + feature extraction)
   - STL (Seasonal-Trend decomposition using LOESS) with `StlBuilder` for ergonomic configuration
-  - MSTL (Multiple Seasonal-Trend decomposition) for complex seasonality
+  - MSTL (Multiple Seasonal-Trend decomposition) for complex seasonality, with pre-regression exogenous regressor support
   - Prophet-style Fourier seasonality (`FourierSeasonality`) with flexible harmonic modeling
   - Dummy (one-hot) seasonality (`DummySeasonality`) — captures arbitrary seasonal shapes without smoothness assumptions
   - Seasonal differencing (`SeasonalDifference`) — standalone transform with strength/variance-reduction features
@@ -136,6 +136,7 @@ console.log(forecast.values);
 
 - **Probabilistic Postprocessing**
   - Conformal Prediction: Distribution-free intervals with coverage guarantees
+  - Binned Conformal Prediction: Heteroscedastic intervals — bins residuals by predicted magnitude for wider intervals where uncertainty is larger
   - Historical Simulation: Non-parametric empirical error distribution
   - Normal Predictor: Gaussian error assumption baseline
   - IDR: Isotonic Distributional Regression (state-of-the-art calibration)
@@ -159,25 +160,10 @@ console.log(forecast.values);
 
 ### Data Processing & Pipeline
 
-- **Orchestration / Agent Forecasting** (`orchestration` module)
-  - `DataProfile`: Automated data profiling — stationarity (ADF), trend direction, seasonality, ACF, quality score, changepoint detection
-  - `PipelineBuilder`: Declarative pipeline — profile → preprocess → changepoint → trend → model selection → cross-validation → ensemble → postprocess → constraints
-  - `Pipeline::from_config()`: Replay a pipeline from saved `PipelineConfig`
-  - `PreprocessMode`: Automatic preprocessing — Box-Cox for skewed data, outlier replacement for low-quality data
-  - `MetricStrategy`: Data-aware multi-metric model selection — Auto, Single, or weighted Composite of MAE/MSE/RMSE/SMAPE/WAPE/MDA
-  - `EnsembleMode`: Auto (MCS-based), Fixed (specify combination method), or None (single best)
-  - `TrendIntegration`: Decompose (detrend → forecast residuals → recompose) or Regressor (trend as exogenous feature `"__trend"`)
-  - `ChangepointMode`: Auto (PELT-based) or FitFrom(index) — adapt training to regime changes with safety checks
-  - `PipelineReport`: Multi-section structured report from pipeline results (summary, profile, forecast, decision log, etc.)
-  - `PipelineStore` trait: Abstract storage backend with `Value` IR — `InMemoryStore` included, swap in DuckDB/SQLite
-  - Structured tool functions: `profile_data`, `select_models`, `run_pipeline`, `explain_result` — MCP-ready with typed I/O
-  - `DecisionLog`: Structured audit trail with categories, outcomes, and timing
-  - `FallbackChain`: Ordered model failover with automatic recovery
-  - `HorizonAnalysis`: Per-step-ahead error decomposition (RMSE, MAE, bias per horizon)
-  - `SelectionConfidence`: Diebold-Mariano pairwise test for forecast accuracy comparison
-  - `ModelConfidenceSet`: Bootstrap-based set of statistically best models (Hansen et al. 2011)
-  - `QualityFloor`: Superior Predictive Ability test — does any model beat the benchmark? (Hansen 2005)
-  - `ExecutionMetadata` / `ExecutionTimer`: Fit/predict timing and convergence tracking
+- **Orchestration / Agent Forecasting** — see [`anofox-orchestration`](https://github.com/sipemu/anofox-orchestration) (private)
+  - Autonomous pipeline: explore → backtest → ensemble → forecast
+  - Data profiling, model selection, cross-validated backtesting, ensemble construction, drift detection, structured reporting
+  - MCP-ready tool functions for agent integration
 
 - **Batch Processing & Parallelism**
   - `fit_predict_many()`: Fit one model across many series (parallel with `parallel` feature)
@@ -460,17 +446,6 @@ println!("Upper: {:?}", intervals.upper());
 | `ModelDiagnostics` | Comprehensive diagnostics: Ljung-Box, Jarque-Bera, Breusch-Pagan |
 | `IntermittentDiagnostics` | Syntetos-Boylan demand classification with model recommendations |
 | `AidAnalyzer` | Automatic Identification of Demand: distribution fitting, anomaly detection |
-| `PipelineBuilder` | Declarative forecasting pipeline with profiling, preprocessing, multi-metric selection, ensemble, fallback |
-| `DataProfile` | Automated data profiling (stationarity, trend, seasonality, quality) |
-| `PreprocessMode` | Auto/Manual preprocessing (Box-Cox, outlier replacement) |
-| `MetricStrategy` | Data-aware multi-metric model selection (Auto/Single/Composite) |
-| `EnsembleMode` | Auto (MCS-based) / Fixed / None ensemble construction |
-| `PipelineReport` | Multi-section structured report from pipeline results |
-| `PipelineStore` | Abstract storage trait with `Value` IR — backend-agnostic persistence |
-| `SelectionConfidence` | Diebold-Mariano pairwise forecast comparison |
-| `ModelConfidenceSet` | Bootstrap model confidence set (Hansen et al. 2011) |
-| `QualityFloor` | Superior Predictive Ability test vs benchmark |
-| `HorizonAnalysis` | Per-step-ahead error decomposition |
 | `bias()` / `periods_in_stock()` | Signed bias and inventory-focused PIS metric |
 | `ForecastMetrics::compute()` | All 10 metrics in one call (MAE through Theil's U) |
 | `fit_all_and_compare()` | Fit all registry models, rank by holdout accuracy |
@@ -488,8 +463,7 @@ println!("Upper: {:?}", intervals.upper());
 | `AutoTrend` | Automatic best-trend selection via AICc/BIC/holdout |
 | `AutoSeasonal` | Automatic best-seasonal selection via AICc/BIC |
 | `Recency` | Fit on recent data only (Window, Fraction, Full, Auto via PELT) |
-| `TrendIntegration` | Decompose (detrend/recompose) or Regressor (trend as exog feature) |
-| `ChangepointMode` | Auto (PELT) or FitFrom — regime-aware training with safety checks |
+| `BinnedConformalPredictor` | Heteroscedastic prediction intervals binned by predicted magnitude |
 | `RegressionForecaster` | Multi-backend regression: OLS, Ridge, ElasticNet, Quantile, WLS, RLS, Tweedie, Poisson, BLS, Dynamic |
 | `RegressionBackend` | Backend selection enum with convenience constructors (`ridge()`, `quantile()`, `wls_decay()`, etc.) |
 | `RegressionFeatures` | Feature builder for regression models (trend, seasonal, lags, structural, exog) |
@@ -520,6 +494,7 @@ println!("Upper: {:?}", intervals.upper());
 |------|-------------|
 | `PostProcessor` | Unified API for all postprocessing methods |
 | `ConformalPredictor` | Distribution-free prediction intervals |
+| `BinnedConformalPredictor` | Heteroscedastic intervals — bins by predicted magnitude |
 | `HistoricalSimulator` | Empirical error distribution |
 | `IDRPredictor` | Isotonic Distributional Regression |
 | `QRAPredictor` | Quantile Regression Averaging |
@@ -532,8 +507,6 @@ println!("Upper: {:?}", intervals.upper());
 cargo run --example quickstart              # End-to-end forecasting
 cargo run --example arima                   # ARIMA family
 cargo run --example regression              # 11 regression backends
-cargo run --example regression_exog_changepoints  # Exog + changepoints + CV
-cargo run --example orchestration           # Full pipeline
 cargo run --example cross_validation        # Time series CV
 cargo run --example postprocess_conformal   # Conformal prediction intervals
 ```
