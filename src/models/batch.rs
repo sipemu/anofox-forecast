@@ -11,7 +11,6 @@
 use crate::core::{Forecast, TimeSeries};
 use crate::error::Result;
 use crate::models::traits::{Forecaster, ModelRegistry};
-use crate::orchestration::pipeline::PipelineResult;
 use crate::utils::metrics::{calculate_metrics, AccuracyMetrics};
 
 #[cfg(feature = "parallel")]
@@ -325,24 +324,6 @@ pub fn fit_registry(registry: &ModelRegistry, series: &TimeSeries) -> Vec<Regist
     {
         specs.iter().map(process).collect()
     }
-}
-
-/// Partition pipeline results into clean and flagged sets by structural-break status.
-///
-/// Returns `(clean, flagged)` where each vector contains indices into `results`.
-/// Flagged series had a structural break detected in the holdout period and
-/// should be excluded from aggregated accuracy summaries.
-pub fn partition_by_structural_break(results: &[PipelineResult]) -> (Vec<usize>, Vec<usize>) {
-    let mut clean = Vec::new();
-    let mut flagged = Vec::new();
-    for (i, r) in results.iter().enumerate() {
-        if r.structural_break_in_holdout {
-            flagged.push(i);
-        } else {
-            clean.push(i);
-        }
-    }
-    (clean, flagged)
 }
 
 #[cfg(test)]
@@ -699,35 +680,4 @@ mod tests {
         assert!(!result.model.is_fitted());
     }
 
-    #[test]
-    fn partition_by_structural_break_filters() {
-        use crate::core::Forecast;
-        use crate::orchestration::decision_log::DecisionLog;
-        use crate::orchestration::pipeline::PipelineResult;
-
-        let make = |flagged: bool| PipelineResult {
-            forecast: Forecast::from_values(vec![1.0]),
-            model_name: "Naive".into(),
-            profile: None,
-            log: DecisionLog::new(),
-            model_metadata: vec![],
-            horizon_analysis: None,
-            selection_confidence: None,
-            model_confidence_set: None,
-            quality_floor: None,
-            preprocess: None,
-            ensemble_weights: None,
-            metric_scores: None,
-            trend_selection: None,
-            seasonal_selection: None,
-            structural_break_in_holdout: flagged,
-            holdout_forecasts: None,
-            holdout_actual: None,
-        };
-
-        let results = vec![make(false), make(true), make(false), make(true), make(false)];
-        let (clean, flagged) = partition_by_structural_break(&results);
-        assert_eq!(clean, vec![0, 2, 4]);
-        assert_eq!(flagged, vec![1, 3]);
-    }
 }

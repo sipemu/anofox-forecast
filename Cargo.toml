@@ -107,10 +107,6 @@ name = "regression"
 path = "examples/forecasting/regression.rs"
 
 [[example]]
-name = "regression_exog_changepoints"
-path = "examples/forecasting/regression_exog_changepoints.rs"
-
-[[example]]
 name = "intermittent"
 path = "examples/forecasting/intermittent.rs"
 
@@ -256,11 +252,6 @@ required-features = ["serde"]
 [[example]]
 name = "trend_components"
 path = "examples/trend_components.rs"
-
-# Orchestration
-[[example]]
-name = "orchestration"
-path = "examples/orchestration.rs"
 
 [[example]]
 name = "recency_sensitivity"
