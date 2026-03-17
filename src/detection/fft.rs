@@ -1,66 +1,38 @@
-//! FFT utilities for spectral analysis.
+//! Spectral analysis utilities.
 //!
 //! Provides Welch's periodogram for robust spectral estimation.
 
-use rustfft::{num_complex::Complex64, FftPlanner};
-
-/// Compute the FFT of a real-valued signal.
-///
-/// Returns the complex frequency domain representation.
-/// Only returns the first half (positive frequencies) since
-/// the input is real-valued and the spectrum is symmetric.
-fn fft_real(signal: &[f64]) -> Vec<Complex64> {
-    let n = signal.len();
-    if n == 0 {
-        return Vec::new();
-    }
-
-    // Convert to complex
-    let mut buffer: Vec<Complex64> = signal.iter().map(|&x| Complex64::new(x, 0.0)).collect();
-
-    // Perform FFT
-    let mut planner = FftPlanner::new();
-    let fft = planner.plan_fft_forward(n);
-    fft.process(&mut buffer);
-
-    // Return only positive frequencies (0 to N/2)
-    buffer.truncate(n / 2 + 1);
-    buffer
-}
-
 /// Compute the periodogram (power spectral density) of a signal.
 ///
-/// Returns (period, power) pairs sorted by period, where power is the
-/// squared magnitude of the FFT normalized by the signal length.
+/// Evaluates the DFT directly at each target integer period using the
+/// Goertzel-style approach.  This avoids bin-to-period rounding errors
+/// that plague FFT-based periodograms, because the spectral power is
+/// computed at exactly the frequency `1/period`.
+///
+/// Returns (period, power) pairs sorted by period (largest first).
 fn periodogram(signal: &[f64]) -> Vec<(usize, f64)> {
     let n = signal.len();
     if n < 4 {
         return Vec::new();
     }
 
-    let fft_result = fft_real(signal);
     let n_f64 = n as f64;
+    let two_pi = 2.0 * std::f64::consts::PI;
+    let mut result = Vec::with_capacity(n / 2);
 
-    // Aggregate power by rounded period so adjacent bins whose true
-    // frequency maps to the same integer period get their power summed.
-    let mut power_by_period: std::collections::BTreeMap<usize, f64> =
-        std::collections::BTreeMap::new();
-
-    for (k, complex) in fft_result.iter().enumerate().skip(1) {
-        // Period = N / frequency_index (round to nearest integer)
-        let period = (n as f64 / k as f64).round() as usize;
-        if period < 2 {
-            break;
+    for period in 2..=n / 2 {
+        let omega = two_pi / period as f64;
+        let mut re = 0.0;
+        let mut im = 0.0;
+        for (i, &x) in signal.iter().enumerate() {
+            let angle = omega * i as f64;
+            re += x * angle.cos();
+            im -= x * angle.sin();
         }
-
-        // Power = |X[k]|^2 / N
-        let power = (complex.re * complex.re + complex.im * complex.im) / n_f64;
-
-        *power_by_period.entry(period).or_insert(0.0) += power;
+        let power = (re * re + im * im) / n_f64;
+        result.push((period, power));
     }
 
-    // Sort by period (largest first for consistency)
-    let mut result: Vec<(usize, f64)> = power_by_period.into_iter().collect();
     result.sort_by(|a, b| b.0.cmp(&a.0));
     result
 }
@@ -111,14 +83,17 @@ pub fn welch_periodogram(signal: &[f64], window_size: usize, overlap: f64) -> Ve
     while start + window_size <= n {
         let segment = &signal[start..start + window_size];
 
-        // Apply Hann window
+        // Subtract segment mean before windowing to remove DC component
+        let seg_mean = segment.iter().sum::<f64>() / window_size as f64;
+
+        // Apply Hann window to demeaned segment
         let windowed: Vec<f64> = segment
             .iter()
             .enumerate()
             .map(|(i, &x)| {
                 let w = 0.5
                     * (1.0 - (2.0 * std::f64::consts::PI * i as f64 / window_size as f64).cos());
-                x * w
+                (x - seg_mean) * w
             })
             .collect();
 
@@ -158,16 +133,24 @@ mod tests {
     #[test]
     fn welch_periodogram_basic() {
         let signal = generate_sine(256, 12);
+
+        // window_size=128 has enough frequency resolution to resolve period 12
         let psd = welch_periodogram(&signal, 128, 0.5);
-
         assert!(!psd.is_empty());
-
-        // Should find period exactly 12
         let peak = psd.iter().max_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
-        assert!(peak.is_some());
-
         let (period, _) = peak.unwrap();
         assert_eq!(*period, 12, "Expected dominant period 12, got {}", period);
+
+        // window_size=64: frequency resolution (1/64) can't distinguish
+        // period 12 from 13, so accept either
+        let psd = welch_periodogram(&signal, 64, 0.5);
+        let peak = psd.iter().max_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        let (period, _) = peak.unwrap();
+        assert!(
+            (11..=13).contains(period),
+            "Expected period near 12 with window_size=64, got {}",
+            period
+        );
     }
 
     #[test]
@@ -203,8 +186,10 @@ mod tests {
 
         let psd = welch_periodogram(&signal, 128, 0.5);
 
-        // Should have peaks near 16 and 32
-        let top_periods: Vec<usize> = psd.iter().take(10).map(|(p, _)| *p).collect();
+        // Sort by power (descending) and take top 10 periods
+        let mut by_power = psd.clone();
+        by_power.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        let top_periods: Vec<usize> = by_power.iter().take(10).map(|(p, _)| *p).collect();
 
         let has_16 = top_periods.iter().any(|p| (14..=18).contains(p));
         let has_32 = top_periods.iter().any(|p| (28..=36).contains(p));
@@ -214,5 +199,113 @@ mod tests {
             "Should detect at least one period, got {:?}",
             top_periods
         );
+    }
+
+    /// Helper: find the dominant period from a welch_periodogram result.
+    fn dominant_period(psd: &[(usize, f64)]) -> usize {
+        psd.iter()
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+            .unwrap()
+            .0
+    }
+
+    /// Helper: find the top-k periods by power.
+    fn top_k_periods(psd: &[(usize, f64)], k: usize) -> Vec<usize> {
+        let mut by_power = psd.to_vec();
+        by_power.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        by_power.iter().take(k).map(|(p, _)| *p).collect()
+    }
+
+    #[test]
+    fn seasonal_monthly_period_12() {
+        // Monthly data: 144 observations (12 years), true period = 12
+        let signal: Vec<f64> = (0..144)
+            .map(|i| 100.0 + 10.0 * (2.0 * std::f64::consts::PI * i as f64 / 12.0).sin())
+            .collect();
+        let psd = welch_periodogram(&signal, 128, 0.5);
+        assert_eq!(dominant_period(&psd), 12);
+    }
+
+    #[test]
+    fn seasonal_quarterly_period_4() {
+        let signal = generate_sine(200, 4);
+        let psd = welch_periodogram(&signal, 128, 0.5);
+        assert_eq!(dominant_period(&psd), 4);
+    }
+
+    #[test]
+    fn seasonal_weekly_period_7() {
+        let signal: Vec<f64> = (0..365)
+            .map(|i| 50.0 + 5.0 * (2.0 * std::f64::consts::PI * i as f64 / 7.0).sin())
+            .collect();
+        let psd = welch_periodogram(&signal, 128, 0.5);
+        assert_eq!(dominant_period(&psd), 7);
+    }
+
+    #[test]
+    fn seasonal_period_24() {
+        // Hourly data with daily seasonality (period = 24)
+        let signal: Vec<f64> = (0..720)
+            .map(|i| 20.0 + 3.0 * (2.0 * std::f64::consts::PI * i as f64 / 24.0).sin())
+            .collect();
+        let psd = welch_periodogram(&signal, 256, 0.5);
+        assert_eq!(dominant_period(&psd), 24);
+    }
+
+    #[test]
+    fn seasonal_period_52() {
+        // Weekly data with annual seasonality (period = 52)
+        let signal: Vec<f64> = (0..260)
+            .map(|i| 30.0 + 8.0 * (2.0 * std::f64::consts::PI * i as f64 / 52.0).sin())
+            .collect();
+        let psd = welch_periodogram(&signal, 128, 0.5);
+        assert_eq!(dominant_period(&psd), 52);
+    }
+
+    #[test]
+    fn seasonal_multiple_12_and_6() {
+        // Monthly data with semi-annual and annual seasonality
+        let signal: Vec<f64> = (0..240)
+            .map(|i| {
+                100.0
+                    + 10.0 * (2.0 * std::f64::consts::PI * i as f64 / 12.0).sin()
+                    + 5.0 * (2.0 * std::f64::consts::PI * i as f64 / 6.0).sin()
+            })
+            .collect();
+        let psd = welch_periodogram(&signal, 128, 0.5);
+        let top = top_k_periods(&psd, 5);
+        assert!(top.contains(&12), "Should detect period 12, top={:?}", top);
+        assert!(top.contains(&6), "Should detect period 6, top={:?}", top);
+    }
+
+    #[test]
+    fn seasonal_multiple_12_and_4() {
+        // Monthly + quarterly seasonality
+        let signal: Vec<f64> = (0..240)
+            .map(|i| {
+                50.0
+                    + 8.0 * (2.0 * std::f64::consts::PI * i as f64 / 12.0).sin()
+                    + 4.0 * (2.0 * std::f64::consts::PI * i as f64 / 4.0).sin()
+            })
+            .collect();
+        let psd = welch_periodogram(&signal, 128, 0.5);
+        let top = top_k_periods(&psd, 5);
+        assert!(top.contains(&12), "Should detect period 12, top={:?}", top);
+        assert!(top.contains(&4), "Should detect period 4, top={:?}", top);
+    }
+
+    #[test]
+    fn seasonal_with_trend_and_noise() {
+        // Period 12 signal + linear trend + noise
+        let signal: Vec<f64> = (0..240)
+            .map(|i| {
+                let trend = 0.1 * i as f64;
+                let seasonal = 10.0 * (2.0 * std::f64::consts::PI * i as f64 / 12.0).sin();
+                let noise = ((i * 7 + 3) % 11) as f64 * 0.3 - 1.5; // deterministic pseudo-noise
+                50.0 + trend + seasonal + noise
+            })
+            .collect();
+        let psd = welch_periodogram(&signal, 128, 0.5);
+        assert_eq!(dominant_period(&psd), 12);
     }
 }
