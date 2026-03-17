@@ -1,14 +1,14 @@
 //! Regression-based forecasting models.
 //!
 //! Bridges external regression estimators (e.g., OLS from `anofox-regression`)
-//! into the [`Forecaster`] trait, enabling them to participate in pipelines,
+//! into the [`Forecaster`](crate::models::Forecaster) trait, enabling them to participate in pipelines,
 //! model registries, ensembles, and cross-validation.
 //!
 //! # Feature engineering
 //!
 //! Time-series forecasting with regression requires features. The
 //! [`RegressionFeatures`] builder configures which features are constructed
-//! from a [`TimeSeries`] before fitting:
+//! from a [`TimeSeries`](crate::core::TimeSeries) before fitting:
 //!
 //! | Feature          | Description |
 //! |-----------------|-------------|
