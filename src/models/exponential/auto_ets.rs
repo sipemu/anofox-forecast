@@ -41,6 +41,8 @@ pub struct AutoETSConfig {
     pub allow_damped: bool,
     /// Restrict to additive models only.
     pub additive_only: bool,
+    /// When true, exclude additive seasonal — only consider None or Multiplicative.
+    pub multiplicative_seasonal_only: bool,
 }
 
 impl Default for AutoETSConfig {
@@ -52,6 +54,7 @@ impl Default for AutoETSConfig {
             allow_multiplicative_seasonal: true,
             allow_damped: true,
             additive_only: false,
+            multiplicative_seasonal_only: false,
         }
     }
 }
@@ -78,6 +81,17 @@ impl AutoETSConfig {
         self.additive_only = true;
         self.allow_multiplicative_error = false;
         self.allow_multiplicative_seasonal = false;
+        self
+    }
+
+    /// Restrict to multiplicative seasonality only (no additive seasonal models).
+    ///
+    /// Use when explore detects multiplicative decomposition — avoids searching
+    /// additive-seasonal candidates that won't fit the data well.
+    pub fn multiplicative_seasonal_only(mut self) -> Self {
+        self.allow_multiplicative_seasonal = true;
+        self.additive_only = false;
+        self.multiplicative_seasonal_only = true;
         self
     }
 
@@ -188,6 +202,8 @@ impl AutoETS {
             || restrict_multiplicative
         {
             vec![SeasonalType::None, SeasonalType::Additive]
+        } else if self.config.multiplicative_seasonal_only {
+            vec![SeasonalType::None, SeasonalType::Multiplicative]
         } else {
             vec![
                 SeasonalType::None,
