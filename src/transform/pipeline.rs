@@ -18,6 +18,7 @@
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
 use crate::models::{BoxedForecaster, FittedParams, Forecaster};
+use crate::utils::ols::OLSResult;
 use std::collections::HashMap;
 use std::fmt;
 
@@ -234,6 +235,10 @@ impl Forecaster for Pipeline {
 
     fn exog_names(&self) -> Option<&[String]> {
         self.model.exog_names()
+    }
+
+    fn exog_coefficients(&self) -> Option<&OLSResult> {
+        self.model.exog_coefficients()
     }
 
     fn predict_with_exog(

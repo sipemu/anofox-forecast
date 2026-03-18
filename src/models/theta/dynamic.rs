@@ -821,6 +821,10 @@ impl Forecaster for DynamicTheta {
             .map(|ols| ols.regressor_names.as_slice())
     }
 
+    fn exog_coefficients(&self) -> Option<&OLSResult> {
+        self.exog_ols.as_ref()
+    }
+
     fn predict_with_exog(
         &self,
         horizon: usize,

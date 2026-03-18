@@ -95,7 +95,34 @@ for (name, vals) in &all_features {
 future_regs.insert("temperature".to_string(), future_temp);
 ```
 
-## 5. Scenario Analysis
+## 5. Extract OLS Coefficients
+
+After fitting with exogenous regressors, extract the OLS pre-regression coefficients:
+
+```rust
+use anofox_forecast::utils::OLSResult;
+
+model.fit(&ts).unwrap();
+
+if let Some(ols) = model.exog_coefficients() {
+    println!("Intercept: {:.4}", ols.intercept);
+    for (name, coef) in ols.regressor_names.iter().zip(&ols.coefficients) {
+        println!("  {}: {:.4}", name, coef);
+    }
+
+    // Predict exog contribution for new data
+    let exog_effect = ols.predict(&future_regs).unwrap();
+}
+```
+
+`OLSResult` fields:
+- `intercept: f64` — regression intercept
+- `coefficients: Vec<f64>` — one per regressor (sorted by name)
+- `regressor_names: Vec<String>` — names in sorted order
+
+Available on all exog-supporting models: ARIMA, SARIMA, AutoARIMA, ETS, AutoETS, Theta, AutoTheta, OptimizedTheta, DynamicTheta, MSTL, MFLES, Naive, and Pipeline.
+
+## 6. Scenario Analysis
 
 Compare forecasts under different regressor scenarios:
 
@@ -124,7 +151,7 @@ let uplift = fc_on.primary()[7] - fc_off.primary()[7];
 // uplift ≈ promotion coefficient
 ```
 
-## 6. Reuse Generator Across Models
+## 7. Reuse Generator Across Models
 
 ```rust
 let gen = FeatureGenerator::new().fourier(12, 3).month_of_year();

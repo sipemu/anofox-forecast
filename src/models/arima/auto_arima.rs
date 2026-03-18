@@ -5,6 +5,7 @@ use crate::error::{ForecastError, Result};
 use crate::models::arima::diff::suggest_differencing;
 use crate::models::arima::model::{ARIMA, SARIMA};
 use crate::models::{validate_series_complete, Forecaster};
+use crate::utils::ols::OLSResult;
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -854,6 +855,13 @@ impl Forecaster for AutoARIMA {
         match self.selected_model.as_ref()? {
             SelectedModel::ARIMA(model) => model.exog_names(),
             SelectedModel::SARIMA(model) => model.exog_names(),
+        }
+    }
+
+    fn exog_coefficients(&self) -> Option<&OLSResult> {
+        match self.selected_model.as_ref()? {
+            SelectedModel::ARIMA(model) => model.exog_coefficients(),
+            SelectedModel::SARIMA(model) => model.exog_coefficients(),
         }
     }
 

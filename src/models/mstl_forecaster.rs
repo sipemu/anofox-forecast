@@ -557,6 +557,10 @@ impl Forecaster for MSTLForecaster {
         }
     }
 
+    fn exog_coefficients(&self) -> Option<&OLSResult> {
+        self.ols_result.as_ref()
+    }
+
     fn predict_with_exog(
         &self,
         horizon: usize,

@@ -115,6 +115,8 @@ trait Forecaster {
     fn name(&self) -> &str;
     fn supports_exog(&self) -> bool;
     fn has_exog(&self) -> bool;
+    fn exog_names(&self) -> Option<&[String]>;
+    fn exog_coefficients(&self) -> Option<&OLSResult>;  // OLS pre-regression coefficients
     fn predict_with_exog(&self, horizon: usize, future: &HashMap<String, Vec<f64>>) -> Result<Forecast>;
 }
 ```

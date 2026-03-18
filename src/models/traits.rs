@@ -2,6 +2,7 @@
 
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
+use crate::utils::ols::OLSResult;
 use std::collections::HashMap;
 
 /// Container for fitted model parameters, enabling warm-starting and parameter extraction.
@@ -136,6 +137,17 @@ pub trait Forecaster {
     ///
     /// Returns None if model doesn't support or wasn't fit with exogenous variables.
     fn exog_names(&self) -> Option<&[String]> {
+        None
+    }
+
+    /// Get the OLS regression result from exogenous pre-regression.
+    ///
+    /// When a model is fit with exogenous regressors, it first runs OLS regression
+    /// (`y ~ intercept + X @ coefficients`) and fits the core model on the residuals.
+    /// This method exposes the OLS coefficients, intercept, and regressor names.
+    ///
+    /// Returns `None` if the model wasn't fit with exogenous variables.
+    fn exog_coefficients(&self) -> Option<&OLSResult> {
         None
     }
 

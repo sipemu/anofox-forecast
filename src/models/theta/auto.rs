@@ -7,6 +7,7 @@ use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
 use crate::models::theta::{DecompositionType, DynamicTheta, OptimizedTheta, Theta};
 use crate::models::{validate_series_complete, Forecaster};
+use crate::utils::ols::OLSResult;
 use std::collections::HashMap;
 
 /// Type of Theta model selected by AutoTheta.
@@ -341,6 +342,15 @@ impl Forecaster for AutoTheta {
             FittedModel::OTM(m) => m.exog_names(),
             FittedModel::DSTM(m) => m.exog_names(),
             FittedModel::DOTM(m) => m.exog_names(),
+        }
+    }
+
+    fn exog_coefficients(&self) -> Option<&OLSResult> {
+        match self.fitted_model.as_ref()? {
+            FittedModel::STM(m) => m.exog_coefficients(),
+            FittedModel::OTM(m) => m.exog_coefficients(),
+            FittedModel::DSTM(m) => m.exog_coefficients(),
+            FittedModel::DOTM(m) => m.exog_coefficients(),
         }
     }
 
