@@ -594,8 +594,11 @@ mod ols_impl {
     pub struct RegressionFeatures {
         /// Include a linear trend index (0, 1, …, n-1).
         pub use_trend: bool,
-        /// Number of autoregressive lags to include.
+        /// Number of autoregressive lags to include (legacy; prefer `lag_indices`).
         pub max_lag: usize,
+        /// Specific lag indices to include (e.g. `vec![12]` for only lag-12).
+        /// When non-empty, this takes precedence over `max_lag`.
+        pub lag_indices: Vec<usize>,
         /// Include exogenous regressors from the TimeSeries (if present).
         pub use_exog: bool,
         /// Trend components to include as feature columns.
@@ -611,6 +614,7 @@ mod ols_impl {
             Self {
                 use_trend: true,
                 max_lag: 0,
+                lag_indices: Vec::new(),
                 use_exog: true,
                 trend_components: Vec::new(),
                 seasonal_components: Vec::new(),
@@ -640,7 +644,38 @@ mod ols_impl {
         /// Include autoregressive lags `y[t-1] … y[t-max_lag]`.
         pub fn lags(mut self, max_lag: usize) -> Self {
             self.max_lag = max_lag;
+            self.lag_indices = Vec::new(); // clear specific lags
             self
+        }
+
+        /// Include only the specified lag indices (e.g. `&[12]` for lag-12 only).
+        pub fn specific_lags(mut self, lags: &[usize]) -> Self {
+            let mut sorted = lags.to_vec();
+            sorted.sort_unstable();
+            sorted.dedup();
+            self.lag_indices = sorted;
+            self.max_lag = 0; // specific_lags takes precedence
+            self
+        }
+
+        /// Return the effective list of lag indices.
+        fn effective_lags(&self) -> Vec<usize> {
+            if !self.lag_indices.is_empty() {
+                self.lag_indices.clone()
+            } else if self.max_lag > 0 {
+                (1..=self.max_lag).collect()
+            } else {
+                Vec::new()
+            }
+        }
+
+        /// Maximum lag value (for offset calculation and tail storage).
+        fn max_effective_lag(&self) -> usize {
+            if !self.lag_indices.is_empty() {
+                self.lag_indices.iter().copied().max().unwrap_or(0)
+            } else {
+                self.max_lag
+            }
         }
 
         /// Include exogenous regressors from the TimeSeries.
@@ -697,7 +732,7 @@ mod ols_impl {
 
         /// Number of observations lost to lagging.
         fn lag_offset(&self) -> usize {
-            self.max_lag
+            self.max_effective_lag()
         }
 
         /// Build feature column names for a given TimeSeries.
@@ -706,7 +741,7 @@ mod ols_impl {
             if self.use_trend {
                 names.push("__trend".to_string());
             }
-            for lag in 1..=self.max_lag {
+            for lag in self.effective_lags() {
                 names.push(format!("__lag_{}", lag));
             }
             // Trend component columns
@@ -753,7 +788,7 @@ mod ols_impl {
             if self.use_trend {
                 result.push(("__trend".to_string(), FeatureSafety::Deterministic));
             }
-            for lag in 1..=self.max_lag {
+            for lag in self.effective_lags() {
                 result.push((format!("__lag_{}", lag), FeatureSafety::Deterministic));
             }
             for trend in &self.trend_components {
@@ -825,8 +860,9 @@ mod ols_impl {
                     needed: offset + 2,
                     got: n,
                     hint: Some(format!(
-                        "need > {} observations for {} lags",
-                        offset, self.max_lag
+                        "need > {} observations for lags {:?}",
+                        offset,
+                        self.effective_lags()
                     )),
                 });
             }
@@ -922,8 +958,8 @@ mod ols_impl {
                 col_idx += 1;
             }
 
-            // Lags: y[t-1], y[t-2], …
-            for lag in 1..=self.max_lag {
+            // Lags: y[t-k] for each specified lag k
+            for lag in self.effective_lags() {
                 for i in 0..n_train {
                     x[(i, col_idx)] = values[offset + i - lag];
                 }
@@ -1039,7 +1075,7 @@ mod ols_impl {
 
             // Lags: filled during recursive prediction (column indices stored)
             // Pre-fill from tail_values where possible
-            for lag in 1..=self.max_lag {
+            for lag in self.effective_lags() {
                 for h in 0..horizon {
                     if h >= lag {
                         // Will be filled recursively during prediction
@@ -1345,7 +1381,8 @@ mod ols_impl {
                 &state.components,
             )?;
 
-            if state.features.max_lag == 0 {
+            let eff_lags = state.features.effective_lags();
+            if eff_lags.is_empty() {
                 // No lags — direct (non-recursive) prediction
                 let preds = state.model.predict(&x_future);
                 return Ok(preds.iter().copied().collect());
@@ -1358,8 +1395,8 @@ mod ols_impl {
 
             for h in 0..horizon {
                 // Update lag columns with most recent known/predicted values
-                for lag in 1..=state.features.max_lag {
-                    let col = trend_offset + (lag - 1);
+                for (col_offset, &lag) in eff_lags.iter().enumerate() {
+                    let col = trend_offset + col_offset;
                     let idx = recent.len() as isize - lag as isize;
                     if idx >= 0 {
                         x_future[(h, col)] = recent[idx as usize];
@@ -1420,7 +1457,7 @@ mod ols_impl {
             }
 
             // Store tail values for recursive prediction
-            let tail_len = self.features.max_lag.max(1);
+            let tail_len = self.features.max_effective_lag().max(1);
             let tail_values = values[n.saturating_sub(tail_len)..].to_vec();
 
             self.state = Some(FittedState {
@@ -1474,7 +1511,7 @@ mod ols_impl {
             // forecasts.  Recursive models (max_lag > 0) feed predicted values
             // back as features, so the standard interval formula does not apply;
             // fall back to point-only predictions in that case.
-            if state.features.max_lag > 0 {
+            if !state.features.effective_lags().is_empty() {
                 return self.predict(horizon);
             }
 

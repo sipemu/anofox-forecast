@@ -1170,8 +1170,15 @@ impl ETS {
                         if best_stage1 < f64::MAX {
                             let mut buf = seasonal_buf.borrow_mut();
                             let init_ll = self.calculate_likelihood_with_init_buf(
-                                values, alpha_init, None, Some(gamma_init), None,
-                                Some(init_level), None, Some(&init_seasonals), &mut buf,
+                                values,
+                                alpha_init,
+                                None,
+                                Some(gamma_init),
+                                None,
+                                Some(init_level),
+                                None,
+                                Some(&init_seasonals),
+                                &mut buf,
                             );
                             drop(buf);
                             if init_ll > best_stage1 * 3.0 {
@@ -1183,8 +1190,15 @@ impl ETS {
                             |p| {
                                 let mut buf = seasonal_buf.borrow_mut();
                                 self.calculate_likelihood_with_init_buf(
-                                    values, p[0], None, Some(p[1]), None,
-                                    Some(init_level), None, Some(&init_seasonals), &mut buf,
+                                    values,
+                                    p[0],
+                                    None,
+                                    Some(p[1]),
+                                    None,
+                                    Some(init_level),
+                                    None,
+                                    Some(&init_seasonals),
+                                    &mut buf,
                                 )
                             },
                             &[alpha_init, gamma_init],
@@ -1217,8 +1231,15 @@ impl ETS {
                         |p| {
                             let mut buf = seasonal_buf.borrow_mut();
                             self.calculate_likelihood_with_init_buf(
-                                values, p[0], None, Some(p[1]), None,
-                                Some(p[2]), None, Some(&p[3..3 + period]), &mut buf,
+                                values,
+                                p[0],
+                                None,
+                                Some(p[1]),
+                                None,
+                                Some(p[2]),
+                                None,
+                                Some(&p[3..3 + period]),
+                                &mut buf,
                             )
                         },
                         &start,
@@ -1238,15 +1259,20 @@ impl ETS {
                             Some(opt_seasonals),
                         )
                     } else {
-                        (0.3, None, Some(0.1), None, init_level, init_trend,
-                         Some(init_seasonals.clone()))
+                        (
+                            0.3,
+                            None,
+                            Some(0.1),
+                            None,
+                            init_level,
+                            init_trend,
+                            Some(init_seasonals.clone()),
+                        )
                     }
                 }
                 (true, false) => {
                     // Stage 1: optimize alpha, beta, gamma (3 params)
-                    let smoothing_bounds = [
-                        (0.0001, 0.9999), (0.0001, 0.9999), (0.0001, 0.9999),
-                    ];
+                    let smoothing_bounds = [(0.0001, 0.9999), (0.0001, 0.9999), (0.0001, 0.9999)];
                     let mut best_stage1 = f64::MAX;
                     let mut best_alpha = 0.3_f64;
                     let mut best_beta = 0.1_f64;
@@ -1256,9 +1282,15 @@ impl ETS {
                         if best_stage1 < f64::MAX {
                             let mut buf = seasonal_buf.borrow_mut();
                             let init_ll = self.calculate_likelihood_with_init_buf(
-                                values, alpha_init, Some(0.1), Some(gamma_init), None,
-                                Some(init_level), Some(init_trend),
-                                Some(&init_seasonals), &mut buf,
+                                values,
+                                alpha_init,
+                                Some(0.1),
+                                Some(gamma_init),
+                                None,
+                                Some(init_level),
+                                Some(init_trend),
+                                Some(&init_seasonals),
+                                &mut buf,
                             );
                             drop(buf);
                             if init_ll > best_stage1 * 3.0 {
@@ -1270,9 +1302,15 @@ impl ETS {
                             |p| {
                                 let mut buf = seasonal_buf.borrow_mut();
                                 self.calculate_likelihood_with_init_buf(
-                                    values, p[0], Some(p[1]), Some(p[2]), None,
-                                    Some(init_level), Some(init_trend),
-                                    Some(&init_seasonals), &mut buf,
+                                    values,
+                                    p[0],
+                                    Some(p[1]),
+                                    Some(p[2]),
+                                    None,
+                                    Some(init_level),
+                                    Some(init_trend),
+                                    Some(&init_seasonals),
+                                    &mut buf,
                                 )
                             },
                             &[alpha_init, 0.1, gamma_init],
@@ -1310,9 +1348,15 @@ impl ETS {
                         |p| {
                             let mut buf = seasonal_buf.borrow_mut();
                             self.calculate_likelihood_with_init_buf(
-                                values, p[0], Some(p[1]), Some(p[2]), None,
-                                Some(p[3]), Some(p[4]),
-                                Some(&p[5..5 + period]), &mut buf,
+                                values,
+                                p[0],
+                                Some(p[1]),
+                                Some(p[2]),
+                                None,
+                                Some(p[3]),
+                                Some(p[4]),
+                                Some(&p[5..5 + period]),
+                                &mut buf,
                             )
                         },
                         &start,
@@ -1332,15 +1376,24 @@ impl ETS {
                             Some(opt_seasonals),
                         )
                     } else {
-                        (0.3, Some(0.1), Some(0.1), None, init_level, init_trend,
-                         Some(init_seasonals.clone()))
+                        (
+                            0.3,
+                            Some(0.1),
+                            Some(0.1),
+                            None,
+                            init_level,
+                            init_trend,
+                            Some(init_seasonals.clone()),
+                        )
                     }
                 }
                 (true, true) => {
                     // Stage 1: optimize alpha, beta, gamma, phi (4 params)
                     let smoothing_bounds = [
-                        (0.0001, 0.9999), (0.0001, 0.9999),
-                        (0.0001, 0.9999), (0.8, 0.98),
+                        (0.0001, 0.9999),
+                        (0.0001, 0.9999),
+                        (0.0001, 0.9999),
+                        (0.8, 0.98),
                     ];
                     let mut best_stage1 = f64::MAX;
                     let mut best_alpha = 0.3_f64;
@@ -1352,9 +1405,15 @@ impl ETS {
                         if best_stage1 < f64::MAX {
                             let mut buf = seasonal_buf.borrow_mut();
                             let init_ll = self.calculate_likelihood_with_init_buf(
-                                values, alpha_init, Some(0.1), Some(gamma_init), Some(0.98),
-                                Some(init_level), Some(init_trend),
-                                Some(&init_seasonals), &mut buf,
+                                values,
+                                alpha_init,
+                                Some(0.1),
+                                Some(gamma_init),
+                                Some(0.98),
+                                Some(init_level),
+                                Some(init_trend),
+                                Some(&init_seasonals),
+                                &mut buf,
                             );
                             drop(buf);
                             if init_ll > best_stage1 * 3.0 {
@@ -1366,9 +1425,15 @@ impl ETS {
                             |p| {
                                 let mut buf = seasonal_buf.borrow_mut();
                                 self.calculate_likelihood_with_init_buf(
-                                    values, p[0], Some(p[1]), Some(p[2]), Some(p[3]),
-                                    Some(init_level), Some(init_trend),
-                                    Some(&init_seasonals), &mut buf,
+                                    values,
+                                    p[0],
+                                    Some(p[1]),
+                                    Some(p[2]),
+                                    Some(p[3]),
+                                    Some(init_level),
+                                    Some(init_trend),
+                                    Some(&init_seasonals),
+                                    &mut buf,
                                 )
                             },
                             &[alpha_init, 0.1, gamma_init, 0.98],
@@ -1409,9 +1474,15 @@ impl ETS {
                         |p| {
                             let mut buf = seasonal_buf.borrow_mut();
                             self.calculate_likelihood_with_init_buf(
-                                values, p[0], Some(p[1]), Some(p[2]), Some(p[3]),
-                                Some(p[4]), Some(p[5]),
-                                Some(&p[6..6 + period]), &mut buf,
+                                values,
+                                p[0],
+                                Some(p[1]),
+                                Some(p[2]),
+                                Some(p[3]),
+                                Some(p[4]),
+                                Some(p[5]),
+                                Some(&p[6..6 + period]),
+                                &mut buf,
                             )
                         },
                         &start,
@@ -1431,8 +1502,15 @@ impl ETS {
                             Some(opt_seasonals),
                         )
                     } else {
-                        (0.3, Some(0.1), Some(0.1), Some(0.98), init_level, init_trend,
-                         Some(init_seasonals.clone()))
+                        (
+                            0.3,
+                            Some(0.1),
+                            Some(0.1),
+                            Some(0.98),
+                            init_level,
+                            init_trend,
+                            Some(init_seasonals.clone()),
+                        )
                     }
                 }
             }
