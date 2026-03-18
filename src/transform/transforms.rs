@@ -247,7 +247,9 @@ impl Transform for BoxCoxTransform {
             ));
         }
 
-        let lambda = self.requested_lambda.unwrap_or_else(|| boxcox_lambda(values));
+        let lambda = self
+            .requested_lambda
+            .unwrap_or_else(|| boxcox_lambda(values));
         self.fitted_lambda = Some(lambda);
         Ok(boxcox(values, lambda))
     }
@@ -327,7 +329,10 @@ impl Transform for ScaleTransform {
                 model: Some("ScaleTransform".into()),
             });
         }
-        Ok(values.iter().map(|&x| x * self.scale + self.center).collect())
+        Ok(values
+            .iter()
+            .map(|&x| x * self.scale + self.center)
+            .collect())
     }
 
     fn offset(&self) -> usize {
@@ -377,11 +382,7 @@ impl Transform for LogTransform {
             return Err(ForecastError::EmptyData);
         }
         let min_val = values.iter().copied().fold(f64::INFINITY, f64::min);
-        self.shift = if min_val <= 0.0 {
-            -min_val + 1.0
-        } else {
-            0.0
-        };
+        self.shift = if min_val <= 0.0 { -min_val + 1.0 } else { 0.0 };
         self.fitted = true;
         Ok(values.iter().map(|&x| (x + self.shift).ln()).collect())
     }
@@ -606,9 +607,15 @@ mod tests {
     #[test]
     fn names_are_correct() {
         assert_eq!(DifferenceTransform::new(1).name(), "Difference");
-        assert_eq!(SeasonalDifferenceTransform::new(7).name(), "SeasonalDifference");
+        assert_eq!(
+            SeasonalDifferenceTransform::new(7).name(),
+            "SeasonalDifference"
+        );
         assert_eq!(BoxCoxTransform::auto().name(), "BoxCox");
-        assert_eq!(ScaleTransform::new(ScaleMethod::Standardize).name(), "Scale");
+        assert_eq!(
+            ScaleTransform::new(ScaleMethod::Standardize).name(),
+            "Scale"
+        );
         assert_eq!(LogTransform::new().name(), "Log");
     }
 

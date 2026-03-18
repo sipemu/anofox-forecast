@@ -51,11 +51,17 @@ pub struct FeatureGenerator {
 
 #[derive(Debug, Clone)]
 enum FeatureSpec {
-    Fourier { period: usize, order: usize },
+    Fourier {
+        period: usize,
+        order: usize,
+    },
     DayOfWeek,
     MonthOfYear,
     Quarter,
-    Holiday { dates: Vec<DateTime<Utc>>, name: String },
+    Holiday {
+        dates: Vec<DateTime<Utc>>,
+        name: String,
+    },
 }
 
 impl FeatureGenerator {
@@ -157,14 +163,19 @@ impl FeatureGenerator {
                 }
                 FeatureSpec::MonthOfYear => {
                     let names = [
-                        "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov",
-                        "dec",
+                        "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
                     ];
                     for (i, name) in names.iter().enumerate() {
                         let month = i + 2; // Feb=2, Mar=3, ...
                         let col: Vec<f64> = timestamps
                             .iter()
-                            .map(|ts| if ts.month() as usize == month { 1.0 } else { 0.0 })
+                            .map(|ts| {
+                                if ts.month() as usize == month {
+                                    1.0
+                                } else {
+                                    0.0
+                                }
+                            })
                             .collect();
                         result.insert(format!("month_{}", name), col);
                     }
@@ -187,10 +198,8 @@ impl FeatureGenerator {
                     }
                 }
                 FeatureSpec::Holiday { dates, name } => {
-                    let holiday_dates: std::collections::HashSet<_> = dates
-                        .iter()
-                        .map(|d| d.date_naive())
-                        .collect();
+                    let holiday_dates: std::collections::HashSet<_> =
+                        dates.iter().map(|d| d.date_naive()).collect();
                     let col: Vec<f64> = timestamps
                         .iter()
                         .map(|ts| {
@@ -216,7 +225,10 @@ impl FeatureGenerator {
     pub fn add_to(&self, ts: &mut TimeSeries) {
         let features = self.generate(ts.timestamps());
 
-        let mut cal = ts.calendar().cloned().unwrap_or_else(CalendarAnnotations::new);
+        let mut cal = ts
+            .calendar()
+            .cloned()
+            .unwrap_or_else(CalendarAnnotations::new);
         for (name, values) in features {
             cal = cal.with_regressor(name, values);
         }
@@ -249,9 +261,7 @@ mod tests {
 
     fn daily_timestamps(n: usize) -> Vec<DateTime<Utc>> {
         (0..n)
-            .map(|i| {
-                Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap() + Duration::days(i as i64)
-            })
+            .map(|i| Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap() + Duration::days(i as i64))
             .collect()
     }
 
@@ -442,8 +452,8 @@ mod tests {
         let mut ts = TimeSeries::univariate(ts_vec, values).unwrap();
 
         // Attach an existing regressor
-        let cal = CalendarAnnotations::new()
-            .with_regressor("temperature".to_string(), vec![20.0; 14]);
+        let cal =
+            CalendarAnnotations::new().with_regressor("temperature".to_string(), vec![20.0; 14]);
         ts.set_calendar(cal);
 
         let gen = FeatureGenerator::new().fourier(7, 1);
@@ -502,5 +512,287 @@ mod tests {
         let feats = gen.generate(&daily_timestamps(10));
         assert!(feats.is_empty());
         assert!(gen.feature_names().is_empty());
+    }
+
+    // ── OLS integration: recover known effects from artificial data ──────
+
+    use crate::utils::ols::ols_fit;
+
+    /// Build y = intercept + sum(coeff_i * feature_i) and verify OLS recovers the coefficients.
+    fn assert_ols_recovers(
+        features: &HashMap<String, Vec<f64>>,
+        true_intercept: f64,
+        true_coeffs: &HashMap<String, f64>,
+        tol: f64,
+    ) {
+        let n = features.values().next().unwrap().len();
+        let mut y = vec![true_intercept; n];
+        for (name, coeff) in true_coeffs {
+            let col = &features[name];
+            for (i, yi) in y.iter_mut().enumerate() {
+                *yi += coeff * col[i];
+            }
+        }
+
+        let result = ols_fit(&y, features).unwrap();
+
+        assert!(
+            (result.intercept - true_intercept).abs() < tol,
+            "intercept: expected {}, got {} (tol {})",
+            true_intercept,
+            result.intercept,
+            tol,
+        );
+        for (name, &expected) in true_coeffs {
+            let idx = result
+                .regressor_names
+                .iter()
+                .position(|n| n == name)
+                .unwrap_or_else(|| panic!("missing regressor '{}'", name));
+            assert!(
+                (result.coefficients[idx] - expected).abs() < tol,
+                "coeff '{}': expected {}, got {} (tol {})",
+                name,
+                expected,
+                result.coefficients[idx],
+                tol,
+            );
+        }
+    }
+
+    #[test]
+    fn ols_recovers_fourier_effects() {
+        // y = 100 + 5*sin1 - 3*cos1
+        let gen = FeatureGenerator::new().fourier(12, 1);
+        let ts = monthly_timestamps(120); // 10 years of monthly data
+        let features = gen.generate(&ts);
+
+        let mut true_coeffs = HashMap::new();
+        true_coeffs.insert("fourier_12_sin1".to_string(), 5.0);
+        true_coeffs.insert("fourier_12_cos1".to_string(), -3.0);
+
+        assert_ols_recovers(&features, 100.0, &true_coeffs, 0.01);
+    }
+
+    #[test]
+    fn ols_recovers_day_of_week_effects() {
+        // y = 50 + effects for Mon..Sat (Sunday is baseline = 0)
+        let gen = FeatureGenerator::new().day_of_week();
+        let ts = daily_timestamps(364); // 52 full weeks
+        let features = gen.generate(&ts);
+
+        let mut true_coeffs = HashMap::new();
+        true_coeffs.insert("dow_mon".to_string(), 10.0);
+        true_coeffs.insert("dow_tue".to_string(), 8.0);
+        true_coeffs.insert("dow_wed".to_string(), 6.0);
+        true_coeffs.insert("dow_thu".to_string(), 4.0);
+        true_coeffs.insert("dow_fri".to_string(), 12.0);
+        true_coeffs.insert("dow_sat".to_string(), -5.0);
+
+        assert_ols_recovers(&features, 50.0, &true_coeffs, 0.01);
+    }
+
+    #[test]
+    fn ols_recovers_month_effects() {
+        // y = 200 + month effects (January = baseline)
+        let gen = FeatureGenerator::new().month_of_year();
+        let ts = monthly_timestamps(120); // 10 years
+        let features = gen.generate(&ts);
+
+        let mut true_coeffs = HashMap::new();
+        let month_effects = [
+            ("month_feb", 2.0),
+            ("month_mar", 5.0),
+            ("month_apr", 10.0),
+            ("month_may", 15.0),
+            ("month_jun", 18.0),
+            ("month_jul", 20.0),
+            ("month_aug", 19.0),
+            ("month_sep", 14.0),
+            ("month_oct", 8.0),
+            ("month_nov", 3.0),
+            ("month_dec", -1.0),
+        ];
+        for (name, effect) in &month_effects {
+            true_coeffs.insert(name.to_string(), *effect);
+        }
+
+        assert_ols_recovers(&features, 200.0, &true_coeffs, 0.01);
+    }
+
+    #[test]
+    fn ols_recovers_quarter_effects() {
+        // y = 80 + quarter effects (Q1 = baseline)
+        let gen = FeatureGenerator::new().quarter();
+        let ts = monthly_timestamps(48); // 4 years
+        let features = gen.generate(&ts);
+
+        let mut true_coeffs = HashMap::new();
+        true_coeffs.insert("quarter_2".to_string(), 15.0);
+        true_coeffs.insert("quarter_3".to_string(), 25.0);
+        true_coeffs.insert("quarter_4".to_string(), 10.0);
+
+        assert_ols_recovers(&features, 80.0, &true_coeffs, 0.01);
+    }
+
+    #[test]
+    fn ols_recovers_holiday_effect() {
+        // y = 30 + 50 on holidays
+        let ts = daily_timestamps(365);
+        // Pick a few dates as holidays (day 10, 50, 100, 200, 300)
+        let holiday_dates: Vec<DateTime<Utc>> = [10, 50, 100, 200, 300]
+            .iter()
+            .map(|&d| Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap() + Duration::days(d))
+            .collect();
+
+        let gen = FeatureGenerator::new().holiday("promo", holiday_dates);
+        let features = gen.generate(&ts);
+
+        let mut true_coeffs = HashMap::new();
+        true_coeffs.insert("holiday_promo".to_string(), 50.0);
+
+        assert_ols_recovers(&features, 30.0, &true_coeffs, 0.01);
+    }
+
+    #[test]
+    fn ols_recovers_combined_effects() {
+        // y = 100 + fourier(7,1) effects + day-of-week effects + holiday effect
+        let n = 364; // 52 weeks
+        let ts = daily_timestamps(n);
+        let holiday_dates: Vec<DateTime<Utc>> = (0..52)
+            .map(|w| Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap() + Duration::days(w * 7))
+            .collect();
+
+        let gen = FeatureGenerator::new()
+            .fourier(7, 1)
+            .day_of_week()
+            .holiday("weekly_event", holiday_dates);
+
+        let features = gen.generate(&ts);
+
+        let mut true_coeffs = HashMap::new();
+        // Fourier effects
+        true_coeffs.insert("fourier_7_sin1".to_string(), 3.0);
+        true_coeffs.insert("fourier_7_cos1".to_string(), -2.0);
+        // Day-of-week effects
+        true_coeffs.insert("dow_mon".to_string(), 5.0);
+        true_coeffs.insert("dow_tue".to_string(), 4.0);
+        true_coeffs.insert("dow_wed".to_string(), 3.0);
+        true_coeffs.insert("dow_thu".to_string(), 2.0);
+        true_coeffs.insert("dow_fri".to_string(), 6.0);
+        true_coeffs.insert("dow_sat".to_string(), -1.0);
+        // Holiday effect
+        true_coeffs.insert("holiday_weekly_event".to_string(), 20.0);
+
+        // Fourier + DOW are collinear (both weekly), so tolerance is larger.
+        // OLS will still recover the combined effect but individual coefficients
+        // shift. Test the combined prediction instead.
+        let n = features.values().next().unwrap().len();
+        let mut y = vec![100.0_f64; n];
+        for (name, coeff) in &true_coeffs {
+            let col = &features[name];
+            for (i, yi) in y.iter_mut().enumerate() {
+                *yi += coeff * col[i];
+            }
+        }
+
+        let result = ols_fit(&y, &features).unwrap();
+        let y_hat = result.predict(&features).unwrap();
+
+        let max_error = y
+            .iter()
+            .zip(y_hat.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(
+            max_error < 0.01,
+            "max prediction error: {} (should be < 0.01)",
+            max_error,
+        );
+    }
+
+    #[test]
+    fn ols_recovers_fourier_with_external_regressor() {
+        // y = 50 + 4*sin1 + 2*cos1 + 7*temperature
+        // where temperature is an external regressor (not from FeatureGenerator)
+        let gen = FeatureGenerator::new().fourier(12, 1);
+        let ts = monthly_timestamps(120);
+        let mut features = gen.generate(&ts);
+
+        // Add external temperature regressor
+        let temperature: Vec<f64> = (0..120)
+            .map(|i| 15.0 + 10.0 * (2.0 * PI * i as f64 / 12.0).cos())
+            .collect();
+        features.insert("temperature".to_string(), temperature);
+
+        let mut true_coeffs = HashMap::new();
+        true_coeffs.insert("fourier_12_sin1".to_string(), 4.0);
+        true_coeffs.insert("fourier_12_cos1".to_string(), 2.0);
+        true_coeffs.insert("temperature".to_string(), 7.0);
+
+        // Note: fourier_12_cos1 and temperature are correlated (both cos with period 12).
+        // With enough data and regularization the combined prediction should still be accurate.
+        let n = features.values().next().unwrap().len();
+        let mut y = vec![50.0_f64; n];
+        for (name, coeff) in &true_coeffs {
+            let col = &features[name];
+            for (i, yi) in y.iter_mut().enumerate() {
+                *yi += coeff * col[i];
+            }
+        }
+
+        let result = ols_fit(&y, &features).unwrap();
+        let y_hat = result.predict(&features).unwrap();
+
+        let max_error = y
+            .iter()
+            .zip(y_hat.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(
+            max_error < 0.01,
+            "max prediction error: {} (should be < 0.01)",
+            max_error,
+        );
+    }
+
+    #[test]
+    fn ols_predict_future_with_features() {
+        // Train: y = 100 + 5*sin1(period=7), then predict future and verify
+        let gen = FeatureGenerator::new().fourier(7, 1);
+
+        let train_ts = daily_timestamps(70);
+        let train_features = gen.generate(&train_ts);
+
+        let n = 70;
+        let mut y = vec![100.0; n];
+        let sin_col = &train_features["fourier_7_sin1"];
+        let cos_col = &train_features["fourier_7_cos1"];
+        for i in 0..n {
+            y[i] += 5.0 * sin_col[i] + 3.0 * cos_col[i];
+        }
+
+        let result = ols_fit(&y, &train_features).unwrap();
+
+        // Generate future features
+        let future_ts: Vec<_> = (70..77)
+            .map(|i| Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap() + Duration::days(i as i64))
+            .collect();
+        let future_features = gen.generate(&future_ts);
+        let predictions = result.predict(&future_features).unwrap();
+
+        // Expected future values
+        for (i, &pred) in predictions.iter().enumerate() {
+            let idx = 70 + i;
+            let angle = 2.0 * PI / 7.0 * idx as f64;
+            let expected = 100.0 + 5.0 * angle.sin() + 3.0 * angle.cos();
+            assert!(
+                (pred - expected).abs() < 0.01,
+                "future[{}]: expected {}, got {}",
+                i,
+                expected,
+                pred,
+            );
+        }
     }
 }

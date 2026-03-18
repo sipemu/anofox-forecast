@@ -283,8 +283,7 @@ mod tests {
         // Monthly + quarterly seasonality
         let signal: Vec<f64> = (0..240)
             .map(|i| {
-                50.0
-                    + 8.0 * (2.0 * std::f64::consts::PI * i as f64 / 12.0).sin()
+                50.0 + 8.0 * (2.0 * std::f64::consts::PI * i as f64 / 12.0).sin()
                     + 4.0 * (2.0 * std::f64::consts::PI * i as f64 / 4.0).sin()
             })
             .collect();

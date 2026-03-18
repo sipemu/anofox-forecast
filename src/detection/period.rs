@@ -190,8 +190,7 @@ fn detect_periods_sazed(signal: &[f64], config: &PeriodDetectionConfig) -> Vec<P
     }
 
     // Also run CFD-Autoperiod for additional multi-period detection.
-    let cfd_result =
-        fdars_core::seasonal::cfd_autoperiod(signal, &argvals, Some(0.1), Some(1));
+    let cfd_result = fdars_core::seasonal::cfd_autoperiod(signal, &argvals, Some(0.1), Some(1));
 
     for (&p, &conf) in cfd_result.periods.iter().zip(cfd_result.confidences.iter()) {
         let p_int = p.round() as usize;
@@ -320,9 +319,14 @@ fn detect_periods_welch(signal: &[f64], config: &PeriodDetectionConfig) -> Vec<P
     }
 
     kept.truncate(config.max_periods);
-    kept
-        .into_iter()
-        .map(|(period, power)| Period { period, power, strength: 0.0, acf: 0.0, n_cycles: 0 })
+    kept.into_iter()
+        .map(|(period, power)| Period {
+            period,
+            power,
+            strength: 0.0,
+            acf: 0.0,
+            n_cycles: 0,
+        })
         .collect()
 }
 
@@ -341,20 +345,18 @@ mod tests {
 
     fn airpassengers() -> Vec<f64> {
         vec![
-            112.0, 118.0, 132.0, 129.0, 121.0, 135.0, 148.0, 148.0, 136.0, 119.0, 104.0,
-            118.0, 115.0, 126.0, 141.0, 135.0, 125.0, 149.0, 170.0, 170.0, 158.0, 133.0,
-            114.0, 140.0, 145.0, 150.0, 178.0, 163.0, 172.0, 178.0, 199.0, 199.0, 184.0,
-            162.0, 146.0, 166.0, 171.0, 180.0, 193.0, 181.0, 183.0, 218.0, 230.0, 242.0,
-            209.0, 191.0, 172.0, 194.0, 196.0, 196.0, 236.0, 235.0, 229.0, 243.0, 264.0,
-            272.0, 237.0, 211.0, 180.0, 201.0, 204.0, 188.0, 235.0, 227.0, 234.0, 264.0,
-            302.0, 293.0, 259.0, 229.0, 203.0, 229.0, 242.0, 233.0, 267.0, 269.0, 270.0,
-            315.0, 364.0, 347.0, 312.0, 274.0, 237.0, 278.0, 284.0, 277.0, 317.0, 313.0,
-            318.0, 374.0, 413.0, 405.0, 355.0, 306.0, 271.0, 306.0, 315.0, 301.0, 356.0,
-            348.0, 355.0, 422.0, 465.0, 467.0, 404.0, 347.0, 305.0, 336.0, 340.0, 318.0,
-            362.0, 348.0, 363.0, 435.0, 491.0, 505.0, 404.0, 359.0, 310.0, 337.0, 360.0,
-            342.0, 406.0, 396.0, 420.0, 472.0, 548.0, 559.0, 463.0, 407.0, 362.0, 405.0,
-            417.0, 391.0, 419.0, 461.0, 472.0, 535.0, 622.0, 606.0, 508.0, 461.0, 390.0,
-            432.0,
+            112.0, 118.0, 132.0, 129.0, 121.0, 135.0, 148.0, 148.0, 136.0, 119.0, 104.0, 118.0,
+            115.0, 126.0, 141.0, 135.0, 125.0, 149.0, 170.0, 170.0, 158.0, 133.0, 114.0, 140.0,
+            145.0, 150.0, 178.0, 163.0, 172.0, 178.0, 199.0, 199.0, 184.0, 162.0, 146.0, 166.0,
+            171.0, 180.0, 193.0, 181.0, 183.0, 218.0, 230.0, 242.0, 209.0, 191.0, 172.0, 194.0,
+            196.0, 196.0, 236.0, 235.0, 229.0, 243.0, 264.0, 272.0, 237.0, 211.0, 180.0, 201.0,
+            204.0, 188.0, 235.0, 227.0, 234.0, 264.0, 302.0, 293.0, 259.0, 229.0, 203.0, 229.0,
+            242.0, 233.0, 267.0, 269.0, 270.0, 315.0, 364.0, 347.0, 312.0, 274.0, 237.0, 278.0,
+            284.0, 277.0, 317.0, 313.0, 318.0, 374.0, 413.0, 405.0, 355.0, 306.0, 271.0, 306.0,
+            315.0, 301.0, 356.0, 348.0, 355.0, 422.0, 465.0, 467.0, 404.0, 347.0, 305.0, 336.0,
+            340.0, 318.0, 362.0, 348.0, 363.0, 435.0, 491.0, 505.0, 404.0, 359.0, 310.0, 337.0,
+            360.0, 342.0, 406.0, 396.0, 420.0, 472.0, 548.0, 559.0, 463.0, 407.0, 362.0, 405.0,
+            417.0, 391.0, 419.0, 461.0, 472.0, 535.0, 622.0, 606.0, 508.0, 461.0, 390.0, 432.0,
         ]
     }
 
@@ -534,7 +536,11 @@ mod tests {
         let periods = detect_periods(&signal, &PeriodDetectionConfig::default());
 
         let p12 = periods.iter().find(|p| p.period == 12).unwrap();
-        assert!(p12.strength > 0.5, "strength should be high, got {}", p12.strength);
+        assert!(
+            p12.strength > 0.5,
+            "strength should be high, got {}",
+            p12.strength
+        );
         assert!(p12.acf > 0.5, "acf(12) should be positive, got {}", p12.acf);
         assert_eq!(p12.n_cycles, 12); // 144 / 12
     }
@@ -555,7 +561,8 @@ mod tests {
             assert!(
                 p.strength >= 0.5,
                 "Period {} has strength {} below threshold 0.5",
-                p.period, p.strength
+                p.period,
+                p.strength
             );
         }
     }
@@ -576,7 +583,8 @@ mod tests {
             assert!(
                 p.n_cycles >= 3,
                 "Period {} has only {} cycles, below min_cycles=3",
-                p.period, p.n_cycles
+                p.period,
+                p.n_cycles
             );
         }
     }

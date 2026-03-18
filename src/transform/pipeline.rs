@@ -159,10 +159,7 @@ impl Forecaster for Pipeline {
         // ── Build inner TimeSeries with transformed values ──────────────
         let inner_ts = series.slice(self.total_offset, n)?;
         // Replace primary values with the transformed ones.
-        let inner_ts = TimeSeries::univariate(
-            inner_ts.timestamps().to_vec(),
-            current.clone(),
-        )?;
+        let inner_ts = TimeSeries::univariate(inner_ts.timestamps().to_vec(), current.clone())?;
 
         // ── Fit the inner model ─────────────────────────────────────────
         self.model.fit(&inner_ts)?;
@@ -349,12 +346,7 @@ mod tests {
 
         let expected: Vec<f64> = (31..=35).map(|i| i as f64).collect();
         for (a, b) in forecast.primary().iter().zip(expected.iter()) {
-            assert!(
-                (a - b).abs() < 1e-10,
-                "expected {}, got {}",
-                b,
-                a
-            );
+            assert!((a - b).abs() < 1e-10, "expected {}, got {}", b, a);
         }
     }
 
@@ -443,11 +435,7 @@ mod tests {
         // Naive on standardized data predicts last standardized value,
         // which inverse-transforms back to 200.0.
         for &v in forecast.primary() {
-            assert!(
-                (v - 200.0).abs() < 1e-8,
-                "expected ~200, got {}",
-                v
-            );
+            assert!((v - 200.0).abs() < 1e-8, "expected ~200, got {}", v);
         }
     }
 
@@ -468,11 +456,7 @@ mod tests {
 
         // Naive predicts last value in log space → exp(ln(20)) = 20
         for &v in forecast.primary() {
-            assert!(
-                (v - 20.0).abs() < 1e-8,
-                "expected ~20, got {}",
-                v
-            );
+            assert!((v - 20.0).abs() < 1e-8, "expected ~20, got {}", v);
         }
     }
 
