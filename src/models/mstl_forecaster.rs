@@ -13,6 +13,8 @@ use crate::models::explain::{Explainable, ForecastExplanation};
 use crate::models::exponential::{AutoETS, AutoETSConfig, SimpleExponentialSmoothing};
 use crate::models::{validate_series_complete, Forecaster};
 use crate::seasonality::{MSTLResult, MSTL};
+use crate::utils::ols::OLSResult;
+use std::collections::HashMap;
 
 /// Method for forecasting the deseasonalized (trend + remainder) component.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -91,6 +93,10 @@ pub struct MSTLForecaster {
     residuals: Option<Vec<f64>>,
     /// Residual variance for confidence intervals.
     residual_variance: Option<f64>,
+    /// OLS result from pre-regression (when fit with exogenous regressors).
+    ols_result: Option<OLSResult>,
+    /// Names of exogenous regressors used during fitting.
+    exog_name_list: Vec<String>,
 }
 
 /// Internal trait for trend forecasters (to allow different types).
@@ -196,6 +202,8 @@ impl MSTLForecaster {
             fitted: None,
             residuals: None,
             residual_variance: None,
+            ols_result: None,
+            exog_name_list: Vec::new(),
         }
     }
 
@@ -231,6 +239,43 @@ impl MSTLForecaster {
     /// Get seasonal periods.
     pub fn seasonal_periods(&self) -> &[usize] {
         &self.seasonal_periods
+    }
+
+    /// Core prediction logic shared by `predict()` and `predict_with_exog()`.
+    fn predict_base(&self, horizon: usize) -> Result<Forecast> {
+        let decomposition = self
+            .decomposition
+            .as_ref()
+            .ok_or(ForecastError::FitRequired { model: None })?;
+        let trend_forecaster = self
+            .trend_forecaster
+            .as_ref()
+            .ok_or(ForecastError::FitRequired { model: None })?;
+
+        if horizon == 0 {
+            return Ok(Forecast::new());
+        }
+
+        // Forecast deseasonalized component
+        let trend_forecast = trend_forecaster.predict(horizon)?;
+
+        // Project each seasonal component
+        let mut seasonal_forecasts: Vec<Vec<f64>> = Vec::new();
+        for (idx, seasonal) in decomposition.seasonal_components.iter().enumerate() {
+            let period = decomposition.seasonal_periods[idx];
+            let seasonal_forecast = self.project_seasonal(seasonal, period, horizon);
+            seasonal_forecasts.push(seasonal_forecast);
+        }
+
+        // Combine forecasts
+        let mut forecasts = trend_forecast;
+        for seasonal_forecast in &seasonal_forecasts {
+            for (i, &s) in seasonal_forecast.iter().enumerate() {
+                forecasts[i] += s;
+            }
+        }
+
+        Ok(Forecast::from_values(forecasts))
     }
 
     /// Project a seasonal component forward.
@@ -324,10 +369,29 @@ impl Forecaster for MSTLForecaster {
             mstl = mstl.robust();
         }
 
-        // Decompose
-        let decomposition = mstl.decompose(values).ok_or_else(|| {
-            ForecastError::ComputationError("MSTL decomposition failed".to_string())
-        })?;
+        // Check for exogenous regressors
+        let regressors = series.all_regressors();
+
+        // Decompose (with or without pre-regression)
+        let decomposition = if regressors.is_empty() {
+            self.ols_result = None;
+            self.exog_name_list.clear();
+            mstl.decompose(values).ok_or_else(|| {
+                ForecastError::ComputationError("MSTL decomposition failed".to_string())
+            })?
+        } else {
+            let result = mstl
+                .decompose_with_regressors(values, &regressors)
+                .ok_or_else(|| {
+                    ForecastError::ComputationError(
+                        "MSTL decomposition with regressors failed".to_string(),
+                    )
+                })?;
+            self.ols_result = result.regressor_coefficients.clone();
+            self.exog_name_list = regressors.keys().cloned().collect();
+            self.exog_name_list.sort();
+            result
+        };
 
         // Create deseasonalized series (trend + remainder)
         let deseasonalized: Vec<f64> = decomposition
@@ -369,11 +433,15 @@ impl Forecaster for MSTLForecaster {
         };
 
         // Compute fitted values (reconstruct from components)
+        let regressor_effect = decomposition.regressor_effect.as_ref();
         let fitted: Vec<f64> = (0..self.n)
             .map(|i| {
                 let mut val = decomposition.trend[i] + decomposition.remainder[i];
                 for seasonal in &decomposition.seasonal_components {
                     val += seasonal[i];
+                }
+                if let Some(effect) = regressor_effect {
+                    val += effect[i];
                 }
                 val
             })
@@ -401,39 +469,13 @@ impl Forecaster for MSTLForecaster {
     }
 
     fn predict(&self, horizon: usize) -> Result<Forecast> {
-        let decomposition = self
-            .decomposition
-            .as_ref()
-            .ok_or(ForecastError::FitRequired { model: None })?;
-        let trend_forecaster = self
-            .trend_forecaster
-            .as_ref()
-            .ok_or(ForecastError::FitRequired { model: None })?;
-
-        if horizon == 0 {
-            return Ok(Forecast::new());
+        if self.ols_result.is_some() {
+            return Err(ForecastError::InvalidParameter(
+                "Model was fit with exogenous regressors. Use predict_with_exog() instead."
+                    .to_string(),
+            ));
         }
-
-        // Forecast deseasonalized component
-        let trend_forecast = trend_forecaster.predict(horizon)?;
-
-        // Project each seasonal component
-        let mut seasonal_forecasts: Vec<Vec<f64>> = Vec::new();
-        for (idx, seasonal) in decomposition.seasonal_components.iter().enumerate() {
-            let period = decomposition.seasonal_periods[idx];
-            let seasonal_forecast = self.project_seasonal(seasonal, period, horizon);
-            seasonal_forecasts.push(seasonal_forecast);
-        }
-
-        // Combine forecasts
-        let mut forecasts = trend_forecast;
-        for seasonal_forecast in &seasonal_forecasts {
-            for (i, &s) in seasonal_forecast.iter().enumerate() {
-                forecasts[i] += s;
-            }
-        }
-
-        Ok(Forecast::from_values(forecasts))
+        self.predict_base(horizon)
     }
 
     fn predict_with_intervals(&self, horizon: usize, confidence: f64) -> Result<Forecast> {
@@ -497,6 +539,60 @@ impl Forecaster for MSTLForecaster {
 
     fn name(&self) -> &str {
         "MSTLForecaster"
+    }
+
+    fn supports_exog(&self) -> bool {
+        true
+    }
+
+    fn has_exog(&self) -> bool {
+        self.ols_result.is_some()
+    }
+
+    fn exog_names(&self) -> Option<&[String]> {
+        if self.exog_name_list.is_empty() {
+            None
+        } else {
+            Some(&self.exog_name_list)
+        }
+    }
+
+    fn predict_with_exog(
+        &self,
+        horizon: usize,
+        future_regressors: &HashMap<String, Vec<f64>>,
+    ) -> Result<Forecast> {
+        let ols = self.ols_result.as_ref().ok_or_else(|| {
+            ForecastError::InvalidParameter(
+                "Model was not fit with exogenous regressors".to_string(),
+            )
+        })?;
+
+        // Get base forecast (trend + seasonal)
+        let base = self.predict_base(horizon)?;
+
+        if horizon == 0 {
+            return Ok(base);
+        }
+
+        // Compute future regressor effect
+        let future_effect = ols.predict(future_regressors)?;
+        if future_effect.len() != horizon {
+            return Err(ForecastError::DimensionMismatch {
+                expected: horizon,
+                got: future_effect.len(),
+            });
+        }
+
+        // Add regressor effect to base forecast
+        let combined: Vec<f64> = base
+            .primary()
+            .iter()
+            .zip(future_effect.iter())
+            .map(|(b, e)| b + e)
+            .collect();
+
+        Ok(Forecast::from_values(combined))
     }
 }
 
@@ -745,6 +841,117 @@ mod tests {
         let mut model = MSTLForecaster::new(vec![12]).with_iterations(3);
         model.fit(&ts).unwrap();
 
+        let forecast = model.predict(12).unwrap();
+        assert_eq!(forecast.horizon(), 12);
+    }
+
+    fn make_series_with_regressor(n: usize, periods: &[usize]) -> (TimeSeries, Vec<f64>) {
+        use crate::core::CalendarAnnotations;
+
+        let timestamps = make_timestamps(n);
+        let x: Vec<f64> = (0..n).map(|i| (i as f64 * 0.1).sin() * 10.0).collect();
+        let values: Vec<f64> = (0..n)
+            .map(|i| {
+                let trend = 50.0 + 0.1 * i as f64;
+                let mut seasonal = 0.0;
+                for (idx, &period) in periods.iter().enumerate() {
+                    let amplitude = 5.0 / (idx + 1) as f64;
+                    seasonal +=
+                        amplitude * (2.0 * std::f64::consts::PI * i as f64 / period as f64).sin();
+                }
+                trend + seasonal + 2.0 * x[i]
+            })
+            .collect();
+
+        let calendar = CalendarAnnotations::new().with_regressor("x".to_string(), x.clone());
+        let mut ts = TimeSeries::univariate(timestamps, values).unwrap();
+        ts.set_calendar(calendar);
+        (ts, x)
+    }
+
+    #[test]
+    fn mstl_forecaster_supports_exog() {
+        let model = MSTLForecaster::new(vec![12]);
+        assert!(model.supports_exog());
+        assert!(!model.has_exog());
+        assert!(model.exog_names().is_none());
+    }
+
+    #[test]
+    fn mstl_forecaster_fit_with_regressors() {
+        let (ts, _x) = make_series_with_regressor(100, &[12]);
+        let mut model = MSTLForecaster::new(vec![12]);
+        model.fit(&ts).unwrap();
+
+        assert!(model.has_exog());
+        assert_eq!(model.exog_names(), Some(&["x".to_string()][..]));
+    }
+
+    #[test]
+    fn mstl_forecaster_predict_guards_exog() {
+        let (ts, _x) = make_series_with_regressor(100, &[12]);
+        let mut model = MSTLForecaster::new(vec![12]);
+        model.fit(&ts).unwrap();
+
+        // predict() should error when exog was used
+        let result = model.predict(12);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn mstl_forecaster_predict_with_exog() {
+        let (ts, _x) = make_series_with_regressor(100, &[12]);
+        let mut model = MSTLForecaster::new(vec![12]);
+        model.fit(&ts).unwrap();
+
+        // Provide future regressor values
+        let future_x: Vec<f64> = (100..112).map(|i| (i as f64 * 0.1).sin() * 10.0).collect();
+        let mut future_regressors = HashMap::new();
+        future_regressors.insert("x".to_string(), future_x);
+
+        let forecast = model.predict_with_exog(12, &future_regressors).unwrap();
+        assert_eq!(forecast.horizon(), 12);
+    }
+
+    #[test]
+    fn mstl_forecaster_exog_improves_fit() {
+        // Fit with and without exog on a series that has a strong regressor effect
+        let (ts_with_exog, _x) = make_series_with_regressor(100, &[12]);
+
+        // Fit with exog (pre-regression)
+        let mut model_exog = MSTLForecaster::new(vec![12]);
+        model_exog.fit(&ts_with_exog).unwrap();
+
+        // Fit without exog (just uses the raw values)
+        let ts_no_exog = make_multi_seasonal_series(100, &[12]);
+        let mut model_plain = MSTLForecaster::new(vec![12]);
+        model_plain.fit(&ts_no_exog).unwrap();
+
+        // Both should produce fitted values
+        assert!(model_exog.fitted_values().is_some());
+        assert!(model_plain.fitted_values().is_some());
+    }
+
+    #[test]
+    fn mstl_forecaster_predict_with_exog_missing_regressor() {
+        let (ts, _x) = make_series_with_regressor(100, &[12]);
+        let mut model = MSTLForecaster::new(vec![12]);
+        model.fit(&ts).unwrap();
+
+        // Missing regressor
+        let future_regressors = HashMap::new();
+        let result = model.predict_with_exog(12, &future_regressors);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn mstl_forecaster_no_exog_predict_works() {
+        // When fit without exog, predict() should work normally
+        let ts = make_multi_seasonal_series(100, &[12]);
+        let mut model = MSTLForecaster::new(vec![12]);
+        model.fit(&ts).unwrap();
+
+        assert!(!model.has_exog());
         let forecast = model.predict(12).unwrap();
         assert_eq!(forecast.horizon(), 12);
     }

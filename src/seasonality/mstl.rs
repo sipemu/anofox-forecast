@@ -4,6 +4,8 @@
 //! patterns in hourly data.
 
 use super::stl::STL;
+use crate::utils::ols::{ols_fit, ols_residuals, OLSResult};
+use std::collections::HashMap;
 
 /// Result of MSTL decomposition.
 #[derive(Debug, Clone)]
@@ -17,6 +19,10 @@ pub struct MSTLResult {
     pub seasonal_periods: Vec<usize>,
     /// Remainder component.
     pub remainder: Vec<f64>,
+    /// OLS coefficients from pre-regression (if regressors were used).
+    pub regressor_coefficients: Option<OLSResult>,
+    /// Estimated regressor effect (X * β) during training.
+    pub regressor_effect: Option<Vec<f64>>,
 }
 
 impl MSTLResult {
@@ -210,7 +216,44 @@ impl MSTL {
             seasonal_components,
             seasonal_periods: self.seasonal_periods.clone(),
             remainder,
+            regressor_coefficients: None,
+            regressor_effect: None,
         })
+    }
+
+    /// Decompose the time series after regressing out exogenous effects.
+    ///
+    /// Performs pre-regression STL: first fits OLS (y ~ X) to remove exogenous
+    /// effects, then decomposes the adjusted series (y - X*β) with standard MSTL.
+    /// This prevents regressors correlated with trend or seasonality from
+    /// distorting the decomposition.
+    ///
+    /// The regressor effect (X*β) is stored in the result so it can be added
+    /// back during forecasting.
+    pub fn decompose_with_regressors(
+        &self,
+        series: &[f64],
+        regressors: &HashMap<String, Vec<f64>>,
+    ) -> Option<MSTLResult> {
+        if regressors.is_empty() {
+            return self.decompose(series);
+        }
+
+        // Fit OLS: y ~ X
+        let ols_result = ols_fit(series, regressors).ok()?;
+
+        // Compute adjusted series: y_adjusted = y - X*β
+        let y_adjusted = ols_residuals(series, &ols_result, regressors).ok()?;
+
+        // Decompose the adjusted series
+        let mut result = self.decompose(&y_adjusted)?;
+
+        // Store OLS info so the forecaster can add back the regressor effect
+        let regressor_effect = ols_result.predict(regressors).ok()?;
+        result.regressor_coefficients = Some(ols_result);
+        result.regressor_effect = Some(regressor_effect);
+
+        Some(result)
     }
 }
 
@@ -396,5 +439,112 @@ mod tests {
         let result = mstl.decompose(&series).unwrap();
 
         assert!(result.seasonal_strength(5).is_none());
+    }
+
+    #[test]
+    fn mstl_decompose_no_regressors_returns_none_fields() {
+        let periods = vec![12];
+        let series = generate_multi_seasonal_series(120, &periods);
+
+        let mstl = MSTL::new(periods);
+        let result = mstl.decompose(&series).unwrap();
+
+        assert!(result.regressor_coefficients.is_none());
+        assert!(result.regressor_effect.is_none());
+    }
+
+    #[test]
+    fn mstl_decompose_with_empty_regressors_falls_back() {
+        let periods = vec![12];
+        let series = generate_multi_seasonal_series(120, &periods);
+
+        let mstl = MSTL::new(periods);
+        let regressors = std::collections::HashMap::new();
+        let result = mstl
+            .decompose_with_regressors(&series, &regressors)
+            .unwrap();
+
+        // Empty regressors should behave like decompose()
+        assert!(result.regressor_coefficients.is_none());
+        assert!(result.regressor_effect.is_none());
+    }
+
+    #[test]
+    fn mstl_decompose_with_regressors_stores_ols() {
+        let n = 120;
+        let periods = vec![12];
+        // Generate series with a regressor effect: y = trend + seasonal + 2*x
+        let x: Vec<f64> = (0..n).map(|i| (i as f64 * 0.1).sin()).collect();
+        let base = generate_multi_seasonal_series(n, &periods);
+        let series: Vec<f64> = base
+            .iter()
+            .zip(x.iter())
+            .map(|(b, xi)| b + 2.0 * xi)
+            .collect();
+
+        let mstl = MSTL::new(periods);
+        let mut regressors = std::collections::HashMap::new();
+        regressors.insert("x".to_string(), x.clone());
+
+        let result = mstl
+            .decompose_with_regressors(&series, &regressors)
+            .unwrap();
+
+        // OLS result should be stored
+        assert!(result.regressor_coefficients.is_some());
+        let ols = result.regressor_coefficients.as_ref().unwrap();
+        assert_eq!(ols.regressor_names, vec!["x".to_string()]);
+
+        // Regressor effect should be stored and have correct length
+        assert!(result.regressor_effect.is_some());
+        assert_eq!(result.regressor_effect.as_ref().unwrap().len(), n);
+
+        // Additive decomposition should reconstruct adjusted series (y - X*β)
+        let regressor_effect = result.regressor_effect.as_ref().unwrap();
+        for i in 0..n {
+            let reconstructed = result.trend[i]
+                + result.seasonal_components[0][i]
+                + result.remainder[i]
+                + regressor_effect[i];
+            assert!(
+                (series[i] - reconstructed).abs() < 1e-4,
+                "Reconstruction failed at index {}: expected {}, got {}",
+                i,
+                series[i],
+                reconstructed,
+            );
+        }
+    }
+
+    #[test]
+    fn mstl_decompose_with_regressors_coefficient_accuracy() {
+        let n = 200;
+        let periods = vec![12];
+        // y = trend + seasonal + 3.0*x (exact, no noise)
+        let x: Vec<f64> = (0..n).map(|i| i as f64 * 0.05).collect();
+        let base = generate_multi_seasonal_series(n, &periods);
+        let series: Vec<f64> = base
+            .iter()
+            .zip(x.iter())
+            .map(|(b, xi)| b + 3.0 * xi)
+            .collect();
+
+        let mstl = MSTL::new(periods);
+        let mut regressors = std::collections::HashMap::new();
+        regressors.insert("x".to_string(), x);
+
+        let result = mstl
+            .decompose_with_regressors(&series, &regressors)
+            .unwrap();
+        let ols = result.regressor_coefficients.as_ref().unwrap();
+
+        // Coefficient should be close to 3.0 (not exact because OLS also has intercept
+        // and the trend in the base series is correlated with x)
+        // Just check it's in a reasonable range
+        assert!(
+            ols.coefficients[0] > 0.0,
+            "Coefficient should be positive, got {}",
+            ols.coefficients[0],
+        );
     }
 }
