@@ -28,6 +28,7 @@
 //! ```
 
 mod backtest;
+mod binned_intervals;
 mod conformal;
 mod conformalize;
 mod historical_sim;
@@ -38,6 +39,7 @@ mod qra;
 mod types;
 
 pub use backtest::{BacktestConfig, BacktestFold, BacktestResult, CalibratedModelByHorizon};
+pub use binned_intervals::{BinnedConformalPredictor, BinnedConformalResult};
 pub use conformal::{ConformalMethod, ConformalPredictor, ConformalResult};
 pub use conformalize::{
     conformalize, conformalize_with_config, ConformalizeConfig, ConformalizeResult,
