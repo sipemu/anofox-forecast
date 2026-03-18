@@ -28,9 +28,11 @@ pub mod counting;
 pub mod distribution;
 pub mod entropy;
 pub mod selection;
+pub mod generator;
 pub mod trend;
 
 // Re-export commonly used items
+pub use generator::FeatureGenerator;
 pub use basic::{
     abs_energy, absolute_maximum, absolute_sum_of_changes, length, maximum, mean, mean_abs_change,
     mean_change, mean_n_absolute_max, mean_second_derivative_central, median, minimum,
