@@ -43,3 +43,6 @@ Thumbs.db
 *.profdata
 coverage/
 tarpaulin-report.html
+
+# Claude Code worktrees
+.claude/worktrees/
