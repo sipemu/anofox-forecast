@@ -151,6 +151,17 @@ fn validate_periods(signal: &[f64], periods: &mut Vec<Period>, config: &PeriodDe
 
     periods.retain(|p| p.n_cycles >= config.min_cycles && p.strength >= config.min_strength);
 
+    // Reject periods where autocorrelation is non-positive — a true seasonal
+    // pattern at period m must show positive ACF(m). Negative ACF indicates
+    // the signal is anti-correlated at that lag (e.g., spectral artifact or
+    // interference from a stronger period).
+    //
+    // Exception: periods with very high strength (≥ 0.6) are kept even with
+    // negative ACF, because the seasonal differencing confirms a genuine
+    // variance-reducing cycle — the ACF can be dragged negative by
+    // interference from a dominant period in multi-seasonal signals.
+    periods.retain(|p| p.acf > 0.0 || p.strength >= 0.6);
+
     // Sort by strength first (most meaningful), then by power as tiebreaker.
     periods.sort_by(|a, b| {
         b.strength
@@ -426,7 +437,13 @@ mod tests {
     // ── Multiple periods ────────────────────────────────────────────────
 
     #[test]
-    fn detects_period_12_and_6() {
+    fn multi_period_dominant_still_detected() {
+        // Signal with period 12 (strong) and period 6 (weaker).
+        // Period 12 dominates: its seasonal_diff_strength ≈ 1.0.
+        // Period 6 has low seasonal_diff_strength (< 0.1) because
+        // differencing at lag 6 doesn't remove the period-12 component,
+        // and its ACF is negative due to interference from period 12.
+        // Only the dominant period should survive validation.
         let signal: Vec<f64> = (0..240)
             .map(|i| {
                 100.0
@@ -438,12 +455,32 @@ mod tests {
         let period_vals: Vec<usize> = periods.iter().map(|p| p.period).collect();
         assert!(
             period_vals.contains(&12),
-            "Should detect period 12, got {:?}",
+            "Should detect dominant period 12, got {:?}",
+            period_vals
+        );
+    }
+
+    #[test]
+    fn multi_period_both_strong() {
+        // When both components have comparable amplitude AND different enough
+        // frequencies, both should be detected. Period 7 + period 30 in a
+        // daily signal — no harmonic relationship, both have high strength.
+        let signal: Vec<f64> = (0..730)
+            .map(|i| {
+                50.0 + 10.0 * (2.0 * std::f64::consts::PI * i as f64 / 7.0).sin()
+                    + 10.0 * (2.0 * std::f64::consts::PI * i as f64 / 30.0).sin()
+            })
+            .collect();
+        let periods = detect_periods(&signal, &PeriodDetectionConfig::default());
+        let period_vals: Vec<usize> = periods.iter().map(|p| p.period).collect();
+        assert!(
+            period_vals.contains(&7),
+            "Should detect period 7, got {:?}",
             period_vals
         );
         assert!(
-            period_vals.contains(&6),
-            "Should detect period 6, got {:?}",
+            period_vals.contains(&30),
+            "Should detect period 30, got {:?}",
             period_vals
         );
     }
