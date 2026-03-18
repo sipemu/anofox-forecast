@@ -266,3 +266,20 @@ path = "examples/forecasting/explainability.rs"
 name = "aid"
 path = "examples/validation/aid.rs"
 
+# New feature examples
+[[example]]
+name = "feature_generator"
+path = "examples/features/feature_generator.rs"
+
+[[example]]
+name = "pipeline"
+path = "examples/transform/pipeline.rs"
+
+[[example]]
+name = "period_detection"
+path = "examples/analysis/period_detection.rs"
+
+[[example]]
+name = "exogenous"
+path = "examples/forecasting/exogenous.rs"
+

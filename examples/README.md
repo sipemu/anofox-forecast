@@ -26,6 +26,7 @@ Each example has a companion `.md` file with a detailed description.
 | [kalman](forecasting/kalman.rs) | `cargo run --example kalman` | Kalman filter: local level, local linear trend, state-space models |
 | [constraints](forecasting/constraints.rs) | `cargo run --example constraints` | Post-hoc forecast constraints: non-negative, clamped, rounded, integer |
 | [explainability](forecasting/explainability.rs) | `cargo run --example explainability` | Forecast decomposition into level, trend, and seasonal components |
+| [exogenous](forecasting/exogenous.rs) | `cargo run --example exogenous` | Exogenous regressors: FeatureGenerator + ARIMA/ETS/Theta/MSTL, scenario analysis |
 
 ## Analysis
 
@@ -36,6 +37,7 @@ Each example has a companion `.md` file with a detailed description.
 | [changepoint_types](analysis/changepoint_types.rs) | `cargo run --example changepoint_types` | Changepoint type classification: level shift, trend change, variance change |
 | [outlier_detection](analysis/outlier_detection.rs) | `cargo run --example outlier_detection` | Statistical outlier detection methods |
 | [imputation](analysis/imputation.rs) | `cargo run --example imputation` | Missing value imputation strategies |
+| [period_detection](analysis/period_detection.rs) | `cargo run --example period_detection` | Seasonal period detection with spectral analysis and validation metrics |
 
 ## Time Series Features
 
@@ -46,6 +48,7 @@ Each example has a companion `.md` file with a detailed description.
 | [autocorrelation](features/autocorrelation.rs) | `cargo run --example autocorrelation` | ACF, PACF, and Ljung-Box test |
 | [entropy](features/entropy.rs) | `cargo run --example entropy` | Entropy-based complexity measures |
 | [complexity](features/complexity.rs) | `cargo run --example complexity` | Time series complexity features |
+| [feature_generator](features/feature_generator.rs) | `cargo run --example feature_generator` | Standalone FeatureGenerator: Fourier, calendar, holiday features for any model |
 
 ## Transforms
 
@@ -55,6 +58,7 @@ Each example has a companion `.md` file with a detailed description.
 | [boxcox](transform/boxcox.rs) | `cargo run --example boxcox` | Box-Cox and log transformations |
 | [window](transform/window.rs) | `cargo run --example window` | Rolling window aggregations |
 | [temporal_aggregation](transform/temporal_aggregation.rs) | `cargo run --example temporal_aggregation` | Temporal aggregation, downsampling, and upsampling |
+| [pipeline](transform/pipeline.rs) | `cargo run --example pipeline` | Composable transform pipeline: chain BoxCox, Difference, Scale, Log around any model |
 
 ## Validation
 
