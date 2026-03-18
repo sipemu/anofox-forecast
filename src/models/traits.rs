@@ -322,6 +322,36 @@ impl ModelRegistry {
     pub fn iter(&self) -> impl Iterator<Item = &ModelSpec> {
         self.models.iter()
     }
+
+    /// List all registered model names.
+    pub fn names(&self) -> Vec<&'static str> {
+        self.models.iter().map(|s| s.name).collect()
+    }
+
+    /// Remove a model by name. Returns true if the model was found and removed.
+    pub fn remove(&mut self, name: &str) -> bool {
+        let before = self.models.len();
+        self.models.retain(|s| s.name != name);
+        self.models.len() < before
+    }
+
+    /// Keep only models matching the predicate.
+    pub fn retain<F>(&mut self, f: F)
+    where
+        F: FnMut(&ModelSpec) -> bool,
+    {
+        self.models.retain(f);
+    }
+
+    /// Append all models from another registry.
+    pub fn extend(&mut self, other: ModelRegistry) {
+        self.models.extend(other.models);
+    }
+
+    /// Check if a model with the given name is registered.
+    pub fn contains(&self, name: &str) -> bool {
+        self.models.iter().any(|s| s.name == name)
+    }
 }
 
 impl Default for ModelRegistry {
