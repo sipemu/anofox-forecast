@@ -224,7 +224,7 @@ impl SeasonalES {
         };
 
         for start in starts {
-            let result = nelder_mead(objective, &start, Some(&[(0.001, 0.999)]), config.clone());
+            let result = nelder_mead(objective, &start, Some(&[(0.001, 0.999)]), config);
 
             if result.optimal_value < best_value {
                 best_value = result.optimal_value;

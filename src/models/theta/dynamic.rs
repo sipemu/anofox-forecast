@@ -559,7 +559,7 @@ impl DynamicTheta {
                 objective,
                 &start,
                 Some(&[(0.01, 0.99), (1.0, 10.0)]),
-                config.clone(),
+                config,
             );
 
             if result.optimal_value < best_value {

@@ -1057,7 +1057,7 @@ impl ETS {
                         Some(init_trend),
                         None,
                     );
-                    if init_ll > best_value * 5.0 {
+                    if init_ll > best_value * 3.0 {
                         continue;
                     }
                 }
@@ -1082,7 +1082,7 @@ impl ETS {
                         level_bounds,
                         trend_bounds,
                     ]),
-                    config.clone(),
+                    config,
                 );
 
                 if result.optimal_value < best_value {
@@ -1143,44 +1143,38 @@ impl ETS {
                 (0.8, 0.01),
             ];
 
-            let mut best_value = f64::MAX;
-            let mut best_result: Option<Vec<f64>> = None;
+            // Two-stage seasonal optimization:
+            // Stage 1: cheaply explore smoothing params (2-4 dim) across 6 starting
+            //   points with heuristic states held fixed (max_iter 500 each).
+            // Stage 2: one joint refinement from the Stage 1 winner, optimizing
+            //   smoothing params + initial level/trend + seasonal indices together.
+            // This replaces 6× expensive joint optimizations (16-18 dim) with
+            // 6× cheap (2-4 dim) + 1× joint, yielding ~3-5× speedup.
+
+            let quick_config = NelderMeadConfig {
+                max_iter: 500,
+                tolerance: 1e-10,
+                ..Default::default()
+            };
+            let seasonal_buf = RefCell::new(vec![0.0; period]);
 
             match (has_trend, is_damped) {
                 (false, _) => {
-                    // alpha, gamma, l0, s0[0..period]
-                    let n_params = 2 + 1 + period;
-                    let mut bounds = Vec::with_capacity(n_params);
-                    bounds.push((0.0001, 0.9999)); // alpha
-                    bounds.push((0.0001, 0.9999)); // gamma
-                    bounds.push(level_bounds); // l0
-                    bounds.extend_from_slice(&seasonal_bounds);
+                    // Stage 1: optimize alpha, gamma only (2 params)
+                    let smoothing_bounds = [(0.0001, 0.9999), (0.0001, 0.9999)];
+                    let mut best_stage1 = f64::MAX;
+                    let mut best_alpha = 0.3_f64;
+                    let mut best_gamma = 0.1_f64;
 
-                    let seasonal_buf = RefCell::new(vec![0.0; period]);
-                    let mut start = Vec::with_capacity(n_params);
                     for &(alpha_init, gamma_init) in &ag_starts {
-                        start.clear();
-                        start.push(alpha_init);
-                        start.push(gamma_init);
-                        start.push(init_level);
-                        start.extend_from_slice(&init_seasonals);
-
-                        // Early-exit: skip starts whose initial point is far worse
-                        if best_value < f64::MAX {
+                        if best_stage1 < f64::MAX {
                             let mut buf = seasonal_buf.borrow_mut();
                             let init_ll = self.calculate_likelihood_with_init_buf(
-                                values,
-                                alpha_init,
-                                None,
-                                Some(gamma_init),
-                                None,
-                                Some(init_level),
-                                None,
-                                Some(&init_seasonals),
-                                &mut buf,
+                                values, alpha_init, None, Some(gamma_init), None,
+                                Some(init_level), None, Some(&init_seasonals), &mut buf,
                             );
                             drop(buf);
-                            if init_ll > best_value * 5.0 {
+                            if init_ll > best_stage1 * 3.0 {
                                 continue;
                             }
                         }
@@ -1189,246 +1183,257 @@ impl ETS {
                             |p| {
                                 let mut buf = seasonal_buf.borrow_mut();
                                 self.calculate_likelihood_with_init_buf(
-                                    values,
-                                    p[0],
-                                    None,
-                                    Some(p[1]),
-                                    None,
-                                    Some(p[2]),
-                                    None,
-                                    Some(&p[3..3 + period]),
-                                    &mut buf,
+                                    values, p[0], None, Some(p[1]), None,
+                                    Some(init_level), None, Some(&init_seasonals), &mut buf,
                                 )
                             },
-                            &start,
-                            Some(&bounds),
-                            seasonal_config.clone(),
+                            &[alpha_init, gamma_init],
+                            Some(&smoothing_bounds),
+                            quick_config,
                         );
 
-                        if result.optimal_value < best_value {
-                            best_value = result.optimal_value;
-                            best_result = Some(result.optimal_point);
+                        if result.optimal_value < best_stage1 {
+                            best_stage1 = result.optimal_value;
+                            best_alpha = result.optimal_point[0];
+                            best_gamma = result.optimal_point[1];
                         }
                     }
 
-                    // Fall back to heuristic states when optimisation
-                    // cannot improve on f64::MAX (degenerate data).
-                    let r = match best_result {
-                        Some(r) => r,
-                        None => {
-                            return (
-                                0.3,
-                                None,
-                                Some(0.1),
-                                None,
-                                init_level,
-                                init_trend,
-                                Some(init_seasonals.clone()),
-                            );
-                        }
-                    };
-                    let opt_seasonals = r[3..3 + period].to_vec();
-                    (
-                        r[0].clamp(0.0001, 0.9999),
-                        None,
-                        Some(r[1].clamp(0.0001, 0.9999)),
-                        None,
-                        r[2],
-                        init_trend,
-                        Some(opt_seasonals),
-                    )
+                    // Stage 2: joint refinement — alpha, gamma, l0, s0[0..period]
+                    let n_params = 2 + 1 + period;
+                    let mut joint_bounds = Vec::with_capacity(n_params);
+                    joint_bounds.push((0.0001, 0.9999));
+                    joint_bounds.push((0.0001, 0.9999));
+                    joint_bounds.push(level_bounds);
+                    joint_bounds.extend_from_slice(&seasonal_bounds);
+
+                    let mut start = Vec::with_capacity(n_params);
+                    start.push(best_alpha);
+                    start.push(best_gamma);
+                    start.push(init_level);
+                    start.extend_from_slice(&init_seasonals);
+
+                    let result = nelder_mead(
+                        |p| {
+                            let mut buf = seasonal_buf.borrow_mut();
+                            self.calculate_likelihood_with_init_buf(
+                                values, p[0], None, Some(p[1]), None,
+                                Some(p[2]), None, Some(&p[3..3 + period]), &mut buf,
+                            )
+                        },
+                        &start,
+                        Some(&joint_bounds),
+                        seasonal_config,
+                    );
+
+                    if result.optimal_value < f64::MAX {
+                        let opt_seasonals = result.optimal_point[3..3 + period].to_vec();
+                        (
+                            result.optimal_point[0].clamp(0.0001, 0.9999),
+                            None,
+                            Some(result.optimal_point[1].clamp(0.0001, 0.9999)),
+                            None,
+                            result.optimal_point[2],
+                            init_trend,
+                            Some(opt_seasonals),
+                        )
+                    } else {
+                        (0.3, None, Some(0.1), None, init_level, init_trend,
+                         Some(init_seasonals.clone()))
+                    }
                 }
                 (true, false) => {
-                    // alpha, beta, gamma, l0, b0, s0[0..period]
-                    let n_params = 3 + 2 + period;
-                    let mut bounds = Vec::with_capacity(n_params);
-                    bounds.push((0.0001, 0.9999)); // alpha
-                    bounds.push((0.0001, 0.9999)); // beta
-                    bounds.push((0.0001, 0.9999)); // gamma
-                    bounds.push(level_bounds); // l0
-                    bounds.push(trend_bounds); // b0
-                    bounds.extend_from_slice(&seasonal_bounds);
+                    // Stage 1: optimize alpha, beta, gamma (3 params)
+                    let smoothing_bounds = [
+                        (0.0001, 0.9999), (0.0001, 0.9999), (0.0001, 0.9999),
+                    ];
+                    let mut best_stage1 = f64::MAX;
+                    let mut best_alpha = 0.3_f64;
+                    let mut best_beta = 0.1_f64;
+                    let mut best_gamma = 0.1_f64;
 
-                    let seasonal_buf = RefCell::new(vec![0.0; period]);
-                    let mut start = Vec::with_capacity(n_params);
                     for &(alpha_init, gamma_init) in &ag_starts {
-                        // Early-exit: skip unpromising starting points
-                        if best_value < f64::MAX {
+                        if best_stage1 < f64::MAX {
                             let mut buf = seasonal_buf.borrow_mut();
                             let init_ll = self.calculate_likelihood_with_init_buf(
-                                values,
-                                alpha_init,
-                                Some(0.1),
-                                Some(gamma_init),
-                                None,
-                                Some(init_level),
-                                Some(init_trend),
-                                Some(&init_seasonals),
-                                &mut buf,
+                                values, alpha_init, Some(0.1), Some(gamma_init), None,
+                                Some(init_level), Some(init_trend),
+                                Some(&init_seasonals), &mut buf,
                             );
                             drop(buf);
-                            if init_ll > best_value * 5.0 {
+                            if init_ll > best_stage1 * 3.0 {
                                 continue;
                             }
                         }
-
-                        start.clear();
-                        start.push(alpha_init);
-                        start.push(0.1); // beta
-                        start.push(gamma_init);
-                        start.push(init_level);
-                        start.push(init_trend);
-                        start.extend_from_slice(&init_seasonals);
 
                         let result = nelder_mead(
                             |p| {
                                 let mut buf = seasonal_buf.borrow_mut();
                                 self.calculate_likelihood_with_init_buf(
-                                    values,
-                                    p[0],
-                                    Some(p[1]),
-                                    Some(p[2]),
-                                    None,
-                                    Some(p[3]),
-                                    Some(p[4]),
-                                    Some(&p[5..5 + period]),
-                                    &mut buf,
+                                    values, p[0], Some(p[1]), Some(p[2]), None,
+                                    Some(init_level), Some(init_trend),
+                                    Some(&init_seasonals), &mut buf,
                                 )
                             },
-                            &start,
-                            Some(&bounds),
-                            seasonal_config.clone(),
+                            &[alpha_init, 0.1, gamma_init],
+                            Some(&smoothing_bounds),
+                            quick_config,
                         );
 
-                        if result.optimal_value < best_value {
-                            best_value = result.optimal_value;
-                            best_result = Some(result.optimal_point);
+                        if result.optimal_value < best_stage1 {
+                            best_stage1 = result.optimal_value;
+                            best_alpha = result.optimal_point[0];
+                            best_beta = result.optimal_point[1];
+                            best_gamma = result.optimal_point[2];
                         }
                     }
 
-                    // Fall back to heuristic states when optimisation
-                    // cannot improve on f64::MAX (degenerate data).
-                    let r = match best_result {
-                        Some(r) => r,
-                        None => {
-                            return (
-                                0.3,
-                                Some(0.1),
-                                Some(0.1),
-                                None,
-                                init_level,
-                                init_trend,
-                                Some(init_seasonals.clone()),
-                            );
-                        }
-                    };
-                    let opt_seasonals = r[5..5 + period].to_vec();
-                    (
-                        r[0].clamp(0.0001, 0.9999),
-                        Some(r[1].clamp(0.0001, 0.9999)),
-                        Some(r[2].clamp(0.0001, 0.9999)),
-                        None,
-                        r[3],
-                        r[4],
-                        Some(opt_seasonals),
-                    )
+                    // Stage 2: joint — alpha, beta, gamma, l0, b0, s0[0..period]
+                    let n_params = 3 + 2 + period;
+                    let mut joint_bounds = Vec::with_capacity(n_params);
+                    joint_bounds.push((0.0001, 0.9999));
+                    joint_bounds.push((0.0001, 0.9999));
+                    joint_bounds.push((0.0001, 0.9999));
+                    joint_bounds.push(level_bounds);
+                    joint_bounds.push(trend_bounds);
+                    joint_bounds.extend_from_slice(&seasonal_bounds);
+
+                    let mut start = Vec::with_capacity(n_params);
+                    start.push(best_alpha);
+                    start.push(best_beta);
+                    start.push(best_gamma);
+                    start.push(init_level);
+                    start.push(init_trend);
+                    start.extend_from_slice(&init_seasonals);
+
+                    let result = nelder_mead(
+                        |p| {
+                            let mut buf = seasonal_buf.borrow_mut();
+                            self.calculate_likelihood_with_init_buf(
+                                values, p[0], Some(p[1]), Some(p[2]), None,
+                                Some(p[3]), Some(p[4]),
+                                Some(&p[5..5 + period]), &mut buf,
+                            )
+                        },
+                        &start,
+                        Some(&joint_bounds),
+                        seasonal_config,
+                    );
+
+                    if result.optimal_value < f64::MAX {
+                        let opt_seasonals = result.optimal_point[5..5 + period].to_vec();
+                        (
+                            result.optimal_point[0].clamp(0.0001, 0.9999),
+                            Some(result.optimal_point[1].clamp(0.0001, 0.9999)),
+                            Some(result.optimal_point[2].clamp(0.0001, 0.9999)),
+                            None,
+                            result.optimal_point[3],
+                            result.optimal_point[4],
+                            Some(opt_seasonals),
+                        )
+                    } else {
+                        (0.3, Some(0.1), Some(0.1), None, init_level, init_trend,
+                         Some(init_seasonals.clone()))
+                    }
                 }
                 (true, true) => {
-                    // alpha, beta, gamma, phi, l0, b0, s0[0..period]
-                    let n_params = 4 + 2 + period;
-                    let mut bounds = Vec::with_capacity(n_params);
-                    bounds.push((0.0001, 0.9999)); // alpha
-                    bounds.push((0.0001, 0.9999)); // beta
-                    bounds.push((0.0001, 0.9999)); // gamma
-                    bounds.push((0.8, 0.98)); // phi
-                    bounds.push(level_bounds); // l0
-                    bounds.push(trend_bounds); // b0
-                    bounds.extend_from_slice(&seasonal_bounds);
+                    // Stage 1: optimize alpha, beta, gamma, phi (4 params)
+                    let smoothing_bounds = [
+                        (0.0001, 0.9999), (0.0001, 0.9999),
+                        (0.0001, 0.9999), (0.8, 0.98),
+                    ];
+                    let mut best_stage1 = f64::MAX;
+                    let mut best_alpha = 0.3_f64;
+                    let mut best_beta = 0.1_f64;
+                    let mut best_gamma = 0.1_f64;
+                    let mut best_phi = 0.98_f64;
 
-                    let seasonal_buf = RefCell::new(vec![0.0; period]);
-                    let mut start = Vec::with_capacity(n_params);
                     for &(alpha_init, gamma_init) in &ag_starts {
-                        // Early-exit: skip unpromising starting points
-                        if best_value < f64::MAX {
+                        if best_stage1 < f64::MAX {
                             let mut buf = seasonal_buf.borrow_mut();
                             let init_ll = self.calculate_likelihood_with_init_buf(
-                                values,
-                                alpha_init,
-                                Some(0.1),
-                                Some(gamma_init),
-                                Some(0.98),
-                                Some(init_level),
-                                Some(init_trend),
-                                Some(&init_seasonals),
-                                &mut buf,
+                                values, alpha_init, Some(0.1), Some(gamma_init), Some(0.98),
+                                Some(init_level), Some(init_trend),
+                                Some(&init_seasonals), &mut buf,
                             );
                             drop(buf);
-                            if init_ll > best_value * 5.0 {
+                            if init_ll > best_stage1 * 3.0 {
                                 continue;
                             }
                         }
-
-                        start.clear();
-                        start.push(alpha_init);
-                        start.push(0.1); // beta
-                        start.push(gamma_init);
-                        start.push(0.98); // phi
-                        start.push(init_level);
-                        start.push(init_trend);
-                        start.extend_from_slice(&init_seasonals);
 
                         let result = nelder_mead(
                             |p| {
                                 let mut buf = seasonal_buf.borrow_mut();
                                 self.calculate_likelihood_with_init_buf(
-                                    values,
-                                    p[0],
-                                    Some(p[1]),
-                                    Some(p[2]),
-                                    Some(p[3]),
-                                    Some(p[4]),
-                                    Some(p[5]),
-                                    Some(&p[6..6 + period]),
-                                    &mut buf,
+                                    values, p[0], Some(p[1]), Some(p[2]), Some(p[3]),
+                                    Some(init_level), Some(init_trend),
+                                    Some(&init_seasonals), &mut buf,
                                 )
                             },
-                            &start,
-                            Some(&bounds),
-                            seasonal_config.clone(),
+                            &[alpha_init, 0.1, gamma_init, 0.98],
+                            Some(&smoothing_bounds),
+                            quick_config,
                         );
 
-                        if result.optimal_value < best_value {
-                            best_value = result.optimal_value;
-                            best_result = Some(result.optimal_point);
+                        if result.optimal_value < best_stage1 {
+                            best_stage1 = result.optimal_value;
+                            best_alpha = result.optimal_point[0];
+                            best_beta = result.optimal_point[1];
+                            best_gamma = result.optimal_point[2];
+                            best_phi = result.optimal_point[3];
                         }
                     }
 
-                    // Fall back to heuristic states when optimisation
-                    // cannot improve on f64::MAX (degenerate data).
-                    let r = match best_result {
-                        Some(r) => r,
-                        None => {
-                            return (
-                                0.3,
-                                Some(0.1),
-                                Some(0.1),
-                                Some(0.98),
-                                init_level,
-                                init_trend,
-                                Some(init_seasonals.clone()),
-                            );
-                        }
-                    };
-                    let opt_seasonals = r[6..6 + period].to_vec();
-                    (
-                        r[0].clamp(0.0001, 0.9999),
-                        Some(r[1].clamp(0.0001, 0.9999)),
-                        Some(r[2].clamp(0.0001, 0.9999)),
-                        Some(r[3].clamp(0.8, 0.98)),
-                        r[4],
-                        r[5],
-                        Some(opt_seasonals),
-                    )
+                    // Stage 2: joint — alpha, beta, gamma, phi, l0, b0, s0[0..period]
+                    let n_params = 4 + 2 + period;
+                    let mut joint_bounds = Vec::with_capacity(n_params);
+                    joint_bounds.push((0.0001, 0.9999));
+                    joint_bounds.push((0.0001, 0.9999));
+                    joint_bounds.push((0.0001, 0.9999));
+                    joint_bounds.push((0.8, 0.98));
+                    joint_bounds.push(level_bounds);
+                    joint_bounds.push(trend_bounds);
+                    joint_bounds.extend_from_slice(&seasonal_bounds);
+
+                    let mut start = Vec::with_capacity(n_params);
+                    start.push(best_alpha);
+                    start.push(best_beta);
+                    start.push(best_gamma);
+                    start.push(best_phi);
+                    start.push(init_level);
+                    start.push(init_trend);
+                    start.extend_from_slice(&init_seasonals);
+
+                    let result = nelder_mead(
+                        |p| {
+                            let mut buf = seasonal_buf.borrow_mut();
+                            self.calculate_likelihood_with_init_buf(
+                                values, p[0], Some(p[1]), Some(p[2]), Some(p[3]),
+                                Some(p[4]), Some(p[5]),
+                                Some(&p[6..6 + period]), &mut buf,
+                            )
+                        },
+                        &start,
+                        Some(&joint_bounds),
+                        seasonal_config,
+                    );
+
+                    if result.optimal_value < f64::MAX {
+                        let opt_seasonals = result.optimal_point[6..6 + period].to_vec();
+                        (
+                            result.optimal_point[0].clamp(0.0001, 0.9999),
+                            Some(result.optimal_point[1].clamp(0.0001, 0.9999)),
+                            Some(result.optimal_point[2].clamp(0.0001, 0.9999)),
+                            Some(result.optimal_point[3].clamp(0.8, 0.98)),
+                            result.optimal_point[4],
+                            result.optimal_point[5],
+                            Some(opt_seasonals),
+                        )
+                    } else {
+                        (0.3, Some(0.1), Some(0.1), Some(0.98), init_level, init_trend,
+                         Some(init_seasonals.clone()))
+                    }
                 }
             }
         } else {

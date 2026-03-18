@@ -14,7 +14,7 @@ pub struct NelderMeadResult {
 }
 
 /// Configuration for Nelder-Mead optimization.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct NelderMeadConfig {
     /// Maximum number of iterations.
     pub max_iter: usize,

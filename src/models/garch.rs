@@ -424,7 +424,7 @@ impl GARCH {
                 continue;
             }
 
-            let result = nelder_mead(&objective, &initial, Some(&bounds), config.clone());
+            let result = nelder_mead(&objective, &initial, Some(&bounds), config);
 
             if result.optimal_value < best_value {
                 best_value = result.optimal_value;

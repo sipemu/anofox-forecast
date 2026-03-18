@@ -308,9 +308,60 @@ impl Forecaster for AutoETS {
         // Matches Theta::determine_decomposition() and R's forecast::ets()
         let has_non_positive = values.iter().any(|&v| v <= 0.0);
 
-        // Determine seasonal period
+        // Determine seasonal period — require at least 3 full cycles for meaningful
+        // seasonal estimation (stricter than the 2× minimum to avoid overfitting)
         let seasonal_period = self.config.seasonal_period.unwrap_or(1);
-        let has_seasonal = seasonal_period > 1 && values.len() >= 2 * seasonal_period;
+        let has_seasonal = seasonal_period > 1 && values.len() >= 3 * seasonal_period;
+
+        // Quick seasonal strength check: compare between-cycle variance to
+        // within-cycle variance (one-way ANOVA F-ratio). If seasonal signal
+        // is negligible (F < 1), skip seasonal candidates entirely.
+        let has_seasonal = if has_seasonal {
+            let period = seasonal_period;
+            let n_cycles = values.len() / period;
+            if n_cycles >= 3 {
+                // Compute seasonal means
+                let mut seasonal_means = vec![0.0; period];
+                for j in 0..period {
+                    let mut sum = 0.0;
+                    for c in 0..n_cycles {
+                        sum += values[c * period + j];
+                    }
+                    seasonal_means[j] = sum / n_cycles as f64;
+                }
+                let grand_mean = seasonal_means.iter().sum::<f64>() / period as f64;
+
+                // Between-group sum of squares (seasonal signal)
+                let ss_between: f64 = seasonal_means
+                    .iter()
+                    .map(|&m| (m - grand_mean).powi(2))
+                    .sum::<f64>()
+                    * n_cycles as f64;
+
+                // Within-group sum of squares (noise)
+                let mut ss_within = 0.0;
+                for j in 0..period {
+                    for c in 0..n_cycles {
+                        let diff = values[c * period + j] - seasonal_means[j];
+                        ss_within += diff * diff;
+                    }
+                }
+
+                let df_between = (period - 1) as f64;
+                let df_within = (n_cycles * period - period) as f64;
+                let f_ratio = if ss_within > 0.0 && df_within > 0.0 {
+                    (ss_between / df_between) / (ss_within / df_within)
+                } else {
+                    f64::MAX
+                };
+                // F > 1.0 indicates some seasonal signal worth modeling
+                f_ratio > 1.0
+            } else {
+                has_seasonal
+            }
+        } else {
+            false
+        };
 
         // Generate candidate models
         let candidates = self.generate_candidates(has_seasonal, has_non_positive);
