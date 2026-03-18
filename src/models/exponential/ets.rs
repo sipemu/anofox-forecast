@@ -797,10 +797,17 @@ impl ETS {
 
         // Use provided initial states or fallback to heuristic.
         // Reuse seasonal_buf instead of allocating via to_vec().
+        // PERF: avoid calling initialize_state() inside the optimization loop —
+        // callers should pre-compute heuristic states once and pass them in.
         let (mut level, mut trend) = match (init_level, init_seasonals) {
             (Some(l), Some(s)) => {
                 seasonal_buf.resize(s.len(), 0.0);
                 seasonal_buf.copy_from_slice(s);
+                (l, init_trend.unwrap_or(0.0))
+            }
+            (Some(l), None) if !self.spec.has_seasonal() => {
+                // Non-seasonal model: no seasonal buffer needed, skip initialize_state()
+                seasonal_buf.clear();
                 (l, init_trend.unwrap_or(0.0))
             }
             (Some(l), None) => {
@@ -1037,6 +1044,24 @@ impl ETS {
             let mut best_value = f64::MAX;
 
             for &alpha_init in &alpha_starts {
+                // Early-exit: if we already have a good result and a new start's
+                // initial evaluation is far worse, skip this start entirely.
+                if best_value < f64::MAX {
+                    let init_ll = self.calculate_likelihood_with_init(
+                        values,
+                        alpha_init,
+                        Some(0.01),
+                        None,
+                        None,
+                        Some(init_level),
+                        Some(init_trend),
+                        None,
+                    );
+                    if init_ll > best_value * 5.0 {
+                        continue;
+                    }
+                }
+
                 let result = nelder_mead(
                     |p| {
                         self.calculate_likelihood_with_init(
@@ -1140,6 +1165,26 @@ impl ETS {
                         start.push(init_level);
                         start.extend_from_slice(&init_seasonals);
 
+                        // Early-exit: skip starts whose initial point is far worse
+                        if best_value < f64::MAX {
+                            let mut buf = seasonal_buf.borrow_mut();
+                            let init_ll = self.calculate_likelihood_with_init_buf(
+                                values,
+                                alpha_init,
+                                None,
+                                Some(gamma_init),
+                                None,
+                                Some(init_level),
+                                None,
+                                Some(&init_seasonals),
+                                &mut buf,
+                            );
+                            drop(buf);
+                            if init_ll > best_value * 5.0 {
+                                continue;
+                            }
+                        }
+
                         let result = nelder_mead(
                             |p| {
                                 let mut buf = seasonal_buf.borrow_mut();
@@ -1207,6 +1252,26 @@ impl ETS {
                     let seasonal_buf = RefCell::new(vec![0.0; period]);
                     let mut start = Vec::with_capacity(n_params);
                     for &(alpha_init, gamma_init) in &ag_starts {
+                        // Early-exit: skip unpromising starting points
+                        if best_value < f64::MAX {
+                            let mut buf = seasonal_buf.borrow_mut();
+                            let init_ll = self.calculate_likelihood_with_init_buf(
+                                values,
+                                alpha_init,
+                                Some(0.1),
+                                Some(gamma_init),
+                                None,
+                                Some(init_level),
+                                Some(init_trend),
+                                Some(&init_seasonals),
+                                &mut buf,
+                            );
+                            drop(buf);
+                            if init_ll > best_value * 5.0 {
+                                continue;
+                            }
+                        }
+
                         start.clear();
                         start.push(alpha_init);
                         start.push(0.1); // beta
@@ -1283,6 +1348,26 @@ impl ETS {
                     let seasonal_buf = RefCell::new(vec![0.0; period]);
                     let mut start = Vec::with_capacity(n_params);
                     for &(alpha_init, gamma_init) in &ag_starts {
+                        // Early-exit: skip unpromising starting points
+                        if best_value < f64::MAX {
+                            let mut buf = seasonal_buf.borrow_mut();
+                            let init_ll = self.calculate_likelihood_with_init_buf(
+                                values,
+                                alpha_init,
+                                Some(0.1),
+                                Some(gamma_init),
+                                Some(0.98),
+                                Some(init_level),
+                                Some(init_trend),
+                                Some(&init_seasonals),
+                                &mut buf,
+                            );
+                            drop(buf);
+                            if init_ll > best_value * 5.0 {
+                                continue;
+                            }
+                        }
+
                         start.clear();
                         start.push(alpha_init);
                         start.push(0.1); // beta
@@ -1351,10 +1436,19 @@ impl ETS {
             match (has_trend, is_damped) {
                 (false, _) => {
                     // Just alpha (ETS(A,N,N) or ETS(M,N,N))
+                    // Pass heuristic init states to avoid redundant initialize_state()
+                    // calls inside each Nelder-Mead evaluation.
                     let result = nelder_mead(
                         |p| {
                             self.calculate_likelihood_with_init(
-                                values, p[0], None, None, None, None, None, None,
+                                values,
+                                p[0],
+                                None,
+                                None,
+                                None,
+                                Some(init_level),
+                                Some(init_trend),
+                                None,
                             )
                         },
                         &[0.3],
@@ -1378,6 +1472,8 @@ impl ETS {
                 }
                 (true, _) => {
                     // alpha, beta, phi (damped trend, no seasonal)
+                    // Pass heuristic init states to avoid redundant initialize_state()
+                    // calls inside each Nelder-Mead evaluation.
                     let result = nelder_mead(
                         |p| {
                             self.calculate_likelihood_with_init(
@@ -1386,8 +1482,8 @@ impl ETS {
                                 Some(p[1]),
                                 None,
                                 Some(p[2]),
-                                None,
-                                None,
+                                Some(init_level),
+                                Some(init_trend),
                                 None,
                             )
                         },
@@ -1835,6 +1931,10 @@ impl Forecaster for ETS {
         self.exog_ols
             .as_ref()
             .map(|ols| ols.regressor_names.as_slice())
+    }
+
+    fn exog_coefficients(&self) -> Option<&OLSResult> {
+        self.exog_ols.as_ref()
     }
 
     fn predict_with_exog(
