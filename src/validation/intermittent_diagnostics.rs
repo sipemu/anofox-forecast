@@ -15,6 +15,7 @@ use std::fmt;
 ///
 /// Thresholds: ADI = 1.32, CV squared = 0.49.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum DemandClassification {
     /// ADI < 1.32 and CV squared < 0.49: regular, low-variability demand.
     Smooth,

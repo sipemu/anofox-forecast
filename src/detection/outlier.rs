@@ -4,6 +4,7 @@
 
 /// Method for outlier detection.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum OutlierMethod {
     /// IQR (Interquartile Range) method.
     IQR,
@@ -15,6 +16,7 @@ pub enum OutlierMethod {
 
 /// Result of outlier detection.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct OutlierResult {
     /// Indices of detected outliers.
     pub outlier_indices: Vec<usize>,

@@ -123,6 +123,7 @@ impl Pelt {
 
 /// Result of PELT changepoint detection.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PeltResult {
     /// Detected changepoint indices
     pub changepoints: Vec<usize>,

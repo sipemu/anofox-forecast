@@ -7,6 +7,7 @@
 
 /// Result of STL decomposition.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct STLResult {
     /// Trend component.
     pub trend: Vec<f64>,
