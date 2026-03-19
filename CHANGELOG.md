@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.7] - 2026-03-19
+
 ### Added
 
 - **Recency-Aware Trend Components** (`seasonality` module)
@@ -98,9 +100,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Orchestration module extracted to [`anofox-orchestration`](https://github.com/sipemu/anofox-orchestration)** (private repo)
   - Moved: `DataProfile`, `PipelineBuilder`, `Pipeline`, `PipelineConfig`, `PipelineResult`, `PipelineReport`, `PipelineStore`, `DecisionLog`, `FallbackChain`, `HorizonAnalysis`, `SelectionConfidence`, `ModelConfidenceSet`, `QualityFloor`, `MetricStrategy`, `EnsembleMode`, `PreprocessMode`, `TrendIntegration`, `ChangepointMode`, `DriftConfig`/`DriftReport`, `ExploreBuilder`, `BacktestBuilder`, structured tool functions
-  - Moved: `partition_by_structural_break()` batch helper
+  - Moved: `partition_by_structural_break()` helper
   - Moved examples: `orchestration`, `explore`, `regression_exog_changepoints`
   - `anofox-forecast` remains the open-source foundation; `anofox-orchestration` depends on it via git
+
+- **Batch processing module removed** (`models::batch`)
+  - Removed `fit_many()`, `predict_many()`, `fit_predict_many()`, `fit_registry()` — batch multi-series operations belong in the orchestration layer
+  - `ModelRegistry` and `ModelSpec` remain (used by `compare_models`, `compare_registry`, cross-validation)
+
+### Internal
+
+- Consolidated 4 duplicate `compute_median()` implementations → shared `utils::stats::median()`
+- Consolidated 3 duplicate aggregate helpers → shared `utils::stats::aggregate()`
+- Removed dead `utils::stats::autocorrelation()` (0 callers)
 
 ### Changed
 
