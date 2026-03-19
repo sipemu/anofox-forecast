@@ -413,6 +413,64 @@ pub fn periods_in_stock(actual: &[f64], forecast: &[f64]) -> Vec<f64> {
         .collect()
 }
 
+/// Root Mean Squared Scaled Error (RMSSE).
+///
+/// RMSSE = RMSE(actual, forecast) / scale, where
+/// scale = sqrt( (1/(n_train-1)) * Σ(train\[t\] - train\[t-1\])² )
+///
+/// The per-series building block of WRMSSE (M5 competition metric).
+/// `train` provides the in-sample data for computing the naive-forecast
+/// scaling factor; `actual` and `forecast` are the holdout evaluation pair.
+///
+/// Returns `NaN` for empty/mismatched slices, or when the scale is zero
+/// (constant training data).
+pub fn rmsse(train: &[f64], actual: &[f64], forecast: &[f64]) -> f64 {
+    if actual.len() != forecast.len() || actual.is_empty() || train.len() < 2 {
+        return f64::NAN;
+    }
+
+    // Scale: sqrt of mean squared first-differences of training data
+    let n_train = train.len();
+    let sum_sq_diff: f64 = train
+        .windows(2)
+        .map(|w| (w[1] - w[0]).powi(2))
+        .sum();
+    let scale_sq = sum_sq_diff / (n_train - 1) as f64;
+
+    if scale_sq == 0.0 {
+        return f64::NAN;
+    }
+
+    // RMSE of forecast
+    let mse_val = mse(actual, forecast);
+    (mse_val / scale_sq).sqrt()
+}
+
+/// Weighted Root Mean Squared Scaled Error (WRMSSE).
+///
+/// WRMSSE = Σ(weights\[i\] * rmsse_values\[i\])
+///
+/// The primary metric of the M5 forecasting competition. Each series
+/// contributes its RMSSE weighted by its relative importance (e.g.
+/// dollar sales share). Weights should sum to 1.
+///
+/// Returns `NaN` for empty or mismatched slices, or if any RMSSE is NaN.
+pub fn wrmsse(weights: &[f64], rmsse_values: &[f64]) -> f64 {
+    if weights.len() != rmsse_values.len() || weights.is_empty() {
+        return f64::NAN;
+    }
+    let result: f64 = weights
+        .iter()
+        .zip(rmsse_values.iter())
+        .map(|(w, r)| w * r)
+        .sum();
+    if result.is_finite() {
+        result
+    } else {
+        f64::NAN
+    }
+}
+
 /// Comprehensive forecast metrics combining point-forecast accuracy measures.
 #[derive(Debug, Clone)]
 pub struct ForecastMetrics {
@@ -971,5 +1029,89 @@ mod tests {
     #[test]
     fn pis_mismatched() {
         assert!(periods_in_stock(&[1.0], &[1.0, 2.0]).is_empty());
+    }
+
+    // --- RMSSE tests ---
+
+    #[test]
+    fn rmsse_known_value() {
+        // Training data with known first-differences
+        let train = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        // scale² = mean(1²+1²+1²+1²) = 4/4 = 1.0, scale = 1.0
+        let actual = vec![6.0, 7.0, 8.0];
+        let forecast = vec![6.5, 7.5, 8.5]; // error = 0.5 each
+        // MSE = 0.25, RMSSE = sqrt(0.25/1.0) = 0.5
+        assert_relative_eq!(rmsse(&train, &actual, &forecast), 0.5, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn rmsse_perfect_forecast() {
+        let train = vec![1.0, 3.0, 5.0, 7.0];
+        let actual = vec![9.0, 11.0];
+        assert_relative_eq!(rmsse(&train, &actual, &actual), 0.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn rmsse_constant_train() {
+        // Constant training data → scale = 0 → NaN
+        let train = vec![5.0, 5.0, 5.0, 5.0];
+        let actual = vec![6.0, 7.0];
+        let forecast = vec![6.0, 7.0];
+        assert!(rmsse(&train, &actual, &forecast).is_nan());
+    }
+
+    #[test]
+    fn rmsse_empty_inputs() {
+        assert!(rmsse(&[], &[1.0], &[1.0]).is_nan());
+        assert!(rmsse(&[1.0, 2.0], &[], &[]).is_nan());
+        assert!(rmsse(&[1.0], &[1.0], &[1.0]).is_nan()); // train.len() < 2
+    }
+
+    #[test]
+    fn rmsse_mismatched() {
+        let train = vec![1.0, 2.0, 3.0];
+        assert!(rmsse(&train, &[1.0, 2.0], &[1.0]).is_nan());
+    }
+
+    // --- WRMSSE tests ---
+
+    #[test]
+    fn wrmsse_known_value() {
+        // Two series with equal weight
+        let weights = vec![0.5, 0.5];
+        let rmsse_vals = vec![1.0, 2.0];
+        assert_relative_eq!(wrmsse(&weights, &rmsse_vals), 1.5, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn wrmsse_single_series() {
+        let weights = vec![1.0];
+        let rmsse_vals = vec![0.75];
+        assert_relative_eq!(wrmsse(&weights, &rmsse_vals), 0.75, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn wrmsse_unequal_weights() {
+        let weights = vec![0.7, 0.3];
+        let rmsse_vals = vec![1.0, 2.0];
+        // 0.7*1.0 + 0.3*2.0 = 1.3
+        assert_relative_eq!(wrmsse(&weights, &rmsse_vals), 1.3, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn wrmsse_with_nan() {
+        let weights = vec![0.5, 0.5];
+        let rmsse_vals = vec![1.0, f64::NAN];
+        assert!(wrmsse(&weights, &rmsse_vals).is_nan());
+    }
+
+    #[test]
+    fn wrmsse_empty() {
+        assert!(wrmsse(&[], &[]).is_nan());
+    }
+
+    #[test]
+    fn wrmsse_mismatched() {
+        assert!(wrmsse(&[0.5], &[1.0, 2.0]).is_nan());
     }
 }

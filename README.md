@@ -126,7 +126,7 @@ console.log(forecast.values);
   - `compare_registry()`: Compare all registered models at once
   - `fit_all_and_compare()`: Fit all registry models, rank by holdout accuracy
   - `cross_validate_all()`: CV all registry models at once with aggregated metrics
-  - Accuracy metrics: MAE, MSE, RMSE, MAPE, sMAPE, MASE, WAPE, MDA, Theil's U, MSIS, coverage, skill scores
+  - Accuracy metrics: MAE, MSE, RMSE, MAPE, sMAPE, MASE, WAPE, MDA, Theil's U, RMSSE, WRMSSE, MSIS, coverage, skill scores
   - `ForecastMetrics::compute()`: All 10 core metrics in a single call
   - Time series cross-validation with configurable strategies and embargo
   - `rolling_forecast()`: Walk-forward evaluation with rolling/expanding windows
@@ -489,6 +489,7 @@ println!("Upper: {:?}", intervals.upper());
 | `ModelDiagnostics` | Comprehensive diagnostics: Ljung-Box, Jarque-Bera, Breusch-Pagan |
 | `IntermittentDiagnostics` | Syntetos-Boylan demand classification with model recommendations |
 | `AidAnalyzer` | Automatic Identification of Demand: distribution fitting, anomaly detection |
+| `rmsse()` / `wrmsse()` | Root Mean Squared Scaled Error and Weighted RMSSE (M5 competition metric) |
 | `bias()` / `periods_in_stock()` | Signed bias and inventory-focused PIS metric |
 | `ForecastMetrics::compute()` | All 10 metrics in one call (MAE through Theil's U) |
 | `fit_all_and_compare()` | Fit all registry models, rank by holdout accuracy |
