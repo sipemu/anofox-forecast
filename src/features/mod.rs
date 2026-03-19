@@ -27,6 +27,7 @@ pub mod complexity;
 pub mod counting;
 pub mod distribution;
 pub mod entropy;
+pub mod factory;
 pub mod generator;
 pub mod selection;
 pub mod trend;
@@ -37,6 +38,7 @@ pub use basic::{
     mean_change, mean_n_absolute_max, mean_second_derivative_central, median, minimum,
     root_mean_square, standard_deviation, sum_values, variance,
 };
+pub use factory::{Feature, FeatureFactory};
 pub use generator::FeatureGenerator;
 
 pub use distribution::{
