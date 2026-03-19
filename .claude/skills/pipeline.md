@@ -6,7 +6,7 @@ user_invocable: true
 
 # Transform Pipeline in anofox-forecast
 
-Chain reversible transforms around any `Forecaster`. The `Pipeline` itself implements `Forecaster`, making it composable with cross-validation, ensembles, and batch operations.
+Chain reversible transforms around any `Forecaster`. The `Pipeline` itself implements `Forecaster`, making it composable with cross-validation and ensembles.
 
 ## 1. Available Transforms
 

@@ -6,7 +6,6 @@ mod traits;
 pub mod arima;
 pub mod auto_forecast;
 pub mod baseline;
-pub mod batch;
 pub mod convenience;
 pub mod ensemble;
 pub mod exponential;

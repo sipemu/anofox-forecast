@@ -67,7 +67,7 @@ impl Clone for Box<dyn Transform> {
 /// A chain of reversible transforms around a [`Forecaster`].
 ///
 /// `Pipeline` itself implements [`Forecaster`], so it can be used anywhere a
-/// model is expected (cross-validation, ensembles, batch operations).
+/// model is expected (cross-validation, ensembles).
 pub struct Pipeline {
     transforms: Vec<Box<dyn Transform>>,
     model: BoxedForecaster,

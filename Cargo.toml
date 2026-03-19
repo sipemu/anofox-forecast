@@ -116,10 +116,6 @@ name = "ensemble"
 path = "examples/forecasting/ensemble.rs"
 
 [[example]]
-name = "batch"
-path = "examples/forecasting/batch.rs"
-
-[[example]]
 name = "var"
 path = "examples/forecasting/var.rs"
 

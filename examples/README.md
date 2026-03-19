@@ -20,7 +20,6 @@ Each example has a companion `.md` file with a detailed description.
 | [regression_exog_changepoints](forecasting/regression_exog_changepoints.rs) | `cargo run --example regression_exog_changepoints` | Exogenous regressors, changepoint features, CV with exog, structural break detection |
 | [intermittent](forecasting/intermittent.rs) | `cargo run --example intermittent` | Croston, SBA, and TSB for sparse/intermittent demand |
 | [ensemble](forecasting/ensemble.rs) | `cargo run --example ensemble` | Model ensembling with equal and optimized weights |
-| [batch](forecasting/batch.rs) | `cargo run --example batch` | Batch forecasting of multiple series (sequential and parallel) |
 | [hierarchy](forecasting/hierarchy.rs) | `cargo run --example hierarchy` | Hierarchical reconciliation: BottomUp, TopDown, MiddleOut, MinTraceOls |
 | [var](forecasting/var.rs) | `cargo run --example var` | Vector Autoregression for multivariate series with Granger causality |
 | [kalman](forecasting/kalman.rs) | `cargo run --example kalman` | Kalman filter: local level, local linear trend, state-space models |

@@ -223,7 +223,7 @@ pub trait Forecaster {
 /// ```
 pub type BoxedForecaster = Box<dyn Forecaster>;
 
-/// Model specification for batch forecasting.
+/// Model specification for model comparison and cross-validation.
 ///
 /// Contains a model factory function, name, and whether it supports native intervals.
 ///
@@ -288,7 +288,7 @@ impl ModelSpec {
     }
 }
 
-/// Collection of model specifications for batch forecasting.
+/// Collection of model specifications for model comparison and cross-validation.
 ///
 /// # Example
 ///

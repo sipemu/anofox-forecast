@@ -161,9 +161,7 @@ console.log(forecast.values);
 
 ### Data Processing & Pipeline
 
-- **Batch Processing & Parallelism**
-  - `fit_predict_many()`: Fit one model across many series (parallel with `parallel` feature)
-  - `fit_registry()`: Fit all registered models on a series (parallel)
+- **Parallelism**
   - `compare_models()` / `compare_registry()`: Parallel model comparison
   - Cross-validation folds run in parallel when `parallel` feature is enabled
   - Bootstrap sampling uses `par_iter` when `parallel` is enabled
@@ -229,7 +227,7 @@ anofox-forecast = { version = "0.4", default-features = false }  # to disable
 | Feature | Default | Description |
 |---------|---------|-------------|
 | `postprocess` | Yes | Conformal prediction, IDR, QRA, historical simulation |
-| `parallel` | No | Rayon-based parallelism for AutoARIMA, AutoForecast, batch processing, bootstrap, and cross-validation (not available on WASM) |
+| `parallel` | No | Rayon-based parallelism for AutoARIMA, AutoForecast, bootstrap, and cross-validation (not available on WASM) |
 | `serde` | No | JSON and bincode serialization/deserialization for models |
 
 ## Quick Start
@@ -483,7 +481,6 @@ println!("Upper: {:?}", intervals.upper());
 | `cross_validate_early_stop()` | CV with convergence-based early stopping |
 | `rolling_forecast()` | Walk-forward evaluation with rolling/expanding windows |
 | `StreamingCVAggregator` | Online metric aggregation using Welford's algorithm |
-| `fit_predict_many()` | Batch fit-predict across multiple series |
 | `bootstrap_forecast()` | Bootstrap confidence intervals for any model |
 | `diagnose_residuals()` | Unified residual diagnostics (Ljung-Box, DW, Jarque-Bera) |
 | `ModelDiagnostics` | Comprehensive diagnostics: Ljung-Box, Jarque-Bera, Breusch-Pagan |

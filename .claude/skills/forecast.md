@@ -137,11 +137,3 @@ let config = ComparisonConfig::new().with_horizon(12);
 let results = compare_models(&factories, &ts, &config).unwrap();
 ```
 
-## Batch Forecasting
-
-```rust
-use anofox_forecast::models::batch::{fit_predict_many};
-
-let series_refs: Vec<&TimeSeries> = vec![&ts1, &ts2, &ts3];
-let results = fit_predict_many(|| ARIMA::new(1, 1, 1), &series_refs, 12);
-```

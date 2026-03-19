@@ -10,7 +10,6 @@ Practical recipes for common time series forecasting tasks with `anofox-forecast
 - [Ensemble Forecasting with AutoEnsemble](#ensemble-forecasting-with-autoensemble)
 - [Seasonal Data Handling](#seasonal-data-handling)
 - [Cross-Validation for Model Selection](#cross-validation-for-model-selection)
-- [Batch Forecasting at Scale](#batch-forecasting-at-scale)
 - [Feature Extraction for Time Series Classification](#feature-extraction-for-time-series-classification)
 - [Changepoint Detection Workflow](#changepoint-detection-workflow)
 - [Residual Diagnostics](#residual-diagnostics)
@@ -426,81 +425,6 @@ See also: `examples/validation/cross_validation.rs`
 
 ---
 
-## Batch Forecasting at Scale
-
-The `batch` module provides functions for fitting and predicting across many series or models efficiently. With the `parallel` feature enabled, operations run in parallel using rayon.
-
-### Fit One Model to Many Series
-
-```rust
-use anofox_forecast::models::batch::{fit_many, predict_many};
-use anofox_forecast::models::baseline::Naive;
-
-let all_series = vec![&ts1, &ts2, &ts3]; // References to your time series
-
-// Fit a fresh Naive model to each series
-let fitted: Vec<_> = fit_many(Naive::new, &all_series)
-    .into_iter()
-    .filter_map(|r| r.ok())
-    .collect();
-
-// Predict 5 steps ahead from each fitted model
-let forecasts = predict_many(&fitted, 5);
-for (i, fc) in forecasts.iter().enumerate() {
-    if let Ok(f) = fc {
-        println!("Series {}: {:?}", i, f.primary());
-    }
-}
-```
-
-### Combined Fit and Predict
-
-```rust
-use anofox_forecast::models::batch::fit_predict_many;
-use anofox_forecast::models::baseline::Naive;
-
-let results = fit_predict_many(Naive::new, &[&ts1, &ts2, &ts3], 5);
-
-for r in &results {
-    match &r.forecast {
-        Some(f) => println!("Series {}: {} forecasts", r.series_index, f.horizon()),
-        None => println!("Series {}: failed - {}", r.series_index, r.error.as_deref().unwrap_or("unknown")),
-    }
-}
-```
-
-### Model Comparison with Registry
-
-```rust
-use anofox_forecast::models::batch::fit_registry;
-use anofox_forecast::models::{ModelRegistry, ModelSpec};
-use anofox_forecast::models::baseline::{Naive, RandomWalkWithDrift};
-
-let mut registry = ModelRegistry::new();
-registry.register(ModelSpec::new("Naive", || Box::new(Naive::new()), true));
-registry.register(ModelSpec::new("RWD", || Box::new(RandomWalkWithDrift::new()), true));
-
-let results = fit_registry(&registry, &ts);
-
-println!("{:<20} {:>10} {:>10}", "Model", "MAE", "RMSE");
-for r in &results {
-    if let Some(metrics) = &r.metrics {
-        println!("{:<20} {:>10.4} {:>10.4}", r.model_name, metrics.mae, metrics.rmse);
-    }
-}
-```
-
-### Enabling Parallelism
-
-Add the `parallel` feature to your `Cargo.toml`:
-
-```toml
-[dependencies]
-anofox-forecast = { version = "0.4", features = ["parallel"] }
-```
-
-All `fit_many`, `predict_many`, and `fit_predict_many` calls will then use rayon for parallel execution across series. No code changes required.
-
 ---
 
 ## Feature Extraction for Time Series Classification
@@ -905,6 +829,6 @@ ls pkg/
 - WASM runs in a sandboxed environment, typically 2-5x slower than native Rust
 - Still significantly faster than pure JavaScript implementations
 - The WASM binary is optimized with `-O3` and `wasm-opt`
-- For batch processing of many series, consider using the native Rust library via a server API instead
+- For processing many series, consider using the native Rust library via a server API instead
 
 See also: the npm package README for the full JavaScript/TypeScript API reference.

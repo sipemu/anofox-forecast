@@ -93,7 +93,7 @@ Practical reference for choosing and tuning `anofox-forecast` models based on da
 | **Small** | 20-50 | SES, Theta, Naive, Croston (intermittent) | Simple models avoid overfitting |
 | **Medium** | 50-500 | ARIMA, ETS, HoltWinters, OptimizedTheta | Enough data for parameter estimation |
 | **Large** | 500-10k | AutoARIMA, AutoETS, MFLES, MSTLForecaster | Auto selection benefits from larger samples |
-| **Very Large** | 10k+ | MFLES, MSTLForecaster, batch ops with `parallel` | Gradient-boosted decomposition scales well |
+| **Very Large** | 10k+ | MFLES, MSTLForecaster | Gradient-boosted decomposition scales well |
 
 ### By Use Case
 
@@ -101,7 +101,6 @@ Practical reference for choosing and tuning `anofox-forecast` models based on da
 |----------|-------------|-------|
 | Real-time / low latency | Naive, SES, Theta | AutoARIMA, AutoETS |
 | Best accuracy (single series) | AutoForecast, AutoEnsemble | Naive, HistoricAverage |
-| Thousands of series | batch `fit_predict_many` + `parallel` | Fitting one at a time |
 | Intermittent / sparse demand | Croston, TSB, ADIDA, IMAPA | ARIMA, HoltWinters |
 | Multiple seasonalities | MSTLForecaster, TBATS | SES, basic ARIMA |
 | Volatility forecasting | GARCH | ETS, Theta |
@@ -119,7 +118,7 @@ Enable rayon-based parallelism in `Cargo.toml`:
 anofox-forecast = { version = "0.4", features = ["parallel"] }
 ```
 
-The `batch` module functions (`fit_many`, `fit_predict_many`, `fit_registry`) automatically parallelize across series when this feature is enabled. AutoARIMA and AutoETS also parallelize candidate evaluation internally.
+AutoARIMA and AutoETS parallelize candidate evaluation internally when this feature is enabled.
 
 ### 2. Constrain AutoARIMA Search Space
 
@@ -316,12 +315,12 @@ This is the recommended approach when forecasting is part of a larger data pipel
 
 | Feature | Default | Effect on Performance |
 |---------|---------|----------------------|
-| `parallel` | No | Enables rayon for batch ops and auto model search |
+| `parallel` | No | Enables rayon for auto model search, CV, bootstrap |
 | `postprocess` | Yes | Adds faer + anofox-regression for conformal prediction |
 | `js` | No | Enables getrandom/js for WASM builds |
 | `serde` | No | Adds serialization support (minimal performance impact) |
 
-Enable only what you need. For maximum speed with batch workloads:
+Enable only what you need. For maximum speed with parallel workloads:
 
 ```toml
 anofox-forecast = { version = "0.4", features = ["parallel"] }

@@ -187,9 +187,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Parallel Batch Processing & AutoForecast**
-  - `fit_predict_many()` — fit one model across many series in parallel
-  - `fit_registry()` — fit all registered models on a series in parallel
+- **Parallel Processing & AutoForecast**
   - `compare_models()` / `compare_registry()` — parallel model comparison
   - `AutoForecast` candidate model fits run in parallel when `parallel` feature enabled
   - Bootstrap sampling uses `par_iter` when `parallel` enabled
@@ -452,7 +450,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Kalman filter uses flat `DenseMatrix` layout with in-place operations and pre-allocated scratch buffers
 - Ensemble supports InverseAIC, Stacking, and HorizonAdaptive combination methods
 
-- `parallel` feature now covers AutoForecast, batch processing, model comparison, bootstrap, cross-validation folds, and rolling forecast windows (previously only AutoARIMA)
+- `parallel` feature now covers AutoForecast, model comparison, bootstrap, cross-validation folds, and rolling forecast windows (previously only AutoARIMA)
 - `serde` feature now includes bincode for binary serialization alongside JSON
 - Several `ComputationError` uses migrated to specific error variants (`ConvergenceFailure`, `SingularMatrix`)
 - Removed dead code in `mfles.rs` and `tbats/model.rs`
