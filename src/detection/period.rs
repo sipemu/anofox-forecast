@@ -68,7 +68,7 @@ impl Default for PeriodDetectionConfig {
             max_periods: 5,
             min_power_ratio: 3.0,
             window_size: None,
-            min_strength: 0.0,
+            min_strength: 0.05,
             min_cycles: 2,
         }
     }
@@ -161,6 +161,14 @@ fn validate_periods(signal: &[f64], periods: &mut Vec<Period>, config: &PeriodDe
     // variance-reducing cycle — the ACF can be dragged negative by
     // interference from a dominant period in multi-seasonal signals.
     periods.retain(|p| p.acf > 0.0 || p.strength >= 0.6);
+
+    // Reject periods whose strength is less than 10% of the strongest
+    // detected period — these are typically spectral artifacts or trend-
+    // induced autocorrelation rather than genuine seasonal structure.
+    if let Some(max_strength) = periods.iter().map(|p| p.strength).reduce(f64::max) {
+        let relative_threshold = 0.1 * max_strength;
+        periods.retain(|p| p.strength >= relative_threshold);
+    }
 
     // Sort by strength first (most meaningful), then by power as tiebreaker.
     periods.sort_by(|a, b| {
@@ -259,11 +267,12 @@ fn detect_periods_welch(signal: &[f64], config: &PeriodDetectionConfig) -> Vec<P
     let n = signal.len();
     let max_period = config.max_period.unwrap_or(n / 3);
 
-    // Pick a sensible window size: largest power of 2 ≤ n, capped at 256,
-    // but at least 32.
+    // Pick a sensible window size: largest power of 2 ≤ n, capped at 2048,
+    // but at least 32. The cap of 2048 allows detecting periods up to 1024
+    // (e.g. yearly seasonality in daily data = 365, weekly in hourly = 168).
     let window_size = config.window_size.unwrap_or_else(|| {
         let mut w = 32;
-        while w * 2 <= n && w < 256 {
+        while w * 2 <= n && w < 2048 {
             w *= 2;
         }
         w
@@ -290,9 +299,17 @@ fn detect_periods_welch(signal: &[f64], config: &PeriodDetectionConfig) -> Vec<P
     // ── Step 1: Extract local maxima ────────────────────────────────────
     // A peak at index i is a local maximum if power[i] > power[i-1] and
     // power[i] > power[i+1].
+    //
+    // The period at exactly window_size/2 is excluded — it is the maximum
+    // detectable period per Welch window and trivially appears as a local
+    // maximum due to the spectral boundary, not genuine seasonality.
+    let boundary_period = window_size / 2;
     let mut peaks: Vec<(usize, f64)> = Vec::new();
     for i in 0..spectrum.len() {
         let (period, power) = spectrum[i];
+        if period == boundary_period {
+            continue;
+        }
         let left = if i > 0 { spectrum[i - 1].1 } else { 0.0 };
         let right = if i + 1 < spectrum.len() {
             spectrum[i + 1].1
@@ -637,5 +654,131 @@ mod tests {
 
         let all = detect_periods(&signal, &PeriodDetectionConfig::default());
         assert_eq!(all[0].period, 12);
+    }
+
+    // ── Issue #18: Boundary artifact at window_size/2 ───────────────────
+
+    #[test]
+    fn no_boundary_artifact_at_window_half() {
+        // Verify that period == window_size/2 is excluded from local maxima.
+        // With window_size=256 (forced), max detectable period is 128.
+        // A signal with period 12 should NOT produce a spurious peak at 128.
+        let signal: Vec<f64> = (0..600)
+            .map(|i| {
+                let trend = 0.05 * i as f64;
+                let seasonal = 20.0 * (2.0 * std::f64::consts::PI * i as f64 / 12.0).sin();
+                let noise = ((i * 7 + 3) % 11) as f64 * 0.3 - 1.5;
+                100.0 + trend + seasonal + noise
+            })
+            .collect();
+        // Force window_size=256 to reproduce the original boundary artifact.
+        let config = PeriodDetectionConfig {
+            window_size: Some(256),
+            ..Default::default()
+        };
+        let periods = detect_periods(&signal, &config);
+        let period_vals: Vec<usize> = periods.iter().map(|p| p.period).collect();
+
+        assert!(
+            period_vals.contains(&12),
+            "Should detect period 12, got {:?}",
+            period_vals
+        );
+        // The boundary artifact at window_size/2=128 should not appear.
+        assert!(
+            !period_vals.contains(&128),
+            "Spurious boundary period 128 should not appear, got {:?}",
+            period_vals
+        );
+    }
+
+    #[test]
+    fn weak_periods_rejected_by_relative_strength() {
+        // A period with strength < 10% of the strongest should be rejected.
+        let signal: Vec<f64> = (0..600)
+            .map(|i| {
+                let trend = 0.5 * i as f64;
+                let seasonal = 20.0 * (2.0 * std::f64::consts::PI * i as f64 / 12.0).sin();
+                100.0 + trend + seasonal
+            })
+            .collect();
+        let periods = detect_periods(&signal, &PeriodDetectionConfig::default());
+
+        if periods.len() > 1 {
+            let max_strength = periods[0].strength;
+            for p in &periods[1..] {
+                assert!(
+                    p.strength >= 0.1 * max_strength,
+                    "Period {} has strength {} which is < 10% of max strength {}",
+                    p.period,
+                    p.strength,
+                    max_strength
+                );
+            }
+        }
+    }
+
+    // ── Issue #19: Long period detection ────────────────────────────────
+
+    #[test]
+    fn detects_period_365_daily() {
+        // Daily data with yearly seasonality — 2190 days (6 years).
+        // With the raised window cap, window_size=2048 can detect
+        // periods up to 1024, covering the yearly cycle.
+        let signal: Vec<f64> = (0..2190)
+            .map(|i| {
+                50.0 + 10.0 * (2.0 * std::f64::consts::PI * i as f64 / 365.0).sin()
+                    + 5.0 * (2.0 * std::f64::consts::PI * i as f64 / 7.0).sin()
+            })
+            .collect();
+        let periods = detect_periods(&signal, &PeriodDetectionConfig::default());
+        let period_vals: Vec<usize> = periods.iter().map(|p| p.period).collect();
+
+        assert!(
+            period_vals.contains(&365),
+            "Should detect yearly period 365, got {:?}",
+            period_vals
+        );
+    }
+
+    #[test]
+    fn detects_period_168_hourly() {
+        // Hourly data with daily (24) and weekly (168) seasonality — 4032 hours (24 weeks).
+        // With the raised window cap, window_size=2048 can detect
+        // periods up to 1024, covering the weekly cycle.
+        let signal: Vec<f64> = (0..4032)
+            .map(|i| {
+                20.0 + 5.0 * (2.0 * std::f64::consts::PI * i as f64 / 24.0).sin()
+                    + 3.0 * (2.0 * std::f64::consts::PI * i as f64 / 168.0).sin()
+            })
+            .collect();
+        let periods = detect_periods(&signal, &PeriodDetectionConfig::default());
+        let period_vals: Vec<usize> = periods.iter().map(|p| p.period).collect();
+
+        assert!(
+            period_vals.contains(&24),
+            "Should detect daily period 24, got {:?}",
+            period_vals
+        );
+        assert!(
+            period_vals.contains(&168),
+            "Should detect weekly period 168, got {:?}",
+            period_vals
+        );
+    }
+
+    #[test]
+    fn window_cap_allows_large_periods() {
+        // Verify the window auto-selection now allows windows > 256.
+        // For n=2048, should get window_size=2048 (was capped at 256).
+        let signal = sine(2048, 512);
+        let periods = detect_periods(&signal, &PeriodDetectionConfig::default());
+        let period_vals: Vec<usize> = periods.iter().map(|p| p.period).collect();
+
+        assert!(
+            period_vals.contains(&512),
+            "Should detect period 512 with raised window cap, got {:?}",
+            period_vals
+        );
     }
 }
