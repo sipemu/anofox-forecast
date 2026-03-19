@@ -146,7 +146,6 @@ pub fn agg_linear_trend(series: &[f64], chunk_len: usize, agg_func: &str, attrib
     }
 }
 
-
 /// Perform linear regression and return trend result
 fn linear_regression(x: &[f64], y: &[f64]) -> LinearTrendResult {
     if x.len() != y.len() || x.len() < 2 {

@@ -110,7 +110,6 @@ pub fn agg_autocorrelation(series: &[f64], max_lag: usize, agg_func: &str) -> f6
     crate::utils::stats::aggregate(&acf_values, agg_func)
 }
 
-
 /// Returns the time reversal asymmetry statistic.
 ///
 /// Measures whether the time series looks the same when reversed.

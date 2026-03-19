@@ -208,7 +208,6 @@ fn quantile(series: &[f64], q: f64) -> f64 {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

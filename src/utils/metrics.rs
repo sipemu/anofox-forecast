@@ -431,10 +431,7 @@ pub fn rmsse(train: &[f64], actual: &[f64], forecast: &[f64]) -> f64 {
 
     // Scale: sqrt of mean squared first-differences of training data
     let n_train = train.len();
-    let sum_sq_diff: f64 = train
-        .windows(2)
-        .map(|w| (w[1] - w[0]).powi(2))
-        .sum();
+    let sum_sq_diff: f64 = train.windows(2).map(|w| (w[1] - w[0]).powi(2)).sum();
     let scale_sq = sum_sq_diff / (n_train - 1) as f64;
 
     if scale_sq == 0.0 {
@@ -1040,7 +1037,7 @@ mod tests {
         // scale² = mean(1²+1²+1²+1²) = 4/4 = 1.0, scale = 1.0
         let actual = vec![6.0, 7.0, 8.0];
         let forecast = vec![6.5, 7.5, 8.5]; // error = 0.5 each
-        // MSE = 0.25, RMSSE = sqrt(0.25/1.0) = 0.5
+                                            // MSE = 0.25, RMSSE = sqrt(0.25/1.0) = 0.5
         assert_relative_eq!(rmsse(&train, &actual, &forecast), 0.5, epsilon = 1e-10);
     }
 

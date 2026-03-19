@@ -46,51 +46,30 @@ pub enum Feature {
     MeanAbsChange,
     MeanChange,
     MeanSecondDerivativeCentral,
-    MeanNAbsoluteMax {
-        n: usize,
-    },
+    MeanNAbsoluteMax { n: usize },
     RootMeanSquare,
     SumValues,
 
     // ── Distribution ──
     Skewness,
     Kurtosis,
-    Quantile {
-        q: f64,
-    },
-    LargeStandardDeviation {
-        r: f64,
-    },
+    Quantile { q: f64 },
+    LargeStandardDeviation { r: f64 },
     VarianceLargerThanStd,
     VariationCoefficient,
-    SymmetryLooking {
-        r: f64,
-    },
-    RatioBeyondRSigma {
-        r: f64,
-    },
+    SymmetryLooking { r: f64 },
+    RatioBeyondRSigma { r: f64 },
 
     // ── Autocorrelation ──
-    Autocorrelation {
-        lag: usize,
-    },
-    PartialAutocorrelation {
-        lag: usize,
-    },
-    AggAutocorrelation {
-        max_lag: usize,
-        agg_func: String,
-    },
-    TimeReversalAsymmetry {
-        lag: usize,
-    },
+    Autocorrelation { lag: usize },
+    PartialAutocorrelation { lag: usize },
+    AggAutocorrelation { max_lag: usize, agg_func: String },
+    TimeReversalAsymmetry { lag: usize },
 
     // ── Counting ──
     CountAboveMean,
     CountBelowMean,
-    NumberPeaks {
-        support: usize,
-    },
+    NumberPeaks { support: usize },
     NumberCrossingMean,
     LongestStrikeAboveMean,
     LongestStrikeBelowMean,
@@ -101,38 +80,19 @@ pub enum Feature {
     HasDuplicate,
     HasDuplicateMax,
     HasDuplicateMin,
-    IndexMassQuantile {
-        q: f64,
-    },
+    IndexMassQuantile { q: f64 },
 
     // ── Entropy ──
-    SampleEntropy {
-        m: usize,
-        r: f64,
-    },
-    ApproximateEntropy {
-        m: usize,
-        r: f64,
-    },
-    PermutationEntropy {
-        order: usize,
-        delay: usize,
-    },
-    BinnedEntropy {
-        max_bins: usize,
-    },
+    SampleEntropy { m: usize, r: f64 },
+    ApproximateEntropy { m: usize, r: f64 },
+    PermutationEntropy { order: usize, delay: usize },
+    BinnedEntropy { max_bins: usize },
     FourierEntropy,
 
     // ── Complexity ──
-    CidCe {
-        normalize: bool,
-    },
-    C3 {
-        lag: usize,
-    },
-    LempelZivComplexity {
-        bins: usize,
-    },
+    CidCe { normalize: bool },
+    C3 { lag: usize },
+    LempelZivComplexity { bins: usize },
 
     // ── Trend ──
     LinearTrendSlope,
@@ -140,16 +100,10 @@ pub enum Feature {
     LinearTrendRSquared,
     LinearTrendPValue,
     AugmentedDickeyFuller,
-    ArCoefficient {
-        k: usize,
-        coeff: usize,
-    },
+    ArCoefficient { k: usize, coeff: usize },
 
     // ── Change ──
-    EnergyRatioByChunks {
-        n_chunks: usize,
-        chunk_index: usize,
-    },
+    EnergyRatioByChunks { n_chunks: usize, chunk_index: usize },
     PercentageReoccurringDatapoints,
     PercentageReoccurringValues,
     RatioValueNumberToLength,
@@ -197,10 +151,9 @@ impl Feature {
             Feature::PartialAutocorrelation { lag } => {
                 format!("partial_autocorrelation_{lag}")
             }
-            Feature::AggAutocorrelation {
-                max_lag,
-                agg_func,
-            } => format!("agg_autocorrelation_{agg_func}_{max_lag}"),
+            Feature::AggAutocorrelation { max_lag, agg_func } => {
+                format!("agg_autocorrelation_{agg_func}_{max_lag}")
+            }
             Feature::TimeReversalAsymmetry { lag } => {
                 format!("time_reversal_asymmetry_{lag}")
             }
@@ -250,9 +203,7 @@ impl Feature {
                 n_chunks,
                 chunk_index,
             } => format!("energy_ratio_by_chunks_{n_chunks}_{chunk_index}"),
-            Feature::PercentageReoccurringDatapoints => {
-                "percentage_reoccurring_datapoints".into()
-            }
+            Feature::PercentageReoccurringDatapoints => "percentage_reoccurring_datapoints".into(),
             Feature::PercentageReoccurringValues => "percentage_reoccurring_values".into(),
             Feature::RatioValueNumberToLength => "ratio_value_number_to_length".into(),
             Feature::SumOfReoccurringDataPoints => "sum_of_reoccurring_data_points".into(),
@@ -279,9 +230,7 @@ impl Feature {
             Feature::Length => basic::length(series),
             Feature::MeanAbsChange => basic::mean_abs_change(series),
             Feature::MeanChange => basic::mean_change(series),
-            Feature::MeanSecondDerivativeCentral => {
-                basic::mean_second_derivative_central(series)
-            }
+            Feature::MeanSecondDerivativeCentral => basic::mean_second_derivative_central(series),
             Feature::MeanNAbsoluteMax { n } => basic::mean_n_absolute_max(series, *n),
             Feature::RootMeanSquare => basic::root_mean_square(series),
             Feature::SumValues => basic::sum_values(series),
@@ -312,19 +261,16 @@ impl Feature {
                     0.0
                 }
             }
-            Feature::RatioBeyondRSigma { r } => {
-                distribution::ratio_beyond_r_sigma(series, *r)
-            }
+            Feature::RatioBeyondRSigma { r } => distribution::ratio_beyond_r_sigma(series, *r),
 
             // Autocorrelation
             Feature::Autocorrelation { lag } => autocorrelation::autocorrelation(series, *lag),
             Feature::PartialAutocorrelation { lag } => {
                 autocorrelation::partial_autocorrelation(series, *lag)
             }
-            Feature::AggAutocorrelation {
-                max_lag,
-                agg_func,
-            } => autocorrelation::agg_autocorrelation(series, *max_lag, agg_func),
+            Feature::AggAutocorrelation { max_lag, agg_func } => {
+                autocorrelation::agg_autocorrelation(series, *max_lag, agg_func)
+            }
             Feature::TimeReversalAsymmetry { lag } => {
                 autocorrelation::time_reversal_asymmetry_statistic(series, *lag)
             }
@@ -332,9 +278,7 @@ impl Feature {
             // Counting
             Feature::CountAboveMean => counting::count_above_mean(series) as f64,
             Feature::CountBelowMean => counting::count_below_mean(series) as f64,
-            Feature::NumberPeaks { support } => {
-                counting::number_peaks(series, *support) as f64
-            }
+            Feature::NumberPeaks { support } => counting::number_peaks(series, *support) as f64,
             Feature::NumberCrossingMean => {
                 if series.is_empty() {
                     0.0
@@ -343,12 +287,8 @@ impl Feature {
                     counting::number_crossing_m(series, m) as f64
                 }
             }
-            Feature::LongestStrikeAboveMean => {
-                counting::longest_strike_above_mean(series) as f64
-            }
-            Feature::LongestStrikeBelowMean => {
-                counting::longest_strike_below_mean(series) as f64
-            }
+            Feature::LongestStrikeAboveMean => counting::longest_strike_above_mean(series) as f64,
+            Feature::LongestStrikeBelowMean => counting::longest_strike_below_mean(series) as f64,
             Feature::FirstLocationOfMaximum => counting::first_location_of_maximum(series),
             Feature::FirstLocationOfMinimum => counting::first_location_of_minimum(series),
             Feature::LastLocationOfMaximum => counting::last_location_of_maximum(series),
@@ -378,15 +318,11 @@ impl Feature {
 
             // Entropy
             Feature::SampleEntropy { m, r } => entropy::sample_entropy(series, *m, *r),
-            Feature::ApproximateEntropy { m, r } => {
-                entropy::approximate_entropy(series, *m, *r)
-            }
+            Feature::ApproximateEntropy { m, r } => entropy::approximate_entropy(series, *m, *r),
             Feature::PermutationEntropy { order, delay } => {
                 entropy::permutation_entropy(series, *order, *delay)
             }
-            Feature::BinnedEntropy { max_bins } => {
-                entropy::binned_entropy(series, *max_bins)
-            }
+            Feature::BinnedEntropy { max_bins } => entropy::binned_entropy(series, *max_bins),
             Feature::FourierEntropy => entropy::fourier_entropy(series),
 
             // Complexity
@@ -402,9 +338,7 @@ impl Feature {
             Feature::LinearTrendRSquared => trend::linear_trend(series).r_squared,
             Feature::LinearTrendPValue => trend::linear_trend(series).p_value,
             Feature::AugmentedDickeyFuller => trend::augmented_dickey_fuller(series),
-            Feature::ArCoefficient { k, coeff } => {
-                trend::ar_coefficient(series, *k, *coeff)
-            }
+            Feature::ArCoefficient { k, coeff } => trend::ar_coefficient(series, *k, *coeff),
 
             // Change
             Feature::EnergyRatioByChunks {
@@ -420,9 +354,7 @@ impl Feature {
             Feature::RatioValueNumberToLength => {
                 change::ratio_value_number_to_time_series_length(series)
             }
-            Feature::SumOfReoccurringDataPoints => {
-                change::sum_of_reoccurring_data_points(series)
-            }
+            Feature::SumOfReoccurringDataPoints => change::sum_of_reoccurring_data_points(series),
             Feature::SumOfReoccurringValues => change::sum_of_reoccurring_values(series),
         }
     }
@@ -564,10 +496,7 @@ impl FeatureFactory {
         self.features([
             Feature::SampleEntropy { m: 2, r: 0.2 },
             Feature::ApproximateEntropy { m: 2, r: 0.2 },
-            Feature::PermutationEntropy {
-                order: 3,
-                delay: 1,
-            },
+            Feature::PermutationEntropy { order: 3, delay: 1 },
             Feature::BinnedEntropy { max_bins: 10 },
             Feature::FourierEntropy,
         ])
@@ -622,54 +551,50 @@ impl FeatureFactory {
     /// Includes the most commonly useful features for classification and clustering:
     /// basic statistics, distribution shape, autocorrelation, trend, and complexity.
     pub fn default_set() -> Self {
-        Self::new()
-            .features([
-                // Statistics
-                Feature::Mean,
-                Feature::Median,
-                Feature::Variance,
-                Feature::StandardDeviation,
-                Feature::Minimum,
-                Feature::Maximum,
-                Feature::AbsEnergy,
-                Feature::AbsoluteSumOfChanges,
-                Feature::MeanAbsChange,
-                Feature::MeanChange,
-                Feature::RootMeanSquare,
-                // Distribution
-                Feature::Skewness,
-                Feature::Kurtosis,
-                Feature::Quantile { q: 0.25 },
-                Feature::Quantile { q: 0.75 },
-                Feature::VariationCoefficient,
-                Feature::RatioBeyondRSigma { r: 2.0 },
-                // Autocorrelation
-                Feature::Autocorrelation { lag: 1 },
-                Feature::Autocorrelation { lag: 2 },
-                Feature::PartialAutocorrelation { lag: 1 },
-                // Counting
-                Feature::CountAboveMean,
-                Feature::CountBelowMean,
-                Feature::NumberPeaks { support: 1 },
-                Feature::NumberCrossingMean,
-                Feature::LongestStrikeAboveMean,
-                Feature::LongestStrikeBelowMean,
-                Feature::HasDuplicate,
-                // Entropy & complexity
-                Feature::BinnedEntropy { max_bins: 10 },
-                Feature::CidCe { normalize: true },
-                Feature::PermutationEntropy {
-                    order: 3,
-                    delay: 1,
-                },
-                // Trend
-                Feature::LinearTrendSlope,
-                Feature::LinearTrendRSquared,
-                Feature::AugmentedDickeyFuller,
-                // Change
-                Feature::PercentageReoccurringDatapoints,
-                Feature::RatioValueNumberToLength,
-            ])
+        Self::new().features([
+            // Statistics
+            Feature::Mean,
+            Feature::Median,
+            Feature::Variance,
+            Feature::StandardDeviation,
+            Feature::Minimum,
+            Feature::Maximum,
+            Feature::AbsEnergy,
+            Feature::AbsoluteSumOfChanges,
+            Feature::MeanAbsChange,
+            Feature::MeanChange,
+            Feature::RootMeanSquare,
+            // Distribution
+            Feature::Skewness,
+            Feature::Kurtosis,
+            Feature::Quantile { q: 0.25 },
+            Feature::Quantile { q: 0.75 },
+            Feature::VariationCoefficient,
+            Feature::RatioBeyondRSigma { r: 2.0 },
+            // Autocorrelation
+            Feature::Autocorrelation { lag: 1 },
+            Feature::Autocorrelation { lag: 2 },
+            Feature::PartialAutocorrelation { lag: 1 },
+            // Counting
+            Feature::CountAboveMean,
+            Feature::CountBelowMean,
+            Feature::NumberPeaks { support: 1 },
+            Feature::NumberCrossingMean,
+            Feature::LongestStrikeAboveMean,
+            Feature::LongestStrikeBelowMean,
+            Feature::HasDuplicate,
+            // Entropy & complexity
+            Feature::BinnedEntropy { max_bins: 10 },
+            Feature::CidCe { normalize: true },
+            Feature::PermutationEntropy { order: 3, delay: 1 },
+            // Trend
+            Feature::LinearTrendSlope,
+            Feature::LinearTrendRSquared,
+            Feature::AugmentedDickeyFuller,
+            // Change
+            Feature::PercentageReoccurringDatapoints,
+            Feature::RatioValueNumberToLength,
+        ])
     }
 
     /// Creates a factory with all features using common default parameters.
@@ -725,7 +650,9 @@ mod tests {
     use approx::assert_relative_eq;
 
     fn test_series() -> Vec<f64> {
-        (0..100).map(|i| (i as f64 * 0.2).sin() * 10.0 + 50.0).collect()
+        (0..100)
+            .map(|i| (i as f64 * 0.2).sin() * 10.0 + 50.0)
+            .collect()
     }
 
     // ==================== Builder API ====================
@@ -875,7 +802,11 @@ mod tests {
     fn all_features() {
         let series = test_series();
         let factory = FeatureFactory::all();
-        assert!(factory.len() >= 70, "Expected 70+ features, got {}", factory.len());
+        assert!(
+            factory.len() >= 70,
+            "Expected 70+ features, got {}",
+            factory.len()
+        );
         let result = factory.compute(&series);
         assert!(result.len() >= 70);
     }
@@ -970,7 +901,10 @@ mod tests {
             .compute(&series);
 
         for (_, &val) in &result {
-            assert!(val == 0.0 || val == 1.0, "Bool feature should be 0 or 1, got {val}");
+            assert!(
+                val == 0.0 || val == 1.0,
+                "Bool feature should be 0 or 1, got {val}"
+            );
         }
     }
 
@@ -1055,10 +989,7 @@ mod tests {
         let mut feature_matrix: std::collections::HashMap<String, Vec<f64>> =
             std::collections::HashMap::new();
         for name in factory.feature_names() {
-            feature_matrix.insert(
-                name.clone(),
-                vec![r1[&name], r2[&name], r3[&name]],
-            );
+            feature_matrix.insert(name.clone(), vec![r1[&name], r2[&name], r3[&name]]);
         }
 
         let config = FeatureSelectionConfig::default();
