@@ -64,6 +64,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Full `Forecaster` exog support: `supports_exog()`, `has_exog()`, `exog_names()`, `predict_with_exog()`
   - `predict()` guards against missing exog when model was fit with regressors
 
+- **Forecasting Metrics** (`utils::metrics` module)
+  - `rmsse()` — Root Mean Squared Scaled Error, scaled by in-sample naive forecast MSE (per-series building block of WRMSSE)
+  - `wrmsse()` — Weighted RMSSE, the M5 competition primary metric for aggregating across series by importance weights
+
+- **Exogenous Coefficient Extraction** (`models::traits`)
+  - `Forecaster::exog_coefficients()` — inspect OLS pre-regression coefficients (intercept, betas, regressor names) on any fitted model with exogenous regressors
+  - Implemented across all exog-supporting models: ARIMA, SARIMA, AutoARIMA, ETS, AutoETS, Theta, AutoTheta, OptimizedTheta, DynamicTheta, Naive, MFLES, MSTL, Pipeline
+
+- **Transform Pipeline** (`transform::pipeline` module)
+  - `Pipeline` — composable transform chains around any `Forecaster`, itself implements `Forecaster`
+  - `PipelineBuilder` — fluent API: `Pipeline::builder().transform(BoxCoxTransform::auto()).transform(DifferenceTransform::new(1)).model(Box::new(Naive::new())).build()`
+  - `Transform` trait with concrete implementations: `DifferenceTransform`, `SeasonalDifferenceTransform`, `BoxCoxTransform`, `ScaleTransform`, `LogTransform`
+
+- **Deterministic Feature Generator** (`features::generator` module)
+  - `FeatureGenerator` — generate regressors from timestamps: `fourier()`, `day_of_week()`, `month_of_year()`, `quarter()`, `holiday()`
+  - `add_to()` — attach generated features to `TimeSeries` as named regressors
+
 - **Composable Seasonality & Trend Components** (`seasonality` module)
   - `SeasonalComponent` / `TrendComponent` traits — dual-purpose: standalone (fit/predict) and feature extraction
   - `DummySeasonality` — one-hot (dummy variable) seasonal encoding for arbitrary seasonal shapes
@@ -84,6 +101,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Moved: `partition_by_structural_break()` batch helper
   - Moved examples: `orchestration`, `explore`, `regression_exog_changepoints`
   - `anofox-forecast` remains the open-source foundation; `anofox-orchestration` depends on it via git
+
+### Changed
+
+- **ETS/AutoETS Performance Optimizations** (accuracy-preserving, all 2383 tests pass)
+  - Eliminate redundant `initialize_state()` calls in non-seasonal Nelder-Mead closures — pass pre-computed heuristic states instead of recomputing O(n) per evaluation
+  - Two-stage seasonal optimization: replace 6× expensive joint optimizations (16-18 dim) with 6× cheap smoothing-only explorations (2-4 dim, 500 iter) + 1× joint refinement from winner
+  - AutoETS candidate pruning: require 3× period (was 2×) for seasonal models; ANOVA F-test skips seasonal candidates when no seasonal signal detected (F < 1.0)
+  - Multi-start early-exit: skip starting points whose initial likelihood exceeds 3× the best found so far
+  - `NelderMeadConfig` derives `Copy` (all fields are `Copy` types), eliminating unnecessary `.clone()` calls across ETS, seasonal ES, GARCH, and Theta models
 
 ### Fixed
 
