@@ -123,7 +123,7 @@ pub fn agg_linear_trend(series: &[f64], chunk_len: usize, agg_func: &str, attrib
     // Aggregate each chunk using the specified function
     let aggregated: Vec<f64> = chunks
         .iter()
-        .map(|chunk| aggregate_chunk(chunk, agg_func))
+        .map(|chunk| crate::utils::stats::aggregate(chunk, agg_func))
         .filter(|v| !v.is_nan())
         .collect();
 
@@ -146,37 +146,6 @@ pub fn agg_linear_trend(series: &[f64], chunk_len: usize, agg_func: &str, attrib
     }
 }
 
-/// Helper: aggregate chunk values
-fn aggregate_chunk(chunk: &[f64], func: &str) -> f64 {
-    if chunk.is_empty() {
-        return f64::NAN;
-    }
-
-    match func {
-        "mean" => chunk.iter().sum::<f64>() / chunk.len() as f64,
-        "var" => {
-            if chunk.len() < 2 {
-                return 0.0;
-            }
-            let m = chunk.iter().sum::<f64>() / chunk.len() as f64;
-            chunk.iter().map(|x| (x - m).powi(2)).sum::<f64>() / chunk.len() as f64
-        }
-        "std" => aggregate_chunk(chunk, "var").sqrt(),
-        "min" => chunk.iter().copied().fold(f64::INFINITY, f64::min),
-        "max" => chunk.iter().copied().fold(f64::NEG_INFINITY, f64::max),
-        "median" => {
-            let mut sorted = chunk.to_vec();
-            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            let n = sorted.len();
-            if n % 2 == 0 {
-                (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
-            } else {
-                sorted[n / 2]
-            }
-        }
-        _ => chunk.iter().sum::<f64>() / chunk.len() as f64, // default to mean
-    }
-}
 
 /// Perform linear regression and return trend result
 fn linear_regression(x: &[f64], y: &[f64]) -> LinearTrendResult {

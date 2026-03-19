@@ -44,7 +44,7 @@ pub fn change_quantiles(
         return f64::NAN;
     }
 
-    aggregate(&changes, agg_func)
+    crate::utils::stats::aggregate(&changes, agg_func)
 }
 
 /// Computes the energy ratio by chunks.
@@ -208,38 +208,6 @@ fn quantile(series: &[f64], q: f64) -> f64 {
     }
 }
 
-/// Helper: aggregate values
-fn aggregate(values: &[f64], func: &str) -> f64 {
-    if values.is_empty() {
-        return f64::NAN;
-    }
-
-    match func {
-        "mean" => values.iter().sum::<f64>() / values.len() as f64,
-        "var" => {
-            if values.len() < 2 {
-                return f64::NAN;
-            }
-            let m = values.iter().sum::<f64>() / values.len() as f64;
-            values.iter().map(|x| (x - m).powi(2)).sum::<f64>() / (values.len() - 1) as f64
-        }
-        "std" => {
-            let var = aggregate(values, "var");
-            var.sqrt()
-        }
-        "median" => {
-            let mut sorted = values.to_vec();
-            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            let n = sorted.len();
-            if n % 2 == 0 {
-                (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
-            } else {
-                sorted[n / 2]
-            }
-        }
-        _ => f64::NAN,
-    }
-}
 
 #[cfg(test)]
 mod tests {

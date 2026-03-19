@@ -107,41 +107,9 @@ pub fn agg_autocorrelation(series: &[f64], max_lag: usize, agg_func: &str) -> f6
         return f64::NAN;
     }
 
-    aggregate_values(&acf_values, agg_func, || {
-        agg_autocorrelation(series, max_lag, "var")
-    })
+    crate::utils::stats::aggregate(&acf_values, agg_func)
 }
 
-/// Aggregate a slice of values using named functions.
-#[inline]
-fn aggregate_values(values: &[f64], func: &str, var_fn: impl FnOnce() -> f64) -> f64 {
-    match func {
-        "mean" => values.iter().sum::<f64>() / values.len() as f64,
-        "var" => {
-            if values.len() < 2 {
-                return f64::NAN;
-            }
-            let m = values.iter().sum::<f64>() / values.len() as f64;
-            values.iter().map(|x| (x - m).powi(2)).sum::<f64>() / (values.len() - 1) as f64
-        }
-        "std" => var_fn().sqrt(),
-        "median" => compute_median(values),
-        _ => f64::NAN,
-    }
-}
-
-/// Compute median of a slice.
-#[inline]
-fn compute_median(values: &[f64]) -> f64 {
-    let mut sorted = values.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let n = sorted.len();
-    if n % 2 == 0 {
-        (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
-    } else {
-        sorted[n / 2]
-    }
-}
 
 /// Returns the time reversal asymmetry statistic.
 ///

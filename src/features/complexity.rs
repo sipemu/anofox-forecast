@@ -163,16 +163,9 @@ pub fn lempel_ziv_complexity_binary(series: &[f64]) -> f64 {
     c as f64 / max_complexity
 }
 
-/// Helper: compute median
+/// Helper: compute median (delegates to shared implementation).
 fn compute_median(series: &[f64]) -> f64 {
-    let mut sorted = series.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let n = sorted.len();
-    if n % 2 == 0 {
-        (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
-    } else {
-        sorted[n / 2]
-    }
+    crate::utils::stats::median(series)
 }
 
 #[cfg(test)]

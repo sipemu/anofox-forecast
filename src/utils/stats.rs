@@ -117,28 +117,32 @@ pub fn nan_median(values: &[f64]) -> f64 {
     }
 }
 
-/// Calculate the autocorrelation at a given lag.
-pub fn autocorrelation(values: &[f64], lag: usize) -> f64 {
-    if values.len() <= lag {
+/// Aggregate a slice of values using a named function.
+///
+/// Supports: "mean", "var", "std", "min", "max", "median".
+/// Variance uses the sample (n-1) denominator.
+pub fn aggregate(values: &[f64], func: &str) -> f64 {
+    if values.is_empty() {
         return f64::NAN;
     }
-    let m = mean(values);
-    let n = values.len();
-
-    let mut numerator = 0.0;
-    let mut denominator = 0.0;
-
-    for i in 0..n {
-        denominator += (values[i] - m).powi(2);
-        if i >= lag {
-            numerator += (values[i] - m) * (values[i - lag] - m);
+    match func {
+        "mean" => values.iter().sum::<f64>() / values.len() as f64,
+        "var" => {
+            if values.len() < 2 {
+                return f64::NAN;
+            }
+            let m = values.iter().sum::<f64>() / values.len() as f64;
+            values.iter().map(|x| (x - m).powi(2)).sum::<f64>() / (values.len() - 1) as f64
         }
+        "std" => {
+            let var = aggregate(values, "var");
+            var.sqrt()
+        }
+        "min" => values.iter().copied().fold(f64::INFINITY, f64::min),
+        "max" => values.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+        "median" => median(values),
+        _ => f64::NAN,
     }
-
-    if denominator == 0.0 {
-        return 0.0;
-    }
-    numerator / denominator
 }
 
 #[cfg(test)]
@@ -194,21 +198,6 @@ mod tests {
         // Unsorted input
         assert_relative_eq!(median(&[5.0, 1.0, 3.0, 2.0, 4.0]), 3.0, epsilon = 1e-10);
         assert!(median(&[]).is_nan());
-    }
-
-    #[test]
-    fn autocorrelation_lag_0_is_1() {
-        let values = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-        assert_relative_eq!(autocorrelation(&values, 0), 1.0, epsilon = 1e-10);
-    }
-
-    #[test]
-    fn autocorrelation_known_pattern() {
-        // For a simple linear trend, lag-1 autocorrelation should be high
-        let values: Vec<f64> = (0..20).map(|i| i as f64).collect();
-        let acf1 = autocorrelation(&values, 1);
-        // For a linear trend of length n, ACF(1) ≈ (n-2)/(n+1) ≈ 0.86 for n=20
-        assert!(acf1 > 0.8);
     }
 
     #[test]

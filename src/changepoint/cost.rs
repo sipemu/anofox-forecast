@@ -231,19 +231,9 @@ pub fn total_cost(series: &[f64], changepoints: &[usize], cost_fn: CostFunction)
     total
 }
 
-/// Helper: compute median
+/// Helper: compute median (delegates to shared implementation).
 fn compute_median(values: &[f64]) -> f64 {
-    if values.is_empty() {
-        return f64::NAN;
-    }
-    let mut sorted = values.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let n = sorted.len();
-    if n % 2 == 0 {
-        (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
-    } else {
-        sorted[n / 2]
-    }
+    crate::utils::stats::median(values)
 }
 
 #[cfg(test)]
