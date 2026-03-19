@@ -53,7 +53,8 @@ console.log(forecast.values);
   - GARCH for volatility modeling
   - VAR (Vector Autoregression) for multivariate forecasting with Granger causality
   - Kalman filter / state-space models (local level, local linear trend, custom)
-  - Exogenous regressor support across model families
+  - Exogenous regressor support across model families with OLS coefficient extraction (`exog_coefficients()`)
+  - `FeatureGenerator`: deterministic regressor generation (Fourier harmonics, day-of-week, month-of-year, quarter, holiday indicators)
   - `RegressionForecaster`: `anofox-regression` backends as `Forecaster` — 11 regression backends (OLS, Ridge, ElasticNet, Quantile, WLS, RLS, Tweedie, Poisson, BLS, NNLS, Dynamic), configurable trend/seasonal/structural features, recursive multi-step prediction
 
 - **Automatic Model Selection**
@@ -173,6 +174,8 @@ console.log(forecast.values);
   - Bootstrap sampling uses `par_iter` when `parallel` is enabled
 
 - **Data Transformations**
+  - `Pipeline`: composable transform chains around any `Forecaster` — `Pipeline::builder().transform(BoxCoxTransform::auto()).transform(DifferenceTransform::new(1)).model(Box::new(Naive::new())).build()`
+  - `Transform` trait: `DifferenceTransform`, `SeasonalDifferenceTransform`, `BoxCoxTransform`, `ScaleTransform`, `LogTransform`
   - Scaling: standardization, min-max, robust scaling
   - Box-Cox transformation with automatic lambda selection
   - Window functions: rolling mean, std, min, max, median
@@ -342,6 +345,49 @@ println!("Seasonal: {:?}", decomposition.seasonal());
 println!("Remainder: {:?}", decomposition.remainder());
 ```
 
+### Transform Pipeline
+
+```rust
+use anofox_forecast::transform::pipeline::{Pipeline, PipelineBuilder};
+use anofox_forecast::transform::transforms::{BoxCoxTransform, DifferenceTransform};
+use anofox_forecast::models::baseline::Naive;
+
+// Chain transforms around any model — Pipeline itself implements Forecaster
+let mut pipeline = Pipeline::builder()
+    .transform(BoxCoxTransform::auto())
+    .transform(DifferenceTransform::new(1))
+    .model(Box::new(Naive::new()))
+    .build();
+
+pipeline.fit(&ts)?;
+let forecast = pipeline.predict(12)?;
+```
+
+### Exogenous Regressors
+
+```rust
+use anofox_forecast::features::FeatureGenerator;
+
+// Generate deterministic regressors from timestamps
+let gen = FeatureGenerator::new()
+    .fourier(7, 2)       // Weekly Fourier terms
+    .day_of_week()        // Day-of-week indicators
+    .holiday("promo", promo_dates);
+
+gen.add_to(&mut ts);     // Attach features to TimeSeries
+
+let mut model = ARIMA::new(1, 1, 1);
+model.fit(&ts)?;
+
+// Inspect OLS pre-regression coefficients
+if let Some(ols) = model.exog_coefficients() {
+    println!("Intercept: {:.4}", ols.intercept);
+    for (name, coef) in ols.regressor_names.iter().zip(&ols.coefficients) {
+        println!("  {}: {:.4}", name, coef);
+    }
+}
+```
+
 ### Changepoint Detection
 
 ```rust
@@ -409,7 +455,9 @@ println!("Upper: {:?}", intervals.upper());
 |------|-------------|
 | `TimeSeries` | Main data structure for univariate/multivariate time series |
 | `Forecast` | Prediction results with optional confidence intervals |
-| `Forecaster` | Trait implemented by all forecasting models |
+| `Forecaster` | Trait implemented by all forecasting models (`exog_coefficients()` for OLS inspection) |
+| `Pipeline` | Composable transform → model chain, itself implements `Forecaster` |
+| `FeatureGenerator` | Deterministic regressor generation (Fourier, DOW, MOY, quarter, holidays) |
 | `AccuracyMetrics` | Model evaluation metrics (MAE, MSE, RMSE, MAPE, etc.) |
 
 ### Forecasting Models
@@ -470,6 +518,10 @@ println!("Upper: {:?}", intervals.upper());
 | `FeatureSafety` | Feature leakage classification: Deterministic, DataDependent, Structural, External |
 | `StructuralFeature` | Trait for forward-filled features during prediction (changepoints, outlier indicators) |
 | `ChangepointFeature` | Structural feature for regime indicators (StepFunctions, RegimeIndex, CumulativeCount) |
+| `Pipeline` / `PipelineBuilder` | Composable transform → model chains (BoxCox → Difference → Model → inverse) |
+| `Transform` trait | Reversible transforms: `DifferenceTransform`, `SeasonalDifferenceTransform`, `BoxCoxTransform`, `ScaleTransform`, `LogTransform` |
+| `FeatureGenerator` | Deterministic feature generation: `fourier()`, `day_of_week()`, `month_of_year()`, `quarter()`, `holiday()` |
+| `OLSResult` / `exog_coefficients()` | Inspect OLS pre-regression coefficients (intercept, betas, regressor names) |
 | `deseasonalize()` / `seasonal_adjust()` | Remove seasonal component from data or TimeSeries |
 | `select_features()` | Automated feature selection (variance, correlation, top-K) |
 | `to_json()` / `from_json()` | Serialization for models, `Forecast`, and `TimeSeries` (requires `serde` feature) |
