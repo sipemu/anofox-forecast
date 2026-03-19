@@ -161,11 +161,6 @@ console.log(forecast.values);
 
 ### Data Processing & Pipeline
 
-- **Orchestration / Agent Forecasting** — see [`anofox-orchestration`](https://github.com/sipemu/anofox-orchestration) (private)
-  - Autonomous pipeline: explore → backtest → ensemble → forecast
-  - Data profiling, model selection, cross-validated backtesting, ensemble construction, drift detection, structured reporting
-  - MCP-ready tool functions for agent integration
-
 - **Batch Processing & Parallelism**
   - `fit_predict_many()`: Fit one model across many series (parallel with `parallel` feature)
   - `fit_registry()`: Fit all registered models on a series (parallel)
