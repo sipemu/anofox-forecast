@@ -126,7 +126,7 @@ pub fn fit_all_and_compare(
 fn all_models_failed(registry: &ModelRegistry) -> ModelComparison {
     let mut results: Vec<ModelResult> = registry
         .iter()
-        .map(|spec| failed_model_result(spec.name))
+        .map(|spec| failed_model_result(&spec.name))
         .collect();
     results.sort_by(cmp_model_result);
     ModelComparison { results }

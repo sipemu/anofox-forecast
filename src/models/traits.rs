@@ -225,7 +225,9 @@ pub type BoxedForecaster = Box<dyn Forecaster>;
 
 /// Model specification for model comparison and cross-validation.
 ///
-/// Contains a model factory function, name, and whether it supports native intervals.
+/// Contains a model factory function, name, model type, and whether it supports
+/// native intervals. The `name` is a unique identifier for this spec instance,
+/// while `model_type` groups specs that share the same underlying model family.
 ///
 /// # Example
 ///
@@ -244,8 +246,11 @@ pub type BoxedForecaster = Box<dyn Forecaster>;
 /// }
 /// ```
 pub struct ModelSpec {
-    /// Display name of the model
-    pub name: &'static str,
+    /// Unique identifier for this model instance (e.g., "MFLES_additive").
+    pub name: String,
+    /// Model family/type (e.g., "MFLES"). Used for grouping and display.
+    /// Defaults to `name` when not explicitly set.
+    pub model_type: String,
     /// Factory function to create a new instance
     factory: Box<dyn Fn() -> BoxedForecaster + Send + Sync>,
     /// Whether the model supports native confidence intervals
@@ -254,20 +259,48 @@ pub struct ModelSpec {
 
 impl ModelSpec {
     /// Create a model spec with a simple factory.
-    pub fn new<F>(name: &'static str, factory: F, has_intervals: bool) -> Self
+    ///
+    /// Sets `model_type` equal to `name`.
+    pub fn new<F>(name: impl Into<String>, factory: F, has_intervals: bool) -> Self
     where
         F: Fn() -> BoxedForecaster + Send + Sync + 'static,
     {
+        let name = name.into();
         Self {
+            model_type: name.clone(),
             name,
             factory: Box::new(factory),
             has_intervals,
         }
     }
 
+    /// Create a model spec with explicit model type (for multi-variant models).
+    ///
+    /// Use this when registering multiple configurations of the same model family,
+    /// e.g., `"MFLES_additive"` and `"MFLES_multiplicative"` both with
+    /// `model_type = "MFLES"`.
+    pub fn with_type<F>(
+        name: impl Into<String>,
+        model_type: impl Into<String>,
+        factory: F,
+        has_intervals: bool,
+    ) -> Self
+    where
+        F: Fn() -> BoxedForecaster + Send + Sync + 'static,
+    {
+        Self {
+            name: name.into(),
+            model_type: model_type.into(),
+            factory: Box::new(factory),
+            has_intervals,
+        }
+    }
+
     /// Create a model spec with a period parameter.
+    ///
+    /// Sets `model_type` equal to `name`.
     pub fn with_period<F>(
-        name: &'static str,
+        name: impl Into<String>,
         factory: F,
         period: usize,
         has_intervals: bool,
@@ -275,7 +308,9 @@ impl ModelSpec {
     where
         F: Fn(usize) -> BoxedForecaster + Send + Sync + 'static,
     {
+        let name = name.into();
         Self {
+            model_type: name.clone(),
             name,
             factory: Box::new(move || factory(period)),
             has_intervals,
@@ -302,7 +337,7 @@ impl ModelSpec {
 /// // Create models from specs
 /// for spec in registry.iter() {
 ///     let model = spec.create();
-///     assert_eq!(model.name(), spec.name);
+///     assert_eq!(model.name(), spec.name.as_str());
 /// }
 /// ```
 pub struct ModelRegistry {
@@ -336,8 +371,8 @@ impl ModelRegistry {
     }
 
     /// List all registered model names.
-    pub fn names(&self) -> Vec<&'static str> {
-        self.models.iter().map(|s| s.name).collect()
+    pub fn names(&self) -> Vec<&str> {
+        self.models.iter().map(|s| s.name.as_str()).collect()
     }
 
     /// Remove a model by name. Returns true if the model was found and removed.
@@ -345,6 +380,14 @@ impl ModelRegistry {
         let before = self.models.len();
         self.models.retain(|s| s.name != name);
         self.models.len() < before
+    }
+
+    /// Get all specs for a given model type.
+    pub fn by_type(&self, model_type: &str) -> Vec<&ModelSpec> {
+        self.models
+            .iter()
+            .filter(|s| s.model_type == model_type)
+            .collect()
     }
 
     /// Keep only models matching the predicate.
@@ -434,10 +477,57 @@ mod tests {
     fn test_model_spec_simple() {
         let spec = ModelSpec::new("Naive", || Box::new(Naive::new()), true);
         assert_eq!(spec.name, "Naive");
+        assert_eq!(spec.model_type, "Naive");
         assert!(spec.has_intervals);
 
         let model = spec.create();
         assert_eq!(model.name(), "Naive");
+    }
+
+    #[test]
+    fn test_model_spec_with_type() {
+        let spec =
+            ModelSpec::with_type("MFLES_additive", "MFLES", || Box::new(Naive::new()), false);
+        assert_eq!(spec.name, "MFLES_additive");
+        assert_eq!(spec.model_type, "MFLES");
+        assert!(!spec.has_intervals);
+    }
+
+    #[test]
+    fn test_model_spec_with_type_dynamic_name() {
+        let name = format!("SMA_{}", 10);
+        let spec = ModelSpec::new(name, || Box::new(Naive::new()), false);
+        assert_eq!(spec.name, "SMA_10");
+        assert_eq!(spec.model_type, "SMA_10");
+    }
+
+    #[test]
+    fn test_registry_by_type() {
+        let mut registry = ModelRegistry::new();
+        registry.register(ModelSpec::with_type(
+            "MFLES_add",
+            "MFLES",
+            || Box::new(Naive::new()),
+            false,
+        ));
+        registry.register(ModelSpec::with_type(
+            "MFLES_mul",
+            "MFLES",
+            || Box::new(Naive::new()),
+            false,
+        ));
+        registry.register(ModelSpec::new("Naive", || Box::new(Naive::new()), true));
+
+        let mfles = registry.by_type("MFLES");
+        assert_eq!(mfles.len(), 2);
+        assert_eq!(mfles[0].name, "MFLES_add");
+        assert_eq!(mfles[1].name, "MFLES_mul");
+
+        let naive = registry.by_type("Naive");
+        assert_eq!(naive.len(), 1);
+
+        let empty = registry.by_type("NonExistent");
+        assert!(empty.is_empty());
     }
 
     #[test]
@@ -485,7 +575,7 @@ mod tests {
         registry.register(ModelSpec::new("Naive", || Box::new(Naive::new()), true));
         assert_eq!(registry.len(), 1);
 
-        let names: Vec<_> = registry.iter().map(|s| s.name).collect();
+        let names: Vec<_> = registry.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, vec!["Naive"]);
     }
 
