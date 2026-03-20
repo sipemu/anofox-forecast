@@ -80,6 +80,14 @@ impl OLSResult {
     pub fn num_regressors(&self) -> usize {
         self.coefficients.len()
     }
+
+    /// Look up the coefficient for a regressor by name.
+    pub fn coefficient_for(&self, name: &str) -> Option<f64> {
+        self.regressor_names
+            .iter()
+            .position(|n| n == name)
+            .map(|i| self.coefficients[i])
+    }
 }
 
 /// Fit OLS regression: y = intercept + X @ coefficients

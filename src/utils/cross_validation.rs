@@ -18,6 +18,7 @@ use rayon::prelude::*;
 
 /// Cross-validation strategy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum CVStrategy {
     /// Rolling window: fixed training window size, slides forward.
     Rolling,

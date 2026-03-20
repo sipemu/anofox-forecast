@@ -34,6 +34,8 @@ pub mod stationarity;
 // Re-export from AID
 #[cfg(feature = "postprocess")]
 pub use aid::{AidAnalyzer, AidAnomalyLabel, AidFeatures, AidResult, AidSummary};
+#[cfg(feature = "postprocess")]
+pub use anofox_regression::solvers::{DemandDistribution, DemandType};
 
 // Re-export from diagnostics
 pub use diagnostics::ModelDiagnostics;
