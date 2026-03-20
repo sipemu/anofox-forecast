@@ -84,6 +84,74 @@ impl ConformalResult {
     }
 }
 
+/// Result of fitting a per-horizon-step conformal predictor.
+///
+/// Each horizon step gets its own interval half-width, so step h=1 has a tighter
+/// interval than step h=12 when forecast error grows with horizon.
+#[derive(Debug, Clone)]
+pub struct PerStepConformalResult {
+    /// Per-step interval half-widths (one per horizon step).
+    half_widths: Vec<f64>,
+    /// Per-step nonconformity scores (one vec per horizon step).
+    scores: Vec<Vec<f64>>,
+    /// Coverage level.
+    coverage: f64,
+    /// Method used.
+    method: ConformalMethod,
+}
+
+impl PerStepConformalResult {
+    /// Get the per-step half-widths.
+    pub fn half_widths(&self) -> &[f64] {
+        &self.half_widths
+    }
+
+    /// Get the per-step nonconformity scores.
+    pub fn scores(&self) -> &[Vec<f64>] {
+        &self.scores
+    }
+
+    /// Get the coverage level.
+    pub fn coverage(&self) -> f64 {
+        self.coverage
+    }
+
+    /// Get the method used.
+    pub fn method(&self) -> &ConformalMethod {
+        &self.method
+    }
+
+    /// Get the number of horizon steps.
+    pub fn horizon(&self) -> usize {
+        self.half_widths.len()
+    }
+
+    /// Apply per-step intervals to a point forecast.
+    ///
+    /// Returns `(lower, upper)` where each bound has one value per horizon step.
+    /// The forecast length must match the horizon used during fitting.
+    pub fn predict(&self, point_forecast: &[f64]) -> (Vec<f64>, Vec<f64>) {
+        let lower: Vec<f64> = point_forecast
+            .iter()
+            .zip(self.half_widths.iter())
+            .map(|(&p, &hw)| p - hw)
+            .collect();
+        let upper: Vec<f64> = point_forecast
+            .iter()
+            .zip(self.half_widths.iter())
+            .map(|(&p, &hw)| p + hw)
+            .collect();
+        (lower, upper)
+    }
+
+    /// Apply per-step intervals and return `PredictionIntervals`.
+    pub fn predict_intervals(&self, point_forecast: &[f64]) -> PredictionIntervals {
+        let (lower, upper) = self.predict(point_forecast);
+        PredictionIntervals::from_bounds(lower, upper, self.coverage)
+            .expect("Valid prediction intervals")
+    }
+}
+
 /// Conformal predictor for distribution-free prediction intervals.
 ///
 /// Provides prediction intervals with coverage guarantees based on
@@ -307,6 +375,116 @@ impl ConformalPredictor {
             coverage: self.coverage,
             method: self.method.clone(),
         })
+    }
+
+    /// Fit per-horizon-step conformal intervals.
+    ///
+    /// Each horizon step gets its own quantile, so early steps (h=1) get tighter
+    /// intervals than later steps (h=12) when forecast error grows with horizon.
+    ///
+    /// # Arguments
+    ///
+    /// * `fold_forecasts` - Per-fold forecast arrays, each of length `horizon`
+    /// * `fold_actuals` - Per-fold actual arrays, each of length `horizon`
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Fewer than 2 folds are provided
+    /// - Any fold has a different length than the first
+    /// - Forecast/actual lengths don't match within a fold
+    pub fn fit_per_step(
+        &self,
+        fold_forecasts: &[Vec<f64>],
+        fold_actuals: &[Vec<f64>],
+    ) -> Result<PerStepConformalResult> {
+        let n_folds = fold_forecasts.len();
+        if n_folds != fold_actuals.len() {
+            return Err(ForecastError::DimensionMismatch {
+                expected: n_folds,
+                got: fold_actuals.len(),
+            });
+        }
+        if n_folds < 2 {
+            return Err(ForecastError::InsufficientData {
+                needed: 2,
+                got: n_folds,
+                hint: Some("per-step conformal needs at least 2 folds".into()),
+            });
+        }
+
+        let horizon = fold_forecasts[0].len();
+        if horizon == 0 {
+            return Err(ForecastError::EmptyData);
+        }
+
+        // Validate all folds have the same horizon length
+        for (i, (fc, ac)) in fold_forecasts.iter().zip(fold_actuals.iter()).enumerate() {
+            if fc.len() != horizon || ac.len() != horizon {
+                return Err(ForecastError::InvalidParameter(format!(
+                    "fold {} has forecast len {} and actual len {}, expected {}",
+                    i,
+                    fc.len(),
+                    ac.len(),
+                    horizon
+                )));
+            }
+        }
+
+        // Compute pooled quantile as fallback for steps with too few residuals
+        let all_scores: Vec<f64> = fold_forecasts
+            .iter()
+            .zip(fold_actuals.iter())
+            .flat_map(|(fc, ac)| fc.iter().zip(ac.iter()).map(|(f, a)| (f - a).abs()))
+            .collect();
+        let pooled_quantile = Self::compute_quantile(&all_scores, self.coverage, &self.method);
+
+        // Compute per-step quantiles
+        let mut half_widths = Vec::with_capacity(horizon);
+        let mut per_step_scores = Vec::with_capacity(horizon);
+
+        for t in 0..horizon {
+            let step_scores: Vec<f64> = fold_forecasts
+                .iter()
+                .zip(fold_actuals.iter())
+                .map(|(fc, ac)| (fc[t] - ac[t]).abs())
+                .collect();
+
+            let hw = if step_scores.len() < 2 {
+                // Fall back to pooled quantile when too few residuals
+                pooled_quantile
+            } else {
+                Self::compute_quantile(&step_scores, self.coverage, &self.method)
+            };
+
+            half_widths.push(hw);
+            per_step_scores.push(step_scores);
+        }
+
+        Ok(PerStepConformalResult {
+            half_widths,
+            scores: per_step_scores,
+            coverage: self.coverage,
+            method: self.method.clone(),
+        })
+    }
+
+    /// Compute the conformal quantile from a set of nonconformity scores.
+    fn compute_quantile(scores: &[f64], coverage: f64, method: &ConformalMethod) -> f64 {
+        let mut sorted = scores.to_vec();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let n = sorted.len();
+
+        let quantile_idx = match method {
+            ConformalMethod::Split { .. } | ConformalMethod::JackknifePlus => {
+                let adjusted_level = (((n + 1) as f64) * coverage / n as f64).min(1.0);
+                ((n as f64) * adjusted_level).ceil() as usize
+            }
+            ConformalMethod::CrossVal { .. } => ((n as f64) * coverage).ceil() as usize,
+        };
+
+        let idx = quantile_idx.saturating_sub(1).min(n - 1);
+        sorted[idx]
     }
 
     /// Generate prediction intervals for new point forecasts.
@@ -842,6 +1020,159 @@ mod tests {
 
             assert_eq!(result.scores(), cloned.scores());
             assert!((result.quantile_value() - cloned.quantile_value()).abs() < 1e-10);
+        }
+    }
+
+    // =========================================================================
+    // Per-step conformal tests
+    // =========================================================================
+
+    mod per_step {
+        use super::*;
+
+        fn make_folds(n_folds: usize, horizon: usize) -> (Vec<Vec<f64>>, Vec<Vec<f64>>) {
+            // Errors grow with horizon step: step t has error ~ t * 0.5
+            let mut forecasts = Vec::new();
+            let mut actuals = Vec::new();
+            for fold in 0..n_folds {
+                let fc: Vec<f64> = (0..horizon).map(|t| 100.0 + t as f64).collect();
+                let ac: Vec<f64> = (0..horizon)
+                    .map(|t| {
+                        let error = (t as f64 + 1.0) * 0.5 * if fold % 2 == 0 { 1.0 } else { -1.0 };
+                        fc[t] + error
+                    })
+                    .collect();
+                forecasts.push(fc);
+                actuals.push(ac);
+            }
+            (forecasts, actuals)
+        }
+
+        #[test]
+        fn fit_per_step_returns_result() {
+            let predictor = ConformalPredictor::split(0.90);
+            let (fc, ac) = make_folds(10, 5);
+            let result = predictor.fit_per_step(&fc, &ac).unwrap();
+
+            assert_eq!(result.horizon(), 5);
+            assert_eq!(result.half_widths().len(), 5);
+            assert_eq!(result.scores().len(), 5);
+            assert!((result.coverage() - 0.90).abs() < 1e-10);
+        }
+
+        #[test]
+        fn later_steps_have_wider_intervals() {
+            let predictor = ConformalPredictor::split(0.90);
+            let (fc, ac) = make_folds(20, 6);
+            let result = predictor.fit_per_step(&fc, &ac).unwrap();
+
+            let hw = result.half_widths();
+            // Errors grow with horizon, so half-widths should generally increase
+            assert!(
+                hw[5] > hw[0],
+                "Last step hw ({}) should be > first step hw ({})",
+                hw[5],
+                hw[0]
+            );
+        }
+
+        #[test]
+        fn predict_returns_correct_bounds() {
+            let predictor = ConformalPredictor::split(0.90);
+            let (fc, ac) = make_folds(10, 3);
+            let result = predictor.fit_per_step(&fc, &ac).unwrap();
+
+            let point = vec![50.0, 51.0, 52.0];
+            let (lower, upper) = result.predict(&point);
+
+            assert_eq!(lower.len(), 3);
+            assert_eq!(upper.len(), 3);
+
+            for t in 0..3 {
+                assert!(lower[t] < point[t]);
+                assert!(upper[t] > point[t]);
+                // Symmetric
+                let diff_low = point[t] - lower[t];
+                let diff_high = upper[t] - point[t];
+                assert!(
+                    (diff_low - diff_high).abs() < 1e-10,
+                    "Step {} should be symmetric",
+                    t
+                );
+            }
+        }
+
+        #[test]
+        fn predict_intervals_returns_prediction_intervals() {
+            let predictor = ConformalPredictor::split(0.90);
+            let (fc, ac) = make_folds(10, 4);
+            let result = predictor.fit_per_step(&fc, &ac).unwrap();
+
+            let intervals = result.predict_intervals(&[10.0, 20.0, 30.0, 40.0]);
+            assert_eq!(intervals.len(), 4);
+            assert!((intervals.coverage() - 0.90).abs() < 1e-10);
+        }
+
+        #[test]
+        fn fails_with_fewer_than_2_folds() {
+            let predictor = ConformalPredictor::split(0.90);
+            let fc = vec![vec![1.0, 2.0]];
+            let ac = vec![vec![1.5, 2.5]];
+            assert!(predictor.fit_per_step(&fc, &ac).is_err());
+        }
+
+        #[test]
+        fn fails_with_mismatched_fold_lengths() {
+            let predictor = ConformalPredictor::split(0.90);
+            let fc = vec![vec![1.0, 2.0], vec![1.0, 2.0, 3.0]];
+            let ac = vec![vec![1.5, 2.5], vec![1.5, 2.5, 3.5]];
+            assert!(predictor.fit_per_step(&fc, &ac).is_err());
+        }
+
+        #[test]
+        fn fails_with_mismatched_forecast_actual_count() {
+            let predictor = ConformalPredictor::split(0.90);
+            let fc = vec![vec![1.0, 2.0], vec![1.0, 2.0]];
+            let ac = vec![vec![1.5, 2.5]];
+            assert!(predictor.fit_per_step(&fc, &ac).is_err());
+        }
+
+        #[test]
+        fn works_with_jackknife_plus() {
+            let predictor = ConformalPredictor::jackknife_plus(0.90);
+            let (fc, ac) = make_folds(10, 3);
+            let result = predictor.fit_per_step(&fc, &ac).unwrap();
+            assert_eq!(result.horizon(), 3);
+            assert!(result.half_widths().iter().all(|&hw| hw > 0.0));
+        }
+
+        #[test]
+        fn works_with_cross_val() {
+            let predictor = ConformalPredictor::cross_val(0.90, 5);
+            let (fc, ac) = make_folds(10, 3);
+            let result = predictor.fit_per_step(&fc, &ac).unwrap();
+            assert_eq!(result.horizon(), 3);
+        }
+
+        #[test]
+        fn each_step_has_n_folds_scores() {
+            let predictor = ConformalPredictor::split(0.90);
+            let (fc, ac) = make_folds(8, 4);
+            let result = predictor.fit_per_step(&fc, &ac).unwrap();
+
+            for step_scores in result.scores() {
+                assert_eq!(step_scores.len(), 8);
+            }
+        }
+
+        #[test]
+        fn result_is_clonable() {
+            let predictor = ConformalPredictor::split(0.90);
+            let (fc, ac) = make_folds(5, 3);
+            let result = predictor.fit_per_step(&fc, &ac).unwrap();
+            let cloned = result.clone();
+            assert_eq!(result.half_widths(), cloned.half_widths());
+            assert_eq!(result.horizon(), cloned.horizon());
         }
     }
 }

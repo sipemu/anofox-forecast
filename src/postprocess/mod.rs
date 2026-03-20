@@ -40,7 +40,7 @@ mod types;
 
 pub use backtest::{BacktestConfig, BacktestFold, BacktestResult, CalibratedModelByHorizon};
 pub use binned_intervals::{BinnedConformalPredictor, BinnedConformalResult};
-pub use conformal::{ConformalMethod, ConformalPredictor, ConformalResult};
+pub use conformal::{ConformalMethod, ConformalPredictor, ConformalResult, PerStepConformalResult};
 pub use conformalize::{
     conformalize, conformalize_with_config, ConformalizeConfig, ConformalizeResult,
 };
