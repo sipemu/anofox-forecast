@@ -622,7 +622,7 @@ mod tests {
 
         assert!(config.run_cv);
         assert_eq!(config.horizon, 5);
-        assert_eq!(config.cv_config.initial_window, 15);
+        assert_eq!(config.cv_config.min_initial_window, 15);
         assert_eq!(config.cv_config.horizon, 3);
         assert_eq!(config.cv_config.step_size, 2);
     }

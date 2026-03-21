@@ -277,7 +277,7 @@ pub fn cross_validate_all(
     let (initial_window, step_size) = compute_cv_fold_params(ts.len(), n_folds, horizon);
 
     let generator = CvFoldGenerator::new()
-        .initial_window(initial_window)
+        .min_initial_window(initial_window)
         .horizon(horizon)
         .step_size(step_size);
     let folds = generator.generate(ts.len());

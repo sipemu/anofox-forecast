@@ -218,7 +218,7 @@ fn cross_validate_select_best_predict_pipeline() {
     // Cross-validate Naive
     let cv_config = CVConfig {
         horizon,
-        initial_window: 60,
+        min_initial_window: 60,
         step_size: 10,
         strategy: CVStrategy::Expanding,
         seasonal_period: Some(7),
@@ -295,7 +295,7 @@ fn cross_validation_fold_metrics_are_consistent() {
 
     let cv_config = CVConfig {
         horizon: 5,
-        initial_window: 50,
+        min_initial_window: 50,
         step_size: 10,
         strategy: CVStrategy::Expanding,
         seasonal_period: None,

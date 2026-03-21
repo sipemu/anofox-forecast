@@ -46,7 +46,7 @@ fn main() {
     println!("  ...");
     println!();
 
-    let expanding_config = CVConfig::expanding(30, 1) // initial_window=30, horizon=1
+    let expanding_config = CVConfig::expanding(30, 1) // min_initial_window=30, horizon=1
         .with_step_size(1);
 
     match cross_validate(&expanding_config, &ts, Naive::new) {
@@ -218,8 +218,8 @@ fn main() {
     // =========================================================================
     println!("\n--- CV Configuration Guide ---\n");
 
-    println!("CVConfig::expanding(initial_window, horizon)");
-    println!("  - Training data grows from initial_window");
+    println!("CVConfig::expanding(min_initial_window, horizon)");
+    println!("  - Training data grows from min_initial_window");
     println!("  - Better utilizes all historical data");
     println!("  - Later folds have more training data");
     println!();

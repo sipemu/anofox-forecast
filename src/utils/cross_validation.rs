@@ -22,7 +22,7 @@ use rayon::prelude::*;
 pub enum CVStrategy {
     /// Rolling window: fixed training window size, slides forward.
     Rolling,
-    /// Expanding window: training window grows, starts from initial_window.
+    /// Expanding window: training window grows, starts from min_initial_window.
     #[default]
     Expanding,
 }
@@ -65,7 +65,7 @@ impl Fold {
 /// use anofox_forecast::utils::cross_validation::{CvFoldGenerator, CVStrategy};
 ///
 /// let generator = CvFoldGenerator::new()
-///     .initial_window(100)
+///     .min_initial_window(100)
 ///     .horizon(7)
 ///     .step_size(7)
 ///     .gap(1)
@@ -80,8 +80,8 @@ impl Fold {
 /// ```
 #[derive(Debug, Clone)]
 pub struct CvFoldGenerator {
-    /// Initial training window size.
-    pub initial_window: usize,
+    /// Minimum number of observations in the first training window.
+    pub min_initial_window: usize,
     /// Forecast horizon (test size per fold).
     pub horizon: usize,
     /// Step size between consecutive folds.
@@ -101,7 +101,7 @@ pub struct CvFoldGenerator {
 impl Default for CvFoldGenerator {
     fn default() -> Self {
         Self {
-            initial_window: 10,
+            min_initial_window: 10,
             horizon: 1,
             step_size: 1,
             gap: 0,
@@ -120,8 +120,8 @@ impl CvFoldGenerator {
     }
 
     /// Set the initial training window size.
-    pub fn initial_window(mut self, size: usize) -> Self {
-        self.initial_window = size;
+    pub fn min_initial_window(mut self, size: usize) -> Self {
+        self.min_initial_window = size;
         self
     }
 
@@ -184,11 +184,11 @@ impl CvFoldGenerator {
     /// Returns an empty vector if the series is too short for any folds.
     pub fn generate(&self, series_len: usize) -> Vec<Fold> {
         let mut folds = Vec::new();
-        let mut origin = self.initial_window;
+        let mut origin = self.min_initial_window;
         let mut max_embargo_end: usize = 0;
         while origin + self.gap + self.horizon <= series_len {
             let base_train_start = match self.strategy {
-                CVStrategy::Rolling => origin.saturating_sub(self.initial_window),
+                CVStrategy::Rolling => origin.saturating_sub(self.min_initial_window),
                 CVStrategy::Expanding => 0,
             };
             let train_end = origin.saturating_sub(self.purge);
@@ -234,7 +234,7 @@ impl CvFoldGenerator {
                 let test_start = series_len - self.horizon;
                 let train_end = test_start.saturating_sub(self.gap + self.purge);
                 let train_start = match self.strategy {
-                    CVStrategy::Rolling => train_end.saturating_sub(self.initial_window),
+                    CVStrategy::Rolling => train_end.saturating_sub(self.min_initial_window),
                     CVStrategy::Expanding => 0,
                 };
                 if train_end > train_start {
@@ -262,8 +262,8 @@ impl CvFoldGenerator {
 pub struct CVConfig {
     /// Forecast horizon for each fold.
     pub horizon: usize,
-    /// Initial training window size.
-    pub initial_window: usize,
+    /// Minimum number of observations in the first training window.
+    pub min_initial_window: usize,
     /// Step size between folds.
     pub step_size: usize,
     /// Cross-validation strategy.
@@ -282,7 +282,7 @@ impl Default for CVConfig {
     fn default() -> Self {
         Self {
             horizon: 1,
-            initial_window: 10,
+            min_initial_window: 10,
             step_size: 1,
             strategy: CVStrategy::Expanding,
             seasonal_period: None,
@@ -295,9 +295,9 @@ impl Default for CVConfig {
 
 impl CVConfig {
     /// Create a new CV configuration with expanding window strategy.
-    pub fn expanding(initial_window: usize, horizon: usize) -> Self {
+    pub fn expanding(min_initial_window: usize, horizon: usize) -> Self {
         Self {
-            initial_window,
+            min_initial_window,
             horizon,
             step_size: 1,
             strategy: CVStrategy::Expanding,
@@ -311,7 +311,7 @@ impl CVConfig {
     /// Create a new CV configuration with rolling window strategy.
     pub fn rolling(window_size: usize, horizon: usize) -> Self {
         Self {
-            initial_window: window_size,
+            min_initial_window: window_size,
             horizon,
             step_size: 1,
             strategy: CVStrategy::Rolling,
@@ -360,7 +360,7 @@ impl CVConfig {
     /// Convert to a CvFoldGenerator.
     pub fn to_fold_generator(&self) -> CvFoldGenerator {
         CvFoldGenerator {
-            initial_window: self.initial_window,
+            min_initial_window: self.min_initial_window,
             horizon: self.horizon,
             step_size: self.step_size,
             gap: self.gap,
@@ -1555,7 +1555,7 @@ mod tests {
     #[test]
     fn fold_generator_basic() {
         let gen = CvFoldGenerator::new()
-            .initial_window(10)
+            .min_initial_window(10)
             .horizon(1)
             .step_size(1);
 
@@ -1572,7 +1572,7 @@ mod tests {
     #[test]
     fn fold_generator_with_gap() {
         let gen = CvFoldGenerator::new()
-            .initial_window(10)
+            .min_initial_window(10)
             .horizon(1)
             .step_size(1)
             .gap(2);
@@ -1591,7 +1591,7 @@ mod tests {
     #[test]
     fn fold_generator_with_purge() {
         let gen = CvFoldGenerator::new()
-            .initial_window(10)
+            .min_initial_window(10)
             .horizon(1)
             .step_size(1)
             .purge(2);
@@ -1606,7 +1606,7 @@ mod tests {
     #[test]
     fn fold_generator_rolling() {
         let gen = CvFoldGenerator::new()
-            .initial_window(5)
+            .min_initial_window(5)
             .horizon(1)
             .step_size(1)
             .strategy(CVStrategy::Rolling);
@@ -1624,7 +1624,7 @@ mod tests {
     #[test]
     fn fold_generator_multi_step_horizon() {
         let gen = CvFoldGenerator::new()
-            .initial_window(10)
+            .min_initial_window(10)
             .horizon(3)
             .step_size(2);
 
@@ -1637,7 +1637,7 @@ mod tests {
 
     #[test]
     fn fold_generator_insufficient_data() {
-        let gen = CvFoldGenerator::new().initial_window(10).horizon(5);
+        let gen = CvFoldGenerator::new().min_initial_window(10).horizon(5);
 
         let folds = gen.generate(10); // Not enough for any fold
         assert!(folds.is_empty());
@@ -1888,7 +1888,7 @@ mod tests {
         let values = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let ts = TimeSeries::univariate(timestamps, values).unwrap();
 
-        // initial_window=10 but only 5 data points
+        // min_initial_window=10 but only 5 data points
         let config = CVConfig::expanding(10, 1);
         let results = cross_validate(&config, &ts, Naive::new).unwrap();
 
@@ -1980,12 +1980,12 @@ mod tests {
     #[test]
     fn cv_config_builders() {
         let expanding = CVConfig::expanding(10, 3);
-        assert_eq!(expanding.initial_window, 10);
+        assert_eq!(expanding.min_initial_window, 10);
         assert_eq!(expanding.horizon, 3);
         assert_eq!(expanding.strategy, CVStrategy::Expanding);
 
         let rolling = CVConfig::rolling(15, 2);
-        assert_eq!(rolling.initial_window, 15);
+        assert_eq!(rolling.min_initial_window, 15);
         assert_eq!(rolling.horizon, 2);
         assert_eq!(rolling.strategy, CVStrategy::Rolling);
 
@@ -2000,7 +2000,7 @@ mod tests {
     fn cv_default_config() {
         let config = CVConfig::default();
         assert_eq!(config.horizon, 1);
-        assert_eq!(config.initial_window, 10);
+        assert_eq!(config.min_initial_window, 10);
         assert_eq!(config.step_size, 1);
         assert_eq!(config.strategy, CVStrategy::Expanding);
         assert_eq!(config.seasonal_period, None);
@@ -2509,11 +2509,11 @@ mod tests {
     #[test]
     fn fold_generator_embargo_zero_matches_no_embargo() {
         let g1 = CvFoldGenerator::new()
-            .initial_window(10)
+            .min_initial_window(10)
             .horizon(3)
             .step_size(3);
         let g2 = CvFoldGenerator::new()
-            .initial_window(10)
+            .min_initial_window(10)
             .horizon(3)
             .step_size(3)
             .embargo(0);
@@ -2522,7 +2522,7 @@ mod tests {
     #[test]
     fn fold_generator_embargo_shrinks_training() {
         let folds = CvFoldGenerator::new()
-            .initial_window(10)
+            .min_initial_window(10)
             .horizon(3)
             .step_size(3)
             .embargo(5)
@@ -2535,7 +2535,7 @@ mod tests {
     #[test]
     fn fold_generator_embargo_with_gap_and_purge() {
         let folds = CvFoldGenerator::new()
-            .initial_window(10)
+            .min_initial_window(10)
             .horizon(3)
             .step_size(3)
             .gap(1)
@@ -2550,7 +2550,7 @@ mod tests {
     #[test]
     fn fold_generator_embargo_beyond_series_clamps() {
         let folds = CvFoldGenerator::new()
-            .initial_window(10)
+            .min_initial_window(10)
             .horizon(3)
             .step_size(3)
             .embargo(1000)
@@ -2560,7 +2560,7 @@ mod tests {
     #[test]
     fn fold_generator_embargo_expanding_vs_rolling() {
         assert!(!CvFoldGenerator::new()
-            .initial_window(10)
+            .min_initial_window(10)
             .horizon(2)
             .step_size(2)
             .strategy(CVStrategy::Expanding)
@@ -2568,7 +2568,7 @@ mod tests {
             .generate(40)
             .is_empty());
         for fold in &CvFoldGenerator::new()
-            .initial_window(10)
+            .min_initial_window(10)
             .horizon(2)
             .step_size(2)
             .strategy(CVStrategy::Rolling)
@@ -2596,13 +2596,13 @@ mod tests {
         // Without: last test_end = 138, indices 138-143 never tested
         // With: extra fold test=[132, 144)
         let folds_without = CvFoldGenerator::new()
-            .initial_window(6)
+            .min_initial_window(6)
             .horizon(12)
             .step_size(12)
             .generate(144);
 
         let folds_with = CvFoldGenerator::new()
-            .initial_window(6)
+            .min_initial_window(6)
             .horizon(12)
             .step_size(12)
             .ensure_end_coverage(true)
@@ -2616,13 +2616,13 @@ mod tests {
     fn ensure_end_coverage_noop_when_already_covered() {
         // step_size evenly divides: no extra fold needed
         let folds_without = CvFoldGenerator::new()
-            .initial_window(10)
+            .min_initial_window(10)
             .horizon(5)
             .step_size(5)
             .generate(30);
 
         let folds_with = CvFoldGenerator::new()
-            .initial_window(10)
+            .min_initial_window(10)
             .horizon(5)
             .step_size(5)
             .ensure_end_coverage(true)
@@ -2636,7 +2636,7 @@ mod tests {
     #[test]
     fn ensure_end_coverage_with_rolling_strategy() {
         let folds = CvFoldGenerator::new()
-            .initial_window(20)
+            .min_initial_window(20)
             .horizon(5)
             .step_size(7)
             .strategy(CVStrategy::Rolling)
@@ -2651,7 +2651,7 @@ mod tests {
     #[test]
     fn ensure_end_coverage_with_gap() {
         let folds = CvFoldGenerator::new()
-            .initial_window(10)
+            .min_initial_window(10)
             .horizon(5)
             .step_size(7)
             .gap(2)
