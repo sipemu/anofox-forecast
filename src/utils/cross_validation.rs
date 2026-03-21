@@ -2678,21 +2678,176 @@ mod tests {
         assert!(!gen.generate(50).unwrap().is_empty());
     }
 
-    // ── n_folds-driven generation tests ─────────────────────────────
+    // ══════════════════════════════════════════════════════════════════
+    // Comprehensive CvFoldGenerator tests (n_folds-driven)
+    // ══════════════════════════════════════════════════════════════════
+
+    // ── A. Basic correctness ─────────────────────────────────────────
 
     #[test]
-    fn generates_requested_number_of_folds() {
+    fn a1_exact_5_folds_expanding_matches_sklearn() {
+        // sklearn TimeSeriesSplit(n_splits=5, test_size=1) on range(10)
+        let folds = CvFoldGenerator::new()
+            .n_folds(5)
+            .horizon(1)
+            .min_initial_window(5)
+            .generate(10)
+            .unwrap();
+        assert_eq!(folds.len(), 5);
+        assert_eq!(folds[0], Fold { train_start: 0, train_end: 5, test_start: 5, test_end: 6 });
+        assert_eq!(folds[1], Fold { train_start: 0, train_end: 6, test_start: 6, test_end: 7 });
+        assert_eq!(folds[2], Fold { train_start: 0, train_end: 7, test_start: 7, test_end: 8 });
+        assert_eq!(folds[3], Fold { train_start: 0, train_end: 8, test_start: 8, test_end: 9 });
+        assert_eq!(folds[4], Fold { train_start: 0, train_end: 9, test_start: 9, test_end: 10 });
+    }
+
+    #[test]
+    fn a2_exact_3_folds_larger_horizon() {
+        // n=20, n_folds=3, h=3, min=5: first_origin=5, last_origin=17, step=6
+        let folds = CvFoldGenerator::new()
+            .n_folds(3)
+            .horizon(3)
+            .min_initial_window(5)
+            .generate(20)
+            .unwrap();
+        assert_eq!(folds.len(), 3);
+        assert_eq!(folds[0], Fold { train_start: 0, train_end: 5, test_start: 5, test_end: 8 });
+        assert_eq!(folds[1], Fold { train_start: 0, train_end: 11, test_start: 11, test_end: 14 });
+        assert_eq!(folds[2], Fold { train_start: 0, train_end: 17, test_start: 17, test_end: 20 });
+    }
+
+    #[test]
+    fn a3_all_indices_within_bounds() {
         let folds = CvFoldGenerator::new()
             .n_folds(5)
             .horizon(7)
             .min_initial_window(30)
             .generate(200)
             .unwrap();
-        assert_eq!(folds.len(), 5);
+        for fold in &folds {
+            assert!(fold.train_start < fold.train_end);
+            assert!(fold.train_end <= 200);
+            assert!(fold.test_start < fold.test_end);
+            assert!(fold.test_end <= 200);
+        }
     }
 
     #[test]
-    fn last_fold_covers_series_end() {
+    fn a4_no_train_test_overlap() {
+        let folds = CvFoldGenerator::new()
+            .n_folds(5)
+            .horizon(7)
+            .min_initial_window(30)
+            .generate(200)
+            .unwrap();
+        for fold in &folds {
+            assert!(fold.train_end <= fold.test_start);
+        }
+    }
+
+    #[test]
+    fn a5_folds_chronologically_ordered() {
+        let folds = CvFoldGenerator::new()
+            .n_folds(5)
+            .horizon(5)
+            .min_initial_window(20)
+            .generate(200)
+            .unwrap();
+        for i in 1..folds.len() {
+            assert!(folds[i].test_start > folds[i - 1].test_start);
+        }
+    }
+
+    // ── B. Expanding window ──────────────────────────────────────────
+
+    #[test]
+    fn b1_expanding_all_start_at_zero() {
+        let folds = CvFoldGenerator::new()
+            .n_folds(5)
+            .horizon(5)
+            .min_initial_window(20)
+            .generate(200)
+            .unwrap();
+        for fold in &folds {
+            assert_eq!(fold.train_start, 0);
+        }
+    }
+
+    #[test]
+    fn b2_expanding_train_size_non_decreasing() {
+        let folds = CvFoldGenerator::new()
+            .n_folds(5)
+            .horizon(5)
+            .min_initial_window(20)
+            .generate(200)
+            .unwrap();
+        for i in 1..folds.len() {
+            assert!(folds[i].train_size() >= folds[i - 1].train_size());
+        }
+    }
+
+    #[test]
+    fn b3_expanding_first_fold_train_size_equals_min() {
+        let folds = CvFoldGenerator::new()
+            .n_folds(5)
+            .horizon(1)
+            .min_initial_window(5)
+            .generate(10)
+            .unwrap();
+        assert_eq!(folds[0].train_size(), 5);
+    }
+
+    // ── C. Rolling window ────────────────────────────────────────────
+
+    #[test]
+    fn c1_rolling_exact_indices() {
+        let folds = CvFoldGenerator::new()
+            .n_folds(5)
+            .horizon(1)
+            .min_initial_window(5)
+            .strategy(CVStrategy::Rolling)
+            .generate(10)
+            .unwrap();
+        assert_eq!(folds.len(), 5);
+        assert_eq!(folds[0], Fold { train_start: 0, train_end: 5, test_start: 5, test_end: 6 });
+        assert_eq!(folds[1], Fold { train_start: 1, train_end: 6, test_start: 6, test_end: 7 });
+        assert_eq!(folds[2], Fold { train_start: 2, train_end: 7, test_start: 7, test_end: 8 });
+        assert_eq!(folds[3], Fold { train_start: 3, train_end: 8, test_start: 8, test_end: 9 });
+        assert_eq!(folds[4], Fold { train_start: 4, train_end: 9, test_start: 9, test_end: 10 });
+    }
+
+    #[test]
+    fn c2_rolling_all_same_train_size() {
+        let folds = CvFoldGenerator::new()
+            .n_folds(10)
+            .horizon(1)
+            .min_initial_window(50)
+            .strategy(CVStrategy::Rolling)
+            .generate(500)
+            .unwrap();
+        for fold in &folds {
+            assert_eq!(fold.train_size(), 50);
+        }
+    }
+
+    #[test]
+    fn c3_rolling_train_start_increases() {
+        let folds = CvFoldGenerator::new()
+            .n_folds(5)
+            .horizon(5)
+            .min_initial_window(20)
+            .strategy(CVStrategy::Rolling)
+            .generate(200)
+            .unwrap();
+        for i in 1..folds.len() {
+            assert!(folds[i].train_start > folds[i - 1].train_start);
+        }
+    }
+
+    // ── D. Last fold anchored at series end ──────────────────────────
+
+    #[test]
+    fn d1_last_fold_expanding() {
         let folds = CvFoldGenerator::new()
             .n_folds(5)
             .horizon(12)
@@ -2703,52 +2858,43 @@ mod tests {
     }
 
     #[test]
-    fn all_folds_respect_min_initial_window() {
+    fn d2_last_fold_rolling() {
         let folds = CvFoldGenerator::new()
-            .n_folds(5)
-            .horizon(7)
-            .min_initial_window(50)
-            .generate(200)
-            .unwrap();
-        for fold in &folds {
-            assert!(
-                fold.train_size() >= 50,
-                "Fold train_size {} < min_initial_window 50",
-                fold.train_size()
-            );
-        }
-    }
-
-    #[test]
-    fn error_when_min_initial_window_violated() {
-        // Series too short for 10 folds with min_initial_window=100
-        let result = CvFoldGenerator::new()
-            .n_folds(10)
+            .n_folds(3)
             .horizon(5)
-            .min_initial_window(100)
-            .generate(50);
-        assert!(result.is_err());
+            .min_initial_window(20)
+            .strategy(CVStrategy::Rolling)
+            .generate(100)
+            .unwrap();
+        assert_eq!(folds.last().unwrap().test_end, 100);
     }
 
     #[test]
-    fn reduce_folds_when_constraint_violated() {
+    fn d3_last_fold_with_gap() {
         let folds = CvFoldGenerator::new()
-            .n_folds(100)
+            .n_folds(3)
             .horizon(5)
             .min_initial_window(10)
-            .on_constraint_violation(ConstraintViolation::ReduceFolds)
-            .generate(50)
+            .gap(3)
+            .generate(80)
             .unwrap();
-        // Should produce fewer than 100 folds, but at least 1
-        assert!(!folds.is_empty());
-        assert!(folds.len() < 100);
-        for fold in &folds {
-            assert!(fold.train_size() >= 10);
-        }
+        assert_eq!(folds.last().unwrap().test_end, 80);
     }
 
     #[test]
-    fn single_fold_anchored_at_end() {
+    fn d4_last_fold_with_purge() {
+        let folds = CvFoldGenerator::new()
+            .n_folds(3)
+            .horizon(5)
+            .min_initial_window(10)
+            .purge(3)
+            .generate(80)
+            .unwrap();
+        assert_eq!(folds.last().unwrap().test_end, 80);
+    }
+
+    #[test]
+    fn d5_single_fold_anchored() {
         let folds = CvFoldGenerator::new()
             .n_folds(1)
             .horizon(5)
@@ -2757,47 +2903,59 @@ mod tests {
             .unwrap();
         assert_eq!(folds.len(), 1);
         assert_eq!(folds[0].test_end, 50);
+        assert_eq!(folds[0].train_start, 0);
+        assert_eq!(folds[0].train_end, 45);
     }
 
-    #[test]
-    fn rolling_strategy_fixed_train_size() {
-        let folds = CvFoldGenerator::new()
-            .n_folds(3)
-            .horizon(5)
-            .min_initial_window(20)
-            .strategy(CVStrategy::Rolling)
-            .generate(100)
-            .unwrap();
-        for fold in &folds {
-            assert_eq!(fold.train_size(), 20);
-        }
-    }
+    // ── E. min_initial_window constraint ─────────────────────────────
 
     #[test]
-    fn expanding_strategy_growing_train_size() {
+    fn e1_expanding_respects_min() {
         let folds = CvFoldGenerator::new()
             .n_folds(5)
-            .horizon(5)
-            .min_initial_window(20)
-            .strategy(CVStrategy::Expanding)
+            .horizon(7)
+            .min_initial_window(50)
             .generate(200)
             .unwrap();
-        for i in 1..folds.len() {
-            assert!(
-                folds[i].train_size() >= folds[i - 1].train_size(),
-                "Fold {} train_size {} < fold {} train_size {}",
-                i,
-                folds[i].train_size(),
-                i - 1,
-                folds[i - 1].train_size()
-            );
+        for (i, fold) in folds.iter().enumerate() {
+            assert!(fold.train_size() >= 50, "fold {} train_size {}", i, fold.train_size());
         }
     }
 
     #[test]
-    fn gap_respected_in_all_folds() {
+    fn e2_rolling_respects_min() {
         let folds = CvFoldGenerator::new()
-            .n_folds(3)
+            .n_folds(5)
+            .horizon(7)
+            .min_initial_window(50)
+            .strategy(CVStrategy::Rolling)
+            .generate(200)
+            .unwrap();
+        for fold in &folds {
+            assert_eq!(fold.train_size(), 50);
+        }
+    }
+
+    #[test]
+    fn e3_series_exactly_min_plus_horizon() {
+        // Only room for 1 fold
+        let folds = CvFoldGenerator::new()
+            .n_folds(5)
+            .horizon(3)
+            .min_initial_window(7)
+            .on_constraint_violation(ConstraintViolation::ReduceFolds)
+            .generate(10)
+            .unwrap();
+        assert_eq!(folds.len(), 1);
+        assert_eq!(folds[0], Fold { train_start: 0, train_end: 7, test_start: 7, test_end: 10 });
+    }
+
+    // ── F. Gap ───────────────────────────────────────────────────────
+
+    #[test]
+    fn f1_gap_respected_all_folds() {
+        let folds = CvFoldGenerator::new()
+            .n_folds(5)
             .horizon(5)
             .min_initial_window(10)
             .gap(3)
@@ -2809,14 +2967,267 @@ mod tests {
     }
 
     #[test]
-    fn default_n_folds_is_5() {
-        let gen = CvFoldGenerator::new();
-        assert_eq!(gen.target_n_folds, 5);
+    fn f2_gap_exact_indices() {
+        // n=30, n_folds=3, h=2, min=5, gap=3: first_origin=5, last_origin=25, step=10
+        let folds = CvFoldGenerator::new()
+            .n_folds(3)
+            .horizon(2)
+            .min_initial_window(5)
+            .gap(3)
+            .generate(30)
+            .unwrap();
+        assert_eq!(folds[0], Fold { train_start: 0, train_end: 5, test_start: 8, test_end: 10 });
+        assert_eq!(folds[1], Fold { train_start: 0, train_end: 15, test_start: 18, test_end: 20 });
+        assert_eq!(folds[2], Fold { train_start: 0, train_end: 25, test_start: 28, test_end: 30 });
     }
 
     #[test]
-    fn default_constraint_violation_is_error() {
-        let gen = CvFoldGenerator::new();
-        assert_eq!(gen.on_constraint_violation, ConstraintViolation::Error);
+    fn f3_gap_zero_means_adjacent() {
+        let folds = CvFoldGenerator::new()
+            .n_folds(3)
+            .horizon(1)
+            .min_initial_window(5)
+            .gap(0)
+            .generate(20)
+            .unwrap();
+        for fold in &folds {
+            assert_eq!(fold.test_start, fold.train_end);
+        }
+    }
+
+    // ── G. Purge ─────────────────────────────────────────────────────
+
+    #[test]
+    fn g1_purge_exact_indices() {
+        // n=30, n_folds=3, h=2, min=5, purge=3: first_origin=8, last_origin=28, step=10
+        let folds = CvFoldGenerator::new()
+            .n_folds(3)
+            .horizon(2)
+            .min_initial_window(5)
+            .purge(3)
+            .generate(30)
+            .unwrap();
+        assert_eq!(folds[0], Fold { train_start: 0, train_end: 5, test_start: 8, test_end: 10 });
+        assert_eq!(folds[1], Fold { train_start: 0, train_end: 15, test_start: 18, test_end: 20 });
+        assert_eq!(folds[2], Fold { train_start: 0, train_end: 25, test_start: 28, test_end: 30 });
+    }
+
+    #[test]
+    fn g2_purge_plus_gap() {
+        // n=30, n_folds=3, h=2, min=5, gap=3, purge=2: first_origin=7, last_origin=25, step=9
+        let folds = CvFoldGenerator::new()
+            .n_folds(3)
+            .horizon(2)
+            .min_initial_window(5)
+            .gap(3)
+            .purge(2)
+            .generate(30)
+            .unwrap();
+        assert_eq!(folds[0], Fold { train_start: 0, train_end: 5, test_start: 10, test_end: 12 });
+        assert_eq!(folds[2].test_end, 30);
+        // All folds: test_start - train_end >= gap + purge = 5
+        for fold in &folds {
+            assert!(fold.test_start - fold.train_end >= 5);
+        }
+    }
+
+    // ── H. Embargo ───────────────────────────────────────────────────
+
+    #[test]
+    fn h1_embargo_shifts_subsequent_train_start() {
+        // n=30, n_folds=3, h=2, min=5, embargo=4
+        let folds = CvFoldGenerator::new()
+            .n_folds(3)
+            .horizon(2)
+            .min_initial_window(5)
+            .embargo(4)
+            .generate(30)
+            .unwrap();
+        // Fold 0: train_start=0 (embargo doesn't affect first fold)
+        assert_eq!(folds[0].train_start, 0);
+        // Subsequent folds should have train_start shifted forward
+        if folds.len() > 1 {
+            assert!(folds[1].train_start > 0, "embargo should shift fold 1 train_start");
+        }
+    }
+
+    #[test]
+    fn h2_large_embargo_skips_folds() {
+        // embargo so large it eats subsequent folds
+        let folds = CvFoldGenerator::new()
+            .n_folds(3)
+            .horizon(2)
+            .min_initial_window(3)
+            .embargo(10)
+            .generate(20)
+            .unwrap();
+        // Some folds should be skipped
+        assert!(folds.len() < 3, "large embargo should skip folds, got {}", folds.len());
+    }
+
+    // ── I. ConstraintViolation::Error ────────────────────────────────
+
+    #[test]
+    fn i1_error_series_too_short() {
+        let result = CvFoldGenerator::new()
+            .n_folds(5)
+            .horizon(5)
+            .min_initial_window(10)
+            .generate(10); // need 15
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn i2_error_with_gap_purge() {
+        let result = CvFoldGenerator::new()
+            .n_folds(3)
+            .horizon(3)
+            .min_initial_window(5)
+            .gap(3)
+            .purge(2)
+            .generate(12); // need 5+2+3+3=13
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn i3_error_step_zero() {
+        // Enough for 1 fold but not 10
+        let result = CvFoldGenerator::new()
+            .n_folds(10)
+            .horizon(3)
+            .min_initial_window(5)
+            .generate(9); // first_origin=5, last_origin=6, range=1, step=0
+        assert!(result.is_err());
+    }
+
+    // ── J. ConstraintViolation::ReduceFolds ──────────────────────────
+
+    #[test]
+    fn j1_reduces_to_1_fold() {
+        let folds = CvFoldGenerator::new()
+            .n_folds(5)
+            .horizon(3)
+            .min_initial_window(7)
+            .on_constraint_violation(ConstraintViolation::ReduceFolds)
+            .generate(10)
+            .unwrap();
+        assert_eq!(folds.len(), 1);
+        assert_eq!(folds[0], Fold { train_start: 0, train_end: 7, test_start: 7, test_end: 10 });
+    }
+
+    #[test]
+    fn j2_reduces_to_feasible_count() {
+        let folds = CvFoldGenerator::new()
+            .n_folds(10)
+            .horizon(3)
+            .min_initial_window(5)
+            .on_constraint_violation(ConstraintViolation::ReduceFolds)
+            .generate(15)
+            .unwrap();
+        // first_origin=5, last_origin=12, range=7, step=0 → reduce to 8 folds
+        assert_eq!(folds.len(), 8);
+        assert_eq!(folds.last().unwrap().test_end, 15);
+    }
+
+    #[test]
+    fn j3_no_reduction_when_fits() {
+        let folds = CvFoldGenerator::new()
+            .n_folds(3)
+            .horizon(5)
+            .min_initial_window(10)
+            .on_constraint_violation(ConstraintViolation::ReduceFolds)
+            .generate(100)
+            .unwrap();
+        assert_eq!(folds.len(), 3);
+    }
+
+    // ── K. Edge cases ────────────────────────────────────────────────
+
+    #[test]
+    fn k1_horizon_larger_than_half_series() {
+        let folds = CvFoldGenerator::new()
+            .n_folds(2)
+            .horizon(15)
+            .min_initial_window(5)
+            .generate(25)
+            .unwrap();
+        assert_eq!(folds.len(), 2);
+        for fold in &folds {
+            assert_eq!(fold.test_size(), 15);
+        }
+        assert_eq!(folds.last().unwrap().test_end, 25);
+    }
+
+    #[test]
+    fn k2_default_n_folds_is_5() {
+        assert_eq!(CvFoldGenerator::new().target_n_folds, 5);
+    }
+
+    #[test]
+    fn k3_default_constraint_violation_is_error() {
+        assert_eq!(CvFoldGenerator::new().on_constraint_violation, ConstraintViolation::Error);
+    }
+
+    #[test]
+    fn k4_uneven_step_last_fold_jumps() {
+        // step=1 but last fold jumps to end: origins 2,3,4,5 then 9
+        let folds = CvFoldGenerator::new()
+            .n_folds(5)
+            .horizon(1)
+            .min_initial_window(2)
+            .generate(10)
+            .unwrap();
+        assert_eq!(folds.len(), 5);
+        assert_eq!(folds[3].test_start, 5); // origin=5
+        assert_eq!(folds[4].test_start, 9); // jump to last_origin
+    }
+
+    #[test]
+    fn k5_perfectly_even_distribution() {
+        // available_range=8, 4 intervals → step=2, no remainder
+        let folds = CvFoldGenerator::new()
+            .n_folds(5)
+            .horizon(1)
+            .min_initial_window(1)
+            .generate(10)
+            .unwrap();
+        assert_eq!(folds.len(), 5);
+        assert_eq!(folds[0].test_start, 1);
+        assert_eq!(folds[1].test_start, 3);
+        assert_eq!(folds[2].test_start, 5);
+        assert_eq!(folds[3].test_start, 7);
+        assert_eq!(folds[4].test_start, 9);
+    }
+
+    // ── L. Reference: match sklearn TimeSeriesSplit ───────────────────
+
+    #[test]
+    fn l1_sklearn_n_splits_3_test_size_2_on_20() {
+        // sklearn: train=[0..14), test=[14..16) / train=[0..16), test=[16..18) / train=[0..18), test=[18..20)
+        let folds = CvFoldGenerator::new()
+            .n_folds(3)
+            .horizon(2)
+            .min_initial_window(14)
+            .generate(20)
+            .unwrap();
+        assert_eq!(folds.len(), 3);
+        assert_eq!(folds[0], Fold { train_start: 0, train_end: 14, test_start: 14, test_end: 16 });
+        assert_eq!(folds[1], Fold { train_start: 0, train_end: 16, test_start: 16, test_end: 18 });
+        assert_eq!(folds[2], Fold { train_start: 0, train_end: 18, test_start: 18, test_end: 20 });
+    }
+
+    #[test]
+    fn l2_sklearn_n_splits_4_test_size_1_on_20() {
+        let folds = CvFoldGenerator::new()
+            .n_folds(4)
+            .horizon(1)
+            .min_initial_window(16)
+            .generate(20)
+            .unwrap();
+        assert_eq!(folds.len(), 4);
+        assert_eq!(folds[0], Fold { train_start: 0, train_end: 16, test_start: 16, test_end: 17 });
+        assert_eq!(folds[1], Fold { train_start: 0, train_end: 17, test_start: 17, test_end: 18 });
+        assert_eq!(folds[2], Fold { train_start: 0, train_end: 18, test_start: 18, test_end: 19 });
+        assert_eq!(folds[3], Fold { train_start: 0, train_end: 19, test_start: 19, test_end: 20 });
     }
 }
