@@ -94,6 +94,8 @@ pub struct CvFoldGenerator {
     pub embargo: usize,
     /// Cross-validation strategy (expanding or rolling).
     pub strategy: CVStrategy,
+    /// When true, append a final fold so that `test_end` reaches the series end.
+    pub ensure_end_coverage: bool,
 }
 
 impl Default for CvFoldGenerator {
@@ -106,6 +108,7 @@ impl Default for CvFoldGenerator {
             purge: 0,
             embargo: 0,
             strategy: CVStrategy::Expanding,
+            ensure_end_coverage: false,
         }
     }
 }
@@ -165,6 +168,16 @@ impl CvFoldGenerator {
         self
     }
 
+    /// Ensure the last fold's test window reaches the series end.
+    ///
+    /// When `step_size` doesn't evenly divide the remaining length, the most
+    /// recent observations may be excluded. This option appends a final fold
+    /// anchored at the series end to guarantee full coverage.
+    pub fn ensure_end_coverage(mut self, enable: bool) -> Self {
+        self.ensure_end_coverage = enable;
+        self
+    }
+
     /// Generate fold indices for a series of given length.
     ///
     /// Returns a vector of [`Fold`] structs containing train/test indices.
@@ -209,6 +222,32 @@ impl CvFoldGenerator {
             }
             origin += self.step_size;
         }
+
+        // Append a final fold covering the series end if requested
+        if self.ensure_end_coverage && self.horizon > 0 {
+            let needs_extra = match folds.last() {
+                Some(last) => last.test_end < series_len,
+                None => series_len >= self.horizon + self.gap,
+            };
+            if needs_extra && series_len >= self.horizon + self.gap {
+                let test_end = series_len;
+                let test_start = series_len - self.horizon;
+                let train_end = test_start.saturating_sub(self.gap + self.purge);
+                let train_start = match self.strategy {
+                    CVStrategy::Rolling => train_end.saturating_sub(self.initial_window),
+                    CVStrategy::Expanding => 0,
+                };
+                if train_end > train_start {
+                    folds.push(Fold {
+                        train_start,
+                        train_end,
+                        test_start,
+                        test_end,
+                    });
+                }
+            }
+        }
+
         folds
     }
 
@@ -328,6 +367,7 @@ impl CVConfig {
             purge: self.purge,
             embargo: self.embargo,
             strategy: self.strategy,
+            ensure_end_coverage: false,
         }
     }
 }
@@ -2546,5 +2586,88 @@ mod tests {
             .to_fold_generator();
         assert_eq!(gen.embargo, 5);
         assert!(!gen.generate(50).is_empty());
+    }
+
+    // ── ensure_end_coverage tests ────────────────────────────────────
+
+    #[test]
+    fn ensure_end_coverage_appends_final_fold() {
+        // n=144, initial=6, step=12, horizon=12
+        // Without: last test_end = 138, indices 138-143 never tested
+        // With: extra fold test=[132, 144)
+        let folds_without = CvFoldGenerator::new()
+            .initial_window(6)
+            .horizon(12)
+            .step_size(12)
+            .generate(144);
+
+        let folds_with = CvFoldGenerator::new()
+            .initial_window(6)
+            .horizon(12)
+            .step_size(12)
+            .ensure_end_coverage(true)
+            .generate(144);
+
+        assert!(folds_with.len() > folds_without.len());
+        assert_eq!(folds_with.last().unwrap().test_end, 144);
+    }
+
+    #[test]
+    fn ensure_end_coverage_noop_when_already_covered() {
+        // step_size evenly divides: no extra fold needed
+        let folds_without = CvFoldGenerator::new()
+            .initial_window(10)
+            .horizon(5)
+            .step_size(5)
+            .generate(30);
+
+        let folds_with = CvFoldGenerator::new()
+            .initial_window(10)
+            .horizon(5)
+            .step_size(5)
+            .ensure_end_coverage(true)
+            .generate(30);
+
+        // Last fold already covers the end
+        assert_eq!(folds_without.last().unwrap().test_end, 30);
+        assert_eq!(folds_without.len(), folds_with.len());
+    }
+
+    #[test]
+    fn ensure_end_coverage_with_rolling_strategy() {
+        let folds = CvFoldGenerator::new()
+            .initial_window(20)
+            .horizon(5)
+            .step_size(7)
+            .strategy(CVStrategy::Rolling)
+            .ensure_end_coverage(true)
+            .generate(50);
+
+        let last = folds.last().unwrap();
+        assert_eq!(last.test_end, 50);
+        assert_eq!(last.train_size(), 20); // rolling: fixed window
+    }
+
+    #[test]
+    fn ensure_end_coverage_with_gap() {
+        let folds = CvFoldGenerator::new()
+            .initial_window(10)
+            .horizon(5)
+            .step_size(7)
+            .gap(2)
+            .ensure_end_coverage(true)
+            .generate(40);
+
+        let last = folds.last().unwrap();
+        assert_eq!(last.test_end, 40);
+        assert_eq!(last.test_start, 35);
+        // train_end = test_start - gap = 33
+        assert!(last.train_end <= 33);
+    }
+
+    #[test]
+    fn ensure_end_coverage_disabled_by_default() {
+        let gen = CvFoldGenerator::new();
+        assert!(!gen.ensure_end_coverage);
     }
 }
