@@ -1522,10 +1522,7 @@ mod ols_impl {
                 let diff_offset = n_original - working_values.len();
                 let trimmed_ts = series.slice(diff_offset, n_original)?;
                 // Replace values with differenced values
-                TimeSeries::univariate(
-                    trimmed_ts.timestamps().to_vec(),
-                    working_values.clone(),
-                )?
+                TimeSeries::univariate(trimmed_ts.timestamps().to_vec(), working_values.clone())?
             } else {
                 series.clone()
             };
@@ -1560,9 +1557,8 @@ mod ols_impl {
 
             // Store tail values for recursive prediction (from differenced series)
             let tail_len = self.features.max_effective_lag().max(1);
-            let tail_values = working_values
-                [working_values.len().saturating_sub(tail_len)..]
-                .to_vec();
+            let tail_values =
+                working_values[working_values.len().saturating_sub(tail_len)..].to_vec();
 
             self.state = Some(FittedState {
                 model: fitted,
@@ -2774,7 +2770,12 @@ mod ols_impl {
             // is constant. Integration should continue the trend roughly.
             let last = ts.primary_values().last().copied().unwrap();
             for &v in forecast.primary() {
-                assert!(v > last * 0.5, "Forecast {} should continue trend from {}", v, last);
+                assert!(
+                    v > last * 0.5,
+                    "Forecast {} should continue trend from {}",
+                    v,
+                    last
+                );
             }
         }
 
@@ -2782,7 +2783,11 @@ mod ols_impl {
         fn differencing_d1_with_lags() {
             let ts = make_linear_ts(50);
             let mut model = RegressionForecaster::ols(
-                RegressionFeatures::new().no_trend().differencing(1).lags(2).no_exog(),
+                RegressionFeatures::new()
+                    .no_trend()
+                    .differencing(1)
+                    .lags(2)
+                    .no_exog(),
             );
             model.fit(&ts).unwrap();
             let forecast = model.predict(5).unwrap();
