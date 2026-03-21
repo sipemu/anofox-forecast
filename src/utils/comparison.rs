@@ -192,10 +192,10 @@ fn run_cv_for_factory(
     cv_config: &CVConfig,
 ) -> Option<AccuracyMetrics> {
     let generator = cv_config.to_fold_generator();
-    let folds = generator.generate(series.len());
-    if folds.is_empty() {
-        return None;
-    }
+    let folds = match generator.generate(series.len()) {
+        Ok(f) if !f.is_empty() => f,
+        _ => return None,
+    };
 
     let mut all_actual = Vec::new();
     let mut all_predicted = Vec::new();

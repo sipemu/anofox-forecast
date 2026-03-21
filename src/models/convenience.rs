@@ -274,13 +274,19 @@ pub fn cross_validate_all(
         };
     }
 
-    let (initial_window, step_size) = compute_cv_fold_params(ts.len(), n_folds, horizon);
-
     let generator = CvFoldGenerator::new()
-        .min_initial_window(initial_window)
+        .n_folds(n_folds)
+        .min_initial_window(2)
         .horizon(horizon)
-        .step_size(step_size);
-    let folds = generator.generate(ts.len());
+        .on_constraint_violation(crate::utils::cross_validation::ConstraintViolation::ReduceFolds);
+    let folds = match generator.generate(ts.len()) {
+        Ok(f) => f,
+        Err(_) => {
+            return CVComparison {
+                results: Vec::new(),
+            }
+        }
+    };
 
     let specs: Vec<_> = registry.iter().collect();
     let evaluate = |spec: &&crate::models::traits::ModelSpec| -> CVModelResult {
