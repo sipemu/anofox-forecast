@@ -10,5 +10,5 @@ mod diff;
 mod model;
 
 pub use auto_arima::{AutoARIMA, AutoARIMAConfig, ModelOrder};
-pub use diff::{difference, integrate, seasonal_difference};
+pub use diff::{difference, integrate, seasonal_difference, seasonal_integrate};
 pub use model::{ARIMASpec, SARIMASpec, ARIMA, SARIMA};

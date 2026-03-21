@@ -92,6 +92,61 @@ pub fn integrate(differenced: &[f64], original: &[f64], d: usize) -> Vec<f64> {
     result
 }
 
+/// Integrate (reverse seasonal differencing) a seasonally differenced series.
+///
+/// # Arguments
+/// * `differenced` - The seasonally differenced forecast values
+/// * `original` - The original series (needed for the last `period * d` values)
+/// * `d` - Seasonal differencing order used
+/// * `period` - Seasonal period used
+///
+/// # Returns
+/// The integrated series on the original scale.
+pub fn seasonal_integrate(
+    differenced: &[f64],
+    original: &[f64],
+    d: usize,
+    period: usize,
+) -> Vec<f64> {
+    if d == 0 || period == 0 || differenced.is_empty() {
+        return differenced.to_vec();
+    }
+
+    let mut result = differenced.to_vec();
+
+    for level in (0..d).rev() {
+        // Get the reference series at this differencing level
+        let reference = if level == 0 {
+            original.to_vec()
+        } else {
+            seasonal_difference(original, level, period)
+        };
+
+        // Each forecast value: y[t] = diff[t] + y[t - period]
+        // We need the last `period` values from the reference to seed integration
+        let mut integrated = Vec::with_capacity(result.len());
+        let ref_len = reference.len();
+
+        for (i, &diff_val) in result.iter().enumerate() {
+            let prev = if i < period {
+                // Seed from the tail of the reference series
+                let ref_idx = ref_len.wrapping_sub(period).wrapping_add(i);
+                if ref_idx < ref_len {
+                    reference[ref_idx]
+                } else {
+                    0.0
+                }
+            } else {
+                integrated[i - period]
+            };
+            integrated.push(diff_val + prev);
+        }
+        result = integrated;
+    }
+
+    result
+}
+
 /// Check if a series needs differencing using a simple variance ratio test.
 ///
 /// # Arguments
@@ -256,5 +311,40 @@ mod tests {
         let series: Vec<f64> = (0..20).map(|i| (i * i) as f64).collect();
         let d = suggest_differencing(&series);
         assert!(d >= 1);
+    }
+
+    #[test]
+    fn seasonal_integrate_reverses_seasonal_difference() {
+        // Quarterly data with year-over-year growth of 10
+        let original = vec![
+            100.0, 120.0, 80.0, 90.0, // Year 1
+            110.0, 130.0, 90.0, 100.0, // Year 2
+        ];
+        let diffed = seasonal_difference(&original, 1, 4);
+        assert_eq!(diffed, vec![10.0, 10.0, 10.0, 10.0]);
+
+        // Forecast: continue the same year-over-year growth
+        let forecast_diff = vec![10.0, 10.0, 10.0, 10.0];
+        let integrated = seasonal_integrate(&forecast_diff, &original, 1, 4);
+
+        // Year 3 should be year 2 + 10 for each quarter
+        assert_relative_eq!(integrated[0], 120.0, epsilon = 1e-10);
+        assert_relative_eq!(integrated[1], 140.0, epsilon = 1e-10);
+        assert_relative_eq!(integrated[2], 100.0, epsilon = 1e-10);
+        assert_relative_eq!(integrated[3], 110.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn seasonal_integrate_order_0_is_identity() {
+        let forecast = vec![1.0, 2.0, 3.0];
+        let original = vec![10.0, 20.0, 30.0, 40.0];
+        let result = seasonal_integrate(&forecast, &original, 0, 4);
+        assert_eq!(result, forecast);
+    }
+
+    #[test]
+    fn seasonal_integrate_empty() {
+        let result = seasonal_integrate(&[], &[1.0, 2.0], 1, 2);
+        assert!(result.is_empty());
     }
 }

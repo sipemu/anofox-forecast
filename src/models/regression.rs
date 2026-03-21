@@ -607,6 +607,10 @@ mod ols_impl {
         pub seasonal_components: Vec<SeasonalSpec>,
         /// Structural features (forward-filled during prediction).
         pub structural_features: Vec<Arc<dyn StructuralFeature>>,
+        /// Regular differencing order (d). Applied before fitting, integrated after predict.
+        pub diff_order: usize,
+        /// Seasonal differencing: (order D, period s). Applied before fitting, integrated after predict.
+        pub seasonal_diff: Option<(usize, usize)>,
     }
 
     impl Default for RegressionFeatures {
@@ -619,6 +623,8 @@ mod ols_impl {
                 trend_components: Vec::new(),
                 seasonal_components: Vec::new(),
                 structural_features: Vec::new(),
+                diff_order: 0,
+                seasonal_diff: None,
             }
         }
     }
@@ -728,6 +734,22 @@ mod ols_impl {
         /// Add changepoint features with specified encoding (convenience).
         pub fn with_changepoints(self, indices: Vec<usize>, encoding: ChangepointEncoding) -> Self {
             self.with_structural(Arc::new(ChangepointFeature::new(indices, encoding)))
+        }
+
+        /// Apply regular differencing of order `d` before fitting.
+        ///
+        /// The model automatically integrates (undoes differencing) during predict.
+        pub fn differencing(mut self, d: usize) -> Self {
+            self.diff_order = d;
+            self
+        }
+
+        /// Apply seasonal differencing of order `D` with the given period before fitting.
+        ///
+        /// The model automatically integrates (undoes seasonal differencing) during predict.
+        pub fn seasonal_differencing(mut self, d: usize, period: usize) -> Self {
+            self.seasonal_diff = Some((d, period));
+            self
         }
 
         /// Number of observations lost to lagging.
@@ -1128,18 +1150,20 @@ mod ols_impl {
         model: Box<dyn FittedRegressor + Send>,
         /// Feature configuration used.
         features: RegressionFeatures,
-        /// Number of observations in the full series.
+        /// Number of observations in the full series (before differencing).
         n_total: usize,
-        /// Last `max_lag` values for recursive prediction.
+        /// Last `max_lag` values for recursive prediction (from differenced series).
         tail_values: Vec<f64>,
-        /// In-sample fitted values (full length, NaN-padded for lags).
+        /// In-sample fitted values (full length, NaN-padded for lags/differencing).
         fitted_values: Vec<f64>,
-        /// In-sample residuals (full length, NaN-padded for lags).
+        /// In-sample residuals (full length, NaN-padded for lags/differencing).
         residuals: Vec<f64>,
         /// Exogenous regressor names (sorted).
         exog_names: Vec<String>,
         /// Fitted trend/seasonal components for generating future feature columns.
         components: Vec<FittedComponentState>,
+        /// Original series values (stored when differencing is used, for integration).
+        original_values: Option<Vec<f64>>,
     }
 
     impl std::fmt::Debug for FittedState {
@@ -1365,6 +1389,55 @@ mod ols_impl {
             self.state.as_ref().map(|s| s.model.r_squared())
         }
 
+        /// Apply configured differencing to a series.
+        fn apply_differencing(&self, values: &[f64]) -> Vec<f64> {
+            use crate::models::arima::{difference, seasonal_difference};
+
+            let mut result = values.to_vec();
+
+            // Seasonal differencing first (standard ARIMA convention)
+            if let Some((d, period)) = self.features.seasonal_diff {
+                result = seasonal_difference(&result, d, period);
+            }
+
+            // Then regular differencing
+            if self.features.diff_order > 0 {
+                result = difference(&result, self.features.diff_order);
+            }
+
+            result
+        }
+
+        /// Integrate (undo differencing) forecast values back to original scale.
+        fn apply_integration(&self, state: &FittedState, predictions: &[f64]) -> Vec<f64> {
+            let original = match &state.original_values {
+                Some(v) => v,
+                None => return predictions.to_vec(),
+            };
+
+            use crate::models::arima::{integrate, seasonal_integrate};
+
+            let mut result = predictions.to_vec();
+
+            // Undo regular differencing first (reverse of application order)
+            if self.features.diff_order > 0 {
+                // The reference for regular integration is the original after seasonal diff
+                let reference = if let Some((d, period)) = self.features.seasonal_diff {
+                    crate::models::arima::seasonal_difference(original, d, period)
+                } else {
+                    original.clone()
+                };
+                result = integrate(&result, &reference, self.features.diff_order);
+            }
+
+            // Then undo seasonal differencing
+            if let Some((d, period)) = self.features.seasonal_diff {
+                result = seasonal_integrate(&result, original, d, period);
+            }
+
+            result
+        }
+
         /// Recursive multi-step prediction for models with lag features.
         fn predict_recursive(
             &self,
@@ -1431,9 +1504,35 @@ mod ols_impl {
         fn fit(&mut self, series: &TimeSeries) -> Result<()> {
             validate_series_complete(series)?;
             let values = series.primary_values();
-            let n = values.len();
+            let n_original = values.len();
 
-            let (x, y, n_train, exog_names, components) = self.features.build_matrices(series)?;
+            // Apply differencing if configured
+            let uses_diff = self.features.diff_order > 0 || self.features.seasonal_diff.is_some();
+            let original_values = if uses_diff {
+                Some(values.to_vec())
+            } else {
+                None
+            };
+
+            let working_values = self.apply_differencing(values);
+
+            // Build a temporary TimeSeries from differenced values for matrix construction
+            let fit_series = if uses_diff {
+                // Trim timestamps to match differenced length
+                let diff_offset = n_original - working_values.len();
+                let trimmed_ts = series.slice(diff_offset, n_original)?;
+                // Replace values with differenced values
+                TimeSeries::univariate(
+                    trimmed_ts.timestamps().to_vec(),
+                    working_values.clone(),
+                )?
+            } else {
+                series.clone()
+            };
+
+            let n = fit_series.primary_values().len();
+            let (x, y, n_train, exog_names, components) =
+                self.features.build_matrices(&fit_series)?;
 
             // Fit via the configured backend
             let fitted = self.backend.fit_to(&x, &y).map_err(|e| {
@@ -1444,21 +1543,26 @@ mod ols_impl {
                 ))
             })?;
 
-            // In-sample predictions
+            // In-sample predictions (on differenced scale)
             let in_sample_preds = fitted.predict(&x);
 
-            // Build full-length fitted values (NaN-padded for lag offset)
-            let offset = self.features.lag_offset();
-            let mut fitted_values = vec![f64::NAN; n];
-            let mut residuals = vec![f64::NAN; n];
+            // Build full-length fitted values (NaN-padded for lag offset + differencing)
+            let diff_offset = n_original - n;
+            let lag_offset = self.features.lag_offset();
+            let total_offset = diff_offset + lag_offset;
+            let mut fitted_values = vec![f64::NAN; n_original];
+            let mut residuals = vec![f64::NAN; n_original];
+            let diff_values = fit_series.primary_values();
             for i in 0..n_train {
-                fitted_values[offset + i] = in_sample_preds[i];
-                residuals[offset + i] = values[offset + i] - in_sample_preds[i];
+                fitted_values[total_offset + i] = in_sample_preds[i];
+                residuals[total_offset + i] = diff_values[lag_offset + i] - in_sample_preds[i];
             }
 
-            // Store tail values for recursive prediction
+            // Store tail values for recursive prediction (from differenced series)
             let tail_len = self.features.max_effective_lag().max(1);
-            let tail_values = values[n.saturating_sub(tail_len)..].to_vec();
+            let tail_values = working_values
+                [working_values.len().saturating_sub(tail_len)..]
+                .to_vec();
 
             self.state = Some(FittedState {
                 model: fitted,
@@ -1469,6 +1573,7 @@ mod ols_impl {
                 residuals,
                 exog_names,
                 components,
+                original_values,
             });
 
             Ok(())
@@ -1494,6 +1599,7 @@ mod ols_impl {
             }
 
             let predictions = self.predict_recursive(state, horizon, None)?;
+            let predictions = self.apply_integration(state, &predictions);
             Ok(Forecast::from_values(predictions))
         }
 
@@ -1602,6 +1708,7 @@ mod ols_impl {
             }
 
             let predictions = self.predict_recursive(state, horizon, Some(future_regressors))?;
+            let predictions = self.apply_integration(state, &predictions);
             Ok(Forecast::from_values(predictions))
         }
 
@@ -2635,6 +2742,96 @@ mod ols_impl {
             for &v in forecast.primary() {
                 assert!(v.is_finite());
             }
+        }
+
+        // ── Differencing tests ───────────────────────────────────────
+
+        #[test]
+        fn differencing_d1_produces_finite_forecast() {
+            let ts = make_linear_ts(50);
+            let mut model = RegressionForecaster::ols(
+                RegressionFeatures::new().trend().differencing(1).no_exog(),
+            );
+            model.fit(&ts).unwrap();
+            let forecast = model.predict(5).unwrap();
+            assert_eq!(forecast.primary().len(), 5);
+            for &v in forecast.primary() {
+                assert!(v.is_finite(), "Forecast should be finite, got {}", v);
+            }
+        }
+
+        #[test]
+        fn differencing_d1_continues_trend() {
+            // Linear trend: values 1..=30
+            let ts = make_linear_ts(30);
+            let mut model = RegressionForecaster::ols(
+                RegressionFeatures::new().trend().differencing(1).no_exog(),
+            );
+            model.fit(&ts).unwrap();
+            let forecast = model.predict(5).unwrap();
+
+            // After d=1 differencing of a linear trend, the differenced series
+            // is constant. Integration should continue the trend roughly.
+            let last = ts.primary_values().last().copied().unwrap();
+            for &v in forecast.primary() {
+                assert!(v > last * 0.5, "Forecast {} should continue trend from {}", v, last);
+            }
+        }
+
+        #[test]
+        fn differencing_d1_with_lags() {
+            let ts = make_linear_ts(50);
+            let mut model = RegressionForecaster::ols(
+                RegressionFeatures::new().no_trend().differencing(1).lags(2).no_exog(),
+            );
+            model.fit(&ts).unwrap();
+            let forecast = model.predict(5).unwrap();
+            assert_eq!(forecast.primary().len(), 5);
+            for &v in forecast.primary() {
+                assert!(v.is_finite());
+            }
+        }
+
+        #[test]
+        fn seasonal_differencing_produces_finite_forecast() {
+            let ts = make_seasonal_ts(60, 7);
+            let mut model = RegressionForecaster::ols(
+                RegressionFeatures::new()
+                    .trend()
+                    .seasonal_differencing(1, 7)
+                    .no_exog(),
+            );
+            model.fit(&ts).unwrap();
+            let forecast = model.predict(7).unwrap();
+            assert_eq!(forecast.primary().len(), 7);
+            for &v in forecast.primary() {
+                assert!(v.is_finite(), "Forecast should be finite, got {}", v);
+            }
+        }
+
+        #[test]
+        fn both_differencing_and_seasonal() {
+            let ts = make_seasonal_ts(80, 7);
+            let mut model = RegressionForecaster::ols(
+                RegressionFeatures::new()
+                    .trend()
+                    .differencing(1)
+                    .seasonal_differencing(1, 7)
+                    .no_exog(),
+            );
+            model.fit(&ts).unwrap();
+            let forecast = model.predict(7).unwrap();
+            assert_eq!(forecast.primary().len(), 7);
+            for &v in forecast.primary() {
+                assert!(v.is_finite());
+            }
+        }
+
+        #[test]
+        fn no_differencing_is_default() {
+            let features = RegressionFeatures::new();
+            assert_eq!(features.diff_order, 0);
+            assert!(features.seasonal_diff.is_none());
         }
     }
 }
