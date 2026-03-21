@@ -137,3 +137,27 @@ let config = ComparisonConfig::new().with_horizon(12);
 let results = compare_models(&factories, &ts, &config).unwrap();
 ```
 
+## ModelSpec and ModelRegistry
+
+```rust
+use anofox_forecast::models::{ModelSpec, ModelRegistry};
+
+// ModelSpec.name is String (accepts &str or String via Into<String>)
+let spec = ModelSpec::new("Naive", || Box::new(Naive::new()), true);
+
+// Dynamic names for multiple variants of the same model
+let spec = ModelSpec::with_type("MFLES_additive", "MFLES", || ..., false);
+let spec = ModelSpec::with_type("MFLES_multiplicative", "MFLES", || ..., false);
+
+// with_period for seasonal models
+let spec = ModelSpec::with_period("SeasonalNaive", |p| Box::new(SeasonalNaive::new(p)), 12, true);
+
+// Registry queries
+let mut reg = ModelRegistry::new();
+reg.register(spec);
+reg.names();              // Vec<&str>
+reg.by_type("MFLES");    // Vec<&ModelSpec> — all specs with model_type == "MFLES"
+reg.contains("Naive");    // bool
+reg.remove("Naive");      // bool
+```
+

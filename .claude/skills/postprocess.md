@@ -64,7 +64,34 @@ let intervals = cp.predict(&result, &new_forecasts).unwrap();
 println!("Interval width: {:.2}", result.quantile_value() * 2.0);
 ```
 
-## 3. Historical Simulation (Non-Parametric Quantiles)
+## 3. Per-Horizon-Step Conformal (Growing Intervals)
+
+```rust
+use anofox_forecast::postprocess::{ConformalPredictor, PerStepConformalResult};
+
+// For multi-step forecasting where error grows with horizon
+let cp = ConformalPredictor::split(0.90);
+
+// fold_forecasts[i] and fold_actuals[i] are Vec<f64> of length `horizon`
+// from cross-validation or rolling-origin backtesting
+let result: PerStepConformalResult = cp.fit_per_step(
+    &fold_forecasts,  // &[Vec<f64>], one per fold
+    &fold_actuals,    // &[Vec<f64>], one per fold
+).unwrap();
+
+// Each step gets its own half-width: h=1 is tighter than h=12
+println!("Half-widths: {:?}", result.half_widths());
+
+// Apply to a point forecast
+let (lower, upper) = result.predict(&point_forecast);
+
+// Or get PredictionIntervals directly
+let intervals = result.predict_intervals(&point_forecast);
+```
+
+Works with all methods: `split()`, `cross_val()`, `jackknife_plus()`. Falls back to pooled quantile when a step has < 2 residuals.
+
+## 4. Historical Simulation (Non-Parametric Quantiles)
 
 ```rust
 use anofox_forecast::postprocess::HistoricalSimulator;
@@ -87,7 +114,7 @@ let q05 = quantiles.at_quantile(0);       // 5th percentile values
 let at_t3 = quantiles.at_time(3);         // all quantiles at time step 3
 ```
 
-## 4. Quantile Regression Averaging (Ensemble)
+## 5. Quantile Regression Averaging (Ensemble)
 
 ```rust
 use anofox_forecast::postprocess::{QRAPredictor, QRARegularization};
@@ -109,7 +136,7 @@ let result = qra.fit(&forecasts_matrix, &actuals).unwrap();
 let quantiles = qra.predict(&result, &new_forecasts_matrix).unwrap();
 ```
 
-## 5. Binned Conformal (Heteroscedastic Intervals)
+## 6. Binned Conformal (Heteroscedastic Intervals)
 
 ```rust
 use anofox_forecast::postprocess::BinnedConformalPredictor;
@@ -122,7 +149,7 @@ let result = bcp.fit(&train_forecasts, &train_actuals).unwrap();
 // result has per-bin quantile values
 ```
 
-## 6. Recalibrate Existing Quantile Forecasts
+## 7. Recalibrate Existing Quantile Forecasts
 
 ```rust
 use anofox_forecast::postprocess::conformalize;
@@ -138,7 +165,7 @@ println!("Adjustments per quantile: {:?}", recalibrated.adjustments());
 let fixed_forecasts = recalibrated.into_forecasts();
 ```
 
-## 7. Evaluate Intervals
+## 8. Evaluate Intervals
 
 ```rust
 use anofox_forecast::utils::metrics::{coverage, msis};
@@ -156,7 +183,7 @@ let widths = intervals.widths();
 println!("Mean width: {:.2}", widths.iter().sum::<f64>() / widths.len() as f64);
 ```
 
-## 8. Typical Workflow
+## 9. Typical Workflow
 
 ```rust
 use anofox_forecast::models::arima::ARIMA;
