@@ -7,7 +7,7 @@ use crate::time_series::{Forecast, TimeSeries};
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
-use anofox_forecast::models::auto_forecast::{AutoForecast, AutoForecastConfig, SelectionStrategy};
+use anofox_forecast::models::auto_forecast::{AutoForecast, AutoForecastConfig};
 use anofox_forecast::models::ensemble::{AutoEnsemble, AutoEnsembleConfig};
 use anofox_forecast::models::Forecaster;
 
@@ -18,7 +18,7 @@ use anofox_forecast::models::Forecaster;
 /// Automatic model selection across ARIMA, ETS, and Theta families.
 ///
 /// Fits all enabled auto models and selects the best one based on
-/// in-sample MSE or cross-validation error.
+/// cross-validation error.
 #[wasm_bindgen]
 pub struct AutoForecaster {
     model: AutoForecast,
@@ -29,7 +29,7 @@ impl AutoForecaster {
     /// Create a new AutoForecaster with default configuration.
     ///
     /// By default, includes AutoARIMA, AutoETS, and AutoTheta candidates
-    /// and uses in-sample MSE for model selection.
+    /// and uses cross-validation for model selection.
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
         Self {
@@ -53,14 +53,12 @@ impl AutoForecaster {
     /// @param includeArima - Include AutoARIMA candidate (default: true)
     /// @param includeEts - Include AutoETS candidate (default: true)
     /// @param includeTheta - Include AutoTheta candidate (default: true)
-    /// @param useCrossValidation - Use cross-validation instead of in-sample MSE (default: false)
     #[wasm_bindgen(js_name = withConfig)]
     pub fn with_config(
         seasonal_period: Option<usize>,
         include_arima: Option<bool>,
         include_ets: Option<bool>,
         include_theta: Option<bool>,
-        use_cross_validation: Option<bool>,
     ) -> Self {
         let mut config = match seasonal_period {
             Some(p) if p > 1 => AutoForecastConfig::with_period(p),
@@ -75,9 +73,6 @@ impl AutoForecaster {
         }
         if let Some(false) = include_theta {
             config = config.without_theta();
-        }
-        if let Some(true) = use_cross_validation {
-            config = config.with_selection(SelectionStrategy::CrossValidation);
         }
 
         Self {
@@ -179,7 +174,6 @@ pub struct AutoForecastBuilder {
     include_arima: Option<bool>,
     include_ets: Option<bool>,
     include_theta: Option<bool>,
-    use_cross_validation: Option<bool>,
 }
 
 #[wasm_bindgen]
@@ -192,7 +186,6 @@ impl AutoForecastBuilder {
             include_arima: None,
             include_ets: None,
             include_theta: None,
-            use_cross_validation: None,
         }
     }
 
@@ -232,15 +225,6 @@ impl AutoForecastBuilder {
         self
     }
 
-    /// Use cross-validation instead of in-sample MSE for model selection.
-    ///
-    /// @param useCv - Whether to use cross-validation (default: false)
-    #[wasm_bindgen(js_name = useCrossValidation)]
-    pub fn use_cross_validation(mut self, use_cv: bool) -> Self {
-        self.use_cross_validation = Some(use_cv);
-        self
-    }
-
     /// Build the AutoForecaster with the configured parameters.
     ///
     /// @returns A new AutoForecaster ready to fit
@@ -258,9 +242,6 @@ impl AutoForecastBuilder {
         }
         if let Some(v) = self.include_theta {
             builder = builder.include_theta(v);
-        }
-        if let Some(true) = self.use_cross_validation {
-            builder = builder.selection(SelectionStrategy::CrossValidation);
         }
 
         AutoForecaster {
@@ -281,7 +262,7 @@ impl Default for AutoForecastBuilder {
 
 /// Automatic ensemble that selects top-K models across families.
 ///
-/// Fits AutoARIMA, AutoETS, and AutoTheta, ranks them by in-sample MSE,
+/// Fits AutoARIMA, AutoETS, and AutoTheta, ranks them by cross-validation error,
 /// and combines the top-K into a weighted ensemble forecast.
 #[wasm_bindgen]
 pub struct AutoEnsembleForecaster {

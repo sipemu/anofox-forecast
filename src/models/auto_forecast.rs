@@ -1,7 +1,7 @@
 //! Unified automatic model selection across ARIMA, ETS, and Theta families.
 //!
 //! `AutoForecast` fits all enabled auto models (AutoARIMA, AutoETS, AutoTheta)
-//! and selects the best one based on in-sample MSE or cross-validation error.
+//! and selects the best one based on cross-validation error.
 
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
@@ -15,16 +15,6 @@ use std::fmt;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-/// Strategy for selecting the best model.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SelectionStrategy {
-    /// Compare models by in-sample MSE of residuals (fast, default).
-    #[default]
-    InSampleMSE,
-    /// Compare models by cross-validation error (more robust, slower).
-    CrossValidation,
-}
-
 /// Configuration for AutoForecast.
 #[derive(Debug, Clone)]
 pub struct AutoForecastConfig {
@@ -36,8 +26,6 @@ pub struct AutoForecastConfig {
     pub include_ets: bool,
     /// Include AutoTheta in the candidate set.
     pub include_theta: bool,
-    /// Selection strategy for comparing models.
-    pub selection: SelectionStrategy,
 }
 
 impl Default for AutoForecastConfig {
@@ -47,7 +35,6 @@ impl Default for AutoForecastConfig {
             include_arima: true,
             include_ets: true,
             include_theta: true,
-            selection: SelectionStrategy::InSampleMSE,
         }
     }
 }
@@ -59,12 +46,6 @@ impl AutoForecastConfig {
             seasonal_period: Some(period),
             ..Default::default()
         }
-    }
-
-    /// Set the selection strategy.
-    pub fn with_selection(mut self, strategy: SelectionStrategy) -> Self {
-        self.selection = strategy;
-        self
     }
 
     /// Disable AutoARIMA.
@@ -145,7 +126,6 @@ pub struct AutoForecastBuilder {
     include_arima: Option<bool>,
     include_ets: Option<bool>,
     include_theta: Option<bool>,
-    selection: Option<SelectionStrategy>,
 }
 
 impl AutoForecastBuilder {
@@ -156,7 +136,6 @@ impl AutoForecastBuilder {
             include_arima: None,
             include_ets: None,
             include_theta: None,
-            selection: None,
         }
     }
 
@@ -184,12 +163,6 @@ impl AutoForecastBuilder {
         self
     }
 
-    /// Set the model selection strategy.
-    pub fn selection(mut self, strategy: SelectionStrategy) -> Self {
-        self.selection = Some(strategy);
-        self
-    }
-
     /// Build the AutoForecast model.
     pub fn build(self) -> AutoForecast {
         let config = AutoForecastConfig {
@@ -197,7 +170,6 @@ impl AutoForecastBuilder {
             include_arima: self.include_arima.unwrap_or(true),
             include_ets: self.include_ets.unwrap_or(true),
             include_theta: self.include_theta.unwrap_or(true),
-            selection: self.selection.unwrap_or_default(),
         };
 
         AutoForecast::with_config(config)
@@ -245,107 +217,6 @@ impl AutoForecast {
     /// Get all candidate scores as (model_name, score) pairs, sorted ascending.
     pub fn all_scores(&self) -> &[(String, f64)] {
         &self.scores
-    }
-
-    /// Calculate MSE from residuals.
-    fn calculate_mse(residuals: &[f64]) -> f64 {
-        if residuals.is_empty() {
-            return f64::MAX;
-        }
-        let n = residuals.len() as f64;
-        residuals.iter().map(|r| r * r).sum::<f64>() / n
-    }
-
-    /// Fit using in-sample MSE comparison.
-    fn fit_in_sample(&mut self, series: &TimeSeries) -> Result<()> {
-        // Build a list of factory closures that each create, fit, and score a candidate.
-        // Models are created and consumed within the closure so non-Send types never
-        // cross thread boundaries.
-        let seasonal_period = self.config.seasonal_period;
-
-        let mut factories: Vec<
-            Box<dyn Fn(&TimeSeries) -> Option<(SelectedAutoModel, String, f64)> + Send + Sync>,
-        > = Vec::new();
-
-        if self.config.include_arima {
-            factories.push(Box::new(move |ts: &TimeSeries| {
-                let mut model = match seasonal_period {
-                    Some(p) if p > 1 => AutoARIMA::seasonal(p),
-                    _ => AutoARIMA::new(),
-                };
-                model.fit(ts).ok()?;
-                let residuals = model.residuals()?;
-                let mse = Self::calculate_mse(residuals);
-                if mse.is_finite() {
-                    let name = model.name().to_string();
-                    Some((SelectedAutoModel::ARIMA(model), name, mse))
-                } else {
-                    None
-                }
-            }));
-        }
-
-        if self.config.include_ets {
-            factories.push(Box::new(move |ts: &TimeSeries| {
-                let mut model = match seasonal_period {
-                    Some(p) if p > 1 => AutoETS::with_period(p),
-                    _ => AutoETS::new(),
-                };
-                model.fit(ts).ok()?;
-                let residuals = model.residuals()?;
-                let mse = Self::calculate_mse(residuals);
-                if mse.is_finite() {
-                    let name = model.name().to_string();
-                    Some((SelectedAutoModel::ETS(model), name, mse))
-                } else {
-                    None
-                }
-            }));
-        }
-
-        if self.config.include_theta {
-            factories.push(Box::new(move |ts: &TimeSeries| {
-                let mut model = match seasonal_period {
-                    Some(p) if p > 1 => AutoTheta::seasonal(p),
-                    _ => AutoTheta::new(),
-                };
-                model.fit(ts).ok()?;
-                let residuals = model.residuals()?;
-                let mse = Self::calculate_mse(residuals);
-                if mse.is_finite() {
-                    let name = model.name().to_string();
-                    Some((SelectedAutoModel::Theta(model), name, mse))
-                } else {
-                    None
-                }
-            }));
-        }
-
-        #[cfg(feature = "parallel")]
-        let mut candidates: Vec<(SelectedAutoModel, String, f64)> =
-            factories.par_iter().filter_map(|f| f(series)).collect();
-
-        #[cfg(not(feature = "parallel"))]
-        let mut candidates: Vec<(SelectedAutoModel, String, f64)> =
-            factories.iter().filter_map(|f| f(series)).collect();
-
-        if candidates.is_empty() {
-            return Err(ForecastError::ConvergenceFailure(
-                "No candidate model could be fitted".to_string(),
-            ));
-        }
-
-        // Sort by MSE
-        candidates.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
-
-        // Store all scores
-        self.scores = candidates.iter().map(|(_, n, s)| (n.clone(), *s)).collect();
-
-        // Select the best
-        let (best_model, _, _) = candidates.into_iter().next().unwrap();
-        self.selected = Some(best_model);
-
-        Ok(())
     }
 
     /// Fit using cross-validation comparison.
@@ -513,10 +384,7 @@ impl Forecaster for AutoForecast {
         self.selected = None;
         self.scores.clear();
 
-        match self.config.selection {
-            SelectionStrategy::InSampleMSE => self.fit_in_sample(series),
-            SelectionStrategy::CrossValidation => self.fit_cross_validation(series),
-        }
+        self.fit_cross_validation(series)
     }
 
     fn predict(&self, horizon: usize) -> Result<Forecast> {
@@ -835,28 +703,6 @@ mod tests {
     }
 
     #[test]
-    fn auto_forecast_config_with_selection() {
-        let config =
-            AutoForecastConfig::default().with_selection(SelectionStrategy::CrossValidation);
-        assert_eq!(config.selection, SelectionStrategy::CrossValidation);
-    }
-
-    #[test]
-    fn auto_forecast_cross_validation_strategy() {
-        let ts = make_trend_series(100);
-        let config =
-            AutoForecastConfig::default().with_selection(SelectionStrategy::CrossValidation);
-        let mut model = AutoForecast::with_config(config);
-        model.fit(&ts).unwrap();
-
-        assert!(model.selected_model_name().is_some());
-        assert!(!model.all_scores().is_empty());
-
-        let forecast = model.predict(5).unwrap();
-        assert_eq!(forecast.horizon(), 5);
-    }
-
-    #[test]
     fn auto_forecast_refit_clears_state() {
         let ts = make_trend_series(100);
         let mut model = AutoForecast::new();
@@ -960,15 +806,6 @@ mod tests {
         let scores = model.all_scores();
         assert_eq!(scores.len(), 1);
         assert!(scores[0].0.contains("AutoARIMA"));
-    }
-
-    #[test]
-    fn auto_forecast_builder_with_selection() {
-        let model = AutoForecast::builder()
-            .selection(SelectionStrategy::CrossValidation)
-            .build();
-        // Just verify it builds without error
-        assert_eq!(model.name(), "AutoForecast");
     }
 
     #[test]

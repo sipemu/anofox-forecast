@@ -60,7 +60,7 @@ console.log(forecast.values);
 - **Automatic Model Selection**
   - `AutoForecast`: Unified selection across ARIMA, ETS, and Theta families (parallel with `parallel` feature)
   - `AutoEnsemble`: Automatic ensemble of top-K best models
-  - Selection by in-sample MSE or cross-validation error
+  - Selection by cross-validation error
   - Builder API: `AutoForecast::builder().seasonal_period(12).include_arima(true).build()`
   - `fit_predict()` convenience method on all models
 

@@ -56,7 +56,7 @@ impl AutoEnsembleConfig {
 
 /// Automatic ensemble that selects top-K models across families.
 ///
-/// Fits AutoARIMA, AutoETS, and AutoTheta, ranks them by in-sample MSE,
+/// Fits AutoARIMA, AutoETS, and AutoTheta, ranks them by cross-validation error,
 /// and combines the top-K into an ensemble.
 ///
 /// # Example

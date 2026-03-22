@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **AutoForecast**: removed `SelectionStrategy::InSampleMSE` — model selection now always uses cross-validation (more robust). `SelectionStrategy` enum and `with_selection()` / `.selection()` builder method removed.
+
 ## [0.4.7] - 2026-03-19
 
 ### Added
