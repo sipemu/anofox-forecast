@@ -28,40 +28,58 @@ let c = coverage(&actual, &lower, &upper); // Interval coverage rate
 
 ## 2. Cross-Validation
 
+### CvFoldGenerator (low-level fold placement)
+
 ```rust
-use anofox_forecast::utils::cross_validation::{
-    cross_validate, CVConfig, CVStrategy,
-};
+use anofox_forecast::utils::cross_validation::{CvFoldGenerator, CVStrategy, ConstraintViolation};
+
+// Folds are placed backwards from the series end, stepping back by step_size.
+// Last fold always covers the series end. n_folds caps how many to take.
+// min_initial_window drops early folds with insufficient training data.
+let folds = CvFoldGenerator::new()
+    .n_folds(5)                               // at most 5 folds
+    .horizon(12)                              // test size per fold
+    .min_initial_window(50)                   // every fold trains on >= 50 obs
+    .step_size(12)                            // step between origins (default = horizon)
+    .strategy(CVStrategy::Expanding)          // or Rolling
+    .generate(365)
+    .unwrap();
+
+// step_size < horizon → overlapping test windows
+// step_size > horizon → sparse sampling (gaps between test windows)
+// step_size = horizon (default) → contiguous, non-overlapping test sets
+```
+
+### CVConfig (high-level CV)
+
+```rust
+use anofox_forecast::utils::cross_validation::{cross_validate, CVConfig};
 use anofox_forecast::models::arima::ARIMA;
 
-// Expanding window CV (default)
-let config = CVConfig::expanding(50, 12)   // initial_window=50, horizon=12
-    .with_step_size(6)                     // step between folds
+// Expanding window CV
+let config = CVConfig::expanding(50, 12)   // min_initial_window=50, horizon=12
     .with_seasonal_period(12);             // for MASE calculation
 
 let results = cross_validate(&config, &ts, || ARIMA::new(1, 1, 1)).unwrap();
 
 println!("Folds: {}", results.n_folds);
 println!("Mean MAE: {:.2} ± {:.2}", results.aggregated.mae, results.aggregated.mae_std);
-println!("Mean RMSE: {:.2}", results.aggregated.rmse);
-println!("Mean sMAPE: {:.2}", results.aggregated.smape);
-
-// Per-fold detail
-for (i, fold_metric) in results.fold_metrics.iter().enumerate() {
-    println!("  Fold {}: MAE={:.2}", i, fold_metric.mae);
-}
 
 // Rolling window CV (fixed training size)
-let config = CVConfig::rolling(50, 12).with_step_size(6);
+let config = CVConfig::rolling(50, 12);
 ```
 
 ### CV with Data Leakage Prevention
 
 ```rust
 let config = CVConfig::expanding(50, 12)
-    .with_gap(1)      // 1-step gap between train and test
-    .with_purge(3)     // remove 3 observations before test
-    .with_embargo(2);  // remove 2 observations after test
+    .with_gap(1)       // 1-step gap between train_end and test_start
+    .with_purge(3)     // remove 3 obs from end of training (train_end = origin - purge)
+    .with_embargo(2);  // exclude 2 obs after test from next fold's training
+
+// gap: observations excluded between train and test (prevents lagged feature leakage)
+// purge: shrinks training end (prevents label overlap in financial ML)
+// embargo: shifts next fold's train_start forward (prevents serial correlation)
 ```
 
 ### Early-Stopping CV
@@ -206,9 +224,14 @@ let (train, test) = train_test_split_at(&ts, 100);
 
 ## Key Rules
 
-- `CVConfig::expanding(initial_window, horizon)` — training window grows each fold.
-- `CVConfig::rolling(window_size, horizon)` — fixed-size training window.
-- `seasonal_period` in CVConfig affects only MASE calculation.
+- Folds are placed **backwards from the series end** — most recent data is always evaluated.
+- `n_folds` is a **cap**, not a target. Fewer folds are returned if `min_initial_window` drops early ones.
+- `step_size` defaults to `horizon` (non-overlapping). Set smaller for overlap, larger for sparse.
+- `CVConfig::expanding(min_window, horizon)` — training grows each fold, starts at 0.
+- `CVConfig::rolling(window_size, horizon)` — fixed-size training window slides forward.
+- `gap`: observations excluded between `train_end` and `test_start`.
+- `purge`: shrinks `train_end` by N observations (origin = train_end + purge).
+- `step_size` steps back from origin, `purge` shortens training. They are independent:
+  `step_size` controls fold spacing, `purge` controls how close training gets to the test boundary.
 - `compare_models` silently skips models that fail to fit.
-- Results from `compare_models` are sorted by in-sample RMSE (ascending).
 - `diagnose_residuals` and `ModelDiagnostics` require the model to have been fit first.

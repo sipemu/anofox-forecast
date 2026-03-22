@@ -54,11 +54,15 @@ impl Fold {
 
 /// Standalone fold generator for reusable cross-validation indices.
 ///
-/// Folds are placed **backwards from the series end** with a step equal to `horizon`
-/// (non-overlapping test sets). The last fold's test window always reaches the series end.
-/// `n_folds` caps how many folds to take. `min_initial_window` is a constraint: if the
-/// earliest fold would have fewer training observations, it is dropped (or an error is
-/// returned, depending on `on_constraint_violation`).
+/// Folds are placed **backwards from the series end** with a configurable step size
+/// (defaults to `horizon` for non-overlapping test sets). The last fold's test window
+/// always reaches the series end. `n_folds` caps how many folds to take.
+/// `min_initial_window` is a constraint: if the earliest fold would have fewer training
+/// observations, it is dropped (or an error is returned, depending on
+/// `on_constraint_violation`).
+///
+/// Use `step_size()` to control spacing: smaller than `horizon` gives overlapping test
+/// windows; larger gives sparse sampling with gaps between test windows.
 ///
 /// # Example
 ///
@@ -89,6 +93,10 @@ pub struct CvFoldGenerator {
     pub min_initial_window: usize,
     /// Forecast horizon (test size per fold).
     pub horizon: usize,
+    /// Step size between consecutive fold origins. Defaults to `None` (= `horizon`,
+    /// giving non-overlapping test sets). Set < horizon for overlapping tests,
+    /// > horizon for sparse sampling.
+    pub step_size: Option<usize>,
     /// Gap between training end and test start (prevents leakage from lagged features).
     pub gap: usize,
     /// Purge window: observations to remove before training end (prevents lookahead bias).
@@ -116,6 +124,7 @@ impl Default for CvFoldGenerator {
             target_n_folds: 5,
             min_initial_window: 10,
             horizon: 1,
+            step_size: None,
             gap: 0,
             purge: 0,
             embargo: 0,
@@ -153,14 +162,12 @@ impl CvFoldGenerator {
         self
     }
 
-    /// Set the step size between folds.
+    /// Set the step size between consecutive fold origins.
     ///
-    /// **Deprecated**: step size is now computed automatically from `n_folds`.
-    /// This method is kept for backwards compatibility but is ignored when
-    /// `target_n_folds > 0`.
-    pub fn step_size(mut self, _step: usize) -> Self {
-        // Ignored — step is computed from n_folds and series_len.
-        // Kept for API compatibility during transition.
+    /// Defaults to `horizon` (non-overlapping test sets). Set smaller for overlapping
+    /// test windows, larger for sparse sampling.
+    pub fn step_size(mut self, step: usize) -> Self {
+        self.step_size = Some(step.max(1));
         self
     }
 
@@ -230,7 +237,7 @@ impl CvFoldGenerator {
         let gap = self.gap;
         let purge = self.purge;
         let min_train = self.min_initial_window.max(1);
-        let step = horizon; // non-overlapping test sets
+        let step = self.step_size.unwrap_or(horizon).max(1);
 
         // Minimum series length for at least one fold
         let min_series = min_train + purge + gap + horizon;
@@ -444,13 +451,16 @@ impl CVConfig {
     }
 
     /// Convert to a CvFoldGenerator.
-    ///
-    /// The step_size from CVConfig is used to estimate the target number of folds.
     pub fn to_fold_generator(&self) -> CvFoldGenerator {
         CvFoldGenerator {
             target_n_folds: 5, // default; callers can override
             min_initial_window: self.min_initial_window,
             horizon: self.horizon,
+            step_size: if self.step_size > 0 {
+                Some(self.step_size)
+            } else {
+                None
+            },
             gap: self.gap,
             purge: self.purge,
             embargo: self.embargo,
@@ -3324,5 +3334,82 @@ mod tests {
                 test_end: 20
             }
         );
+    }
+
+    // ── M. Custom step_size ──────────────────────────────────────────
+
+    #[test]
+    fn m1_step_size_smaller_than_horizon_overlapping_tests() {
+        // h=5, step=2: test windows overlap
+        let folds = CvFoldGenerator::new()
+            .n_folds(3)
+            .horizon(5)
+            .step_size(2)
+            .min_initial_window(5)
+            .generate(20)
+            .unwrap();
+        assert_eq!(folds.len(), 3);
+        assert_eq!(folds.last().unwrap().test_end, 20);
+        // Step=2: origins differ by 2, but horizon=5 → overlapping tests
+        for fold in &folds {
+            assert_eq!(fold.test_size(), 5);
+        }
+        // Test sets overlap: fold[1].test_start < fold[0].test_end
+        assert!(folds[1].test_start < folds[0].test_end);
+    }
+
+    #[test]
+    fn m2_step_size_larger_than_horizon_sparse() {
+        // h=3, step=10: gaps between test windows
+        let folds = CvFoldGenerator::new()
+            .n_folds(3)
+            .horizon(3)
+            .step_size(10)
+            .min_initial_window(5)
+            .generate(50)
+            .unwrap();
+        assert_eq!(folds.len(), 3);
+        assert_eq!(folds.last().unwrap().test_end, 50);
+        // Gaps between test windows
+        assert!(folds[1].test_start > folds[0].test_end);
+    }
+
+    #[test]
+    fn m3_step_size_equals_horizon_contiguous() {
+        // Explicit step = horizon: same as default
+        let folds_default = CvFoldGenerator::new()
+            .n_folds(4)
+            .horizon(5)
+            .min_initial_window(10)
+            .generate(50)
+            .unwrap();
+        let folds_explicit = CvFoldGenerator::new()
+            .n_folds(4)
+            .horizon(5)
+            .step_size(5)
+            .min_initial_window(10)
+            .generate(50)
+            .unwrap();
+        assert_eq!(folds_default, folds_explicit);
+    }
+
+    #[test]
+    fn m4_step_size_1_maximum_folds() {
+        // step=1: maximum possible folds
+        let folds = CvFoldGenerator::new()
+            .n_folds(100)
+            .horizon(3)
+            .step_size(1)
+            .min_initial_window(5)
+            .generate(20)
+            .unwrap();
+        // origins: 17,16,15,...,5 → 13 candidates, capped at 100 but only 13 fit
+        assert!(folds.len() > 5);
+        assert_eq!(folds.last().unwrap().test_end, 20);
+    }
+
+    #[test]
+    fn m5_default_step_is_none() {
+        assert!(CvFoldGenerator::new().step_size.is_none());
     }
 }
