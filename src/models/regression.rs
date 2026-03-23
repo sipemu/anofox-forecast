@@ -590,6 +590,16 @@ mod ols_impl {
     /// 4. Seasonal component columns ([`SeasonalSpec`])
     /// 5. Structural feature columns ([`StructuralFeature`])
     /// 6. Exogenous regressors (if `use_exog`)
+
+    /// Criterion for automatic lag selection.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum LagSelectionCriterion {
+        /// Bayesian Information Criterion (default). Penalizes complexity more than AIC.
+        Bic,
+        /// Akaike Information Criterion. Penalizes complexity less than BIC.
+        Aic,
+    }
+
     #[derive(Debug, Clone)]
     pub struct RegressionFeatures {
         /// Include a linear trend index (0, 1, …, n-1).
@@ -599,6 +609,8 @@ mod ols_impl {
         /// Specific lag indices to include (e.g. `vec![12]` for only lag-12).
         /// When non-empty, this takes precedence over `max_lag`.
         pub lag_indices: Vec<usize>,
+        /// Automatic lag selection: (max_lag, criterion). When set, overrides max_lag/lag_indices.
+        pub auto_lag_config: Option<(usize, LagSelectionCriterion)>,
         /// Include exogenous regressors from the TimeSeries (if present).
         pub use_exog: bool,
         /// Trend components to include as feature columns.
@@ -619,6 +631,7 @@ mod ols_impl {
                 use_trend: true,
                 max_lag: 0,
                 lag_indices: Vec::new(),
+                auto_lag_config: None,
                 use_exog: true,
                 trend_components: Vec::new(),
                 seasonal_components: Vec::new(),
@@ -654,6 +667,25 @@ mod ols_impl {
             self
         }
 
+        /// Automatically select the best lag order up to `max_lag` using BIC.
+        ///
+        /// Tries each lag order from 0 to `max_lag`, fits OLS, computes BIC, and
+        /// selects the order with the lowest BIC. This is resolved during `fit()`.
+        pub fn auto_lags(mut self, max_lag: usize) -> Self {
+            self.auto_lag_config = Some((max_lag, LagSelectionCriterion::Bic));
+            self.max_lag = 0;
+            self.lag_indices = Vec::new();
+            self
+        }
+
+        /// Automatically select the best lag order using the specified criterion.
+        pub fn auto_lags_with(mut self, max_lag: usize, criterion: LagSelectionCriterion) -> Self {
+            self.auto_lag_config = Some((max_lag, criterion));
+            self.max_lag = 0;
+            self.lag_indices = Vec::new();
+            self
+        }
+
         /// Include only the specified lag indices (e.g. `&[12]` for lag-12 only).
         pub fn specific_lags(mut self, lags: &[usize]) -> Self {
             let mut sorted = lags.to_vec();
@@ -682,6 +714,89 @@ mod ols_impl {
             } else {
                 self.max_lag
             }
+        }
+
+        /// Resolve auto-lag selection if configured.
+        ///
+        /// Tries each lag order 0..=max_lag, builds the feature matrix with that
+        /// lag order, fits OLS, computes the information criterion, and selects
+        /// the order with the lowest IC. Mutates `self.max_lag` with the result.
+        fn resolve_auto_lags(&mut self, series: &TimeSeries) -> Result<()> {
+            let (max_lag, criterion) = match self.auto_lag_config {
+                Some(cfg) => cfg,
+                None => return Ok(()),
+            };
+
+            let values = series.primary_values();
+            let n = values.len();
+
+            if max_lag == 0 || n < 4 {
+                self.max_lag = 0;
+                self.auto_lag_config = None;
+                return Ok(());
+            }
+
+            let mut best_ic = f64::INFINITY;
+            let mut best_order = 0_usize;
+
+            for p in 0..=max_lag {
+                // Temporarily set lag order
+                self.max_lag = p;
+                self.lag_indices.clear();
+
+                let offset = self.lag_offset();
+                if n <= offset + 1 {
+                    continue; // Not enough data for this lag order
+                }
+
+                // Build matrices and fit OLS
+                let result = self.build_matrices(series);
+                let (x, y, n_train, _, _) = match result {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+
+                if n_train < 3 {
+                    continue;
+                }
+
+                let fitted = match RegressionBackend::Ols.fit_to(&x, &y) {
+                    Ok(f) => f,
+                    Err(_) => continue,
+                };
+
+                // Compute RSS from in-sample predictions
+                let preds = fitted.predict(&x);
+                let mut rss = 0.0_f64;
+                for i in 0..n_train {
+                    let r = y[i] - preds[i];
+                    rss += r * r;
+                }
+
+                if !rss.is_finite() || rss <= 0.0 {
+                    continue;
+                }
+
+                let n_f = n_train as f64;
+                let k = x.ncols() as f64 + 1.0; // +1 for intercept
+
+                let ic = match criterion {
+                    LagSelectionCriterion::Bic => n_f * (rss / n_f).ln() + k * n_f.ln(),
+                    LagSelectionCriterion::Aic => n_f * (rss / n_f).ln() + 2.0 * k,
+                };
+
+                if ic.is_finite() && ic < best_ic {
+                    best_ic = ic;
+                    best_order = p;
+                }
+            }
+
+            // Set the winning lag order
+            self.max_lag = best_order;
+            self.lag_indices.clear();
+            self.auto_lag_config = None; // resolved — don't re-run on next fit
+
+            Ok(())
         }
 
         /// Include exogenous regressors from the TimeSeries.
@@ -1507,6 +1622,10 @@ mod ols_impl {
     impl Forecaster for RegressionForecaster {
         fn fit(&mut self, series: &TimeSeries) -> Result<()> {
             validate_series_complete(series)?;
+
+            // Resolve auto-lag selection before anything else
+            self.features.resolve_auto_lags(series)?;
+
             let values = series.primary_values();
             let n_original = values.len();
 
@@ -2873,13 +2992,91 @@ mod ols_impl {
             assert_eq!(features.diff_order, 0);
             assert!(features.seasonal_diffs.is_empty());
         }
+
+        // ── Auto-lag selection tests ─────────────────────────────────
+
+        #[test]
+        fn auto_lags_selects_reasonable_order() {
+            // AR(2) process: y[t] = 0.5*y[t-1] + 0.3*y[t-2] + noise
+            let mut values = vec![0.0; 100];
+            values[0] = 1.0;
+            values[1] = 0.5;
+            for i in 2..100 {
+                let noise = ((i * 7 + 3) % 11) as f64 * 0.02 - 0.11;
+                values[i] = 0.5 * values[i - 1] + 0.3 * values[i - 2] + noise;
+            }
+            let ts = TimeSeries::univariate(make_timestamps(100), values).unwrap();
+
+            let mut model = RegressionForecaster::ols(
+                RegressionFeatures::new().no_trend().auto_lags(10).no_exog(),
+            );
+            model.fit(&ts).unwrap();
+
+            let forecast = model.predict(5).unwrap();
+            assert_eq!(forecast.primary().len(), 5);
+            for &v in forecast.primary() {
+                assert!(v.is_finite());
+            }
+        }
+
+        #[test]
+        fn auto_lags_with_aic() {
+            let ts = make_linear_ts(50);
+            let mut model = RegressionForecaster::ols(
+                RegressionFeatures::new()
+                    .trend()
+                    .auto_lags_with(5, LagSelectionCriterion::Aic)
+                    .no_exog(),
+            );
+            model.fit(&ts).unwrap();
+            let forecast = model.predict(5).unwrap();
+            assert_eq!(forecast.primary().len(), 5);
+            for &v in forecast.primary() {
+                assert!(v.is_finite());
+            }
+        }
+
+        #[test]
+        fn auto_lags_max_zero_selects_no_lags() {
+            let ts = make_linear_ts(50);
+            let mut model =
+                RegressionForecaster::ols(RegressionFeatures::new().trend().auto_lags(0).no_exog());
+            model.fit(&ts).unwrap();
+            let forecast = model.predict(5).unwrap();
+            assert_eq!(forecast.primary().len(), 5);
+        }
+
+        #[test]
+        fn auto_lags_default_is_none() {
+            let features = RegressionFeatures::new();
+            assert!(features.auto_lag_config.is_none());
+        }
+
+        #[test]
+        fn auto_lags_with_differencing() {
+            let ts = make_linear_ts(60);
+            let mut model = RegressionForecaster::ols(
+                RegressionFeatures::new()
+                    .no_trend()
+                    .auto_lags(5)
+                    .differencing(1)
+                    .no_exog(),
+            );
+            model.fit(&ts).unwrap();
+            let forecast = model.predict(5).unwrap();
+            assert_eq!(forecast.primary().len(), 5);
+            for &v in forecast.primary() {
+                assert!(v.is_finite());
+            }
+        }
     }
 }
 
 #[cfg(feature = "postprocess")]
 pub use ols_impl::{
-    ChangepointEncoding, ChangepointFeature, FeatureSafety, RegressionBackend, RegressionFeatures,
-    RegressionForecaster, SeasonalSpec, StructuralFeature, TrendType, WeightStrategy,
+    ChangepointEncoding, ChangepointFeature, FeatureSafety, LagSelectionCriterion,
+    RegressionBackend, RegressionFeatures, RegressionForecaster, SeasonalSpec, StructuralFeature,
+    TrendType, WeightStrategy,
 };
 // Re-export InformationCriterion so users can configure Dynamic backend without
 // depending on anofox-regression directly.
