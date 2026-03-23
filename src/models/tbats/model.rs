@@ -682,6 +682,14 @@ impl Default for TBATS {
 impl Forecaster for TBATS {
     fn fit(&mut self, series: &TimeSeries) -> Result<()> {
         validate_series_complete(series)?;
+        for &period in &self.seasonal_periods {
+            if period < 2 {
+                return Err(ForecastError::InvalidParameter(format!(
+                    "seasonal period must be >= 2, got {}",
+                    period
+                )));
+            }
+        }
         let values = series.primary_values();
         self.n = values.len();
 
@@ -1247,6 +1255,28 @@ mod tests {
     }
 
     #[test]
+    fn constant_series_produces_constant_forecast() {
+        let timestamps = make_timestamps(40);
+        let values = vec![5.0; 40];
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = TBATS::new(vec![4]);
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(8).unwrap();
+        let preds = forecast.primary();
+
+        assert!(
+            preds.iter().all(|v| v.is_finite()),
+            "All predictions must be finite, got: {:?}",
+            preds
+        );
+        for &p in preds {
+            assert!((p - 5.0).abs() < 0.5, "Expected ~5.0, got {}", p);
+        }
+    }
+
+    #[test]
     fn tbats_forecasts_reasonable_magnitude() {
         // Test that forecasts have reasonable magnitude relative to input data
         let ts = make_complex_seasonal_series(200);
@@ -1271,5 +1301,35 @@ mod tests {
                 data_max + 2.0 * data_range
             );
         }
+    }
+
+    #[test]
+    fn tbats_rejects_period_zero() {
+        let ts = make_complex_seasonal_series(200);
+        let mut model = TBATS::new(vec![0]);
+        assert!(matches!(
+            model.fit(&ts),
+            Err(ForecastError::InvalidParameter(ref msg)) if msg.contains("seasonal period must be >= 2")
+        ));
+    }
+
+    #[test]
+    fn tbats_rejects_period_one() {
+        let ts = make_complex_seasonal_series(200);
+        let mut model = TBATS::new(vec![1]);
+        assert!(matches!(
+            model.fit(&ts),
+            Err(ForecastError::InvalidParameter(ref msg)) if msg.contains("seasonal period must be >= 2")
+        ));
+    }
+
+    #[test]
+    fn tbats_rejects_any_period_below_two() {
+        let ts = make_complex_seasonal_series(500);
+        let mut model = TBATS::new(vec![24, 0]);
+        assert!(matches!(
+            model.fit(&ts),
+            Err(ForecastError::InvalidParameter(ref msg)) if msg.contains("seasonal period must be >= 2")
+        ));
     }
 }

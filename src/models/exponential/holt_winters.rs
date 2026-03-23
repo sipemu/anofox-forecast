@@ -331,6 +331,12 @@ impl Default for HoltWinters {
 impl Forecaster for HoltWinters {
     fn fit(&mut self, series: &TimeSeries) -> Result<()> {
         validate_series_complete(series)?;
+        if self.seasonal_period < 2 {
+            return Err(ForecastError::InvalidParameter(format!(
+                "seasonal period must be >= 2, got {}",
+                self.seasonal_period
+            )));
+        }
         let values = series.primary_values();
         if values.len() < 2 * self.seasonal_period {
             return Err(ForecastError::InsufficientData {
@@ -771,6 +777,24 @@ mod tests {
     }
 
     #[test]
+    fn constant_series_produces_constant_forecast() {
+        let timestamps = make_timestamps(20);
+        let values = vec![5.0; 20];
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = HoltWinters::additive(0.3, 0.1, 0.1, 4);
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(8).unwrap();
+        let preds = forecast.primary();
+
+        assert!(preds.iter().all(|v| v.is_finite()));
+        for &p in preds {
+            assert_relative_eq!(p, 5.0, epsilon = 1e-6);
+        }
+    }
+
+    #[test]
     fn hw_multi_season_forecast() {
         let timestamps = make_timestamps(24);
         let values = make_seasonal_data(24, 4, 0.0, 3.0); // No trend
@@ -793,5 +817,31 @@ mod tests {
             assert!((s1 - s2).abs() / s1.abs().max(1.0) < 0.2);
             assert!((s2 - s3).abs() / s2.abs().max(1.0) < 0.2);
         }
+    }
+
+    #[test]
+    fn hw_rejects_period_zero() {
+        let timestamps = make_timestamps(16);
+        let values: Vec<f64> = (0..16).map(|i| 10.0 + (i % 4) as f64).collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = HoltWinters::additive(0.3, 0.1, 0.1, 0);
+        assert!(matches!(
+            model.fit(&ts),
+            Err(ForecastError::InvalidParameter(ref msg)) if msg.contains("seasonal period must be >= 2")
+        ));
+    }
+
+    #[test]
+    fn hw_rejects_period_one() {
+        let timestamps = make_timestamps(16);
+        let values: Vec<f64> = (0..16).map(|i| 10.0 + (i % 4) as f64).collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = HoltWinters::additive(0.3, 0.1, 0.1, 1);
+        assert!(matches!(
+            model.fit(&ts),
+            Err(ForecastError::InvalidParameter(ref msg)) if msg.contains("seasonal period must be >= 2")
+        ));
     }
 }

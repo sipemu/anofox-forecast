@@ -49,6 +49,12 @@ impl Default for SeasonalNaive {
 impl Forecaster for SeasonalNaive {
     fn fit(&mut self, series: &TimeSeries) -> Result<()> {
         validate_series_complete(series)?;
+        if self.period < 2 {
+            return Err(ForecastError::InvalidParameter(format!(
+                "seasonal period must be >= 2, got {}",
+                self.period
+            )));
+        }
         let values = series.primary_values();
         if values.len() < self.period {
             return Err(ForecastError::InsufficientData {
@@ -370,5 +376,49 @@ mod tests {
     fn seasonal_naive_name_is_correct() {
         let model = SeasonalNaive::new(12);
         assert_eq!(model.name(), "SeasonalNaive");
+    }
+
+    #[test]
+    fn constant_series_produces_constant_forecast() {
+        let timestamps = make_timestamps(20);
+        let values = vec![5.0; 20];
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = SeasonalNaive::new(4);
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(8).unwrap();
+        let preds = forecast.primary();
+
+        assert!(preds.iter().all(|v| v.is_finite()));
+        for &p in preds {
+            assert_relative_eq!(p, 5.0, epsilon = 1e-10);
+        }
+    }
+
+    #[test]
+    fn seasonal_naive_rejects_period_zero() {
+        let timestamps = make_timestamps(8);
+        let values = vec![1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0];
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = SeasonalNaive::new(0);
+        assert!(matches!(
+            model.fit(&ts),
+            Err(ForecastError::InvalidParameter(ref msg)) if msg.contains("seasonal period must be >= 2")
+        ));
+    }
+
+    #[test]
+    fn seasonal_naive_rejects_period_one() {
+        let timestamps = make_timestamps(8);
+        let values = vec![1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 3.0, 4.0];
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = SeasonalNaive::new(1);
+        assert!(matches!(
+            model.fit(&ts),
+            Err(ForecastError::InvalidParameter(ref msg)) if msg.contains("seasonal period must be >= 2")
+        ));
     }
 }

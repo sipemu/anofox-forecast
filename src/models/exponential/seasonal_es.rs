@@ -245,6 +245,12 @@ impl Default for SeasonalES {
 impl Forecaster for SeasonalES {
     fn fit(&mut self, series: &TimeSeries) -> Result<()> {
         validate_series_complete(series)?;
+        if self.period < 2 {
+            return Err(ForecastError::InvalidParameter(format!(
+                "seasonal period must be >= 2, got {}",
+                self.period
+            )));
+        }
         let values = series.primary_values();
         let n = values.len();
         self.n = n;
@@ -554,6 +560,24 @@ mod tests {
     }
 
     #[test]
+    fn constant_series_produces_constant_forecast() {
+        let timestamps = make_timestamps(20);
+        let values = vec![5.0; 20];
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = SeasonalES::new(4);
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(8).unwrap();
+        let preds = forecast.primary();
+
+        assert!(preds.iter().all(|v| v.is_finite()));
+        for &p in preds {
+            assert!((p - 5.0).abs() < 1e-6, "Expected ~5.0, got {}", p);
+        }
+    }
+
+    #[test]
     fn seasonal_es_statsforecast_match() {
         // Test data similar to statsforecast test
         let timestamps = make_timestamps(100);
@@ -576,5 +600,25 @@ mod tests {
             assert!(p.is_finite());
             assert!(p > 30.0 && p < 120.0);
         }
+    }
+
+    #[test]
+    fn seasonal_es_rejects_period_zero() {
+        let ts = make_seasonal_series(48, 12);
+        let mut model = SeasonalES::new(0);
+        assert!(matches!(
+            model.fit(&ts),
+            Err(ForecastError::InvalidParameter(ref msg)) if msg.contains("seasonal period must be >= 2")
+        ));
+    }
+
+    #[test]
+    fn seasonal_es_rejects_period_one() {
+        let ts = make_seasonal_series(48, 12);
+        let mut model = SeasonalES::new(1);
+        assert!(matches!(
+            model.fit(&ts),
+            Err(ForecastError::InvalidParameter(ref msg)) if msg.contains("seasonal period must be >= 2")
+        ));
     }
 }

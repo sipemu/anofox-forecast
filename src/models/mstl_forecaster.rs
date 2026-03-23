@@ -350,6 +350,15 @@ impl Forecaster for MSTLForecaster {
             ));
         }
 
+        for &period in &self.seasonal_periods {
+            if period < 2 {
+                return Err(ForecastError::InvalidParameter(format!(
+                    "seasonal period must be >= 2, got {}",
+                    period
+                )));
+            }
+        }
+
         let max_period = *self.seasonal_periods.iter().max().unwrap_or(&1);
         if values.len() < 2 * max_period {
             return Err(ForecastError::InsufficientData {
@@ -949,6 +958,28 @@ mod tests {
     }
 
     #[test]
+    fn constant_series_produces_constant_forecast() {
+        let timestamps = make_timestamps(40);
+        let values = vec![5.0; 40];
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+
+        let mut model = MSTLForecaster::new(vec![4]);
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict(8).unwrap();
+        let preds = forecast.primary();
+
+        assert!(
+            preds.iter().all(|v| v.is_finite()),
+            "All predictions must be finite, got: {:?}",
+            preds
+        );
+        for &p in preds {
+            assert!((p - 5.0).abs() < 0.5, "Expected ~5.0, got {}", p);
+        }
+    }
+
+    #[test]
     fn mstl_forecaster_no_exog_predict_works() {
         // When fit without exog, predict() should work normally
         let ts = make_multi_seasonal_series(100, &[12]);
@@ -958,5 +989,35 @@ mod tests {
         assert!(!model.has_exog());
         let forecast = model.predict(12).unwrap();
         assert_eq!(forecast.horizon(), 12);
+    }
+
+    #[test]
+    fn mstl_forecaster_rejects_period_zero() {
+        let ts = make_multi_seasonal_series(100, &[12]);
+        let mut model = MSTLForecaster::new(vec![0]);
+        assert!(matches!(
+            model.fit(&ts),
+            Err(ForecastError::InvalidParameter(ref msg)) if msg.contains("seasonal period must be >= 2")
+        ));
+    }
+
+    #[test]
+    fn mstl_forecaster_rejects_period_one() {
+        let ts = make_multi_seasonal_series(100, &[12]);
+        let mut model = MSTLForecaster::new(vec![1]);
+        assert!(matches!(
+            model.fit(&ts),
+            Err(ForecastError::InvalidParameter(ref msg)) if msg.contains("seasonal period must be >= 2")
+        ));
+    }
+
+    #[test]
+    fn mstl_forecaster_rejects_any_period_below_two() {
+        let ts = make_multi_seasonal_series(200, &[12, 24]);
+        let mut model = MSTLForecaster::new(vec![12, 1]);
+        assert!(matches!(
+            model.fit(&ts),
+            Err(ForecastError::InvalidParameter(ref msg)) if msg.contains("seasonal period must be >= 2")
+        ));
     }
 }

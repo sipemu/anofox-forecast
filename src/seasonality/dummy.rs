@@ -72,6 +72,12 @@ impl Default for DummySeasonality {
 
 impl SeasonalComponent for DummySeasonality {
     fn fit_seasonal(&mut self, values: &[f64], period: usize) -> Result<()> {
+        if period < 2 {
+            return Err(ForecastError::InvalidParameter(format!(
+                "seasonal period must be >= 2, got {}",
+                period
+            )));
+        }
         if values.is_empty() {
             return Err(ForecastError::EmptyData);
         }
@@ -675,5 +681,27 @@ mod tests {
         assert_abs_diff_eq!(fitted[0], 40.0, epsilon = 1e-10);
         assert_abs_diff_eq!(fitted[3], 40.0, epsilon = 1e-10);
         assert_abs_diff_eq!(fitted[6], 40.0, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn fit_rejects_period_zero() {
+        let mut model = DummySeasonality::new();
+        let values = vec![1.0, 2.0, 3.0, 4.0];
+        let result = model.fit_seasonal(&values, 0);
+        assert!(matches!(
+            result,
+            Err(ForecastError::InvalidParameter(ref msg)) if msg.contains("seasonal period must be >= 2")
+        ));
+    }
+
+    #[test]
+    fn fit_rejects_period_one() {
+        let mut model = DummySeasonality::new();
+        let values = vec![1.0, 2.0, 3.0, 4.0];
+        let result = model.fit_seasonal(&values, 1);
+        assert!(matches!(
+            result,
+            Err(ForecastError::InvalidParameter(ref msg)) if msg.contains("seasonal period must be >= 2")
+        ));
     }
 }
