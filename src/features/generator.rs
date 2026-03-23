@@ -71,7 +71,8 @@ enum FeatureSpec {
 }
 
 /// Time component for cyclical (sin/cos) encoding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum TimeComponent {
     /// Month of year (1-12), period=12.
     Month,
@@ -91,10 +92,13 @@ pub enum TimeComponent {
     Hour,
     /// Minute of hour (0-59), period=60.
     Minute,
+    /// Second of minute (0-59), period=60.
+    Second,
 }
 
 /// Binary (0/1) calendar indicators.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum BinaryIndicator {
     /// First day of the month.
     MonthStart,
@@ -113,7 +117,8 @@ pub enum BinaryIndicator {
 }
 
 /// Advanced numeric calendar features.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum AdvancedFeature {
     /// 1.0 if leap year, 0.0 otherwise.
     LeapYear,
@@ -302,6 +307,7 @@ impl FeatureGenerator {
                         TimeComponent::DayOfYear => ("day_of_year", 366.0),
                         TimeComponent::Hour => ("hour", 24.0),
                         TimeComponent::Minute => ("minute", 60.0),
+                        TimeComponent::Second => ("second", 60.0),
                     };
                     let mut sin_col = Vec::with_capacity(n);
                     let mut cos_col = Vec::with_capacity(n);
@@ -316,6 +322,7 @@ impl FeatureGenerator {
                             TimeComponent::DayOfYear => ts.ordinal() as f64,
                             TimeComponent::Hour => ts.hour() as f64,
                             TimeComponent::Minute => ts.minute() as f64,
+                            TimeComponent::Second => ts.second() as f64,
                         };
                         let angle = 2.0 * PI * value / period;
                         sin_col.push(angle.sin());
