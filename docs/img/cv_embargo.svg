@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 200" font-family="Consolas,monospace" font-size="13">
+  <style>
+    .train { fill: #4a90d9; }
+    .test  { fill: #e74c3c; }
+    .embargo { fill: #2ecc71; opacity: 0.5; }
+    .unused { fill: #e8e8e8; }
+    .label { fill: #333; font-size: 12px; }
+    .title { fill: #333; font-size: 15px; font-weight: bold; }
+    .axis  { fill: #666; font-size: 10px; }
+  </style>
+
+  <text x="360" y="22" text-anchor="middle" class="title">Embargo: exclude post-test obs from next fold's training</text>
+
+  <!-- Fold 1 -->
+  <text x="10" y="55" class="label">Fold 1</text>
+  <rect x="80" y="40" width="580" height="22" class="unused" rx="3" stroke="#ccc"/>
+  <rect x="80" y="40" width="180" height="22" class="train" rx="3" opacity="0.9"/>
+  <rect x="260" y="40" width="60" height="22" class="test" rx="3" opacity="0.9"/>
+  <rect x="320" y="40" width="80" height="22" class="embargo" rx="0"/>
+  <text x="360" y="55" fill="#27ae60" font-size="9" text-anchor="middle">embargo</text>
+
+  <!-- Fold 2: train_start shifted past embargo zone -->
+  <text x="10" y="95" class="label">Fold 2</text>
+  <rect x="80" y="80" width="580" height="22" class="unused" rx="3" stroke="#ccc"/>
+  <rect x="400" y="80" width="120" height="22" class="train" rx="3" opacity="0.9"/>
+  <rect x="520" y="80" width="60" height="22" class="test" rx="3" opacity="0.9"/>
+  <rect x="580" y="80" width="80" height="22" class="embargo" rx="0"/>
+  <text x="620" y="95" fill="#27ae60" font-size="9" text-anchor="middle">embargo</text>
+
+  <!-- Arrow showing shift -->
+  <line x1="320" y1="68" x2="400" y2="76" stroke="#2ecc71" stroke-width="1.5" stroke-dasharray="4"/>
+  <text x="340" y="76" fill="#27ae60" font-size="9">train_start shifted →</text>
+
+  <!-- Explanation -->
+  <text x="80" y="130" class="label">Without embargo: Fold 2 would train on [0..test2_start)</text>
+  <text x="80" y="148" class="label">With embargo: Fold 2 trains on [embargo_end..test2_start) only</text>
+  <text x="80" y="170" class="axis">Prevents serial correlation from leaking between adjacent folds.</text>
+  <text x="80" y="185" class="axis">Common in financial ML (Lopez de Prado, 2018).</text>
+</svg>

@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 280" font-family="Consolas,monospace" font-size="13">
+  <style>
+    .train { fill: #4a90d9; }
+    .test  { fill: #e74c3c; }
+    .unused { fill: #e8e8e8; }
+    .label { fill: #333; font-size: 12px; }
+    .title { fill: #333; font-size: 15px; font-weight: bold; }
+    .axis  { fill: #666; font-size: 10px; }
+  </style>
+
+  <text x="360" y="22" text-anchor="middle" class="title">Expanding Window CV (5 folds, horizon=3, min_initial_window=5)</text>
+
+  <!-- Axis -->
+  <line x1="80" y1="245" x2="680" y2="245" stroke="#999" stroke-width="1"/>
+  <text x="80" y="260" class="axis">0</text>
+  <text x="200" y="260" class="axis">5</text>
+  <text x="320" y="260" class="axis">10</text>
+  <text x="440" y="260" class="axis">15</text>
+  <text x="620" y="260" class="axis">20</text>
+
+  <!-- Legend -->
+  <rect x="80" y="270" width="12" height="12" class="train" rx="2"/>
+  <text x="96" y="281" class="axis">Train</text>
+  <rect x="140" y="270" width="12" height="12" class="test" rx="2"/>
+  <text x="156" y="281" class="axis">Test</text>
+  <rect x="200" y="270" width="12" height="12" class="unused" rx="2" stroke="#ccc"/>
+  <text x="216" y="281" class="axis">Unused</text>
+
+  <!-- Fold 1: train=[0..8), test=[8..11) -->
+  <text x="10" y="55" class="label">Fold 1</text>
+  <rect x="80" y="40" width="192" height="22" class="unused" rx="3" stroke="#ccc"/>
+  <rect x="80" y="40" width="192" height="22" class="train" rx="3" opacity="0.9"/>
+  <rect x="272" y="40" width="72" height="22" class="test" rx="3" opacity="0.9"/>
+
+  <!-- Fold 2: train=[0..11), test=[11..14) -->
+  <text x="10" y="95" class="label">Fold 2</text>
+  <rect x="80" y="80" width="264" height="22" class="train" rx="3" opacity="0.9"/>
+  <rect x="344" y="80" width="72" height="22" class="test" rx="3" opacity="0.9"/>
+
+  <!-- Fold 3: train=[0..14), test=[14..17) -->
+  <text x="10" y="135" class="label">Fold 3</text>
+  <rect x="80" y="120" width="336" height="22" class="train" rx="3" opacity="0.9"/>
+  <rect x="416" y="120" width="72" height="22" class="test" rx="3" opacity="0.9"/>
+
+  <!-- Fold 4: train=[0..17), test=[17..20) -->
+  <text x="10" y="175" class="label">Fold 4</text>
+  <rect x="80" y="160" width="408" height="22" class="train" rx="3" opacity="0.9"/>
+  <rect x="488" y="160" width="72" height="22" class="test" rx="3" opacity="0.9"/>
+
+  <!-- Fold 5: train=[0..20), test=[20..23) — last fold anchored at end -->
+  <text x="10" y="215" class="label">Fold 5</text>
+  <rect x="80" y="200" width="480" height="22" class="train" rx="3" opacity="0.9"/>
+  <rect x="560" y="200" width="72" height="22" class="test" rx="3" opacity="0.9"/>
+
+  <!-- Arrow indicating "anchored at end" -->
+  <line x1="632" y1="200" x2="632" y2="240" stroke="#e74c3c" stroke-width="1.5" stroke-dasharray="4"/>
+  <text x="636" y="238" fill="#e74c3c" font-size="9">series end</text>
+</svg>
