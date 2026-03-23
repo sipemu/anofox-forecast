@@ -62,6 +62,63 @@ enum FeatureSpec {
         dates: Vec<DateTime<Utc>>,
         name: String,
     },
+    /// Cyclical sin/cos encoding of a time component.
+    Cyclical(TimeComponent),
+    /// Binary indicator (0/1).
+    Binary(BinaryIndicator),
+    /// Advanced numeric feature.
+    Advanced(AdvancedFeature),
+}
+
+/// Time component for cyclical (sin/cos) encoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeComponent {
+    /// Month of year (1-12), period=12.
+    Month,
+    /// Quarter (1-4), period=4.
+    Quarter,
+    /// Semester (1-2), period=2.
+    Semester,
+    /// ISO week of year (1-53), period=53.
+    WeekOfYear,
+    /// Day of week (0-6, Mon=0), period=7.
+    DayOfWeek,
+    /// Day of month (1-31), period=31.
+    DayOfMonth,
+    /// Day of year (1-366), period=366.
+    DayOfYear,
+    /// Hour of day (0-23), period=24.
+    Hour,
+    /// Minute of hour (0-59), period=60.
+    Minute,
+}
+
+/// Binary (0/1) calendar indicators.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinaryIndicator {
+    /// First day of the month.
+    MonthStart,
+    /// Last day of the month.
+    MonthEnd,
+    /// First day of the quarter (Jan/Apr/Jul/Oct 1).
+    QuarterStart,
+    /// Last day of the quarter (Mar/Jun/Sep/Dec last day).
+    QuarterEnd,
+    /// January 1.
+    YearStart,
+    /// December 31.
+    YearEnd,
+    /// Saturday or Sunday.
+    Weekend,
+}
+
+/// Advanced numeric calendar features.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdvancedFeature {
+    /// 1.0 if leap year, 0.0 otherwise.
+    LeapYear,
+    /// Number of days in the month (28-31).
+    DaysInMonth,
 }
 
 impl FeatureGenerator {
@@ -104,6 +161,27 @@ impl FeatureGenerator {
     /// Produces 3 binary columns: `quarter_2`, `quarter_3`, `quarter_4`.
     pub fn quarter(mut self) -> Self {
         self.specs.push(FeatureSpec::Quarter);
+        self
+    }
+
+    /// Add cyclical sin/cos encoding of a time component.
+    ///
+    /// Produces 2 columns: `{name}_sin` and `{name}_cos` where the angle
+    /// is `2*pi*value/period`.
+    pub fn cyclical(mut self, component: TimeComponent) -> Self {
+        self.specs.push(FeatureSpec::Cyclical(component));
+        self
+    }
+
+    /// Add a binary (0/1) calendar indicator.
+    pub fn binary(mut self, indicator: BinaryIndicator) -> Self {
+        self.specs.push(FeatureSpec::Binary(indicator));
+        self
+    }
+
+    /// Add an advanced numeric calendar feature.
+    pub fn advanced(mut self, feature: AdvancedFeature) -> Self {
+        self.specs.push(FeatureSpec::Advanced(feature));
         self
     }
 
@@ -211,6 +289,123 @@ impl FeatureGenerator {
                         })
                         .collect();
                     result.insert(format!("holiday_{}", name), col);
+                }
+                FeatureSpec::Cyclical(component) => {
+                    use chrono::{Datelike, Timelike};
+                    let (name, period) = match component {
+                        TimeComponent::Month => ("month", 12.0),
+                        TimeComponent::Quarter => ("quarter", 4.0),
+                        TimeComponent::Semester => ("semester", 2.0),
+                        TimeComponent::WeekOfYear => ("week_of_year", 53.0),
+                        TimeComponent::DayOfWeek => ("day_of_week", 7.0),
+                        TimeComponent::DayOfMonth => ("day_of_month", 31.0),
+                        TimeComponent::DayOfYear => ("day_of_year", 366.0),
+                        TimeComponent::Hour => ("hour", 24.0),
+                        TimeComponent::Minute => ("minute", 60.0),
+                    };
+                    let mut sin_col = Vec::with_capacity(n);
+                    let mut cos_col = Vec::with_capacity(n);
+                    for ts in timestamps {
+                        let value = match component {
+                            TimeComponent::Month => ts.month() as f64,
+                            TimeComponent::Quarter => ((ts.month() - 1) / 3 + 1) as f64,
+                            TimeComponent::Semester => ((ts.month() - 1) / 6 + 1) as f64,
+                            TimeComponent::WeekOfYear => ts.iso_week().week() as f64,
+                            TimeComponent::DayOfWeek => ts.weekday().num_days_from_monday() as f64,
+                            TimeComponent::DayOfMonth => ts.day() as f64,
+                            TimeComponent::DayOfYear => ts.ordinal() as f64,
+                            TimeComponent::Hour => ts.hour() as f64,
+                            TimeComponent::Minute => ts.minute() as f64,
+                        };
+                        let angle = 2.0 * PI * value / period;
+                        sin_col.push(angle.sin());
+                        cos_col.push(angle.cos());
+                    }
+                    result.insert(format!("{}_sin", name), sin_col);
+                    result.insert(format!("{}_cos", name), cos_col);
+                }
+                FeatureSpec::Binary(indicator) => {
+                    use chrono::Datelike;
+                    let (name, test_fn): (&str, Box<dyn Fn(&DateTime<Utc>) -> bool>) =
+                        match indicator {
+                            BinaryIndicator::MonthStart => {
+                                ("month_start", Box::new(|ts| ts.day() == 1))
+                            }
+                            BinaryIndicator::MonthEnd => (
+                                "month_end",
+                                Box::new(|ts| {
+                                    let max_day = crate::core::time_series::days_in_month_pub(
+                                        ts.year(),
+                                        ts.month(),
+                                    );
+                                    ts.day() == max_day
+                                }),
+                            ),
+                            BinaryIndicator::QuarterStart => (
+                                "quarter_start",
+                                Box::new(|ts| {
+                                    ts.day() == 1 && matches!(ts.month(), 1 | 4 | 7 | 10)
+                                }),
+                            ),
+                            BinaryIndicator::QuarterEnd => (
+                                "quarter_end",
+                                Box::new(|ts| {
+                                    let m = ts.month();
+                                    let max_day =
+                                        crate::core::time_series::days_in_month_pub(ts.year(), m);
+                                    ts.day() == max_day && matches!(m, 3 | 6 | 9 | 12)
+                                }),
+                            ),
+                            BinaryIndicator::YearStart => (
+                                "year_start",
+                                Box::new(|ts| ts.month() == 1 && ts.day() == 1),
+                            ),
+                            BinaryIndicator::YearEnd => (
+                                "year_end",
+                                Box::new(|ts| ts.month() == 12 && ts.day() == 31),
+                            ),
+                            BinaryIndicator::Weekend => (
+                                "weekend",
+                                Box::new(|ts| {
+                                    matches!(
+                                        ts.weekday(),
+                                        chrono::Weekday::Sat | chrono::Weekday::Sun
+                                    )
+                                }),
+                            ),
+                        };
+                    let col: Vec<f64> = timestamps
+                        .iter()
+                        .map(|ts| if test_fn(ts) { 1.0 } else { 0.0 })
+                        .collect();
+                    result.insert(name.to_string(), col);
+                }
+                FeatureSpec::Advanced(feature) => {
+                    use chrono::Datelike;
+                    let (name, compute_fn): (&str, Box<dyn Fn(&DateTime<Utc>) -> f64>) =
+                        match feature {
+                            AdvancedFeature::LeapYear => (
+                                "leap_year",
+                                Box::new(|ts| {
+                                    if crate::core::time_series::is_leap_year_pub(ts.year()) {
+                                        1.0
+                                    } else {
+                                        0.0
+                                    }
+                                }),
+                            ),
+                            AdvancedFeature::DaysInMonth => (
+                                "days_in_month",
+                                Box::new(|ts| {
+                                    crate::core::time_series::days_in_month_pub(
+                                        ts.year(),
+                                        ts.month(),
+                                    ) as f64
+                                }),
+                            ),
+                        };
+                    let col: Vec<f64> = timestamps.iter().map(|ts| compute_fn(ts)).collect();
+                    result.insert(name.to_string(), col);
                 }
             }
         }

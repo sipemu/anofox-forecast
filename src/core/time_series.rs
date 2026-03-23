@@ -1297,6 +1297,28 @@ impl TimeSeries {
         Ok(Duration::seconds(modal_diff))
     }
 
+    /// Generate future timestamps for a forecast horizon.
+    ///
+    /// Infers the frequency from existing timestamps, then extrapolates forward.
+    /// Uses calendar-aware arithmetic for monthly/quarterly data.
+    pub fn future_timestamps(&self, horizon: usize) -> Result<Vec<DateTime<Utc>>> {
+        if self.timestamps.is_empty() {
+            return Err(ForecastError::EmptyData);
+        }
+        let last = *self.timestamps.last().unwrap();
+
+        // Try calendar-aware frequency first, fall back to duration-based
+        let freq = self
+            .infer_frequency_calendar(0.5)
+            .or_else(|_| self.infer_frequency(0.5))?;
+
+        Ok(generate_future_timestamps(
+            &last,
+            &Frequency::Duration(freq),
+            horizon,
+        ))
+    }
+
     /// Set frequency from timestamps (auto-infer).
     pub fn set_frequency_from_timestamps(&mut self) -> Result<()> {
         let freq = self.infer_frequency(0.5)?;
@@ -1800,6 +1822,42 @@ fn validate_frequency_positive(frequency: &Frequency) -> Result<()> {
     }
 }
 
+/// Generate future timestamps by advancing from a starting point.
+///
+/// Uses calendar-aware arithmetic for monthly/quarterly/yearly frequencies
+/// (e.g., Jan 31 + 1 month = Feb 28/29, not Mar 02).
+///
+/// # Arguments
+/// * `last` - The last known timestamp
+/// * `frequency` - The step frequency
+/// * `horizon` - Number of future timestamps to generate
+///
+/// # Example
+/// ```
+/// use anofox_forecast::core::time_series::{generate_future_timestamps, Frequency};
+/// use chrono::{Datelike, TimeZone, Utc};
+///
+/// let last = Utc.with_ymd_and_hms(2024, 1, 31, 0, 0, 0).unwrap();
+/// let future = generate_future_timestamps(&last, &Frequency::Months(1), 3);
+///
+/// assert_eq!(future[0].day(), 29); // Feb 29 (2024 is leap year)
+/// assert_eq!(future[1].month(), 3); // Mar 31
+/// assert_eq!(future[2].month(), 4); // Apr 30
+/// ```
+pub fn generate_future_timestamps(
+    last: &DateTime<Utc>,
+    frequency: &Frequency,
+    horizon: usize,
+) -> Vec<DateTime<Utc>> {
+    let mut result = Vec::with_capacity(horizon);
+    let mut current = *last;
+    for _ in 0..horizon {
+        current = advance_timestamp(current, frequency);
+        result.push(current);
+    }
+    result
+}
+
 /// Advance a timestamp by one frequency step.
 #[inline]
 fn advance_timestamp(current: DateTime<Utc>, frequency: &Frequency) -> DateTime<Utc> {
@@ -1857,6 +1915,16 @@ fn days_in_month(year: i32, month: u32) -> u32 {
 /// Check if a year is a leap year.
 fn is_leap_year(year: i32) -> bool {
     (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+}
+
+/// Public crate-internal accessor for `days_in_month`.
+pub(crate) fn days_in_month_pub(year: i32, month: u32) -> u32 {
+    days_in_month(year, month)
+}
+
+/// Public crate-internal accessor for `is_leap_year`.
+pub(crate) fn is_leap_year_pub(year: i32) -> bool {
+    is_leap_year(year)
 }
 
 /// Linear interpolation for a series with NaN values.

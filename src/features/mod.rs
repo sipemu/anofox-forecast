@@ -39,7 +39,7 @@ pub use basic::{
     root_mean_square, standard_deviation, sum_values, variance,
 };
 pub use factory::{Feature, FeatureFactory};
-pub use generator::FeatureGenerator;
+pub use generator::{AdvancedFeature, BinaryIndicator, FeatureGenerator, TimeComponent};
 
 pub use distribution::{
     kurtosis, large_standard_deviation, quantile, ratio_beyond_r_sigma, skewness, symmetry_looking,
