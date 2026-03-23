@@ -29,6 +29,7 @@
 
 mod backtest;
 mod binned_intervals;
+mod bootstrap;
 mod conformal;
 mod conformalize;
 mod historical_sim;
@@ -40,6 +41,7 @@ mod types;
 
 pub use backtest::{BacktestConfig, BacktestFold, BacktestResult, CalibratedModelByHorizon};
 pub use binned_intervals::{BinnedConformalPredictor, BinnedConformalResult};
+pub use bootstrap::{BootstrapPredictor, BootstrapResult};
 pub use conformal::{ConformalMethod, ConformalPredictor, ConformalResult, PerStepConformalResult};
 pub use conformalize::{
     conformalize, conformalize_with_config, ConformalizeConfig, ConformalizeResult,
