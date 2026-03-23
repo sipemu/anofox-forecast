@@ -8,55 +8,59 @@
     .axis  { fill: #666; font-size: 10px; }
   </style>
 
-  <text x="360" y="22" text-anchor="middle" class="title">Rolling Window CV (5 folds, horizon=3, min_initial_window=5)</text>
+  <!-- series_len=23, horizon=3, min_initial_window=5, step=3 -->
+  <!-- 1 unit = 26px, origin at x=60 -->
+  <!-- origins backward: 20,17,14,11,8 → folds: 8,11,14,17,20 -->
+
+  <text x="360" y="22" text-anchor="middle" class="title">Rolling Window CV (5 folds, horizon=3, window=5, n=23)</text>
 
   <!-- Axis -->
-  <line x1="80" y1="245" x2="680" y2="245" stroke="#999" stroke-width="1"/>
-  <text x="80" y="260" class="axis">0</text>
-  <text x="200" y="260" class="axis">5</text>
+  <line x1="60" y1="245" x2="658" y2="245" stroke="#999" stroke-width="1"/>
+  <text x="60"  y="260" class="axis">0</text>
+  <text x="190" y="260" class="axis">5</text>
   <text x="320" y="260" class="axis">10</text>
-  <text x="440" y="260" class="axis">15</text>
-  <text x="620" y="260" class="axis">20</text>
+  <text x="450" y="260" class="axis">15</text>
+  <text x="580" y="260" class="axis">20</text>
+  <text x="656" y="260" class="axis">23</text>
 
   <!-- Legend -->
-  <rect x="80" y="270" width="12" height="12" class="train" rx="2"/>
-  <text x="96" y="281" class="axis">Train</text>
-  <rect x="140" y="270" width="12" height="12" class="test" rx="2"/>
-  <text x="156" y="281" class="axis">Test</text>
-  <rect x="200" y="270" width="12" height="12" class="unused" rx="2" stroke="#ccc"/>
-  <text x="216" y="281" class="axis">Unused</text>
+  <rect x="60" y="270" width="12" height="12" class="train" rx="2"/>
+  <text x="76" y="281" class="axis">Train (fixed=5)</text>
+  <rect x="175" y="270" width="12" height="12" class="test" rx="2"/>
+  <text x="191" y="281" class="axis">Test (horizon=3)</text>
 
+  <!-- Full series bar (background for each fold) -->
   <!-- Fold 1: train=[3..8), test=[8..11) -->
   <text x="10" y="55" class="label">Fold 1</text>
-  <rect x="80" y="40" width="600" height="22" class="unused" rx="3" stroke="#ccc"/>
-  <rect x="152" y="40" width="120" height="22" class="train" rx="3" opacity="0.9"/>
-  <rect x="272" y="40" width="72" height="22" class="test" rx="3" opacity="0.9"/>
+  <rect x="60" y="40" width="598" height="22" class="unused" rx="3" stroke="#ccc"/>
+  <rect x="138" y="40" width="130" height="22" class="train" rx="3" opacity="0.9"/>
+  <rect x="268" y="40" width="78" height="22" class="test" rx="3" opacity="0.9"/>
 
   <!-- Fold 2: train=[6..11), test=[11..14) -->
   <text x="10" y="95" class="label">Fold 2</text>
-  <rect x="80" y="80" width="600" height="22" class="unused" rx="3" stroke="#ccc"/>
-  <rect x="224" y="80" width="120" height="22" class="train" rx="3" opacity="0.9"/>
-  <rect x="344" y="80" width="72" height="22" class="test" rx="3" opacity="0.9"/>
+  <rect x="60" y="80" width="598" height="22" class="unused" rx="3" stroke="#ccc"/>
+  <rect x="216" y="80" width="130" height="22" class="train" rx="3" opacity="0.9"/>
+  <rect x="346" y="80" width="78" height="22" class="test" rx="3" opacity="0.9"/>
 
   <!-- Fold 3: train=[9..14), test=[14..17) -->
   <text x="10" y="135" class="label">Fold 3</text>
-  <rect x="80" y="120" width="600" height="22" class="unused" rx="3" stroke="#ccc"/>
-  <rect x="296" y="120" width="120" height="22" class="train" rx="3" opacity="0.9"/>
-  <rect x="416" y="120" width="72" height="22" class="test" rx="3" opacity="0.9"/>
+  <rect x="60" y="120" width="598" height="22" class="unused" rx="3" stroke="#ccc"/>
+  <rect x="294" y="120" width="130" height="22" class="train" rx="3" opacity="0.9"/>
+  <rect x="424" y="120" width="78" height="22" class="test" rx="3" opacity="0.9"/>
 
   <!-- Fold 4: train=[12..17), test=[17..20) -->
   <text x="10" y="175" class="label">Fold 4</text>
-  <rect x="80" y="160" width="600" height="22" class="unused" rx="3" stroke="#ccc"/>
-  <rect x="368" y="160" width="120" height="22" class="train" rx="3" opacity="0.9"/>
-  <rect x="488" y="160" width="72" height="22" class="test" rx="3" opacity="0.9"/>
+  <rect x="60" y="160" width="598" height="22" class="unused" rx="3" stroke="#ccc"/>
+  <rect x="372" y="160" width="130" height="22" class="train" rx="3" opacity="0.9"/>
+  <rect x="502" y="160" width="78" height="22" class="test" rx="3" opacity="0.9"/>
 
-  <!-- Fold 5: train=[15..20), test=[20..23) -->
+  <!-- Fold 5: train=[15..20), test=[20..23) — last fold anchored at end -->
   <text x="10" y="215" class="label">Fold 5</text>
-  <rect x="80" y="200" width="600" height="22" class="unused" rx="3" stroke="#ccc"/>
-  <rect x="440" y="200" width="120" height="22" class="train" rx="3" opacity="0.9"/>
-  <rect x="560" y="200" width="72" height="22" class="test" rx="3" opacity="0.9"/>
+  <rect x="60" y="200" width="598" height="22" class="unused" rx="3" stroke="#ccc"/>
+  <rect x="450" y="200" width="130" height="22" class="train" rx="3" opacity="0.9"/>
+  <rect x="580" y="200" width="78" height="22" class="test" rx="3" opacity="0.9"/>
 
-  <!-- Fixed window annotation -->
-  <line x1="440" y1="228" x2="560" y2="228" stroke="#4a90d9" stroke-width="2"/>
-  <text x="460" y="240" fill="#4a90d9" font-size="9">fixed size = 5</text>
+  <!-- Arrow indicating "anchored at end" -->
+  <line x1="658" y1="200" x2="658" y2="240" stroke="#e74c3c" stroke-width="1.5" stroke-dasharray="4"/>
+  <text x="618" y="238" fill="#e74c3c" font-size="9">series end (23)</text>
 </svg>
