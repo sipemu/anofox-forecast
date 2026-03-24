@@ -54,8 +54,8 @@ console.log(forecast.values);
   - VAR (Vector Autoregression) for multivariate forecasting with Granger causality
   - Kalman filter / state-space models (local level, local linear trend, custom)
   - Exogenous regressor support across model families with OLS coefficient extraction (`exog_coefficients()`)
-  - `FeatureGenerator`: deterministic regressor generation (Fourier harmonics, day-of-week, month-of-year, quarter, holiday indicators)
-  - `RegressionForecaster`: `anofox-regression` backends as `Forecaster` — 11 regression backends (OLS, Ridge, ElasticNet, Quantile, WLS, RLS, Tweedie, Poisson, BLS, NNLS, Dynamic), configurable trend/seasonal/structural features, recursive multi-step prediction
+  - `FeatureGenerator`: deterministic regressor generation (Fourier harmonics, day-of-week, month-of-year, quarter, holiday indicators, cyclical sin/cos encoding, binary calendar indicators)
+  - `RegressionForecaster`: `anofox-regression` backends as `Forecaster` — 11 regression backends (OLS, Ridge, ElasticNet, Quantile, WLS, RLS, Tweedie, Poisson, BLS, NNLS, Dynamic), configurable trend/seasonal/structural features, recursive multi-step prediction, auto-lag selection (BIC/AIC), differencing and seasonal differencing
 
 - **Automatic Model Selection**
   - `AutoForecast`: Unified selection across ARIMA, ETS, and Theta families (parallel with `parallel` feature)
@@ -128,7 +128,7 @@ console.log(forecast.values);
   - `cross_validate_all()`: CV all registry models at once with aggregated metrics
   - Accuracy metrics: MAE, MSE, RMSE, MAPE, sMAPE, MASE, WAPE, MDA, Theil's U, RMSSE, WRMSSE, MSIS, coverage, skill scores
   - `ForecastMetrics::compute()`: All 10 core metrics in a single call
-  - Time series cross-validation with configurable strategies and embargo
+  - Time series cross-validation: backward-anchored folds, n_folds-driven, expanding/rolling windows, gap/purge/embargo
   - `rolling_forecast()`: Walk-forward evaluation with rolling/expanding windows
   - Streaming CV aggregation with early stopping (`cross_validate_early_stop()`)
   - `ModelDiagnostics`: Ljung-Box, Jarque-Bera, Breusch-Pagan residual diagnostics
@@ -137,7 +137,9 @@ console.log(forecast.values);
 
 - **Probabilistic Postprocessing**
   - Conformal Prediction: Distribution-free intervals with coverage guarantees
+  - Per-horizon-step conformal: separate interval widths per forecast step (tighter at h=1, wider at h=12)
   - Binned Conformal Prediction: Heteroscedastic intervals — bins residuals by predicted magnitude for wider intervals where uncertainty is larger
+  - Bootstrap Prediction Intervals: Model-agnostic residual resampling with cumulative error paths (IID and block bootstrap)
   - Historical Simulation: Non-parametric empirical error distribution
   - Normal Predictor: Gaussian error assumption baseline
   - IDR: Isotonic Distributional Regression (state-of-the-art calibration)

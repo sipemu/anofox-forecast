@@ -7,9 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.8] - 2026-03-24
+
+### Added
+
+- **Per-Horizon-Step Conformal Prediction** (`postprocess` module)
+  - `ConformalPredictor::fit_per_step()` — separate interval widths per forecast step
+  - `PerStepConformalResult` with `half_widths()`, `predict()`, `predict_intervals()`
+  - Works with Split, CrossVal, and Jackknife+ methods; falls back to pooled quantile when < 2 residuals per step
+
+- **Bootstrap Prediction Intervals** (`postprocess` module)
+  - `BootstrapPredictor` — model-agnostic residual resampling with cumulative error path simulation
+  - IID and block bootstrap variants
+  - Intervals grow with horizon (uncertainty accumulates)
+
+- **Calendar Feature Engineering** (`features` module)
+  - `TimeComponent` cyclical sin/cos encoding: Month, Quarter, DayOfWeek, Hour, DayOfYear, etc.
+  - `BinaryIndicator`: MonthStart, MonthEnd, QuarterStart, QuarterEnd, YearStart, YearEnd, Weekend
+  - `AdvancedFeature`: LeapYear, DaysInMonth
+
+- **Future Timestamp Generation** (`core` module)
+  - `generate_future_timestamps()` — calendar-aware (Jan 31 + 1mo = Feb 28/29, not Mar 2)
+  - `TimeSeries::future_timestamps(horizon)` — auto-infers frequency from data
+  - Preserves original day across monthly/yearly stepping (no month-end drift)
+
+- **Auto-Lag Selection for RegressionForecaster** (`models::regression`)
+  - `.auto_lags(max_lag)` — select best lag order by BIC
+  - `.auto_lags_with(max_lag, LagSelectionCriterion::Aic)` — select by AIC
+  - `LagSelectionCriterion` enum: `Bic`, `Aic`
+  - Re-selects on each `fit()` call
+
+- **Differencing for RegressionForecaster** (`models::regression`)
+  - `.differencing(d)` — regular differencing, auto-integrates after predict
+  - `.seasonal_differencing(D, period)` — chainable for multi-seasonal series
+  - `seasonal_integrate()` in `arima/diff.rs` — inverse of `seasonal_difference()`
+
+- **CvFoldGenerator Rework** (`utils::cross_validation`)
+  - Backward-anchored fold placement (last fold always covers series end)
+  - `n_folds` driven — caps how many folds to take
+  - `min_initial_window` as constraint (not driver) — drops early folds with insufficient training
+  - `step_size` configurable (default = horizon for non-overlapping test sets)
+  - `ConstraintViolation::Error` (default) or `ReduceFolds`
+
+- **ModelSpec Flexibility** (`models::traits`)
+  - `ModelSpec.name` changed from `&'static str` to `String` (accepts `impl Into<String>`)
+  - `model_type` field for grouping multi-variant models
+  - `ModelSpec::with_type()` constructor, `ModelRegistry::by_type()` query
+
+- **Period Validation** — seasonal models reject `period < 2` with `InvalidParameter` error (SeasonalNaive, HoltWinters, SeasonalES, SeasonalWindowAverage, MSTLForecaster, TBATS, DummySeasonality)
+
 ### Changed
 
-- **AutoForecast**: removed `SelectionStrategy::InSampleMSE` — model selection now always uses cross-validation (more robust). `SelectionStrategy` enum and `with_selection()` / `.selection()` builder method removed.
+- **AutoForecast**: removed `SelectionStrategy::InSampleMSE` — always uses cross-validation
+- **CvFoldGenerator**: `initial_window` renamed to `min_initial_window`
+- Consolidated 4 duplicate `compute_median()` → shared `utils::stats::median()`
+- Consolidated 3 duplicate aggregate helpers → shared `utils::stats::aggregate()`
+- Removed dead `utils::stats::autocorrelation()` (0 callers)
+- Removed batch processing module (`fit_many`, `predict_many`, `fit_predict_many`, `fit_registry`)
+
+### Fixed
+
+- `generate_future_timestamps`: month-end drift (Jan 31→Feb 28→Mar 28) fixed to preserve original day (Jan 31→Feb 28→Mar 31)
+- `BootstrapPredictor`: intervals now grow with horizon via cumulative error paths (was flat)
+- `auto_lags`: config preserved across re-fit calls (was destroyed after first fit)
+- `TimeSeries::future_timestamps`: monthly data now uses `Frequency::Months(1)` instead of `Duration::days(30)`
 
 ## [0.4.7] - 2026-03-19
 
