@@ -1315,11 +1315,11 @@ impl TimeSeries {
         let secs = freq_duration.num_seconds();
 
         // Classify: ~30 days = monthly, ~91 days = quarterly, ~365 days = yearly
-        let frequency = if secs >= 27 * 86400 && secs <= 33 * 86400 {
+        let frequency = if (27 * 86400..=33 * 86400).contains(&secs) {
             Frequency::Months(1)
-        } else if secs >= 88 * 86400 && secs <= 95 * 86400 {
+        } else if (88 * 86400..=95 * 86400).contains(&secs) {
             Frequency::Months(3)
-        } else if secs >= 360 * 86400 && secs <= 370 * 86400 {
+        } else if (360 * 86400..=370 * 86400).contains(&secs) {
             Frequency::Years(1)
         } else {
             Frequency::Duration(freq_duration)

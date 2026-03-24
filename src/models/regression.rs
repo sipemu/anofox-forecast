@@ -580,6 +580,15 @@ mod ols_impl {
 
     // ── Feature specification ───────────────────────────────────────
 
+    /// Criterion for automatic lag selection.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum LagSelectionCriterion {
+        /// Bayesian Information Criterion (default). Penalizes complexity more than AIC.
+        Bic,
+        /// Akaike Information Criterion. Penalizes complexity less than BIC.
+        Aic,
+    }
+
     /// Configures which features are built from a [`TimeSeries`] for
     /// the regression model.
     ///
@@ -590,16 +599,6 @@ mod ols_impl {
     /// 4. Seasonal component columns ([`SeasonalSpec`])
     /// 5. Structural feature columns ([`StructuralFeature`])
     /// 6. Exogenous regressors (if `use_exog`)
-
-    /// Criterion for automatic lag selection.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub enum LagSelectionCriterion {
-        /// Bayesian Information Criterion (default). Penalizes complexity more than AIC.
-        Bic,
-        /// Akaike Information Criterion. Penalizes complexity less than BIC.
-        Aic,
-    }
-
     #[derive(Debug, Clone)]
     pub struct RegressionFeatures {
         /// Include a linear trend index (0, 1, …, n-1).

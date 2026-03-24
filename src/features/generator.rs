@@ -411,7 +411,7 @@ impl FeatureGenerator {
                                 }),
                             ),
                         };
-                    let col: Vec<f64> = timestamps.iter().map(|ts| compute_fn(ts)).collect();
+                    let col: Vec<f64> = timestamps.iter().map(&*compute_fn).collect();
                     result.insert(name.to_string(), col);
                 }
             }
