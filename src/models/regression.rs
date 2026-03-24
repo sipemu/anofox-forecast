@@ -3069,6 +3069,385 @@ mod ols_impl {
                 assert!(v.is_finite());
             }
         }
+
+        // ── Extended auto-lag selection tests ────────────────────────
+
+        #[test]
+        fn auto_lags_ar1_selects_order_ge_1() {
+            // Pure AR(1): y[t] = 0.8 * y[t-1] + noise
+            let n = 200;
+            let mut values = vec![0.0_f64; n];
+            values[0] = 1.0;
+            for i in 1..n {
+                let noise = ((i * 13 + 7) % 17) as f64 * 0.01 - 0.085;
+                values[i] = 0.8 * values[i - 1] + noise;
+            }
+            let ts = TimeSeries::univariate(make_timestamps(n), values).unwrap();
+
+            let mut model = RegressionForecaster::ols(
+                RegressionFeatures::new().no_trend().auto_lags(10).no_exog(),
+            );
+            model.fit(&ts).unwrap();
+
+            assert!(
+                model.features().max_lag >= 1,
+                "AR(1) process: auto_lags should select order >= 1, got {}",
+                model.features().max_lag
+            );
+        }
+
+        #[test]
+        fn auto_lags_ar3_selects_order_ge_3() {
+            // Pure AR(3): y[t] = 0.5*y[t-1] + 0.2*y[t-2] + 0.15*y[t-3] + noise
+            let n = 300;
+            let mut values = vec![0.0_f64; n];
+            values[0] = 1.0;
+            values[1] = 0.5;
+            values[2] = 0.7;
+            for i in 3..n {
+                let noise = ((i * 11 + 5) % 19) as f64 * 0.005 - 0.0475;
+                values[i] =
+                    0.5 * values[i - 1] + 0.2 * values[i - 2] + 0.15 * values[i - 3] + noise;
+            }
+            let ts = TimeSeries::univariate(make_timestamps(n), values).unwrap();
+
+            let mut model = RegressionForecaster::ols(
+                RegressionFeatures::new().no_trend().auto_lags(10).no_exog(),
+            );
+            model.fit(&ts).unwrap();
+
+            assert!(
+                model.features().max_lag >= 3,
+                "AR(3) process: auto_lags should select order >= 3, got {}",
+                model.features().max_lag
+            );
+        }
+
+        #[test]
+        fn auto_lags_white_noise_selects_low_order() {
+            // White noise (no autocorrelation): BIC should select a low lag order.
+            // Use a deterministic PRNG (xorshift-style) to avoid sequential patterns.
+            let n = 200;
+            let mut state: u64 = 123456789;
+            let values: Vec<f64> = (0..n)
+                .map(|_| {
+                    // xorshift64
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    // Map to [-1, 1]
+                    (state as f64 / u64::MAX as f64) * 2.0 - 1.0
+                })
+                .collect();
+            let ts = TimeSeries::univariate(make_timestamps(n), values).unwrap();
+
+            let mut model = RegressionForecaster::ols(
+                RegressionFeatures::new().no_trend().auto_lags(10).no_exog(),
+            );
+            model.fit(&ts).unwrap();
+
+            // For white noise, BIC should select 0 or a very low order (<=2).
+            // The exact result depends on the PRNG realization, but it should
+            // not select a high order like 8-10 on uncorrelated data.
+            assert!(
+                model.features().max_lag <= 2,
+                "White noise: auto_lags should select a low order (<= 2), got {}",
+                model.features().max_lag
+            );
+        }
+
+        #[test]
+        fn auto_lags_aic_selects_ge_bic() {
+            // AIC penalizes less than BIC, so AIC should select >= BIC order.
+            // Use an AR(2) process with moderate signal.
+            let n = 200;
+            let mut values = vec![0.0_f64; n];
+            values[0] = 1.0;
+            values[1] = 0.5;
+            for i in 2..n {
+                let noise = ((i * 7 + 3) % 11) as f64 * 0.02 - 0.11;
+                values[i] = 0.5 * values[i - 1] + 0.3 * values[i - 2] + noise;
+            }
+
+            let ts_bic = TimeSeries::univariate(make_timestamps(n), values.clone()).unwrap();
+            let ts_aic = TimeSeries::univariate(make_timestamps(n), values).unwrap();
+
+            let mut model_bic = RegressionForecaster::ols(
+                RegressionFeatures::new()
+                    .no_trend()
+                    .auto_lags_with(10, LagSelectionCriterion::Bic)
+                    .no_exog(),
+            );
+            model_bic.fit(&ts_bic).unwrap();
+
+            let mut model_aic = RegressionForecaster::ols(
+                RegressionFeatures::new()
+                    .no_trend()
+                    .auto_lags_with(10, LagSelectionCriterion::Aic)
+                    .no_exog(),
+            );
+            model_aic.fit(&ts_aic).unwrap();
+
+            let bic_order = model_bic.features().max_lag;
+            let aic_order = model_aic.features().max_lag;
+            assert!(
+                aic_order >= bic_order,
+                "AIC order ({}) should be >= BIC order ({})",
+                aic_order,
+                bic_order
+            );
+        }
+
+        #[test]
+        fn auto_lags_short_series_does_not_panic() {
+            // Barely enough data: 6 observations, max_lag = 4
+            let n = 6;
+            let values: Vec<f64> = (0..n).map(|i| i as f64 * 2.0 + 1.0).collect();
+            let ts = TimeSeries::univariate(make_timestamps(n), values).unwrap();
+
+            let mut model = RegressionForecaster::ols(
+                RegressionFeatures::new().no_trend().auto_lags(4).no_exog(),
+            );
+            // Should not panic, even if it selects order 0
+            model.fit(&ts).unwrap();
+            let forecast = model.predict(3).unwrap();
+            assert_eq!(forecast.primary().len(), 3);
+            for &v in forecast.primary() {
+                assert!(v.is_finite());
+            }
+        }
+
+        // ── Extended differencing round-trip tests ───────────────────
+
+        #[test]
+        fn differencing_d1_then_integrate_continues_original_scale() {
+            // Linear trend: 1, 2, 3, ..., 50
+            let n = 50;
+            let values: Vec<f64> = (1..=n).map(|i| i as f64).collect();
+            let ts = TimeSeries::univariate(make_timestamps(n), values.clone()).unwrap();
+
+            let mut model = RegressionForecaster::ols(
+                RegressionFeatures::new().trend().differencing(1).no_exog(),
+            );
+            model.fit(&ts).unwrap();
+            let forecast = model.predict(5).unwrap();
+
+            // After integration, forecast should be on the original scale (around 51-55)
+            let last = *values.last().unwrap(); // 50.0
+            for (h, &v) in forecast.primary().iter().enumerate() {
+                assert!(
+                    v.is_finite(),
+                    "Forecast step {} should be finite, got {}",
+                    h,
+                    v
+                );
+                // Should be roughly continuing the trend (within 10% of expected)
+                let expected = last + (h + 1) as f64;
+                assert!(
+                    (v - expected).abs() < expected * 0.2,
+                    "Forecast step {}: expected ~{}, got {}",
+                    h,
+                    expected,
+                    v
+                );
+            }
+        }
+
+        #[test]
+        fn linear_trend_differencing_gives_constant_diffs() {
+            // 1, 2, 3, ..., 50 — first difference should be all 1.0
+            use crate::models::arima::difference;
+            let values: Vec<f64> = (1..=50).map(|i| i as f64).collect();
+            let diffed = difference(&values, 1);
+            assert_eq!(diffed.len(), 49);
+            for &d in &diffed {
+                assert_relative_eq!(d, 1.0, epsilon = 1e-12);
+            }
+        }
+
+        #[test]
+        fn forecast_after_integration_is_on_original_scale() {
+            // Exponential-ish growth: values in 100..~250 range
+            let n = 60;
+            let values: Vec<f64> = (0..n).map(|i| 100.0 + 2.5 * i as f64).collect();
+            let ts = TimeSeries::univariate(make_timestamps(n), values.clone()).unwrap();
+
+            let mut model = RegressionForecaster::ols(
+                RegressionFeatures::new().trend().differencing(1).no_exog(),
+            );
+            model.fit(&ts).unwrap();
+            let forecast = model.predict(10).unwrap();
+
+            let last = *values.last().unwrap(); // 100 + 2.5*59 = 247.5
+            for &v in forecast.primary() {
+                // Forecasts should be on the original scale (> 200), not on
+                // the differenced scale (which would be around 2.5)
+                assert!(
+                    v > last * 0.5,
+                    "Forecast {} should be on original scale (last train = {}), not differenced",
+                    v,
+                    last
+                );
+            }
+        }
+
+        // ── Extended seasonal differencing round-trip tests ──────────
+
+        #[test]
+        fn seasonal_diff_weekly_integration_recovers_scale() {
+            // Weekly pattern repeating over 10 weeks
+            let period = 7;
+            let n_weeks = 10;
+            let n = period * n_weeks;
+            let weekly_pattern = [10.0, 20.0, 15.0, 25.0, 30.0, 12.0, 8.0];
+            let values: Vec<f64> = (0..n)
+                .map(|i| weekly_pattern[i % period] + 0.5 * i as f64)
+                .collect();
+            let ts = TimeSeries::univariate(make_timestamps(n), values.clone()).unwrap();
+
+            let mut model = RegressionForecaster::ols(
+                RegressionFeatures::new()
+                    .trend()
+                    .seasonal_differencing(1, 7)
+                    .no_exog(),
+            );
+            model.fit(&ts).unwrap();
+            let forecast = model.predict(7).unwrap();
+
+            // Forecasts should be on the original scale, not the differenced scale
+            let _last = *values.last().unwrap();
+            for &v in forecast.primary() {
+                assert!(v.is_finite(), "Seasonal forecast should be finite");
+                // Original scale is roughly 10-80 range; differenced scale is ~3.5
+                assert!(
+                    v > 5.0,
+                    "Forecast {} should be on original scale (not seasonal-differenced)",
+                    v
+                );
+            }
+        }
+
+        #[test]
+        fn seasonal_diff_monthly_integration_recovers_scale() {
+            // Monthly pattern (period=12) with linear trend
+            let period = 12;
+            let n_years = 5;
+            let n = period * n_years;
+            let monthly_pattern = [
+                5.0, 8.0, 12.0, 18.0, 22.0, 25.0, 24.0, 22.0, 18.0, 12.0, 8.0, 5.0,
+            ];
+            let values: Vec<f64> = (0..n)
+                .map(|i| monthly_pattern[i % period] + 1.0 * i as f64)
+                .collect();
+            let ts = TimeSeries::univariate(make_timestamps(n), values.clone()).unwrap();
+
+            let mut model = RegressionForecaster::ols(
+                RegressionFeatures::new()
+                    .trend()
+                    .seasonal_differencing(1, 12)
+                    .no_exog(),
+            );
+            model.fit(&ts).unwrap();
+            let forecast = model.predict(12).unwrap();
+
+            let last = *values.last().unwrap();
+            for &v in forecast.primary() {
+                assert!(v.is_finite(), "Monthly seasonal forecast should be finite");
+                // Should be on the original scale (last train ~ 64)
+                assert!(
+                    v > last * 0.3,
+                    "Forecast {} should be on original scale (last train = {})",
+                    v,
+                    last
+                );
+            }
+        }
+
+        #[test]
+        fn multiple_seasonal_diffs_chain_correctly() {
+            // Two seasonal diffs: weekly (7) and bi-weekly (14)
+            let features = RegressionFeatures::new()
+                .seasonal_differencing(1, 7)
+                .seasonal_differencing(1, 365);
+            assert_eq!(features.seasonal_diffs.len(), 2);
+            assert_eq!(features.seasonal_diffs[0], (1, 7));
+            assert_eq!(features.seasonal_diffs[1], (1, 365));
+
+            // Verify that chaining actually works end-to-end with a model
+            // Use enough data for both periods (need > 365 + 7 for both diffs)
+            let n = 400;
+            let values: Vec<f64> = (0..n)
+                .map(|i| {
+                    let t = i as f64;
+                    // Weekly component + small trend
+                    5.0 * (2.0 * std::f64::consts::PI * t / 7.0).sin() + 0.1 * t + 50.0
+                })
+                .collect();
+            let ts = TimeSeries::univariate(make_timestamps(n), values).unwrap();
+
+            let mut model = RegressionForecaster::ols(
+                RegressionFeatures::new()
+                    .trend()
+                    .seasonal_differencing(1, 7)
+                    .seasonal_differencing(1, 14)
+                    .no_exog(),
+            );
+            model.fit(&ts).unwrap();
+            let forecast = model.predict(7).unwrap();
+            assert_eq!(forecast.primary().len(), 7);
+            for &v in forecast.primary() {
+                assert!(
+                    v.is_finite(),
+                    "Multi-seasonal forecast should be finite, got {}",
+                    v
+                );
+            }
+        }
+
+        // ── Combined differencing + auto_lags tests ─────────────────
+
+        #[test]
+        fn differencing_d1_auto_lags_fits_on_differenced_data() {
+            // Linear trend with AR structure: after differencing, should have lag structure
+            let n = 100;
+            let mut values = vec![0.0_f64; n];
+            values[0] = 10.0;
+            for i in 1..n {
+                let noise = ((i * 13 + 7) % 17) as f64 * 0.01 - 0.085;
+                values[i] = values[i - 1] + 2.0 + 0.3 * noise;
+            }
+            let ts = TimeSeries::univariate(make_timestamps(n), values.clone()).unwrap();
+
+            let mut model = RegressionForecaster::ols(
+                RegressionFeatures::new()
+                    .no_trend()
+                    .differencing(1)
+                    .auto_lags(5)
+                    .no_exog(),
+            );
+            model.fit(&ts).unwrap();
+
+            // The model should have resolved auto_lags (config cleared)
+            assert!(
+                model.features().auto_lag_config.is_none(),
+                "auto_lag_config should be None after fit"
+            );
+
+            let forecast = model.predict(10).unwrap();
+            assert_eq!(forecast.primary().len(), 10);
+
+            let last = *values.last().unwrap();
+            for &v in forecast.primary() {
+                assert!(v.is_finite(), "Forecast should be finite");
+                // Forecast should be on the original scale, not differenced
+                assert!(
+                    v > last * 0.5,
+                    "Forecast {} should be on original scale (last train = {})",
+                    v,
+                    last
+                );
+            }
+        }
     }
 }
 

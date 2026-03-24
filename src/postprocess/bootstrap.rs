@@ -330,4 +330,281 @@ mod tests {
             w90
         );
     }
+
+    // =========================================================================
+    // Interval-contains-point-forecast tests
+    // =========================================================================
+
+    #[test]
+    fn intervals_contain_point_forecast() {
+        // With moderate residuals the point forecast should lie within bounds
+        // for most (not necessarily all) steps.
+        let n = 200;
+        let forecasts: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let actuals: Vec<f64> = (0..n)
+            .map(|i| i as f64 + ((i * 13 + 7) % 17) as f64 * 0.3 - 2.5)
+            .collect();
+
+        let predictor = BootstrapPredictor::new(0.95).n_replicates(2000).seed(99);
+        let result = predictor.fit(&forecasts, &actuals).unwrap();
+
+        let point: Vec<f64> = (200..210).map(|i| i as f64).collect();
+        let intervals = predictor.predict(&result, &point);
+
+        let mut contained = 0;
+        for i in 0..point.len() {
+            if intervals.lower()[i] <= point[i] && point[i] <= intervals.upper()[i] {
+                contained += 1;
+            }
+        }
+        // With 95% coverage, most steps should contain the point forecast
+        assert!(
+            contained >= 7,
+            "Expected at least 7/10 steps to contain the point forecast, got {}/10",
+            contained
+        );
+    }
+
+    // =========================================================================
+    // Wider coverage produces wider intervals (50% vs 99%)
+    // =========================================================================
+
+    #[test]
+    fn wider_coverage_produces_wider_intervals_50_vs_99() {
+        let n = 200;
+        let forecasts: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let actuals: Vec<f64> = (0..n)
+            .map(|i| i as f64 + ((i * 11 + 5) % 23) as f64 * 0.4 - 4.0)
+            .collect();
+
+        let p50 = BootstrapPredictor::new(0.50).n_replicates(1000).seed(77);
+        let p99 = BootstrapPredictor::new(0.99).n_replicates(1000).seed(77);
+
+        let r50 = p50.fit(&forecasts, &actuals).unwrap();
+        let r99 = p99.fit(&forecasts, &actuals).unwrap();
+
+        let point = vec![250.0, 260.0, 270.0];
+        let i50 = p50.predict(&r50, &point);
+        let i99 = p99.predict(&r99, &point);
+
+        for h in 0..3 {
+            let w50 = i50.upper()[h] - i50.lower()[h];
+            let w99 = i99.upper()[h] - i99.lower()[h];
+            assert!(
+                w99 > w50,
+                "Step {}: 99% width ({}) should exceed 50% width ({})",
+                h,
+                w99,
+                w50
+            );
+        }
+    }
+
+    // =========================================================================
+    // Same seed → identical intervals (stability)
+    // =========================================================================
+
+    #[test]
+    fn same_seed_produces_identical_intervals() {
+        let forecasts: Vec<f64> = (0..80).map(|i| i as f64 * 1.5).collect();
+        let actuals: Vec<f64> = (0..80)
+            .map(|i| i as f64 * 1.5 + ((i * 3 + 1) % 9) as f64 * 0.2 - 0.8)
+            .collect();
+
+        let point = vec![120.0, 121.5, 123.0, 124.5, 126.0];
+
+        // Run 1
+        let p1 = BootstrapPredictor::new(0.90).n_replicates(500).seed(555);
+        let r1 = p1.fit(&forecasts, &actuals).unwrap();
+        let iv1 = p1.predict(&r1, &point);
+
+        // Run 2 — same seed
+        let p2 = BootstrapPredictor::new(0.90).n_replicates(500).seed(555);
+        let r2 = p2.fit(&forecasts, &actuals).unwrap();
+        let iv2 = p2.predict(&r2, &point);
+
+        for h in 0..5 {
+            assert!(
+                (iv1.lower()[h] - iv2.lower()[h]).abs() < 1e-10,
+                "Lower bounds differ at step {}",
+                h
+            );
+            assert!(
+                (iv1.upper()[h] - iv2.upper()[h]).abs() < 1e-10,
+                "Upper bounds differ at step {}",
+                h
+            );
+        }
+    }
+
+    // =========================================================================
+    // Block vs IID bootstrap produce different intervals for autocorrelated residuals
+    // =========================================================================
+
+    #[test]
+    fn block_vs_iid_differ_for_autocorrelated_residuals() {
+        // Build residuals with strong structure: a sawtooth pattern where
+        // nearby residuals are similar (autocorrelated). Block bootstrap
+        // preserves this structure while IID destroys it.
+        let n = 200;
+        let forecasts: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        // Sawtooth: residuals ramp from -5 to +5 in blocks of 20, then reset.
+        // Adjacent residuals are very similar; IID will scramble this.
+        let actuals: Vec<f64> = (0..n)
+            .map(|i| {
+                let phase = (i % 20) as f64;
+                let err = phase * 0.5 - 5.0; // ranges from -5.0 to +4.5
+                i as f64 + err
+            })
+            .collect();
+
+        let point = vec![200.0, 201.0, 202.0, 203.0, 204.0];
+
+        // Use different seeds to break any coincidental equality from
+        // the RNG consuming the same number of random values.
+        let iid = BootstrapPredictor::new(0.90).n_replicates(2000).seed(42);
+        let block = BootstrapPredictor::new(0.90)
+            .n_replicates(2000)
+            .block_size(10)
+            .seed(43);
+
+        let r_iid = iid.fit(&forecasts, &actuals).unwrap();
+        let r_block = block.fit(&forecasts, &actuals).unwrap();
+
+        let iv_iid = iid.predict(&r_iid, &point);
+        let iv_block = block.predict(&r_block, &point);
+
+        // At least one step should show a meaningful difference in bounds
+        let mut any_differ = false;
+        for h in 0..5 {
+            let lo_diff = (iv_iid.lower()[h] - iv_block.lower()[h]).abs();
+            let hi_diff = (iv_iid.upper()[h] - iv_block.upper()[h]).abs();
+            if lo_diff > 1e-6 || hi_diff > 1e-6 {
+                any_differ = true;
+                break;
+            }
+        }
+        assert!(
+            any_differ,
+            "Block and IID bootstrap should produce different interval bounds for autocorrelated residuals"
+        );
+    }
+
+    // =========================================================================
+    // All NaN residuals → error
+    // =========================================================================
+
+    #[test]
+    fn all_nan_residuals_errors() {
+        let predictor = BootstrapPredictor::new(0.90);
+        let forecasts = vec![f64::NAN, f64::NAN, f64::NAN];
+        let actuals = vec![1.0, 2.0, 3.0];
+        let result = predictor.fit(&forecasts, &actuals);
+        assert!(result.is_err(), "All-NaN residuals should produce an error");
+    }
+
+    // =========================================================================
+    // Residuals with some NaN values → filtered out, still works
+    // =========================================================================
+
+    #[test]
+    fn some_nan_residuals_filtered_and_works() {
+        let predictor = BootstrapPredictor::new(0.90).n_replicates(100).seed(42);
+        // Mix of finite and NaN forecast values
+        let mut forecasts = vec![f64::NAN; 5];
+        forecasts.extend((0..30).map(|i| i as f64));
+        let actuals: Vec<f64> = (0..35).map(|i| i as f64 * 0.9).collect();
+
+        let result = predictor.fit(&forecasts, &actuals).unwrap();
+        // Only 30 finite residuals should remain
+        assert_eq!(result.residuals().len(), 30);
+
+        let point = vec![35.0, 36.0];
+        let intervals = predictor.predict(&result, &point);
+        assert_eq!(intervals.len(), 2);
+        for i in 0..2 {
+            assert!(intervals.lower()[i].is_finite());
+            assert!(intervals.upper()[i].is_finite());
+            assert!(intervals.lower()[i] <= intervals.upper()[i]);
+        }
+    }
+
+    // =========================================================================
+    // Horizon = 1 works
+    // =========================================================================
+
+    #[test]
+    fn horizon_one_works() {
+        let forecasts: Vec<f64> = (0..50).map(|i| i as f64).collect();
+        let actuals: Vec<f64> = (0..50).map(|i| i as f64 + 0.3).collect();
+
+        let predictor = BootstrapPredictor::new(0.90).n_replicates(200).seed(42);
+        let result = predictor.fit(&forecasts, &actuals).unwrap();
+
+        let intervals = predictor.predict(&result, &[50.0]);
+        assert_eq!(intervals.len(), 1);
+        assert!(intervals.lower()[0] <= intervals.upper()[0]);
+        assert!(intervals.lower()[0].is_finite());
+        assert!(intervals.upper()[0].is_finite());
+    }
+
+    // =========================================================================
+    // Large horizon (50 steps) works without panic
+    // =========================================================================
+
+    #[test]
+    fn large_horizon_50_steps_works() {
+        let forecasts: Vec<f64> = (0..100).map(|i| i as f64).collect();
+        let actuals: Vec<f64> = (0..100)
+            .map(|i| i as f64 + ((i * 3 + 1) % 7) as f64 * 0.5 - 1.5)
+            .collect();
+
+        let predictor = BootstrapPredictor::new(0.90).n_replicates(500).seed(42);
+        let result = predictor.fit(&forecasts, &actuals).unwrap();
+
+        let point: Vec<f64> = (100..150).map(|i| i as f64).collect();
+        assert_eq!(point.len(), 50);
+
+        let intervals = predictor.predict(&result, &point);
+        assert_eq!(intervals.len(), 50);
+        for i in 0..50 {
+            assert!(
+                intervals.lower()[i] <= intervals.upper()[i],
+                "lower > upper at step {}",
+                i
+            );
+            assert!(intervals.lower()[i].is_finite(), "lower NaN at step {}", i);
+            assert!(intervals.upper()[i].is_finite(), "upper NaN at step {}", i);
+        }
+    }
+
+    // =========================================================================
+    // Very small residuals → very narrow intervals
+    // =========================================================================
+
+    #[test]
+    fn very_small_residuals_give_narrow_intervals() {
+        let n = 100;
+        let forecasts: Vec<f64> = (0..n).map(|i| i as f64 * 10.0).collect();
+        // Actuals differ by at most 1e-8
+        let actuals: Vec<f64> = (0..n)
+            .map(|i| i as f64 * 10.0 + ((i % 3) as f64 - 1.0) * 1e-8)
+            .collect();
+
+        let predictor = BootstrapPredictor::new(0.95).n_replicates(500).seed(42);
+        let result = predictor.fit(&forecasts, &actuals).unwrap();
+
+        let point = vec![1000.0, 1010.0, 1020.0];
+        let intervals = predictor.predict(&result, &point);
+
+        for h in 0..3 {
+            let width = intervals.upper()[h] - intervals.lower()[h];
+            assert!(
+                width < 1e-6,
+                "Step {}: interval width {} should be very narrow for near-zero residuals",
+                h,
+                width
+            );
+        }
+    }
 }

@@ -1174,5 +1174,227 @@ mod tests {
             assert_eq!(result.half_widths(), cloned.half_widths());
             assert_eq!(result.horizon(), cloned.horizon());
         }
+
+        // =================================================================
+        // All three methods work: split, cross_val, jackknife_plus
+        // =================================================================
+
+        #[test]
+        fn all_three_methods_produce_valid_per_step_results() {
+            let (fc, ac) = make_folds(10, 4);
+
+            let split = ConformalPredictor::split(0.90);
+            let cv = ConformalPredictor::cross_val(0.90, 5);
+            let jk = ConformalPredictor::jackknife_plus(0.90);
+
+            let r_split = split.fit_per_step(&fc, &ac).unwrap();
+            let r_cv = cv.fit_per_step(&fc, &ac).unwrap();
+            let r_jk = jk.fit_per_step(&fc, &ac).unwrap();
+
+            for r in [&r_split, &r_cv, &r_jk] {
+                assert_eq!(r.horizon(), 4);
+                assert_eq!(r.half_widths().len(), 4);
+                assert!(r.half_widths().iter().all(|&hw| hw >= 0.0));
+                assert!((r.coverage() - 0.90).abs() < 1e-10);
+            }
+        }
+
+        // =================================================================
+        // Fallback to pooled quantile when step has < 2 residuals
+        // (use exactly 1 fold — triggers the InsufficientData guard so
+        //  we need exactly 2 folds but a step that has few residuals;
+        //  since each fold contributes 1 residual per step, 2 folds
+        //  gives exactly 2 per step which is the minimum. To test the
+        //  fallback we call compute_quantile directly isn't possible, so
+        //  instead we verify it doesn't panic with exactly 2 folds.)
+        // =================================================================
+
+        #[test]
+        fn two_folds_works_uses_per_step_or_pooled() {
+            let predictor = ConformalPredictor::split(0.90);
+            let fc = vec![vec![10.0, 20.0, 30.0], vec![11.0, 21.0, 31.0]];
+            let ac = vec![vec![10.5, 20.5, 30.5], vec![11.5, 21.5, 31.5]];
+
+            let result = predictor.fit_per_step(&fc, &ac).unwrap();
+            assert_eq!(result.horizon(), 3);
+            // With only 2 scores per step, the quantile must still be computed
+            for &hw in result.half_widths() {
+                assert!(hw >= 0.0, "half-width should be non-negative");
+                assert!(hw.is_finite(), "half-width should be finite");
+            }
+        }
+
+        // =================================================================
+        // Half-widths are non-negative
+        // =================================================================
+
+        #[test]
+        fn half_widths_are_non_negative() {
+            let predictor = ConformalPredictor::split(0.95);
+            let (fc, ac) = make_folds(15, 8);
+            let result = predictor.fit_per_step(&fc, &ac).unwrap();
+
+            for (t, &hw) in result.half_widths().iter().enumerate() {
+                assert!(
+                    hw >= 0.0,
+                    "Step {}: half-width {} should be non-negative",
+                    t,
+                    hw
+                );
+            }
+        }
+
+        // =================================================================
+        // predict() returns correct length
+        // =================================================================
+
+        #[test]
+        fn predict_returns_correct_length() {
+            let predictor = ConformalPredictor::split(0.90);
+            let (fc, ac) = make_folds(10, 7);
+            let result = predictor.fit_per_step(&fc, &ac).unwrap();
+
+            let point: Vec<f64> = (0..7).map(|i| 50.0 + i as f64).collect();
+            let (lower, upper) = result.predict(&point);
+
+            assert_eq!(lower.len(), 7);
+            assert_eq!(upper.len(), 7);
+        }
+
+        // =================================================================
+        // predict_intervals() returns valid PredictionIntervals
+        // =================================================================
+
+        #[test]
+        fn predict_intervals_returns_valid_prediction_intervals() {
+            let predictor = ConformalPredictor::split(0.90);
+            let (fc, ac) = make_folds(10, 5);
+            let result = predictor.fit_per_step(&fc, &ac).unwrap();
+
+            let point = vec![100.0, 200.0, 300.0, 400.0, 500.0];
+            let intervals = result.predict_intervals(&point);
+
+            assert_eq!(intervals.len(), 5);
+            assert!((intervals.coverage() - 0.90).abs() < 1e-10);
+            for i in 0..5 {
+                assert!(
+                    intervals.lower()[i] <= intervals.upper()[i],
+                    "lower > upper at step {}",
+                    i
+                );
+                assert!(intervals.lower()[i].is_finite());
+                assert!(intervals.upper()[i].is_finite());
+            }
+        }
+
+        // =================================================================
+        // Fold with constant errors → all half-widths should be equal
+        // =================================================================
+
+        #[test]
+        fn constant_errors_give_equal_half_widths() {
+            let predictor = ConformalPredictor::split(0.90);
+
+            // Every fold, every step has the same absolute error = 2.0
+            let n_folds = 10;
+            let horizon = 5;
+            let fc: Vec<Vec<f64>> = (0..n_folds).map(|_| vec![10.0; horizon]).collect();
+            let ac: Vec<Vec<f64>> = (0..n_folds)
+                .map(|fold| vec![if fold % 2 == 0 { 12.0 } else { 8.0 }; horizon])
+                .collect();
+
+            let result = predictor.fit_per_step(&fc, &ac).unwrap();
+            let hw = result.half_widths();
+
+            let first = hw[0];
+            for (t, &h) in hw.iter().enumerate() {
+                assert!(
+                    (h - first).abs() < 1e-10,
+                    "Step {} half-width {} should equal step 0 half-width {}",
+                    t,
+                    h,
+                    first
+                );
+            }
+        }
+
+        // =================================================================
+        // Fold with growing errors → later half-widths should be larger
+        // =================================================================
+
+        #[test]
+        fn growing_errors_give_increasing_half_widths() {
+            let predictor = ConformalPredictor::split(0.90);
+
+            // Error at step t is proportional to (t+1)
+            let n_folds = 20;
+            let horizon = 6;
+            let fc: Vec<Vec<f64>> = (0..n_folds)
+                .map(|_| (0..horizon).map(|t| 100.0 + t as f64).collect())
+                .collect();
+            let ac: Vec<Vec<f64>> = (0..n_folds)
+                .map(|fold| {
+                    let sign = if fold % 2 == 0 { 1.0 } else { -1.0 };
+                    (0..horizon)
+                        .map(|t| 100.0 + t as f64 + sign * (t as f64 + 1.0) * 2.0)
+                        .collect()
+                })
+                .collect();
+
+            let result = predictor.fit_per_step(&fc, &ac).unwrap();
+            let hw = result.half_widths();
+
+            assert!(
+                hw[horizon - 1] > hw[0],
+                "Last step hw ({}) should exceed first step hw ({})",
+                hw[horizon - 1],
+                hw[0]
+            );
+        }
+
+        // =================================================================
+        // Empty fold_forecasts → error
+        // =================================================================
+
+        #[test]
+        fn empty_fold_forecasts_errors() {
+            let predictor = ConformalPredictor::split(0.90);
+            let fc: Vec<Vec<f64>> = vec![];
+            let ac: Vec<Vec<f64>> = vec![];
+            let result = predictor.fit_per_step(&fc, &ac);
+            assert!(result.is_err(), "Empty folds should produce an error");
+        }
+
+        // =================================================================
+        // Mismatched fold lengths → error
+        // =================================================================
+
+        #[test]
+        fn mismatched_fold_lengths_errors() {
+            let predictor = ConformalPredictor::split(0.90);
+            let fc = vec![vec![1.0, 2.0, 3.0], vec![1.0, 2.0]]; // horizon 3 vs 2
+            let ac = vec![vec![1.5, 2.5, 3.5], vec![1.5, 2.5]];
+            let result = predictor.fit_per_step(&fc, &ac);
+            assert!(
+                result.is_err(),
+                "Mismatched fold lengths should produce an error"
+            );
+        }
+
+        // =================================================================
+        // Mismatched fold_forecasts vs fold_actuals count → error
+        // =================================================================
+
+        #[test]
+        fn mismatched_fold_forecast_actual_count_errors() {
+            let predictor = ConformalPredictor::split(0.90);
+            let fc = vec![vec![1.0, 2.0], vec![1.0, 2.0], vec![1.0, 2.0]];
+            let ac = vec![vec![1.5, 2.5], vec![1.5, 2.5]]; // 3 vs 2
+            let result = predictor.fit_per_step(&fc, &ac);
+            assert!(
+                result.is_err(),
+                "Mismatched forecast/actual fold count should produce an error"
+            );
+        }
     }
 }

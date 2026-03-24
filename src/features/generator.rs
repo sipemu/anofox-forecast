@@ -997,4 +997,434 @@ mod tests {
             );
         }
     }
+
+    // ── Cyclical encoding correctness ──────────────────────────────────
+
+    #[test]
+    fn cyclical_month_january_values() {
+        // January: value=1, period=12, angle = 2*pi*1/12
+        let ts = vec![Utc.with_ymd_and_hms(2024, 1, 15, 0, 0, 0).unwrap()];
+        let gen = FeatureGenerator::new().cyclical(TimeComponent::Month);
+        let feats = gen.generate(&ts);
+
+        let expected_angle = 2.0 * PI * 1.0 / 12.0;
+        let sin_val = feats["month_sin"][0];
+        let cos_val = feats["month_cos"][0];
+        assert!(
+            (sin_val - expected_angle.sin()).abs() < 1e-10,
+            "Jan sin: expected {}, got {}",
+            expected_angle.sin(),
+            sin_val,
+        );
+        assert!(
+            (cos_val - expected_angle.cos()).abs() < 1e-10,
+            "Jan cos: expected {}, got {}",
+            expected_angle.cos(),
+            cos_val,
+        );
+    }
+
+    #[test]
+    fn cyclical_month_december_wraps_near_january() {
+        // Dec: value=12, angle = 2*pi*12/12 = 2*pi => same as 0
+        // Jan: value=1, angle = 2*pi*1/12
+        // The point is that December (12) wraps: sin(2*pi*12/12) = sin(2*pi) ~ 0
+        // and January (1) has sin(2*pi*1/12) ~ 0.5, so they are close in the
+        // cyclical space compared to, say, July (7).
+        let jan = vec![Utc.with_ymd_and_hms(2024, 1, 15, 0, 0, 0).unwrap()];
+        let dec = vec![Utc.with_ymd_and_hms(2024, 12, 15, 0, 0, 0).unwrap()];
+        let jul = vec![Utc.with_ymd_and_hms(2024, 7, 15, 0, 0, 0).unwrap()];
+        let gen = FeatureGenerator::new().cyclical(TimeComponent::Month);
+
+        let jan_f = gen.generate(&jan);
+        let dec_f = gen.generate(&dec);
+        let jul_f = gen.generate(&jul);
+
+        // Euclidean distance in (sin, cos) space
+        let dist_dec_jan = ((dec_f["month_sin"][0] - jan_f["month_sin"][0]).powi(2)
+            + (dec_f["month_cos"][0] - jan_f["month_cos"][0]).powi(2))
+        .sqrt();
+        let dist_jul_jan = ((jul_f["month_sin"][0] - jan_f["month_sin"][0]).powi(2)
+            + (jul_f["month_cos"][0] - jan_f["month_cos"][0]).powi(2))
+        .sqrt();
+
+        assert!(
+            dist_dec_jan < dist_jul_jan,
+            "Dec should be closer to Jan than Jul in cyclical space: dec-jan={}, jul-jan={}",
+            dist_dec_jan,
+            dist_jul_jan,
+        );
+    }
+
+    #[test]
+    fn cyclical_day_of_week_monday_differs_from_sunday() {
+        // Monday=0, Sunday=6
+        // 2024-01-01 is Monday, 2024-01-07 is Sunday
+        let monday = vec![Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap()];
+        let sunday = vec![Utc.with_ymd_and_hms(2024, 1, 7, 0, 0, 0).unwrap()];
+        let gen = FeatureGenerator::new().cyclical(TimeComponent::DayOfWeek);
+
+        let mon_f = gen.generate(&monday);
+        let sun_f = gen.generate(&sunday);
+
+        // Monday: value=0, angle=0 => sin=0, cos=1
+        assert!((mon_f["day_of_week_sin"][0] - 0.0).abs() < 1e-10);
+        assert!((mon_f["day_of_week_cos"][0] - 1.0).abs() < 1e-10);
+
+        // Sunday: value=6, angle=2*pi*6/7
+        let expected_angle = 2.0 * PI * 6.0 / 7.0;
+        assert!(
+            (sun_f["day_of_week_sin"][0] - expected_angle.sin()).abs() < 1e-10,
+            "Sunday sin: expected {}, got {}",
+            expected_angle.sin(),
+            sun_f["day_of_week_sin"][0],
+        );
+        assert!(
+            (sun_f["day_of_week_cos"][0] - expected_angle.cos()).abs() < 1e-10,
+            "Sunday cos: expected {}, got {}",
+            expected_angle.cos(),
+            sun_f["day_of_week_cos"][0],
+        );
+
+        // They should differ
+        assert!(
+            (mon_f["day_of_week_sin"][0] - sun_f["day_of_week_sin"][0]).abs() > 1e-5
+                || (mon_f["day_of_week_cos"][0] - sun_f["day_of_week_cos"][0]).abs() > 1e-5,
+            "Monday and Sunday should have different cyclical encodings"
+        );
+    }
+
+    #[test]
+    fn cyclical_hour_zero_equals_hour_24_wrap() {
+        // Hour 0 and hour 24 should produce the same values since
+        // sin(2*pi*0/24) = sin(2*pi*24/24) = sin(0) = sin(2*pi) = 0
+        // cos(2*pi*0/24) = cos(2*pi*24/24) = cos(0) = cos(2*pi) = 1
+        // Note: chrono hours are 0-23, there is no hour=24. But hour=0
+        // should equal what hour=24 would be (i.e., wrap around).
+        let hour0 = vec![Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap()];
+        let gen = FeatureGenerator::new().cyclical(TimeComponent::Hour);
+        let feats = gen.generate(&hour0);
+
+        // hour=0: angle = 2*pi*0/24 = 0
+        // hour=24 would be: angle = 2*pi*24/24 = 2*pi (same as 0)
+        let sin_0 = feats["hour_sin"][0];
+        let cos_0 = feats["hour_cos"][0];
+
+        // sin(0) = 0, cos(0) = 1 -- same as sin(2*pi), cos(2*pi)
+        assert!(
+            sin_0.abs() < 1e-10,
+            "hour=0 sin should be 0.0, got {}",
+            sin_0
+        );
+        assert!(
+            (cos_0 - 1.0).abs() < 1e-10,
+            "hour=0 cos should be 1.0, got {}",
+            cos_0
+        );
+    }
+
+    #[test]
+    fn cyclical_all_values_in_range() {
+        // Generate cyclical features for all components over a full year of
+        // hourly data and verify every value lies in [-1, 1].
+        let hourly_ts: Vec<DateTime<Utc>> =
+            (0..8760) // 365 * 24
+                .map(|i| {
+                    Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap() + Duration::hours(i as i64)
+                })
+                .collect();
+
+        let gen = FeatureGenerator::new()
+            .cyclical(TimeComponent::Month)
+            .cyclical(TimeComponent::Quarter)
+            .cyclical(TimeComponent::Semester)
+            .cyclical(TimeComponent::WeekOfYear)
+            .cyclical(TimeComponent::DayOfWeek)
+            .cyclical(TimeComponent::DayOfMonth)
+            .cyclical(TimeComponent::DayOfYear)
+            .cyclical(TimeComponent::Hour)
+            .cyclical(TimeComponent::Minute)
+            .cyclical(TimeComponent::Second);
+
+        let feats = gen.generate(&hourly_ts);
+
+        for (name, values) in &feats {
+            for (i, &v) in values.iter().enumerate() {
+                assert!(
+                    v >= -1.0 && v <= 1.0,
+                    "Feature '{}' at index {} has value {} outside [-1, 1]",
+                    name,
+                    i,
+                    v,
+                );
+            }
+        }
+    }
+
+    // ── Binary indicators ──────────────────────────────────────────────
+
+    #[test]
+    fn binary_month_start_only_day_1() {
+        // Generate daily timestamps for 3 months (Jan-Mar 2024)
+        let ts: Vec<DateTime<Utc>> = (0..91)
+            .map(|i| Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap() + Duration::days(i as i64))
+            .collect();
+        let gen = FeatureGenerator::new().binary(BinaryIndicator::MonthStart);
+        let feats = gen.generate(&ts);
+        let col = &feats["month_start"];
+
+        // Jan 1 = index 0, Feb 1 = index 31, Mar 1 = index 31+29=60 (2024 is leap)
+        let ones: Vec<usize> = col
+            .iter()
+            .enumerate()
+            .filter(|(_, &v)| v == 1.0)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            ones,
+            vec![0, 31, 60],
+            "MonthStart should only fire on day 1"
+        );
+
+        // All others should be 0
+        let zero_count = col.iter().filter(|&&v| v == 0.0).count();
+        assert_eq!(zero_count, 91 - 3);
+    }
+
+    #[test]
+    fn binary_month_end_various_months() {
+        // Test specific month-end dates
+        let dates = vec![
+            // Jan 31, 2024 (31 days)
+            Utc.with_ymd_and_hms(2024, 1, 31, 0, 0, 0).unwrap(),
+            // Jan 30, 2024 (not end)
+            Utc.with_ymd_and_hms(2024, 1, 30, 0, 0, 0).unwrap(),
+            // Feb 29, 2024 (leap year)
+            Utc.with_ymd_and_hms(2024, 2, 29, 0, 0, 0).unwrap(),
+            // Feb 28, 2024 (NOT end in leap year)
+            Utc.with_ymd_and_hms(2024, 2, 28, 0, 0, 0).unwrap(),
+            // Feb 28, 2023 (end in non-leap year)
+            Utc.with_ymd_and_hms(2023, 2, 28, 0, 0, 0).unwrap(),
+            // Apr 30, 2024 (30 days)
+            Utc.with_ymd_and_hms(2024, 4, 30, 0, 0, 0).unwrap(),
+            // Apr 29, 2024 (not end)
+            Utc.with_ymd_and_hms(2024, 4, 29, 0, 0, 0).unwrap(),
+        ];
+        let gen = FeatureGenerator::new().binary(BinaryIndicator::MonthEnd);
+        let feats = gen.generate(&dates);
+        let col = &feats["month_end"];
+
+        assert_eq!(col[0], 1.0, "Jan 31 should be month end");
+        assert_eq!(col[1], 0.0, "Jan 30 should NOT be month end");
+        assert_eq!(col[2], 1.0, "Feb 29 (leap) should be month end");
+        assert_eq!(col[3], 0.0, "Feb 28 (leap year) should NOT be month end");
+        assert_eq!(col[4], 1.0, "Feb 28 (non-leap) should be month end");
+        assert_eq!(col[5], 1.0, "Apr 30 should be month end");
+        assert_eq!(col[6], 0.0, "Apr 29 should NOT be month end");
+    }
+
+    #[test]
+    fn binary_quarter_start() {
+        // Only Jan 1, Apr 1, Jul 1, Oct 1 should be 1
+        let dates = vec![
+            Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(), // Q1 start
+            Utc.with_ymd_and_hms(2024, 1, 2, 0, 0, 0).unwrap(), // not
+            Utc.with_ymd_and_hms(2024, 2, 1, 0, 0, 0).unwrap(), // not (month start but not quarter)
+            Utc.with_ymd_and_hms(2024, 4, 1, 0, 0, 0).unwrap(), // Q2 start
+            Utc.with_ymd_and_hms(2024, 5, 1, 0, 0, 0).unwrap(), // not
+            Utc.with_ymd_and_hms(2024, 7, 1, 0, 0, 0).unwrap(), // Q3 start
+            Utc.with_ymd_and_hms(2024, 10, 1, 0, 0, 0).unwrap(), // Q4 start
+            Utc.with_ymd_and_hms(2024, 10, 2, 0, 0, 0).unwrap(), // not
+        ];
+        let gen = FeatureGenerator::new().binary(BinaryIndicator::QuarterStart);
+        let feats = gen.generate(&dates);
+        let col = &feats["quarter_start"];
+
+        assert_eq!(col, &[1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn binary_quarter_end() {
+        // Only Mar 31, Jun 30, Sep 30, Dec 31 should be 1
+        let dates = vec![
+            Utc.with_ymd_and_hms(2024, 3, 31, 0, 0, 0).unwrap(), // Q1 end
+            Utc.with_ymd_and_hms(2024, 3, 30, 0, 0, 0).unwrap(), // not
+            Utc.with_ymd_and_hms(2024, 6, 30, 0, 0, 0).unwrap(), // Q2 end
+            Utc.with_ymd_and_hms(2024, 6, 29, 0, 0, 0).unwrap(), // not
+            Utc.with_ymd_and_hms(2024, 9, 30, 0, 0, 0).unwrap(), // Q3 end
+            Utc.with_ymd_and_hms(2024, 12, 31, 0, 0, 0).unwrap(), // Q4 end
+            Utc.with_ymd_and_hms(2024, 12, 30, 0, 0, 0).unwrap(), // not
+            Utc.with_ymd_and_hms(2024, 1, 31, 0, 0, 0).unwrap(), // month end but not quarter end
+        ];
+        let gen = FeatureGenerator::new().binary(BinaryIndicator::QuarterEnd);
+        let feats = gen.generate(&dates);
+        let col = &feats["quarter_end"];
+
+        assert_eq!(col, &[1.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn binary_year_start() {
+        let dates = vec![
+            Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(), // yes
+            Utc.with_ymd_and_hms(2024, 1, 2, 0, 0, 0).unwrap(), // no
+            Utc.with_ymd_and_hms(2024, 12, 31, 0, 0, 0).unwrap(), // no
+            Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(), // yes
+            Utc.with_ymd_and_hms(2024, 7, 1, 0, 0, 0).unwrap(), // no (month start, not year)
+        ];
+        let gen = FeatureGenerator::new().binary(BinaryIndicator::YearStart);
+        let feats = gen.generate(&dates);
+        let col = &feats["year_start"];
+
+        assert_eq!(col, &[1.0, 0.0, 0.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn binary_year_end() {
+        let dates = vec![
+            Utc.with_ymd_and_hms(2024, 12, 31, 0, 0, 0).unwrap(), // yes
+            Utc.with_ymd_and_hms(2024, 12, 30, 0, 0, 0).unwrap(), // no
+            Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),   // no
+            Utc.with_ymd_and_hms(2023, 12, 31, 0, 0, 0).unwrap(), // yes
+            Utc.with_ymd_and_hms(2024, 6, 30, 0, 0, 0).unwrap(),  // no (quarter end, not year)
+        ];
+        let gen = FeatureGenerator::new().binary(BinaryIndicator::YearEnd);
+        let feats = gen.generate(&dates);
+        let col = &feats["year_end"];
+
+        assert_eq!(col, &[1.0, 0.0, 0.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn binary_weekend() {
+        // 2024-01-01 is Monday
+        let ts = daily_timestamps(7);
+        let gen = FeatureGenerator::new().binary(BinaryIndicator::Weekend);
+        let feats = gen.generate(&ts);
+        let col = &feats["weekend"];
+
+        // Mon=0, Tue=0, Wed=0, Thu=0, Fri=0, Sat=1, Sun=1
+        assert_eq!(col, &[0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0]);
+    }
+
+    // ── Advanced features ──────────────────────────────────────────────
+
+    #[test]
+    fn advanced_days_in_month() {
+        let dates = vec![
+            Utc.with_ymd_and_hms(2024, 2, 15, 0, 0, 0).unwrap(), // Feb 2024 (leap) = 29
+            Utc.with_ymd_and_hms(2023, 2, 15, 0, 0, 0).unwrap(), // Feb 2023 (non-leap) = 28
+            Utc.with_ymd_and_hms(2024, 1, 10, 0, 0, 0).unwrap(), // Jan = 31
+            Utc.with_ymd_and_hms(2024, 4, 20, 0, 0, 0).unwrap(), // Apr = 30
+        ];
+        let gen = FeatureGenerator::new().advanced(AdvancedFeature::DaysInMonth);
+        let feats = gen.generate(&dates);
+        let col = &feats["days_in_month"];
+
+        assert_eq!(col[0], 29.0, "Feb 2024 (leap) should have 29 days");
+        assert_eq!(col[1], 28.0, "Feb 2023 (non-leap) should have 28 days");
+        assert_eq!(col[2], 31.0, "Jan should have 31 days");
+        assert_eq!(col[3], 30.0, "Apr should have 30 days");
+    }
+
+    #[test]
+    fn advanced_leap_year() {
+        let dates = vec![
+            Utc.with_ymd_and_hms(2024, 6, 1, 0, 0, 0).unwrap(), // leap (div by 4)
+            Utc.with_ymd_and_hms(2023, 6, 1, 0, 0, 0).unwrap(), // not leap
+            Utc.with_ymd_and_hms(2000, 6, 1, 0, 0, 0).unwrap(), // leap (div by 400)
+            Utc.with_ymd_and_hms(1900, 6, 1, 0, 0, 0).unwrap(), // NOT leap (div by 100 but not 400)
+        ];
+        let gen = FeatureGenerator::new().advanced(AdvancedFeature::LeapYear);
+        let feats = gen.generate(&dates);
+        let col = &feats["leap_year"];
+
+        assert_eq!(col[0], 1.0, "2024 should be leap year");
+        assert_eq!(col[1], 0.0, "2023 should NOT be leap year");
+        assert_eq!(col[2], 1.0, "2000 should be leap year");
+        assert_eq!(col[3], 0.0, "1900 should NOT be leap year");
+    }
+
+    // ── Edge cases ─────────────────────────────────────────────────────
+
+    #[test]
+    fn empty_timestamp_slice() {
+        let empty: Vec<DateTime<Utc>> = vec![];
+        let gen = FeatureGenerator::new()
+            .cyclical(TimeComponent::Month)
+            .cyclical(TimeComponent::Hour)
+            .binary(BinaryIndicator::MonthStart)
+            .binary(BinaryIndicator::Weekend)
+            .advanced(AdvancedFeature::DaysInMonth)
+            .advanced(AdvancedFeature::LeapYear)
+            .fourier(7, 2)
+            .day_of_week()
+            .month_of_year();
+
+        let feats = gen.generate(&empty);
+
+        // All columns should exist but be empty
+        assert!(
+            !feats.is_empty(),
+            "Features map should have keys even for empty input"
+        );
+        for (name, values) in &feats {
+            assert!(
+                values.is_empty(),
+                "Feature '{}' should have 0 elements for empty timestamps, got {}",
+                name,
+                values.len(),
+            );
+        }
+    }
+
+    #[test]
+    fn single_timestamp() {
+        let single = vec![Utc.with_ymd_and_hms(2024, 6, 15, 12, 30, 45).unwrap()];
+        let gen = FeatureGenerator::new()
+            .cyclical(TimeComponent::Month)
+            .cyclical(TimeComponent::DayOfWeek)
+            .cyclical(TimeComponent::Hour)
+            .binary(BinaryIndicator::MonthStart)
+            .binary(BinaryIndicator::MonthEnd)
+            .binary(BinaryIndicator::Weekend)
+            .advanced(AdvancedFeature::DaysInMonth)
+            .advanced(AdvancedFeature::LeapYear);
+
+        let feats = gen.generate(&single);
+
+        // All columns should have exactly 1 element
+        for (name, values) in &feats {
+            assert_eq!(
+                values.len(),
+                1,
+                "Feature '{}' should have 1 element, got {}",
+                name,
+                values.len(),
+            );
+        }
+
+        // June 15, 2024 is a Saturday
+        assert_eq!(feats["weekend"][0], 1.0, "June 15, 2024 is a Saturday");
+        assert_eq!(feats["month_start"][0], 0.0, "Day 15 is not month start");
+        assert_eq!(feats["month_end"][0], 0.0, "Day 15 is not month end");
+        assert_eq!(feats["days_in_month"][0], 30.0, "June has 30 days");
+        assert_eq!(feats["leap_year"][0], 1.0, "2024 is a leap year");
+
+        // Cyclical month: June=6, angle=2*pi*6/12 = pi
+        let expected_sin = (2.0 * PI * 6.0 / 12.0).sin();
+        let expected_cos = (2.0 * PI * 6.0 / 12.0).cos();
+        assert!(
+            (feats["month_sin"][0] - expected_sin).abs() < 1e-10,
+            "Month sin for June: expected {}, got {}",
+            expected_sin,
+            feats["month_sin"][0],
+        );
+        assert!(
+            (feats["month_cos"][0] - expected_cos).abs() < 1e-10,
+            "Month cos for June: expected {}, got {}",
+            expected_cos,
+            feats["month_cos"][0],
+        );
+    }
 }
