@@ -237,6 +237,22 @@ name = "postprocess_backtest"
 path = "examples/postprocess/backtest.rs"
 
 [[example]]
+name = "bootstrap_predictor"
+path = "examples/postprocess/bootstrap_predictor.rs"
+
+[[example]]
+name = "per_step_conformal"
+path = "examples/postprocess/per_step_conformal.rs"
+
+[[example]]
+name = "calendar_features"
+path = "examples/features/calendar_features.rs"
+
+[[example]]
+name = "regression_advanced"
+path = "examples/forecasting/regression_advanced.rs"
+
+[[example]]
 name = "temporal_aggregation"
 path = "examples/transform/temporal_aggregation.rs"
 
