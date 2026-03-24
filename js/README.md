@@ -278,10 +278,23 @@ model.fit(ts);
 const forecast = model.predict(10);
 ```
 
+## What's New in the Rust Crate (v0.4.8)
+
+These features are available in the Rust crate but not yet exposed as WASM bindings:
+
+- **Per-horizon-step conformal prediction** — separate interval widths per forecast step
+- **Bootstrap prediction intervals** — model-agnostic residual resampling with cumulative error paths
+- **Calendar feature engineering** — cyclical sin/cos encoding, binary indicators (weekend, month-end, etc.)
+- **Future timestamp generation** — calendar-aware (`generate_future_timestamps`)
+- **Auto-lag selection** for RegressionForecaster (BIC/AIC)
+- **Differencing** for RegressionForecaster (regular + seasonal)
+- **Reworked cross-validation** — backward-anchored folds, n_folds-driven
+
 ## Limitations
 
 - The `parallel` feature from the Rust crate is not available in WASM
 - IDR (Isotonic Distributional Regression) and QRA are not yet exposed in WASM
+- Per-step conformal, bootstrap predictor, and calendar features are Rust-only (not yet in WASM)
 
 ## License
 
