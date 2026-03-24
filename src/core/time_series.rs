@@ -1300,23 +1300,32 @@ impl TimeSeries {
     /// Generate future timestamps for a forecast horizon.
     ///
     /// Infers the frequency from existing timestamps, then extrapolates forward.
-    /// Uses calendar-aware arithmetic for monthly/quarterly data.
+    /// Uses calendar-aware arithmetic for monthly/quarterly/yearly data.
     pub fn future_timestamps(&self, horizon: usize) -> Result<Vec<DateTime<Utc>>> {
         if self.timestamps.is_empty() {
             return Err(ForecastError::EmptyData);
         }
         let last = *self.timestamps.last().unwrap();
 
-        // Try calendar-aware frequency first, fall back to duration-based
-        let freq = self
+        // Try to detect monthly/quarterly/yearly from median spacing
+        let freq_duration = self
             .infer_frequency_calendar(0.5)
             .or_else(|_| self.infer_frequency(0.5))?;
 
-        Ok(generate_future_timestamps(
-            &last,
-            &Frequency::Duration(freq),
-            horizon,
-        ))
+        let secs = freq_duration.num_seconds();
+
+        // Classify: ~30 days = monthly, ~91 days = quarterly, ~365 days = yearly
+        let frequency = if secs >= 27 * 86400 && secs <= 33 * 86400 {
+            Frequency::Months(1)
+        } else if secs >= 88 * 86400 && secs <= 95 * 86400 {
+            Frequency::Months(3)
+        } else if secs >= 360 * 86400 && secs <= 370 * 86400 {
+            Frequency::Years(1)
+        } else {
+            Frequency::Duration(freq_duration)
+        };
+
+        Ok(generate_future_timestamps(&last, &frequency, horizon))
     }
 
     /// Set frequency from timestamps (auto-infer).
@@ -1850,9 +1859,17 @@ pub fn generate_future_timestamps(
     horizon: usize,
 ) -> Vec<DateTime<Utc>> {
     let mut result = Vec::with_capacity(horizon);
+    let original_day = last.day();
+
     let mut current = *last;
     for _ in 0..horizon {
-        current = advance_timestamp(current, frequency);
+        current = match frequency {
+            // For month/year frequencies, preserve the original day to prevent drift
+            // (Jan 31 → Feb 29 → Mar 31, not Jan 31 → Feb 29 → Mar 29)
+            Frequency::Months(m) => add_months_with_target_day(current, *m, original_day),
+            Frequency::Years(y) => add_months_with_target_day(current, *y * 12, original_day),
+            Frequency::Duration(d) => current + *d,
+        };
         result.push(current);
     }
     result
@@ -1869,20 +1886,29 @@ fn advance_timestamp(current: DateTime<Utc>, frequency: &Frequency) -> DateTime<
 }
 
 /// Add months to a DateTime, handling month-end edge cases.
+///
+/// Uses the *original* day (stored in the Frequency step chain via generate_future_timestamps)
+/// rather than the current timestamp's day. This prevents month-end drift:
+/// Jan 31 → Feb 29 → Mar 31 → Apr 30 (correct)
+/// instead of Jan 31 → Feb 29 → Mar 29 → Apr 29 (drift bug).
 fn add_months(dt: DateTime<Utc>, months: i32) -> DateTime<Utc> {
+    add_months_with_target_day(dt, months, dt.day())
+}
+
+/// Add months with a specific target day. If the target day exceeds the
+/// destination month's length, clamp to the last day of that month.
+fn add_months_with_target_day(dt: DateTime<Utc>, months: i32, target_day: u32) -> DateTime<Utc> {
     use chrono::{NaiveDate, Timelike};
 
     let year = dt.year();
     let month = dt.month() as i32;
-    let day = dt.day();
 
     let total_months = year * 12 + (month - 1) + months;
     let new_year = total_months / 12;
     let new_month = (total_months % 12 + 1) as u32;
 
-    // Handle month-end edge cases (e.g., Jan 31 + 1 month = Feb 28/29)
     let max_day = days_in_month(new_year, new_month);
-    let new_day = day.min(max_day);
+    let new_day = target_day.min(max_day);
 
     // Build the new date directly using NaiveDate to avoid issues with chrono's with_* methods
     if let Some(naive_date) = NaiveDate::from_ymd_opt(new_year, new_month, new_day) {
@@ -3353,34 +3379,35 @@ mod tests {
 
     #[test]
     fn monthly_step_jan31_clamps_to_feb28_in_non_leap_year() {
-        // Jan 31 2023 + 1mo => Feb 28 2023 (non-leap)
+        // Jan 31 2023 + 1mo: original_day=31, clamped per target month
         let last = ymd(2023, 1, 31);
         let result = generate_future_timestamps(&last, &Frequency::Months(1), 3);
         assert_eq!(result.len(), 3);
-        assert_eq!(result[0], ymd(2023, 2, 28)); // Feb 28
-        assert_eq!(result[1], ymd(2023, 3, 28)); // Mar 28 (clamped from prev Feb 28)
-        assert_eq!(result[2], ymd(2023, 4, 28)); // Apr 28
+        assert_eq!(result[0], ymd(2023, 2, 28)); // Feb 28 (31 clamped)
+        assert_eq!(result[1], ymd(2023, 3, 31)); // Mar 31 (original_day=31 preserved)
+        assert_eq!(result[2], ymd(2023, 4, 30)); // Apr 30 (31 clamped)
     }
 
     #[test]
     fn monthly_step_jan31_clamps_to_feb29_in_leap_year() {
-        // Jan 31 2024 + 1mo => Feb 29 2024 (leap year)
+        // Jan 31 2024: original_day=31, preserved across months
         let last = ymd(2024, 1, 31);
         let result = generate_future_timestamps(&last, &Frequency::Months(1), 4);
         assert_eq!(result.len(), 4);
-        assert_eq!(result[0], ymd(2024, 2, 29)); // Feb 29 (leap)
-        assert_eq!(result[1], ymd(2024, 3, 29)); // Mar 29 (clamped from prev Feb 29)
-        assert_eq!(result[2], ymd(2024, 4, 29)); // Apr 29
-        assert_eq!(result[3], ymd(2024, 5, 29)); // May 29
+        assert_eq!(result[0], ymd(2024, 2, 29)); // Feb 29 (31 clamped, leap)
+        assert_eq!(result[1], ymd(2024, 3, 31)); // Mar 31 (original_day=31)
+        assert_eq!(result[2], ymd(2024, 4, 30)); // Apr 30 (31 clamped)
+        assert_eq!(result[3], ymd(2024, 5, 31)); // May 31 (original_day=31)
     }
 
     #[test]
     fn monthly_step_mar31_to_apr30_and_beyond() {
+        // Mar 31: original_day=31, preserved
         let last = ymd(2024, 3, 31);
         let result = generate_future_timestamps(&last, &Frequency::Months(1), 3);
-        assert_eq!(result[0], ymd(2024, 4, 30)); // Apr has 30 days
-        assert_eq!(result[1], ymd(2024, 5, 30)); // clamped from prev Apr 30
-        assert_eq!(result[2], ymd(2024, 6, 30)); // Jun has 30 days
+        assert_eq!(result[0], ymd(2024, 4, 30)); // Apr 30 (31 clamped)
+        assert_eq!(result[1], ymd(2024, 5, 31)); // May 31 (original_day=31)
+        assert_eq!(result[2], ymd(2024, 6, 30)); // Jun 30 (31 clamped)
     }
 
     #[test]
@@ -3396,12 +3423,13 @@ mod tests {
 
     #[test]
     fn quarterly_step_from_jan31() {
+        // original_day=31 preserved across quarters
         let last = ymd(2024, 1, 31);
         let result = generate_future_timestamps(&last, &Frequency::Months(3), 4);
-        assert_eq!(result[0], ymd(2024, 4, 30)); // Apr has 30 days
-        assert_eq!(result[1], ymd(2024, 7, 30)); // clamped from prev Apr 30
-        assert_eq!(result[2], ymd(2024, 10, 30)); // clamped from prev Jul 30
-        assert_eq!(result[3], ymd(2025, 1, 30)); // clamped from prev Oct 30
+        assert_eq!(result[0], ymd(2024, 4, 30)); // Apr 30 (31 clamped)
+        assert_eq!(result[1], ymd(2024, 7, 31)); // Jul 31 (original_day=31)
+        assert_eq!(result[2], ymd(2024, 10, 31)); // Oct 31 (original_day=31)
+        assert_eq!(result[3], ymd(2025, 1, 31)); // Jan 31 (original_day=31)
     }
 
     #[test]
@@ -3426,12 +3454,13 @@ mod tests {
 
     #[test]
     fn yearly_step_from_feb29_leap_to_non_leap() {
-        let last = ymd(2024, 2, 29); // 2024 is a leap year
+        // original_day=29 preserved: clamped to 28 in non-leap, restored to 29 in leap
+        let last = ymd(2024, 2, 29);
         let result = generate_future_timestamps(&last, &Frequency::Years(1), 4);
-        assert_eq!(result[0], ymd(2025, 2, 28)); // 2025 not leap
-        assert_eq!(result[1], ymd(2026, 2, 28)); // 2026 not leap
-        assert_eq!(result[2], ymd(2027, 2, 28)); // 2027 not leap
-        assert_eq!(result[3], ymd(2028, 2, 28)); // 2028 IS leap, but clamped from prev Feb 28
+        assert_eq!(result[0], ymd(2025, 2, 28)); // 2025 not leap (29 clamped)
+        assert_eq!(result[1], ymd(2026, 2, 28)); // 2026 not leap (29 clamped)
+        assert_eq!(result[2], ymd(2027, 2, 28)); // 2027 not leap (29 clamped)
+        assert_eq!(result[3], ymd(2028, 2, 29)); // 2028 IS leap (original_day=29 fits)
     }
 
     #[test]
@@ -3445,11 +3474,12 @@ mod tests {
 
     #[test]
     fn yearly_step_two_years() {
+        // original_day=29, 2-year stride
         let last = ymd(2024, 2, 29);
         let result = generate_future_timestamps(&last, &Frequency::Years(2), 3);
-        assert_eq!(result[0], ymd(2026, 2, 28)); // not leap
-        assert_eq!(result[1], ymd(2028, 2, 28)); // leap but clamped from prev 28
-        assert_eq!(result[2], ymd(2030, 2, 28)); // not leap
+        assert_eq!(result[0], ymd(2026, 2, 28)); // not leap (29 clamped)
+        assert_eq!(result[1], ymd(2028, 2, 29)); // leap (original_day=29 fits)
+        assert_eq!(result[2], ymd(2030, 2, 28)); // not leap (29 clamped)
     }
 
     // --- 4. Daily / weekly / hourly Duration-based stepping ---
@@ -3537,18 +3567,13 @@ mod tests {
         let values: Vec<f64> = (0..12).map(|i| i as f64).collect();
         let ts = TimeSeries::univariate(timestamps, values).unwrap();
 
-        // future_timestamps uses infer_frequency_calendar which returns a Duration.
-        // For monthly data the modal diff will be ~30 or 31 days.
+        // future_timestamps detects ~30-day spacing and uses Frequency::Months(1)
         let future = ts.future_timestamps(3).unwrap();
         assert_eq!(future.len(), 3);
-        // The inferred Duration-based step is the modal diff in seconds.
-        // For 1st-of-month data, most gaps are 31 days (Jan, Mar, May, Jul, Aug, Oct
-        // have 31 days). The modal diff should be 31*86400 seconds.
-        let last = ymd(2024, 12, 1);
-        let step = future[0] - last;
-        // The step should be consistent across all future timestamps
-        assert_eq!(future[1] - future[0], step);
-        assert_eq!(future[2] - future[1], step);
+        // Calendar-aware monthly stepping from Dec 1
+        assert_eq!(future[0], ymd(2025, 1, 1));
+        assert_eq!(future[1], ymd(2025, 2, 1));
+        assert_eq!(future[2], ymd(2025, 3, 1));
     }
 
     // --- 6. Empty series edge case ---
@@ -3676,15 +3701,15 @@ mod tests {
 
     #[test]
     fn quarterly_step_from_quarter_parse() {
-        // Frequency::parse("1q") should produce Months(3)
+        // Frequency::parse("1q") should produce Months(3), original_day=31
         let freq = Frequency::parse("1q").unwrap();
         assert_eq!(freq, Frequency::Months(3));
         let last = ymd(2024, 3, 31);
         let result = generate_future_timestamps(&last, &freq, 4);
-        assert_eq!(result[0], ymd(2024, 6, 30)); // Jun has 30 days
-        assert_eq!(result[1], ymd(2024, 9, 30)); // Sep has 30 days
-        assert_eq!(result[2], ymd(2024, 12, 30)); // clamped from Sep 30
-        assert_eq!(result[3], ymd(2025, 3, 30)); // clamped from Dec 30
+        assert_eq!(result[0], ymd(2024, 6, 30)); // Jun 30 (31 clamped)
+        assert_eq!(result[1], ymd(2024, 9, 30)); // Sep 30 (31 clamped)
+        assert_eq!(result[2], ymd(2024, 12, 31)); // Dec 31 (original_day=31)
+        assert_eq!(result[3], ymd(2025, 3, 31)); // Mar 31 (original_day=31)
     }
 }
 

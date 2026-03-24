@@ -133,13 +133,17 @@ impl BootstrapPredictor {
             None => StdRng::from_entropy(),
         };
 
-        // Simulate n_rep paths, each of length horizon
+        // Simulate n_rep paths with cumulative error accumulation.
+        // Each path: simulated[h] = point_forecast[h] + sum(errors[0..=h])
+        // This makes intervals grow with horizon (uncertainty accumulates).
         let mut samples_per_step: Vec<Vec<f64>> = vec![Vec::with_capacity(n_rep); horizon];
 
         for _ in 0..n_rep {
             let errors = resample(&result.residuals, horizon, result.block_size, &mut rng);
+            let mut cumulative_error = 0.0;
             for (h, &err) in errors.iter().enumerate() {
-                let simulated = point_forecast[h] + err;
+                cumulative_error += err;
+                let simulated = point_forecast[h] + cumulative_error;
                 if simulated.is_finite() {
                     samples_per_step[h].push(simulated);
                 }

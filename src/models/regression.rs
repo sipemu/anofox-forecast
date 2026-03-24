@@ -791,10 +791,9 @@ mod ols_impl {
                 }
             }
 
-            // Set the winning lag order
+            // Set the winning lag order (keep auto_lag_config so re-fit works)
             self.max_lag = best_order;
             self.lag_indices.clear();
-            self.auto_lag_config = None; // resolved — don't re-run on next fit
 
             Ok(())
         }
@@ -3427,10 +3426,10 @@ mod ols_impl {
             );
             model.fit(&ts).unwrap();
 
-            // The model should have resolved auto_lags (config cleared)
+            // auto_lag_config is preserved for re-fit; max_lag is set to the selected order
             assert!(
-                model.features().auto_lag_config.is_none(),
-                "auto_lag_config should be None after fit"
+                model.features().max_lag <= 5,
+                "selected lag should be <= max_lag"
             );
 
             let forecast = model.predict(10).unwrap();
