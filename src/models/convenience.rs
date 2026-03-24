@@ -303,26 +303,6 @@ pub fn cross_validate_all(
     CVComparison { results }
 }
 
-/// Compute the initial window size and step size for cross-validation folds.
-///
-/// Given the series length, desired number of folds, and forecast horizon,
-/// returns `(initial_window, step_size)` that fit approximately `n_folds`
-/// folds within the series.
-fn compute_cv_fold_params(series_len: usize, n_folds: usize, horizon: usize) -> (usize, usize) {
-    if n_folds == 0 || horizon == 0 || series_len < horizon + 2 {
-        return (series_len, 1); // Will produce 0 folds
-    }
-
-    let needed_for_folds = n_folds * horizon;
-    if needed_for_folds >= series_len {
-        let iw = series_len.saturating_sub(n_folds + horizon - 1).max(2);
-        (iw, 1)
-    } else {
-        let iw = series_len.saturating_sub(needed_for_folds).max(2);
-        (iw, horizon)
-    }
-}
-
 /// Construct a `CVModelResult` with NaN metrics (used when no folds succeed).
 fn failed_cv_result(name: String) -> CVModelResult {
     CVModelResult {
