@@ -52,6 +52,7 @@ pub struct DynamicTheta {
     /// Whether decomposition type was automatically changed due to fallback rules.
     decomposition_fallback: bool,
     /// Seasonal indices (for deseasonalizing).
+    #[allow(dead_code)]
     seasonals: Option<Vec<f64>>,
     /// Seasonal forecast pattern (last cycle, for reseasonalizing forecasts).
     seasonal_forecast: Option<Vec<f64>>,
