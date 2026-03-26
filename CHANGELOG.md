@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-03-26
+
+### Added
+
+- **WASM/JS Parity** — major expansion of JS/WASM bindings to match Rust core:
+  - `FeatureGenerator` with cyclical sin/cos, binary indicators, advanced calendar features
+  - `generateFutureTimestamps(lastMs, frequency, horizon)` standalone function
+  - `TimeSeries.futureTimestamps(horizon)` auto-inferred
+  - `JsBootstrapPredictor` with `predictIntervals()` and `predictQuantiles()`
+  - `JsConformalPredictor.predictQuantiles()` for multi-quantile conformal forecasts
+  - `JsConformalPredictor.fitPerStep()` → `JsPerStepConformalResult`
+  - `KalmanForecaster.custom(F, H, Q, R)` for user-defined state-space models
+  - `KalmanForecaster.logLikelihood(series)` for model comparison
+  - `KalmanForecaster.nState` / `nObs` getters
+
+### Fixed
+
+- `KalmanForecaster.smooth()` was hardcoding `local_level(1.0, 0.1)` instead of using the user-configured state-space model
+
 ## [0.4.9] - 2026-03-26
 
 ### Added

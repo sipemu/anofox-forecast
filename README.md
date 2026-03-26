@@ -210,7 +210,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-anofox-forecast = "0.4"
+anofox-forecast = "0.5"
 ```
 
 ### Optional Features
