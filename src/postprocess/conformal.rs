@@ -487,6 +487,54 @@ impl ConformalPredictor {
         sorted[idx]
     }
 
+    /// Generate quantile forecasts at multiple quantile levels.
+    ///
+    /// For each quantile level, computes the conformal prediction bound
+    /// from the fitted nonconformity scores. Returns a `QuantileForecasts`
+    /// with one column per quantile level.
+    ///
+    /// Quantile levels below 0.5 produce lower bounds (point - hw),
+    /// levels above 0.5 produce upper bounds (point + hw).
+    pub fn predict_quantiles(
+        &self,
+        result: &ConformalResult,
+        point_forecast: &[f64],
+        quantile_levels: &[f64],
+    ) -> crate::postprocess::QuantileForecasts {
+        let horizon = point_forecast.len();
+        let scores = result.scores();
+
+        let mut forecast_values = Vec::with_capacity(horizon);
+
+        for h in 0..horizon {
+            let mut row = Vec::with_capacity(quantile_levels.len());
+            for &q in quantile_levels {
+                // Map quantile to a coverage level and direction
+                let hw = if q < 0.5 {
+                    // Lower tail: use coverage = 1 - 2*q → half-width, subtract
+                    let cov = 1.0 - 2.0 * q;
+                    let hw = Self::compute_quantile(scores, cov, &result.method);
+                    -hw
+                } else if q > 0.5 {
+                    // Upper tail: use coverage = 2*q - 1 → half-width, add
+                    let cov = 2.0 * q - 1.0;
+                    Self::compute_quantile(scores, cov, &result.method)
+                } else {
+                    // Median: no adjustment
+                    0.0
+                };
+                row.push(point_forecast[h] + hw);
+            }
+            forecast_values.push(row);
+        }
+
+        crate::postprocess::QuantileForecasts::from_values(
+            quantile_levels.to_vec(),
+            forecast_values,
+        )
+        .expect("Valid quantile forecasts")
+    }
+
     /// Generate prediction intervals for new point forecasts.
     ///
     /// # Arguments
@@ -1395,6 +1443,103 @@ mod tests {
                 result.is_err(),
                 "Mismatched forecast/actual fold count should produce an error"
             );
+        }
+    }
+
+    // =========================================================================
+    // predict_quantiles tests
+    // =========================================================================
+
+    mod quantile_forecasts {
+        use super::*;
+
+        fn make_calibration_data() -> (Vec<f64>, Vec<f64>) {
+            let forecasts: Vec<f64> = (0..50).map(|i| i as f64).collect();
+            let actuals: Vec<f64> = (0..50)
+                .map(|i| i as f64 + ((i * 7 + 3) % 11) as f64 * 0.3 - 1.5)
+                .collect();
+            (forecasts, actuals)
+        }
+
+        #[test]
+        fn returns_correct_shape() {
+            let (fc, ac) = make_calibration_data();
+            let cp = ConformalPredictor::split(0.90);
+            let result = cp.fit(&fc, &ac).unwrap();
+
+            let levels = vec![0.10, 0.25, 0.50, 0.75, 0.90];
+            let qf = cp.predict_quantiles(&result, &[50.0, 51.0, 52.0], &levels);
+
+            assert_eq!(qf.n_times(), 3);
+            assert_eq!(qf.quantiles().len(), 5);
+        }
+
+        #[test]
+        fn quantiles_are_monotonically_ordered() {
+            let (fc, ac) = make_calibration_data();
+            let cp = ConformalPredictor::split(0.90);
+            let result = cp.fit(&fc, &ac).unwrap();
+
+            let levels = vec![0.05, 0.25, 0.50, 0.75, 0.95];
+            let qf = cp.predict_quantiles(&result, &[50.0], &levels);
+
+            let row = qf.at_time(0).unwrap();
+            for i in 1..row.len() {
+                assert!(
+                    row[i] >= row[i - 1],
+                    "q[{}]={} < q[{}]={}",
+                    i,
+                    row[i],
+                    i - 1,
+                    row[i - 1]
+                );
+            }
+        }
+
+        #[test]
+        fn median_equals_point_forecast() {
+            let (fc, ac) = make_calibration_data();
+            let cp = ConformalPredictor::split(0.90);
+            let result = cp.fit(&fc, &ac).unwrap();
+
+            let qf = cp.predict_quantiles(&result, &[100.0], &[0.50]);
+            let median = qf.at_time(0).unwrap()[0];
+            assert!(
+                (median - 100.0).abs() < 1e-10,
+                "Median {} should equal point forecast 100.0",
+                median
+            );
+        }
+
+        #[test]
+        fn symmetric_quantiles_are_symmetric() {
+            let (fc, ac) = make_calibration_data();
+            let cp = ConformalPredictor::split(0.90);
+            let result = cp.fit(&fc, &ac).unwrap();
+
+            let point = 100.0;
+            let qf = cp.predict_quantiles(&result, &[point], &[0.10, 0.50, 0.90]);
+            let row = qf.at_time(0).unwrap();
+
+            let lower_dist = point - row[0]; // distance from point to 10th percentile
+            let upper_dist = row[2] - point; // distance from point to 90th percentile
+            assert!(
+                (lower_dist - upper_dist).abs() < 1e-10,
+                "Symmetric quantiles: lower_dist={}, upper_dist={}",
+                lower_dist,
+                upper_dist
+            );
+        }
+
+        #[test]
+        fn works_with_jackknife_plus() {
+            let (fc, ac) = make_calibration_data();
+            let cp = ConformalPredictor::jackknife_plus(0.90);
+            let result = cp.fit(&fc, &ac).unwrap();
+
+            let qf = cp.predict_quantiles(&result, &[50.0, 51.0], &[0.25, 0.75]);
+            assert_eq!(qf.n_times(), 2);
+            assert_eq!(qf.quantiles().len(), 2);
         }
     }
 }
