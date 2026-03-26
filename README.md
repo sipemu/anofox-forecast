@@ -144,6 +144,7 @@ console.log(forecast.values);
   - Normal Predictor: Gaussian error assumption baseline
   - IDR: Isotonic Distributional Regression (state-of-the-art calibration)
   - QRA: Quantile Regression Averaging for ensemble combining
+  - Multi-quantile forecasts: `predict_quantiles()` on Bootstrap and Conformal predictors (e.g., 10th/25th/50th/75th/90th percentiles)
   - Backtesting: Rolling/expanding window evaluation with horizon-aware calibration
 
 - **Bootstrap Confidence Intervals**

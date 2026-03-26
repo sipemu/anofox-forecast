@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `BootstrapPredictor::predict_quantiles()` — multi-quantile forecasts from bootstrap simulation paths
+- `ConformalPredictor::predict_quantiles()` — multi-quantile forecasts from conformal nonconformity scores (symmetric, median = point forecast)
+
 ## [0.4.8] - 2026-03-24
 
 ### Added
