@@ -121,6 +121,25 @@ impl TimeSeries {
         self.inner.clear_calendar();
     }
 
+    /// Generate future timestamps by inferring the series frequency.
+    ///
+    /// Detects whether the data is daily, weekly, monthly, quarterly, or
+    /// yearly from the existing timestamps and extrapolates forward.
+    ///
+    /// @param horizon - Number of future timestamps to generate
+    /// @returns Array of timestamps as milliseconds since Unix epoch
+    #[wasm_bindgen(js_name = futureTimestamps)]
+    pub fn future_timestamps(&self, horizon: usize) -> Result<Vec<f64>, JsError> {
+        let future = self
+            .inner
+            .future_timestamps(horizon)
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(future
+            .iter()
+            .map(|dt| dt.timestamp_millis() as f64)
+            .collect())
+    }
+
     /// Get the inner TimeSeries (for internal use).
     pub(crate) fn inner(&self) -> &InnerTimeSeries {
         &self.inner

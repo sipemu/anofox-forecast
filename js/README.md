@@ -278,23 +278,67 @@ model.fit(ts);
 const forecast = model.predict(10);
 ```
 
-## What's New in the Rust Crate (v0.4.8)
+## Calendar Feature Engineering
 
-These features are available in the Rust crate but not yet exposed as WASM bindings:
+```javascript
+import { FeatureGenerator, generateFutureTimestamps } from '@sipemu/anofox-forecast';
 
-- **Per-horizon-step conformal prediction** — separate interval widths per forecast step
-- **Bootstrap prediction intervals** — model-agnostic residual resampling with cumulative error paths
-- **Calendar feature engineering** — cyclical sin/cos encoding, binary indicators (weekend, month-end, etc.)
-- **Future timestamp generation** — calendar-aware (`generate_future_timestamps`)
-- **Auto-lag selection** for RegressionForecaster (BIC/AIC)
-- **Differencing** for RegressionForecaster (regular + seasonal)
-- **Reworked cross-validation** — backward-anchored folds, n_folds-driven
+// Build a feature generator
+const gen = new FeatureGenerator();
+gen.fourier(7, 2);              // weekly Fourier terms
+gen.cyclical('month');           // sin/cos month encoding
+gen.cyclical('day_of_week');     // sin/cos day-of-week
+gen.binary('weekend');           // 0/1 weekend indicator
+gen.binary('month_end');         // 0/1 month-end
+gen.advanced('days_in_month');   // 28-31
+
+// Generate features from timestamps (ms since epoch)
+const features = gen.generate(timestamps);  // { month_sin: [...], weekend: [...], ... }
+const names = gen.featureNames();
+
+// Generate future timestamps (calendar-aware)
+const future = generateFutureTimestamps(lastTimestampMs, '1mo', 12);  // monthly
+const weekly = generateFutureTimestamps(lastTimestampMs, '1w', 4);    // weekly
+
+// Auto-infer from TimeSeries
+const futureTs = ts.futureTimestamps(12);
+```
+
+## Bootstrap Prediction Intervals
+
+```javascript
+import { JsBootstrapPredictor } from '@sipemu/anofox-forecast';
+
+const bp = new JsBootstrapPredictor(0.95);
+bp.nReplicates(1000);
+bp.seed(42);
+
+const result = bp.fit(fittedValues, actuals);
+const intervals = bp.predictIntervals(result, pointForecast);
+console.log(intervals.lower, intervals.upper);
+
+// Multi-quantile forecasts
+const quantiles = bp.predictQuantiles(result, pointForecast, [0.10, 0.25, 0.50, 0.75, 0.90]);
+```
+
+## Per-Step Conformal Prediction
+
+```javascript
+// Per-horizon-step intervals (tighter at h=1, wider at h=12)
+const perStep = predictor.fitPerStep(foldForecasts, foldActuals);
+console.log(perStep.halfWidths);  // different width per step
+
+const intervals = perStep.predictIntervals(pointForecast);
+
+// Multi-quantile conformal forecasts
+const quantiles = predictor.predictQuantiles(result, pointForecast, [0.10, 0.50, 0.90]);
+```
 
 ## Limitations
 
 - The `parallel` feature from the Rust crate is not available in WASM
 - IDR (Isotonic Distributional Regression) and QRA are not yet exposed in WASM
-- Per-step conformal, bootstrap predictor, and calendar features are Rust-only (not yet in WASM)
+- RegressionForecaster (11 regression backends) is Rust-only (not yet in WASM)
 
 ## License
 

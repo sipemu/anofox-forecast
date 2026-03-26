@@ -3,15 +3,18 @@
 //! This module provides wasm-bindgen wrappers for postprocessing methods
 //! that convert point forecasts into calibrated prediction intervals.
 
+use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
 use anofox_forecast::postprocess::{
     BacktestConfig as InnerBacktestConfig, BacktestResult as InnerBacktestResult,
+    BootstrapPredictor as InnerBootstrapPredictor, BootstrapResult as InnerBootstrapResult,
     ConformalPredictor as InnerConformalPredictor, ConformalResult as InnerConformalResult,
     HistoricalSimResult as InnerHistoricalSimResult,
     HistoricalSimulator as InnerHistoricalSimulator, NormalPredictor as InnerNormalPredictor,
-    NormalResult as InnerNormalResult, PointForecasts as InnerPointForecasts,
-    PostProcessor as InnerPostProcessor, PredictionIntervals as InnerPredictionIntervals,
+    NormalResult as InnerNormalResult, PerStepConformalResult as InnerPerStepConformalResult,
+    PointForecasts as InnerPointForecasts, PostProcessor as InnerPostProcessor,
+    PredictionIntervals as InnerPredictionIntervals, QuantileForecasts as InnerQuantileForecasts,
     TrainedModel as InnerTrainedModel,
 };
 
@@ -219,6 +222,50 @@ impl JsConformalPredictor {
     ) -> JsPredictionIntervals {
         let intervals = self.inner.predict_values(&result.inner, &point_forecasts);
         JsPredictionIntervals::from_inner(intervals)
+    }
+
+    /// Generate quantile forecasts at multiple quantile levels.
+    ///
+    /// Returns a serialized object with `quantiles` (levels) and `values` (matrix).
+    ///
+    /// @param result - A fitted JsConformalResult from calibrate()
+    /// @param pointForecasts - New point forecast values
+    /// @param levels - Quantile levels in (0, 1), e.g. [0.1, 0.5, 0.9]
+    #[wasm_bindgen(js_name = predictQuantiles)]
+    pub fn predict_quantiles(
+        &self,
+        result: &JsConformalResult,
+        point_forecasts: Vec<f64>,
+        levels: Vec<f64>,
+    ) -> Result<JsValue, JsError> {
+        let qf = self
+            .inner
+            .predict_quantiles(&result.inner, &point_forecasts, &levels);
+        let js_qf = QuantileForecastsJs::from_inner(&qf);
+        serde_wasm_bindgen::to_value(&js_qf).map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// Fit per-horizon-step conformal intervals.
+    ///
+    /// Each horizon step gets its own interval half-width, allowing tighter
+    /// intervals for near-horizon steps and wider for far-horizon steps.
+    ///
+    /// @param foldForecasts - Per-fold forecast arrays (array of arrays), each of length `horizon`
+    /// @param foldActuals - Per-fold actual arrays (array of arrays), each of length `horizon`
+    #[wasm_bindgen(js_name = fitPerStep)]
+    pub fn fit_per_step(
+        &self,
+        fold_forecasts: JsValue,
+        fold_actuals: JsValue,
+    ) -> Result<JsPerStepConformalResult, JsError> {
+        let fc: Vec<Vec<f64>> = serde_wasm_bindgen::from_value(fold_forecasts)
+            .map_err(|e| JsError::new(&format!("invalid foldForecasts: {}", e)))?;
+        let ac: Vec<Vec<f64>> = serde_wasm_bindgen::from_value(fold_actuals)
+            .map_err(|e| JsError::new(&format!("invalid foldActuals: {}", e)))?;
+        self.inner
+            .fit_per_step(&fc, &ac)
+            .map(|r| JsPerStepConformalResult { inner: r })
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 }
 
@@ -606,4 +653,227 @@ pub fn backtest_post_processor(
         .backtest(forecasts.inner(), &actuals, config.inner)
         .map(|r| JsBacktestResult { inner: r })
         .map_err(|e| JsError::new(&e.to_string()))
+}
+
+// =============================================================================
+// SERIALIZABLE QUANTILE FORECASTS (shared helper)
+// =============================================================================
+
+/// Serialized representation of QuantileForecasts for JavaScript.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct QuantileForecastsJs {
+    /// Quantile levels.
+    quantiles: Vec<f64>,
+    /// Values matrix: values[time_idx][quantile_idx].
+    values: Vec<Vec<f64>>,
+}
+
+impl QuantileForecastsJs {
+    fn from_inner(qf: &InnerQuantileForecasts) -> Self {
+        Self {
+            quantiles: qf.quantiles().to_vec(),
+            values: qf.values().to_vec(),
+        }
+    }
+}
+
+// =============================================================================
+// BOOTSTRAP PREDICTOR (postprocess)
+// =============================================================================
+
+/// Bootstrap result — stores residuals and configuration from fitting.
+#[wasm_bindgen]
+pub struct JsBootstrapResult {
+    inner: InnerBootstrapResult,
+}
+
+#[wasm_bindgen]
+impl JsBootstrapResult {
+    /// Get the residuals used for resampling.
+    pub fn residuals(&self) -> Vec<f64> {
+        self.inner.residuals().to_vec()
+    }
+
+    /// Get the coverage level.
+    #[wasm_bindgen(getter)]
+    pub fn coverage(&self) -> f64 {
+        self.inner.coverage()
+    }
+
+    /// Get the number of replicates.
+    #[wasm_bindgen(js_name = nReplicates, getter)]
+    pub fn n_replicates(&self) -> usize {
+        self.inner.n_replicates()
+    }
+}
+
+/// Bootstrap predictor for distribution-free prediction intervals.
+///
+/// Resamples forecast residuals to simulate future error paths, producing
+/// per-step prediction intervals where uncertainty grows with horizon.
+#[wasm_bindgen]
+pub struct JsBootstrapPredictor {
+    inner: InnerBootstrapPredictor,
+}
+
+#[wasm_bindgen]
+impl JsBootstrapPredictor {
+    /// Create a bootstrap predictor with the given coverage level.
+    ///
+    /// @param coverage - Target coverage level in (0, 1), e.g. 0.90
+    #[wasm_bindgen(constructor)]
+    pub fn new(coverage: f64) -> Self {
+        Self {
+            inner: InnerBootstrapPredictor::new(coverage),
+        }
+    }
+
+    /// Set the number of bootstrap replicates (default: 1000).
+    ///
+    /// @param n - Number of replicates (minimum 10)
+    #[wasm_bindgen(js_name = nReplicates)]
+    pub fn n_replicates(self, n: usize) -> Self {
+        Self {
+            inner: self.inner.n_replicates(n),
+        }
+    }
+
+    /// Use block bootstrap with the given block size.
+    ///
+    /// Preserves autocorrelation in residuals.
+    ///
+    /// @param size - Block size (0 falls back to IID)
+    #[wasm_bindgen(js_name = blockSize)]
+    pub fn block_size(self, size: usize) -> Self {
+        Self {
+            inner: self.inner.block_size(size),
+        }
+    }
+
+    /// Set random seed for reproducibility.
+    ///
+    /// @param seed - Random seed value
+    pub fn seed(self, seed: u64) -> Self {
+        Self {
+            inner: self.inner.seed(seed),
+        }
+    }
+
+    /// Fit the predictor on historical forecasts and actuals.
+    ///
+    /// Computes residuals and stores them for resampling.
+    ///
+    /// @param forecasts - Historical point forecast values
+    /// @param actuals - Corresponding actual observed values
+    pub fn fit(
+        &self,
+        forecasts: Vec<f64>,
+        actuals: Vec<f64>,
+    ) -> Result<JsBootstrapResult, JsError> {
+        self.inner
+            .fit(&forecasts, &actuals)
+            .map(|r| JsBootstrapResult { inner: r })
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// Generate prediction intervals for new point forecasts.
+    ///
+    /// Returns a JsPredictionIntervals with lower and upper bounds.
+    ///
+    /// @param result - A fitted JsBootstrapResult from fit()
+    /// @param pointForecasts - New point forecast values
+    #[wasm_bindgen(js_name = predictIntervals)]
+    pub fn predict_intervals(
+        &self,
+        result: &JsBootstrapResult,
+        point_forecasts: Vec<f64>,
+    ) -> JsPredictionIntervals {
+        let intervals = self.inner.predict(&result.inner, &point_forecasts);
+        JsPredictionIntervals::from_inner(intervals)
+    }
+
+    /// Generate quantile forecasts at multiple quantile levels.
+    ///
+    /// Returns a serialized object with `quantiles` (levels) and `values` (matrix).
+    ///
+    /// @param result - A fitted JsBootstrapResult from fit()
+    /// @param pointForecasts - New point forecast values
+    /// @param levels - Quantile levels in (0, 1), e.g. [0.1, 0.25, 0.5, 0.75, 0.9]
+    #[wasm_bindgen(js_name = predictQuantiles)]
+    pub fn predict_quantiles(
+        &self,
+        result: &JsBootstrapResult,
+        point_forecasts: Vec<f64>,
+        levels: Vec<f64>,
+    ) -> Result<JsValue, JsError> {
+        let qf = self
+            .inner
+            .predict_quantiles(&result.inner, &point_forecasts, &levels);
+        let js_qf = QuantileForecastsJs::from_inner(&qf);
+        serde_wasm_bindgen::to_value(&js_qf).map_err(|e| JsError::new(&e.to_string()))
+    }
+}
+
+// =============================================================================
+// PER-STEP CONFORMAL RESULT
+// =============================================================================
+
+/// Per-step conformal result — each horizon step has its own interval half-width.
+///
+/// Step h=1 gets a tighter interval than step h=12 when forecast error grows
+/// with horizon.
+#[wasm_bindgen]
+pub struct JsPerStepConformalResult {
+    inner: InnerPerStepConformalResult,
+}
+
+#[wasm_bindgen]
+impl JsPerStepConformalResult {
+    /// Get the per-step interval half-widths.
+    #[wasm_bindgen(js_name = halfWidths, getter)]
+    pub fn half_widths(&self) -> Vec<f64> {
+        self.inner.half_widths().to_vec()
+    }
+
+    /// Get the coverage level.
+    #[wasm_bindgen(getter)]
+    pub fn coverage(&self) -> f64 {
+        self.inner.coverage()
+    }
+
+    /// Get the number of horizon steps.
+    #[wasm_bindgen(getter)]
+    pub fn horizon(&self) -> usize {
+        self.inner.horizon()
+    }
+
+    /// Apply per-step intervals to a point forecast.
+    ///
+    /// Returns a JsPredictionIntervals with per-step lower and upper bounds.
+    ///
+    /// @param pointForecasts - Point forecast values (length must match horizon)
+    #[wasm_bindgen(js_name = predictIntervals)]
+    pub fn predict_intervals(&self, point_forecasts: Vec<f64>) -> JsPredictionIntervals {
+        let intervals = self.inner.predict_intervals(&point_forecasts);
+        JsPredictionIntervals::from_inner(intervals)
+    }
+
+    /// Apply per-step intervals and return lower/upper as a plain object.
+    ///
+    /// Returns a serialized object with `lower` and `upper` arrays.
+    ///
+    /// @param pointForecasts - Point forecast values (length must match horizon)
+    pub fn predict(&self, point_forecasts: Vec<f64>) -> Result<JsValue, JsError> {
+        let (lower, upper) = self.inner.predict(&point_forecasts);
+        let result = PerStepPredictJs { lower, upper };
+        serde_wasm_bindgen::to_value(&result).map_err(|e| JsError::new(&e.to_string()))
+    }
+}
+
+/// Serialized per-step predict result.
+#[derive(Serialize)]
+struct PerStepPredictJs {
+    lower: Vec<f64>,
+    upper: Vec<f64>,
 }
