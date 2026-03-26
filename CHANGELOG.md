@@ -7,10 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.9] - 2026-03-26
+
 ### Added
 
-- `BootstrapPredictor::predict_quantiles()` — multi-quantile forecasts from bootstrap simulation paths
+- `BootstrapPredictor::predict_quantiles()` — multi-quantile forecasts from bootstrap simulation paths (e.g., 10th/25th/50th/75th/90th percentiles)
 - `ConformalPredictor::predict_quantiles()` — multi-quantile forecasts from conformal nonconformity scores (symmetric, median = point forecast)
+
+### Fixed
+
+- `RegressionForecaster`: exogenous regressors were silently dropped when differencing was active — now preserved via `TrimOnly` policy (regressors trimmed to match differenced length)
 
 ## [0.4.8] - 2026-03-24
 
