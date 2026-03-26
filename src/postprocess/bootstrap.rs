@@ -9,7 +9,7 @@
 //! resampled errors.
 
 use crate::error::{ForecastError, Result};
-use crate::postprocess::PredictionIntervals;
+use crate::postprocess::{PredictionIntervals, QuantileForecasts};
 use rand::prelude::*;
 use rand::SeedableRng;
 
@@ -123,54 +123,51 @@ impl BootstrapPredictor {
     /// Generate prediction intervals for a point forecast.
     ///
     /// Simulates `n_replicates` future error paths by resampling residuals,
-    /// then extracts per-step quantile bounds.
+    /// then extracts per-step quantile bounds at `(1-coverage)/2` and
+    /// `1-(1-coverage)/2`.
     pub fn predict(&self, result: &BootstrapResult, point_forecast: &[f64]) -> PredictionIntervals {
-        let horizon = point_forecast.len();
-        let n_rep = result.n_replicates;
-
-        let mut rng: StdRng = match result.seed {
-            Some(s) => StdRng::seed_from_u64(s),
-            None => StdRng::from_entropy(),
-        };
-
-        // Simulate n_rep paths with cumulative error accumulation.
-        // Each path: simulated[h] = point_forecast[h] + sum(errors[0..=h])
-        // This makes intervals grow with horizon (uncertainty accumulates).
-        let mut samples_per_step: Vec<Vec<f64>> = vec![Vec::with_capacity(n_rep); horizon];
-
-        for _ in 0..n_rep {
-            let errors = resample(&result.residuals, horizon, result.block_size, &mut rng);
-            let mut cumulative_error = 0.0;
-            for (h, &err) in errors.iter().enumerate() {
-                cumulative_error += err;
-                let simulated = point_forecast[h] + cumulative_error;
-                if simulated.is_finite() {
-                    samples_per_step[h].push(simulated);
-                }
-            }
-        }
-
-        // Extract quantile bounds per step
         let alpha = (1.0 - result.coverage) / 2.0;
-        let mut lower = Vec::with_capacity(horizon);
-        let mut upper = Vec::with_capacity(horizon);
+        let quantiles = vec![alpha, 1.0 - alpha];
+        let samples = simulate_paths(result, point_forecast);
+        let values = extract_quantiles(&samples, &quantiles);
 
-        for samples in &mut samples_per_step {
-            if samples.is_empty() {
-                lower.push(f64::NAN);
-                upper.push(f64::NAN);
-                continue;
-            }
-            samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            let n = samples.len();
-            let lo_idx = ((alpha * n as f64).floor() as usize).min(n - 1);
-            let hi_idx = (((1.0 - alpha) * n as f64).floor() as usize).min(n - 1);
-            lower.push(samples[lo_idx]);
-            upper.push(samples[hi_idx]);
+        PredictionIntervals::from_bounds(values[0].clone(), values[1].clone(), result.coverage)
+            .expect("Valid prediction intervals")
+    }
+
+    /// Generate quantile forecasts at multiple quantile levels.
+    ///
+    /// Returns a `QuantileForecasts` with one column per requested quantile
+    /// level, each of length `horizon`. Quantile levels must be in (0, 1).
+    ///
+    /// # Example
+    /// ```ignore
+    /// let quantiles = predictor.predict_quantiles(
+    ///     &result,
+    ///     &point_forecast,
+    ///     &[0.10, 0.25, 0.50, 0.75, 0.90],
+    /// );
+    /// ```
+    pub fn predict_quantiles(
+        &self,
+        result: &BootstrapResult,
+        point_forecast: &[f64],
+        quantile_levels: &[f64],
+    ) -> QuantileForecasts {
+        let samples = simulate_paths(result, point_forecast);
+        let values = extract_quantiles(&samples, quantile_levels);
+
+        // values[q][h] → need to reshape to QuantileForecasts format: [h][q]
+        let horizon = point_forecast.len();
+        let n_q = quantile_levels.len();
+        let mut forecast_values = Vec::with_capacity(horizon);
+        for h in 0..horizon {
+            let row: Vec<f64> = (0..n_q).map(|q| values[q][h]).collect();
+            forecast_values.push(row);
         }
 
-        PredictionIntervals::from_bounds(lower, upper, result.coverage)
-            .expect("Valid prediction intervals")
+        QuantileForecasts::from_values(quantile_levels.to_vec(), forecast_values)
+            .expect("Valid quantile forecasts")
     }
 }
 
@@ -189,6 +186,64 @@ impl BootstrapResult {
     pub fn n_replicates(&self) -> usize {
         self.n_replicates
     }
+}
+
+/// Simulate bootstrap paths: resample residuals, accumulate errors, add to point forecast.
+///
+/// Returns `samples_per_step[h]` = sorted Vec of simulated values at step h.
+fn simulate_paths(result: &BootstrapResult, point_forecast: &[f64]) -> Vec<Vec<f64>> {
+    let horizon = point_forecast.len();
+    let n_rep = result.n_replicates;
+
+    let mut rng: StdRng = match result.seed {
+        Some(s) => StdRng::seed_from_u64(s),
+        None => StdRng::from_entropy(),
+    };
+
+    let mut samples_per_step: Vec<Vec<f64>> = vec![Vec::with_capacity(n_rep); horizon];
+
+    for _ in 0..n_rep {
+        let errors = resample(&result.residuals, horizon, result.block_size, &mut rng);
+        let mut cumulative_error = 0.0;
+        for (h, &err) in errors.iter().enumerate() {
+            cumulative_error += err;
+            let simulated = point_forecast[h] + cumulative_error;
+            if simulated.is_finite() {
+                samples_per_step[h].push(simulated);
+            }
+        }
+    }
+
+    // Sort each step's samples for quantile extraction
+    for samples in &mut samples_per_step {
+        samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    }
+
+    samples_per_step
+}
+
+/// Extract quantile values from sorted samples.
+///
+/// Returns `values[q][h]` for each quantile level q and horizon step h.
+fn extract_quantiles(samples_per_step: &[Vec<f64>], quantile_levels: &[f64]) -> Vec<Vec<f64>> {
+    let horizon = samples_per_step.len();
+    let mut result = Vec::with_capacity(quantile_levels.len());
+
+    for &q in quantile_levels {
+        let mut col = Vec::with_capacity(horizon);
+        for samples in samples_per_step {
+            if samples.is_empty() {
+                col.push(f64::NAN);
+                continue;
+            }
+            let n = samples.len();
+            let idx = ((q * n as f64).floor() as usize).min(n - 1);
+            col.push(samples[idx]);
+        }
+        result.push(col);
+    }
+
+    result
 }
 
 /// Resample residuals for a given horizon length.
@@ -610,5 +665,90 @@ mod tests {
                 width
             );
         }
+    }
+
+    // ── predict_quantiles tests ──────────────────────────────────
+
+    #[test]
+    fn predict_quantiles_returns_correct_shape() {
+        let forecasts: Vec<f64> = (0..50).map(|i| i as f64).collect();
+        let actuals: Vec<f64> = (0..50).map(|i| i as f64 + 0.5).collect();
+
+        let predictor = BootstrapPredictor::new(0.90).n_replicates(200).seed(42);
+        let result = predictor.fit(&forecasts, &actuals).unwrap();
+
+        let point = vec![50.0, 51.0, 52.0, 53.0, 54.0];
+        let levels = vec![0.10, 0.25, 0.50, 0.75, 0.90];
+        let qf = predictor.predict_quantiles(&result, &point, &levels);
+
+        assert_eq!(qf.quantiles().len(), 5);
+        assert_eq!(qf.n_times(), 5); // 5 horizon steps
+    }
+
+    #[test]
+    fn predict_quantiles_monotonically_ordered() {
+        let forecasts: Vec<f64> = (0..100).map(|i| i as f64).collect();
+        let actuals: Vec<f64> = (0..100)
+            .map(|i| i as f64 + ((i * 7 + 3) % 11) as f64 * 0.3 - 1.5)
+            .collect();
+
+        let predictor = BootstrapPredictor::new(0.90).n_replicates(500).seed(42);
+        let result = predictor.fit(&forecasts, &actuals).unwrap();
+
+        let point = vec![100.0, 101.0, 102.0];
+        let levels = vec![0.05, 0.25, 0.50, 0.75, 0.95];
+        let qf = predictor.predict_quantiles(&result, &point, &levels);
+
+        // At each step, quantiles should be monotonically non-decreasing
+        for h in 0..3 {
+            let row = qf.at_time(h).unwrap();
+            for i in 1..row.len() {
+                assert!(
+                    row[i] >= row[i - 1],
+                    "Step {}: q[{}]={} < q[{}]={}",
+                    h,
+                    i,
+                    row[i],
+                    i - 1,
+                    row[i - 1]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn predict_quantiles_median_near_point_forecast() {
+        let forecasts: Vec<f64> = (0..100).map(|i| i as f64).collect();
+        // Symmetric residuals centered at 0
+        let actuals: Vec<f64> = (0..100)
+            .map(|i| i as f64 + ((i % 2) as f64 * 2.0 - 1.0) * 0.1)
+            .collect();
+
+        let predictor = BootstrapPredictor::new(0.90).n_replicates(1000).seed(42);
+        let result = predictor.fit(&forecasts, &actuals).unwrap();
+
+        let point = vec![100.0];
+        let qf = predictor.predict_quantiles(&result, &point, &[0.50]);
+
+        // Median should be close to point forecast for symmetric residuals
+        let median = qf.at_time(0).unwrap()[0];
+        assert!(
+            (median - 100.0).abs() < 2.0,
+            "Median {} should be near point forecast 100.0",
+            median
+        );
+    }
+
+    #[test]
+    fn predict_quantiles_single_level() {
+        let forecasts: Vec<f64> = (0..50).map(|i| i as f64).collect();
+        let actuals: Vec<f64> = (0..50).map(|i| i as f64 + 0.3).collect();
+
+        let predictor = BootstrapPredictor::new(0.90).n_replicates(100).seed(42);
+        let result = predictor.fit(&forecasts, &actuals).unwrap();
+
+        let qf = predictor.predict_quantiles(&result, &[50.0, 51.0], &[0.50]);
+        assert_eq!(qf.quantiles().len(), 1);
+        assert_eq!(qf.n_times(), 2);
     }
 }
