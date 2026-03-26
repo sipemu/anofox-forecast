@@ -1638,13 +1638,23 @@ mod ols_impl {
 
             let working_values = self.apply_differencing(values);
 
-            // Build a temporary TimeSeries from differenced values for matrix construction
+            // Build a temporary TimeSeries from differenced values for matrix construction.
+            // Slice the original series to preserve regressors (trimmed to differenced length).
             let fit_series = if uses_diff {
-                // Trim timestamps to match differenced length
                 let diff_offset = n_original - working_values.len();
                 let trimmed_ts = series.slice(diff_offset, n_original)?;
-                // Replace values with differenced values
-                TimeSeries::univariate(trimmed_ts.timestamps().to_vec(), working_values.clone())?
+                // Replace primary values with differenced values, keeping regressors
+                TimeSeries::new(
+                    trimmed_ts.timestamps().to_vec(),
+                    vec![working_values.clone()],
+                    crate::core::ValueLayout::Column,
+                    trimmed_ts.labels().to_vec(),
+                    trimmed_ts.metadata().clone(),
+                    Vec::new(),
+                    None,
+                    None,
+                    trimmed_ts.calendar().cloned(),
+                )?
             } else {
                 series.clone()
             };
@@ -2989,6 +2999,40 @@ mod ols_impl {
             let features = RegressionFeatures::new();
             assert_eq!(features.diff_order, 0);
             assert!(features.seasonal_diffs.is_empty());
+        }
+
+        #[test]
+        fn differencing_preserves_exog_regressors() {
+            // Regression with trend + exog + differencing should use exog
+            let n = 60;
+            let timestamps = make_timestamps(n);
+            let values: Vec<f64> = (0..n)
+                .map(|i| 10.0 + 2.0 * i as f64 + 3.0 * (i % 2) as f64)
+                .collect();
+            let exog: Vec<f64> = (0..n).map(|i| (i % 2) as f64).collect();
+
+            let mut ts = TimeSeries::univariate(timestamps, values).unwrap();
+            let cal =
+                crate::core::CalendarAnnotations::new().with_regressor("pulse".to_string(), exog);
+            ts.set_calendar(cal);
+
+            // Without differencing: should use exog
+            let mut model_no_diff =
+                RegressionForecaster::ols(RegressionFeatures::new().trend().exog());
+            model_no_diff.fit(&ts).unwrap();
+            assert!(
+                model_no_diff.has_exog(),
+                "model without diff should have exog"
+            );
+
+            // With differencing: should ALSO use exog (this was the bug)
+            let mut model_diff =
+                RegressionForecaster::ols(RegressionFeatures::new().trend().differencing(1).exog());
+            model_diff.fit(&ts).unwrap();
+            assert!(
+                model_diff.has_exog(),
+                "model with differencing should preserve exog regressors"
+            );
         }
 
         // ── Auto-lag selection tests ─────────────────────────────────
