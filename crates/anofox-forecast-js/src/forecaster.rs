@@ -1960,12 +1960,13 @@ impl VARForecaster {
 
 /// Kalman filter forecaster for state-space models.
 ///
-/// Supports local level and local linear trend models out of the box.
+/// Supports local level, local linear trend, and custom state-space models.
 #[wasm_bindgen]
 pub struct KalmanForecaster {
     model: anofox_forecast::models::kalman_forecaster::KalmanForecaster,
+    /// Keep a clone of the SSM for smooth/filter operations.
+    ssm: anofox_forecast::models::kalman::StateSpaceModel,
     fitted: bool,
-    innovation_variance: f64,
 }
 
 #[wasm_bindgen]
@@ -1979,9 +1980,11 @@ impl KalmanForecaster {
         let ssm =
             anofox_forecast::models::kalman::StateSpaceModel::local_level(obs_noise, state_noise);
         Self {
-            model: anofox_forecast::models::kalman_forecaster::KalmanForecaster::with_model(ssm),
+            model: anofox_forecast::models::kalman_forecaster::KalmanForecaster::with_model(
+                ssm.clone(),
+            ),
+            ssm,
             fitted: false,
-            innovation_variance: 0.0,
         }
     }
 
@@ -1998,10 +2001,67 @@ impl KalmanForecaster {
             trend_noise,
         );
         Self {
-            model: anofox_forecast::models::kalman_forecaster::KalmanForecaster::with_model(ssm),
+            model: anofox_forecast::models::kalman_forecaster::KalmanForecaster::with_model(
+                ssm.clone(),
+            ),
+            ssm,
             fitted: false,
-            innovation_variance: 0.0,
         }
+    }
+
+    /// Create a custom state-space model from matrices.
+    ///
+    /// @param transition - State transition matrix F (n_state x n_state), flat row-major
+    /// @param observation - Observation matrix H (n_obs x n_state), flat row-major
+    /// @param processNoise - Process noise covariance Q (n_state x n_state), flat row-major
+    /// @param observationNoise - Observation noise covariance R (n_obs x n_obs), flat row-major
+    /// @param nState - Number of state dimensions
+    /// @param nObs - Number of observation dimensions
+    #[wasm_bindgen(js_name = custom)]
+    pub fn custom(
+        transition: &[f64],
+        observation: &[f64],
+        process_noise: &[f64],
+        observation_noise: &[f64],
+        n_state: usize,
+        n_obs: usize,
+    ) -> Result<KalmanForecaster, JsError> {
+        let to_mat = |flat: &[f64], rows: usize, cols: usize| -> Vec<Vec<f64>> {
+            (0..rows)
+                .map(|r| flat[r * cols..(r + 1) * cols].to_vec())
+                .collect()
+        };
+
+        if transition.len() != n_state * n_state {
+            return Err(JsError::new(&format!(
+                "transition must have {} elements, got {}",
+                n_state * n_state,
+                transition.len()
+            )));
+        }
+        if observation.len() != n_obs * n_state {
+            return Err(JsError::new(&format!(
+                "observation must have {} elements, got {}",
+                n_obs * n_state,
+                observation.len()
+            )));
+        }
+
+        let ssm = anofox_forecast::models::kalman::StateSpaceModel {
+            transition: to_mat(transition, n_state, n_state),
+            observation: to_mat(observation, n_obs, n_state),
+            process_noise: to_mat(process_noise, n_state, n_state),
+            observation_noise: to_mat(observation_noise, n_obs, n_obs),
+        };
+        ssm.validate().map_err(|e| JsError::new(&e.to_string()))?;
+
+        Ok(Self {
+            model: anofox_forecast::models::kalman_forecaster::KalmanForecaster::with_model(
+                ssm.clone(),
+            ),
+            ssm,
+            fitted: false,
+        })
     }
 
     /// Fit the Kalman filter to a time series.
@@ -2011,15 +2071,6 @@ impl KalmanForecaster {
         self.model
             .fit(series.inner())
             .map_err(|e| JsError::new(&e.to_string()))?;
-        // Compute innovation variance from residuals for interval prediction.
-        if let Some(residuals) = self.model.residuals() {
-            let n = residuals.len();
-            if n > 0 {
-                let mean: f64 = residuals.iter().sum::<f64>() / n as f64;
-                self.innovation_variance =
-                    residuals.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / n as f64;
-            }
-        }
         self.fitted = true;
         Ok(())
     }
@@ -2050,21 +2101,22 @@ impl KalmanForecaster {
 
     /// Apply the Kalman smoother (RTS smoother) and return smoothed observations.
     ///
+    /// Uses the same state-space model that was configured (local level, local linear
+    /// trend, or custom). Fits the filter first, then runs the RTS smoother.
+    ///
     /// @param series - TimeSeries to smooth
     /// @returns Array of smoothed observation values
     pub fn smooth(&mut self, series: &TimeSeries) -> Result<Vec<f64>, JsError> {
-        // Fit first to produce filtered states.
         self.model
             .fit(series.inner())
             .map_err(|e| JsError::new(&e.to_string()))?;
         self.fitted = true;
 
-        // Run the underlying Kalman filter + smoother.
         let values = series.inner().primary_values();
         let observations: Vec<Vec<f64>> = values.iter().map(|&v| vec![v]).collect();
 
-        let ssm = anofox_forecast::models::kalman::StateSpaceModel::local_level(1.0, 0.1);
-        let mut kf = anofox_forecast::models::kalman::KalmanFilter::new(ssm)
+        // Use the actual configured SSM (not a hardcoded default)
+        let mut kf = anofox_forecast::models::kalman::KalmanFilter::new(self.ssm.clone())
             .map_err(|e| JsError::new(&e.to_string()))?;
         let filtered = kf
             .filter(&observations)
@@ -2073,22 +2125,41 @@ impl KalmanForecaster {
             .smooth(&filtered)
             .map_err(|e| JsError::new(&e.to_string()))?;
 
-        // Extract the first observation dimension from each smoothed state.
-        let result: Vec<f64> = smoothed
-            .iter()
-            .map(|state| {
-                // H * x_smoothed gives the smoothed observation
-                state.state[0]
-            })
-            .collect();
-
+        let result: Vec<f64> = smoothed.iter().map(|state| state.state[0]).collect();
         Ok(result)
+    }
+
+    /// Compute the log-likelihood of the observations under the model.
+    ///
+    /// @param series - TimeSeries to evaluate
+    /// @returns Log-likelihood value
+    #[wasm_bindgen(js_name = logLikelihood)]
+    pub fn log_likelihood(&mut self, series: &TimeSeries) -> Result<f64, JsError> {
+        let values = series.inner().primary_values();
+        let observations: Vec<Vec<f64>> = values.iter().map(|&v| vec![v]).collect();
+
+        let mut kf = anofox_forecast::models::kalman::KalmanFilter::new(self.ssm.clone())
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        kf.log_likelihood(&observations)
+            .map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// Get the model name.
     #[wasm_bindgen(getter)]
     pub fn name(&self) -> String {
         self.model.name().to_string()
+    }
+
+    /// Get the number of state dimensions.
+    #[wasm_bindgen(getter, js_name = nState)]
+    pub fn n_state(&self) -> usize {
+        self.ssm.n_state()
+    }
+
+    /// Get the number of observation dimensions.
+    #[wasm_bindgen(getter, js_name = nObs)]
+    pub fn n_obs(&self) -> usize {
+        self.ssm.n_obs()
     }
 }
 
