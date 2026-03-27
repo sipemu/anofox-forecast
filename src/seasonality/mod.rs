@@ -8,10 +8,12 @@
 
 pub mod auto_seasonal;
 pub mod auto_trend;
+pub mod bandpass;
 pub mod convenience;
 pub mod dummy;
 pub mod exponential_trend;
 pub mod fourier;
+pub mod hamilton;
 pub mod hp_filter;
 pub mod logistic_trend;
 mod mstl;
@@ -24,6 +26,7 @@ pub mod traits;
 
 pub use auto_seasonal::AutoSeasonal;
 pub use auto_trend::AutoTrend;
+pub use bandpass::{bk_filter, cf_filter, CycleDecomposition};
 pub use convenience::recompose as recompose_components;
 pub use convenience::{
     deseasonalize, detrend, remainder_component, seasonal_adjust, seasonal_component,
@@ -32,6 +35,9 @@ pub use convenience::{
 pub use dummy::{dummy_seasonal_amplitude, dummy_seasonal_strength, DummySeasonality};
 pub use exponential_trend::ExponentialTrend;
 pub use fourier::{fourier_terms, FourierSeasonality};
+pub use hamilton::{
+    hamilton_annual, hamilton_filter, hamilton_monthly, hamilton_quarterly, HamiltonDecomposition,
+};
 pub use hp_filter::{hp_cycle_variance_ratio, hp_trend_strength, HodrickPrescottFilter};
 pub use logistic_trend::{CapacityMode, LogisticTrend};
 pub use mstl::{MSTLResult, MSTL};
