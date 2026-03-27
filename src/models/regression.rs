@@ -622,6 +622,11 @@ mod ols_impl {
         pub diff_order: usize,
         /// Seasonal differencing specs: Vec of (order D, period s). Applied in order before fitting, integrated in reverse after predict.
         pub seasonal_diffs: Vec<(usize, usize)>,
+        /// Fractional differencing order (0 < d < 1). Applied before fitting.
+        /// Note: fractional differencing is NOT invertible for prediction —
+        /// forecasts are on the differenced scale. Use for feature engineering
+        /// in regression, not for direct forecasting.
+        pub frac_diff_order: Option<f64>,
     }
 
     impl Default for RegressionFeatures {
@@ -637,6 +642,7 @@ mod ols_impl {
                 structural_features: Vec::new(),
                 diff_order: 0,
                 seasonal_diffs: Vec::new(),
+                frac_diff_order: None,
             }
         }
     }
@@ -864,6 +870,23 @@ mod ols_impl {
         /// and integrated in reverse order during predict.
         pub fn seasonal_differencing(mut self, d: usize, period: usize) -> Self {
             self.seasonal_diffs.push((d, period));
+            self
+        }
+
+        /// Apply fractional differencing before fitting.
+        ///
+        /// Differences the series by order `d` (typically 0 < d < 1) using the
+        /// binomial series expansion `(1-B)^d`. This removes just enough memory
+        /// to achieve stationarity while preserving predictive signal.
+        ///
+        /// Note: fractional differencing is NOT exactly invertible, so forecasts
+        /// remain on the differenced scale. Use this for feature engineering in
+        /// regression models, not for direct point forecasting that needs
+        /// original-scale output.
+        ///
+        /// Reference: Lopez de Prado, *Advances in Financial Machine Learning* (2018).
+        pub fn fractional_differencing(mut self, d: f64) -> Self {
+            self.frac_diff_order = Some(d);
             self
         }
 
@@ -1506,7 +1529,7 @@ mod ols_impl {
 
         /// Apply configured differencing to a series.
         fn apply_differencing(&self, values: &[f64]) -> Vec<f64> {
-            use crate::models::arima::{difference, seasonal_difference};
+            use crate::models::arima::{difference, fractional_difference, seasonal_difference};
 
             let mut result = values.to_vec();
 
@@ -1518,6 +1541,13 @@ mod ols_impl {
             // Then regular differencing
             if self.features.diff_order > 0 {
                 result = difference(&result, self.features.diff_order);
+            }
+
+            // Then fractional differencing (applied last)
+            if let Some(d) = self.features.frac_diff_order {
+                if d > 0.0 {
+                    result = fractional_difference(&result, d, 1e-4);
+                }
             }
 
             result
@@ -1628,8 +1658,9 @@ mod ols_impl {
             let n_original = values.len();
 
             // Apply differencing if configured
-            let uses_diff =
-                self.features.diff_order > 0 || !self.features.seasonal_diffs.is_empty();
+            let uses_diff = self.features.diff_order > 0
+                || !self.features.seasonal_diffs.is_empty()
+                || self.features.frac_diff_order.is_some();
             let original_values = if uses_diff {
                 Some(values.to_vec())
             } else {
