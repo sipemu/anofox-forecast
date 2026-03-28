@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-03-28
+
+### Added
+
+- **Cycle Extraction Filters** (`seasonality` module)
+  - `cf_filter()` — Christiano-Fitzgerald asymmetric band-pass filter (preserves full series length)
+  - `bk_filter()` — Baxter-King symmetric band-pass filter (loses 2k edge observations)
+  - `hamilton_filter()` — Hamilton (2018) regression-based trend-cycle decomposition with QR solver
+  - `hamilton_quarterly()` / `hamilton_monthly()` / `hamilton_annual()` convenience constructors
+  - `CycleDecomposition` and `HamiltonDecomposition` result types
+
+- **Fractional Differencing** (`arima/diff` module)
+  - `fractional_difference(series, d, threshold)` — binomial `(1-B)^d` expansion
+  - `fractional_weights(d, max_len, threshold)` — weight computation
+  - `find_min_fractional_d(series, significance, threshold)` — binary search for minimum d achieving ADF stationarity
+  - `RegressionFeatures::fractional_differencing(d)` — builder method
+  - Reference: Lopez de Prado, *Advances in Financial Machine Learning* (2018)
+
+- **Multi-Quantile Forecasts**
+  - `BootstrapPredictor::predict_quantiles()` — multiple quantile levels from bootstrap simulation
+  - `ConformalPredictor::predict_quantiles()` — multiple quantile levels from conformal scores
+
+### Changed
+
+- Updated `anofox-regression` dependency from 0.5.0 to 0.5.3
+- Added `codecov.yml` with project threshold 1% and patch target 70%
+
+### Fixed
+
+- `RegressionForecaster`: exogenous regressors preserved during differencing (was silently dropped)
+- `KalmanForecaster.smooth()` uses configured SSM (was hardcoding local_level defaults)
+
 ## [0.5.0] - 2026-03-26
 
 ### Added
