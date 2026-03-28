@@ -28,7 +28,7 @@ checksum = "4b46cbb362ab8752921c97e041f5e366ee6297bd428a31275b9fcf1e380f7299"
 
 [[package]]
 name = "anofox-forecast"
-version = "0.4.7"
+version = "0.5.0"
 dependencies = [
  "anofox-regression",
  "anofox-statistics",
@@ -51,7 +51,7 @@ dependencies = [
 
 [[package]]
 name = "anofox-forecast-js"
-version = "0.4.7"
+version = "0.5.0"
 dependencies = [
  "anofox-forecast",
  "chrono",
@@ -65,9 +65,9 @@ dependencies = [
 
 [[package]]
 name = "anofox-regression"
-version = "0.5.0"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "555ef752bfbe9c07b89cacbd680b85c82c83be9b99121bcd909a6b4984b1216d"
+checksum = "1c5e7ff992a9aecc92334984926b65328ef180982cbf58b9e850bba36b4ad26b"
 dependencies = [
  "argmin",
  "argmin-math",
