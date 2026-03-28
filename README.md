@@ -85,6 +85,11 @@ console.log(forecast.values);
   - Dummy (one-hot) seasonality (`DummySeasonality`) — captures arbitrary seasonal shapes without smoothness assumptions
   - Seasonal differencing (`SeasonalDifference`) — standalone transform with strength/variance-reduction features
   - Hodrick-Prescott filter (`HodrickPrescottFilter`) — smooth trend extraction with cycle decomposition
+  - Christiano-Fitzgerald band-pass filter (`cf_filter`) — asymmetric, preserves full series length
+  - Baxter-King band-pass filter (`bk_filter`) — symmetric, loses 2k edge observations
+  - Hamilton filter (`hamilton_filter`) — regression-based trend-cycle decomposition (avoids HP endpoint bias)
+  - Fractional differencing (`fractional_difference`) — memory-preserving stationarity (Lopez de Prado 2018)
+  - `find_min_fractional_d()` — automatic minimum d for ADF stationarity
   - Piecewise linear trend (`PiecewiseLinearTrend`) — PELT-based changepoint detection + per-segment regression
   - Polynomial trend (`PolynomialTrend`) — degree 1-3, Vandermonde + Cholesky solve
   - Exponential trend (`ExponentialTrend`) — log-linear regression for growth/decay
@@ -218,13 +223,13 @@ anofox-forecast = "0.5"
 ```toml
 [dependencies]
 # Parallel AutoARIMA (4-8x speedup via rayon, opt-in for embedding contexts like DuckDB)
-anofox-forecast = { version = "0.4", features = ["parallel"] }
+anofox-forecast = { version = "0.5", features = ["parallel"] }
 
 # Model serialization (save/load to JSON)
-anofox-forecast = { version = "0.4", features = ["serde"] }
+anofox-forecast = { version = "0.5", features = ["serde"] }
 
 # Probabilistic postprocessing (conformal, IDR, QRA — enabled by default)
-anofox-forecast = { version = "0.4", default-features = false }  # to disable
+anofox-forecast = { version = "0.5", default-features = false }  # to disable
 ```
 
 | Feature | Default | Description |
