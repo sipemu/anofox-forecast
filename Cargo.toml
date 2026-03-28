@@ -82,6 +82,10 @@ harness = false
 name = "cv_benchmark"
 harness = false
 
+[[bench]]
+name = "comprehensive_benchmark"
+harness = false
+
 # Examples
 [[example]]
 name = "quickstart"
