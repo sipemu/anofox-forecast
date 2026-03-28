@@ -31,7 +31,7 @@ trueno = "0.8"
 statrs = "0.18"
 thiserror = "2.0"
 rand = "0.8"
-anofox-regression = { version = "0.5.0", optional = true }
+anofox-regression = { version = "0.5.3", optional = true }
 anofox-statistics = "0.4"
 fdars-core = { version = "0.9", optional = true, default-features = false }
 faer = { version = "0.23", optional = true, default-features = false, features = ["std", "linalg"] }
