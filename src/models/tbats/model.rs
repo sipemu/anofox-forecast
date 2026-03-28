@@ -12,6 +12,8 @@
 //! - Transition: x_{t+1} = F @ x_t + g @ error
 //! - Separate gamma_one (cos) and gamma_two (sin) smoothing parameters
 
+use std::cell::RefCell;
+
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
 use crate::models::{validate_series_complete, Forecaster};
@@ -167,35 +169,51 @@ impl TBATS {
             return (1, values.to_vec());
         }
 
-        // Build Fourier design matrix
-        let t_indices: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        let max_h = max_k.min(6); // Limit to max 6 harmonics
+
+        // Precompute the FULL design matrix for max_h harmonics once.
+        // For each h, we use columns 0..2*h as a submatrix view.
+        // Layout: x_full is a flat vec of n * (2 * max_h) elements, row-major.
+        let cols_full = 2 * max_h;
+        let mut x_full = vec![0.0; n * cols_full];
+        for t in 0..n {
+            let t_f64 = t as f64;
+            let row_offset = t * cols_full;
+            for j in 0..max_h {
+                let freq = 2.0 * std::f64::consts::PI * (j + 1) as f64 / period as f64;
+                let angle = freq * t_f64;
+                x_full[row_offset + 2 * j] = angle.cos();
+                x_full[row_offset + 2 * j + 1] = angle.sin();
+            }
+        }
+
         let mut best_k = 1;
         let mut best_aic = f64::INFINITY;
         let mut best_residuals = z.clone();
 
-        for h in 1..=max_k.min(6) {
-            // Limit to max 6 harmonics
-            // Build design matrix for h harmonics
-            let mut x = vec![vec![0.0; 2 * h]; n];
-            for t in 0..n {
-                for j in 0..h {
-                    let freq = 2.0 * std::f64::consts::PI * (j + 1) as f64 / period as f64;
-                    x[t][2 * j] = (freq * t_indices[t]).cos();
-                    x[t][2 * j + 1] = (freq * t_indices[t]).sin();
-                }
-            }
+        for h in 1..=max_h {
+            // Use submatrix view: columns 0..2*h from x_full
+            let k_params = 2 * h;
 
             // Least squares: solve X'X * beta = X'y
-            let k_params = 2 * h;
             let mut xtx = vec![vec![0.0; k_params]; k_params];
             let mut xty = vec![0.0; k_params];
 
             for t in 0..n {
+                let row_offset = t * cols_full;
+                let zt = z[t];
                 for i in 0..k_params {
-                    xty[i] += x[t][i] * z[t];
-                    for j in 0..k_params {
-                        xtx[i][j] += x[t][i] * x[t][j];
+                    let xi = x_full[row_offset + i];
+                    xty[i] += xi * zt;
+                    for j in i..k_params {
+                        xtx[i][j] += xi * x_full[row_offset + j];
                     }
+                }
+            }
+            // Fill lower triangle (symmetric)
+            for i in 0..k_params {
+                for j in 0..i {
+                    xtx[i][j] = xtx[j][i];
                 }
             }
 
@@ -209,9 +227,10 @@ impl TBATS {
             let mut sse = 0.0;
             let mut residuals = vec![0.0; n];
             for t in 0..n {
+                let row_offset = t * cols_full;
                 let mut fitted = 0.0;
                 for j in 0..k_params {
-                    fitted += x[t][j] * coeffs[j];
+                    fitted += x_full[row_offset + j] * coeffs[j];
                 }
                 residuals[t] = z[t] - fitted;
                 sse += residuals[t] * residuals[t];
@@ -389,6 +408,22 @@ impl TBATS {
         self.fourier_k.iter().map(|&k| 2 * k).sum()
     }
 
+    /// Precompute (cos, sin) pairs for all Fourier harmonics across all seasonal periods.
+    /// Returns a flat Vec where each entry corresponds to harmonic j of period i,
+    /// ordered the same way they appear in the state vector.
+    fn precompute_trig_table(seasonal_periods: &[usize], fourier_k: &[usize]) -> Vec<(f64, f64)> {
+        let total: usize = fourier_k.iter().map(|&k| k).sum();
+        let mut table = Vec::with_capacity(total);
+        for (period_idx, &k) in fourier_k.iter().enumerate() {
+            let period = seasonal_periods[period_idx];
+            for j in 0..k {
+                let freq = 2.0 * std::f64::consts::PI * (j + 1) as f64 / period as f64;
+                table.push((freq.cos(), freq.sin()));
+            }
+        }
+        table
+    }
+
     /// State dimension: level + trend (if used) + tau (Fourier states).
     fn state_dim(&self) -> usize {
         let base = if self.use_trend { 2 } else { 1 };
@@ -428,8 +463,22 @@ impl TBATS {
         gamma_two: &[f64],
     ) -> (f64, Vec<f64>, Vec<f64>, Vec<f64>) {
         let n = values.len();
-        let _dim = self.state_dim();
         let base = if self.use_trend { 2 } else { 1 };
+
+        // Precompute trig table once (constant across all timesteps)
+        let trig_table = Self::precompute_trig_table(&self.seasonal_periods, &self.fourier_k);
+
+        // Precompute per-period gamma values and the trig table offset for each period
+        let n_periods = self.fourier_k.len();
+        let mut period_info: Vec<(usize, f64, f64, usize)> = Vec::with_capacity(n_periods);
+        // (k, g1, g2, trig_offset)
+        let mut trig_offset = 0usize;
+        for (period_idx, &k) in self.fourier_k.iter().enumerate() {
+            let g1 = gamma_one.get(period_idx).copied().unwrap_or(0.0);
+            let g2 = gamma_two.get(period_idx).copied().unwrap_or(0.0);
+            period_info.push((k, g1, g2, trig_offset));
+            trig_offset += k;
+        }
 
         let mut state = initial_state.to_vec();
         let mut fitted = Vec::with_capacity(n);
@@ -443,7 +492,7 @@ impl TBATS {
 
             let mut seasonal = 0.0;
             let mut pos = base;
-            for &k in &self.fourier_k {
+            for &(k, _, _, _) in &period_info {
                 for j in 0..k {
                     seasonal += state[pos + 2 * j]; // Only cosine component
                 }
@@ -458,25 +507,17 @@ impl TBATS {
             sse += error * error;
 
             // State transition with error correction
-            // New level = level + phi * trend + alpha * error
             state[0] = level + phi * trend + alpha * error;
 
-            // New trend = phi * trend + beta * error
             if self.use_trend {
                 state[1] = phi * trend + beta * error;
             }
 
             // Update seasonal states with rotation + gamma correction
             let mut pos = base;
-            for (period_idx, &k) in self.fourier_k.iter().enumerate() {
-                let period = self.seasonal_periods[period_idx];
-                let g1 = gamma_one.get(period_idx).copied().unwrap_or(0.0);
-                let g2 = gamma_two.get(period_idx).copied().unwrap_or(0.0);
-
+            for &(k, g1, g2, trig_off) in &period_info {
                 for j in 0..k {
-                    let freq = 2.0 * std::f64::consts::PI * (j + 1) as f64 / period as f64;
-                    let cos_freq = freq.cos();
-                    let sin_freq = freq.sin();
+                    let (cos_freq, sin_freq) = trig_table[trig_off + j];
 
                     let idx_cos = pos + 2 * j;
                     let idx_sin = pos + 2 * j + 1;
@@ -497,6 +538,11 @@ impl TBATS {
 
     /// Fit model parameters using optimization.
     fn optimize_parameters(&mut self, values: &[f64]) {
+        self.optimize_parameters_with_max_iter(values, 300);
+    }
+
+    /// Fit model parameters using optimization with a configurable iteration limit.
+    pub(crate) fn optimize_parameters_with_max_iter(&mut self, values: &[f64], max_iter: usize) {
         let n = values.len();
         let n_periods = self.seasonal_periods.len();
 
@@ -526,11 +572,26 @@ impl TBATS {
             bounds.push((-0.1, 0.1));
         }
 
-        let seasonal_periods = self.seasonal_periods.clone();
         let fourier_k = self.fourier_k.clone();
         let use_trend = self.use_trend;
         let use_damped = self.use_damped_trend;
         let initial_state = self.initialize_state(values);
+        let base = if use_trend { 2 } else { 1 };
+
+        // Precompute trig table once — constant across all NM iterations
+        let trig_table = Self::precompute_trig_table(&self.seasonal_periods, &self.fourier_k);
+
+        // Precompute per-period info: (k, trig_offset)
+        let mut period_trig_offsets: Vec<(usize, usize)> = Vec::with_capacity(n_periods);
+        let mut trig_offset = 0usize;
+        for &k in &fourier_k {
+            period_trig_offsets.push((k, trig_offset));
+            trig_offset += k;
+        }
+
+        // Scratch buffer for state — avoids allocation per NM iteration.
+        // Uses RefCell because nelder_mead takes Fn (not FnMut).
+        let scratch_state = RefCell::new(initial_state.clone());
 
         let objective = move |params: &[f64]| {
             let alpha = params[0];
@@ -554,14 +615,14 @@ impl TBATS {
                 0.0
             };
 
-            let gamma_one: Vec<f64> = (0..n_periods).map(|i| params[idx + i]).collect();
+            // Read gamma values directly from params (no Vec allocation)
+            let gamma_one_start = idx;
             idx += n_periods;
-            let gamma_two: Vec<f64> = (0..n_periods).map(|i| params[idx + i]).collect();
+            let gamma_two_start = idx;
 
-            // Run filter
-            let base = if use_trend { 2 } else { 1 };
-            let _dim = base + fourier_k.iter().map(|&k| 2 * k).sum::<usize>();
-            let mut state = initial_state.clone();
+            // Reset scratch state via memcpy (no allocation)
+            let mut state = scratch_state.borrow_mut();
+            state.copy_from_slice(&initial_state);
             let mut sse = 0.0;
 
             for t in 0..n {
@@ -571,7 +632,7 @@ impl TBATS {
 
                 let mut seasonal = 0.0;
                 let mut pos = base;
-                for &k in &fourier_k {
+                for &(k, _) in &period_trig_offsets {
                     for j in 0..k {
                         seasonal += state[pos + 2 * j];
                     }
@@ -588,17 +649,14 @@ impl TBATS {
                     state[1] = phi * trend + beta * error;
                 }
 
-                // Seasonal update
+                // Seasonal update with precomputed trig table
                 let mut pos = base;
-                for (period_idx, &k) in fourier_k.iter().enumerate() {
-                    let period = seasonal_periods[period_idx];
-                    let g1 = gamma_one[period_idx];
-                    let g2 = gamma_two[period_idx];
+                for (period_idx, &(k, trig_off)) in period_trig_offsets.iter().enumerate() {
+                    let g1 = params[gamma_one_start + period_idx];
+                    let g2 = params[gamma_two_start + period_idx];
 
                     for j in 0..k {
-                        let freq = 2.0 * std::f64::consts::PI * (j + 1) as f64 / period as f64;
-                        let cos_freq = freq.cos();
-                        let sin_freq = freq.sin();
+                        let (cos_freq, sin_freq) = trig_table[trig_off + j];
 
                         let idx_cos = pos + 2 * j;
                         let idx_sin = pos + 2 * j + 1;
@@ -616,7 +674,7 @@ impl TBATS {
         };
 
         let config = NelderMeadConfig {
-            max_iter: 300,
+            max_iter,
             tolerance: 1e-8,
             ..Default::default()
         };
@@ -670,6 +728,109 @@ impl TBATS {
         k += self.arma_p + self.arma_q;
 
         k
+    }
+
+    /// Fit the model with a configurable NelderMead iteration limit.
+    /// Used by AutoTBATS for screening passes (fewer iterations).
+    pub(crate) fn fit_with_max_iter(&mut self, series: &TimeSeries, max_iter: usize) -> Result<()> {
+        validate_series_complete(series)?;
+        for &period in &self.seasonal_periods {
+            if period < 2 {
+                return Err(ForecastError::InvalidParameter(format!(
+                    "seasonal period must be >= 2, got {}",
+                    period
+                )));
+            }
+        }
+        let values = series.primary_values();
+        self.n = values.len();
+
+        let min_required = self
+            .seasonal_periods
+            .iter()
+            .max()
+            .copied()
+            .unwrap_or(4)
+            .max(10);
+
+        if values.len() < min_required {
+            return Err(ForecastError::InsufficientData {
+                needed: min_required,
+                got: values.len(),
+                hint: Some(format!(
+                    "TBATS requires at least max(max_period, 10) = {} observations for seasonal estimation",
+                    min_required
+                )),
+            });
+        }
+
+        // Apply Box-Cox transformation if needed
+        let transformed: Vec<f64> = if self.lambda.is_some() || values.iter().all(|&v| v > 0.0) {
+            let lambda = self.lambda.unwrap_or_else(|| Self::estimate_lambda(values));
+            self.lambda = Some(lambda);
+            values
+                .iter()
+                .map(|&v| Self::box_cox_transform(v, lambda))
+                .collect()
+        } else {
+            values.to_vec()
+        };
+
+        // Find optimal number of harmonics for each period using AIC
+        let mut residuals_for_next = transformed.clone();
+        for (i, &period) in self.seasonal_periods.iter().enumerate() {
+            let (k, residuals) = Self::find_harmonics(&residuals_for_next, period);
+            self.fourier_k[i] = k;
+            residuals_for_next = residuals;
+        }
+
+        let n = transformed.len();
+
+        // Initialize state
+        self.state = self.initialize_state(&transformed);
+
+        // Optimize parameters with given iteration limit
+        self.optimize_parameters_with_max_iter(&transformed, max_iter);
+
+        // Run final filter with optimized parameters
+        let phi = if self.use_trend { self.phi } else { 0.0 };
+        let (sse, final_state, fitted, _residuals) = self.run_filter(
+            &transformed,
+            &self.initialize_state(&transformed),
+            self.alpha,
+            self.beta,
+            phi,
+            &self.gamma_one,
+            &self.gamma_two,
+        );
+
+        self.state = final_state;
+        self.sigma2 = sse / n as f64;
+
+        // Inverse Box-Cox transformation for fitted values
+        let lambda = self.lambda.unwrap_or(1.0);
+        let fitted_original: Vec<f64> = fitted
+            .iter()
+            .map(|&f| Self::inverse_box_cox(f, lambda))
+            .collect();
+
+        // Residuals in original scale
+        let residuals_original: Vec<f64> = values
+            .iter()
+            .zip(fitted_original.iter())
+            .map(|(y, f)| y - f)
+            .collect();
+
+        // Compute AIC
+        let log_likelihood =
+            -0.5 * n as f64 * (1.0 + (2.0 * std::f64::consts::PI * self.sigma2).ln());
+        let k = self.n_parameters();
+        self.aic = Some(-2.0 * log_likelihood + 2.0 * k as f64);
+
+        self.fitted = Some(fitted_original);
+        self.residuals = Some(residuals_original);
+
+        Ok(())
     }
 }
 
@@ -798,6 +959,17 @@ impl Forecaster for TBATS {
         let base = if self.use_trend { 2 } else { 1 };
         let phi = if self.use_trend { self.phi } else { 0.0 };
 
+        // Precompute trig table once for all forecast steps
+        let trig_table = Self::precompute_trig_table(&self.seasonal_periods, &self.fourier_k);
+
+        // Precompute per-period info: (k, trig_offset)
+        let mut period_trig_offsets: Vec<(usize, usize)> = Vec::with_capacity(self.fourier_k.len());
+        let mut trig_offset = 0usize;
+        for &k in &self.fourier_k {
+            period_trig_offsets.push((k, trig_offset));
+            trig_offset += k;
+        }
+
         for _h in 0..horizon {
             // Observation: y = level + phi * trend + sum(cos_coef)
             let level = state[0];
@@ -805,7 +977,7 @@ impl Forecaster for TBATS {
 
             let mut seasonal = 0.0;
             let mut pos = base;
-            for &k in &self.fourier_k {
+            for &(k, _) in &period_trig_offsets {
                 for j in 0..k {
                     seasonal += state[pos + 2 * j]; // Only cosine component
                 }
@@ -817,22 +989,17 @@ impl Forecaster for TBATS {
             predictions.push(pred);
 
             // State transition (F @ x, without error correction)
-            // Level: level_{t+1} = level_t + phi * trend_t
             state[0] = level + phi * trend;
 
-            // Trend: trend_{t+1} = phi * trend_t
             if self.use_trend {
                 state[1] = phi * trend;
             }
 
             // Rotate seasonal states
             let mut pos = base;
-            for (period_idx, &k) in self.fourier_k.iter().enumerate() {
-                let period = self.seasonal_periods[period_idx];
+            for &(k, trig_off) in &period_trig_offsets {
                 for j in 0..k {
-                    let freq = 2.0 * std::f64::consts::PI * (j + 1) as f64 / period as f64;
-                    let cos_freq = freq.cos();
-                    let sin_freq = freq.sin();
+                    let (cos_freq, sin_freq) = trig_table[trig_off + j];
 
                     let idx_cos = pos + 2 * j;
                     let idx_sin = pos + 2 * j + 1;
