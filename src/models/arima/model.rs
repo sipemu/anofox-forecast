@@ -452,16 +452,39 @@ impl ARIMA {
             bounds.push((-0.99, 0.99)); // MA bounds
         }
 
+        // Pre-allocate residuals buffer, shared via RefCell since optimizers take Fn (not FnMut)
+        let residuals_buf = std::cell::RefCell::new(vec![0.0; diff_series.len()]);
+
+        // Phase 1: L-BFGS for fast convergence to near-optimum
+        let lbfgs_result = lbfgs_optimize(
+            |params| {
+                let mut buf = residuals_buf.borrow_mut();
+                Self::calculate_css(
+                    &diff_series,
+                    p,
+                    q,
+                    &params[1..1 + p],
+                    &params[1 + p..],
+                    params[0],
+                    &mut buf,
+                )
+            },
+            &initial,
+            Some(&bounds),
+            LbfgsConfig {
+                max_iter: 50,
+                ..Default::default()
+            },
+        );
+
+        // Phase 2: Refine with NM from L-BFGS solution
         let config = NelderMeadConfig {
-            max_iter: 1000,
+            max_iter: 200,
             tolerance: 1e-8,
             ..Default::default()
         };
 
-        // Pre-allocate residuals buffer, shared via RefCell since nelder_mead takes Fn (not FnMut)
-        let residuals_buf = std::cell::RefCell::new(vec![0.0; diff_series.len()]);
-
-        let result = nelder_mead(
+        let nm_result = nelder_mead(
             |params| {
                 let mut buf = residuals_buf.borrow_mut();
                 Self::calculate_css(
@@ -474,10 +497,17 @@ impl ARIMA {
                     &mut buf,
                 )
             },
-            &initial,
+            &lbfgs_result.optimal_point,
             Some(&bounds),
             config,
         );
+
+        // Use whichever found a better minimum
+        let result = if lbfgs_result.optimal_value < nm_result.optimal_value {
+            lbfgs_result
+        } else {
+            nm_result
+        };
 
         // Extract optimized parameters
         self.intercept = result.optimal_point[0];
