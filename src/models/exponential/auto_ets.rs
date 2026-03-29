@@ -363,8 +363,11 @@ impl Forecaster for AutoETS {
             false
         };
 
-        // Generate candidate models
-        let candidates = self.generate_candidates(has_seasonal, has_non_positive);
+        // Generate candidate models, sorted so non-seasonal (cheap) models run first.
+        // This enables early termination for the sequential path.
+        let mut candidates = self.generate_candidates(has_seasonal, has_non_positive);
+        candidates.sort_by_key(|spec| if spec.has_seasonal() { 1 } else { 0 });
+
         self.model_scores.clear();
 
         let criterion = self.config.criterion;

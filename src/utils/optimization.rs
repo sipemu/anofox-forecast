@@ -20,6 +20,9 @@ pub struct NelderMeadConfig {
     pub max_iter: usize,
     /// Convergence tolerance.
     pub tolerance: f64,
+    /// Stagnation window: terminate if best value hasn't improved by more than
+    /// `tolerance` in this many iterations. 0 = disabled.
+    pub stagnation_window: usize,
     /// Reflection coefficient (default: 1.0).
     pub alpha: f64,
     /// Expansion coefficient (default: 2.0).
@@ -37,6 +40,7 @@ impl Default for NelderMeadConfig {
         Self {
             max_iter: 1000,
             tolerance: 1e-8,
+            stagnation_window: 0,
             alpha: 1.0,
             gamma: 2.0,
             rho: 0.5,
@@ -168,6 +172,8 @@ where
 
     let mut iterations = 0;
     let mut converged = false;
+    let mut stagnation_counter = 0usize;
+    let mut stagnation_best = f64::MAX;
 
     while iterations < config.max_iter {
         iterations += 1;
@@ -189,6 +195,21 @@ where
         ) {
             converged = true;
             break;
+        }
+
+        // Stagnation check: terminate if best value hasn't improved significantly
+        if config.stagnation_window > 0 {
+            let current_best = values[best_idx];
+            if stagnation_best - current_best > config.tolerance {
+                stagnation_best = current_best;
+                stagnation_counter = 0;
+            } else {
+                stagnation_counter += 1;
+                if stagnation_counter >= config.stagnation_window {
+                    converged = true;
+                    break;
+                }
+            }
         }
 
         // Try reflection/expansion; if not accepted, try contraction with the reflected value
@@ -624,6 +645,7 @@ mod tests {
         let config = NelderMeadConfig {
             max_iter: 100,
             tolerance: 1e-4,
+            stagnation_window: 0,
             alpha: 1.5,
             gamma: 2.5,
             rho: 0.4,

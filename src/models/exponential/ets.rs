@@ -1015,6 +1015,7 @@ impl ETS {
         let config = NelderMeadConfig {
             max_iter: 2000,
             tolerance: 1e-10,
+            stagnation_window: 150,
             ..Default::default()
         };
 
@@ -1119,8 +1120,9 @@ impl ETS {
         if has_seasonal && !init_seasonals.is_empty() {
             let period = self.seasonal_period;
             let seasonal_config = NelderMeadConfig {
-                max_iter: 5000 + 500 * period,
+                max_iter: 3000 + 300 * period,
                 tolerance: 1e-10,
+                stagnation_window: 200, // early stop when no improvement for 200 iters
                 ..Default::default()
             };
 
