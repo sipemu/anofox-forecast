@@ -352,3 +352,44 @@ fn arima_210_parameter_comparison() {
     println!("  AR coeffs: {:?}", model.ar_coefficients());
     println!("  MA coeffs: {:?}", model.ma_coefficients());
 }
+
+#[test]
+fn mle_at_python_params_vs_ours() {
+    let n = 100;
+    let values: Vec<f64> = (0..n)
+        .map(|i| {
+            50.0 + 0.3 * i as f64
+                + 10.0 * (2.0 * std::f64::consts::PI * i as f64 / 7.0).sin()
+                + ((i * 7 + 3) % 11) as f64 * 0.3
+        })
+        .collect();
+
+    // Difference the series
+    let diff: Vec<f64> = values.windows(2).map(|w| w[1] - w[0]).collect();
+
+    // Evaluate MLE at Python's params: ar1=0.963, ar2=-0.757
+    let mut buf = vec![0.0; diff.len()];
+    let python_nll = ARIMA::calculate_mle_pub(&diff, 2, 0, &[0.963, -0.757], &[], 0.0, &mut buf);
+
+    // Evaluate at our params
+    let ts = TimeSeries::univariate(
+        (0..n)
+            .map(|i| {
+                chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2020, 1, 1, 0, 0, 0).unwrap()
+                    + chrono::Duration::days(i as i64)
+            })
+            .collect(),
+        values,
+    )
+    .unwrap();
+    let mut model = ARIMA::new(2, 1, 0);
+    model.fit(&ts).unwrap();
+    let our_ar = model.ar_coefficients().to_vec();
+    let our_nll = ARIMA::calculate_mle_pub(&diff, 2, 0, &our_ar, &[], 0.0, &mut buf);
+
+    println!("Python params NLL: {:.4}", python_nll);
+    println!("Our params NLL: {:.4}", our_nll);
+    println!("Our AR: {:?}", our_ar);
+    println!("Python AR: [0.963, -0.757]");
+    println!("Python is better: {}", python_nll < our_nll);
+}

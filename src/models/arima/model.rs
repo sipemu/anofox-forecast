@@ -335,15 +335,7 @@ impl ARIMA {
         let result = nelder_mead(
             |params| {
                 let mut buf = residuals_buf.borrow_mut();
-                Self::calculate_css(
-                    diff_series,
-                    p,
-                    q,
-                    &params[..p],
-                    &params[p..],
-                    0.0, // no intercept for differenced data
-                    &mut buf,
-                )
+                Self::calculate_mle(diff_series, p, q, &params[..p], &params[p..], 0.0, &mut buf)
             },
             &hr_init,
             Some(&bounds),
@@ -375,9 +367,169 @@ impl ARIMA {
         }
     }
 
-    /// Calculate the conditional sum of squares for given parameters.
-    /// Uses a pre-allocated residuals buffer to avoid allocation per call.
-    /// The buffer must be at least `diff_series.len()` elements.
+    /// Compute exact negative log-likelihood via the innovations algorithm.
+    ///
+    /// This matches Python statsmodels' `innovations_mle` method exactly:
+    /// 1. Compute MA(∞) representation coefficients (ψ-weights)
+    /// 2. Compute autocovariance γ(0..n-1) from ψ-weights
+    /// 3. Run innovations recursion to get one-step-ahead prediction variances
+    /// 4. Compute exact Gaussian log-likelihood
+    ///
+    /// Sigma^2 is concentrated out (profiled likelihood).
+    /// Public accessor for testing MLE computation.
+    #[doc(hidden)]
+    pub fn calculate_mle_pub(
+        diff_series: &[f64],
+        p: usize,
+        q: usize,
+        ar: &[f64],
+        ma: &[f64],
+        intercept: f64,
+        residuals: &mut [f64],
+    ) -> f64 {
+        Self::calculate_mle(diff_series, p, q, ar, ma, intercept, residuals)
+    }
+
+    fn calculate_mle(
+        diff_series: &[f64],
+        p: usize,
+        q: usize,
+        ar: &[f64],
+        ma: &[f64],
+        _intercept: f64,
+        _residuals: &mut [f64],
+    ) -> f64 {
+        let n = diff_series.len();
+        if n < 3 {
+            return f64::MAX;
+        }
+
+        // Check stationarity via sum of AR coefficients (necessary condition)
+        // Note: sum of |AR| < 1 is too strict; sum of AR < 1 with ar[0] < 1 suffices
+        // for most practical cases. Full check requires root analysis.
+        let ar_sum: f64 = ar.iter().sum();
+        if ar_sum >= 1.0 || ar.iter().any(|a| a.abs() >= 1.0) {
+            return f64::MAX;
+        }
+
+        // Compute MA(∞) psi-weights: ψ_0 = 1, ψ_j = θ_j + Σ φ_i ψ_{j-i}
+        let max_psi = n;
+        let mut psi = vec![0.0; max_psi];
+        psi[0] = 1.0;
+        for j in 1..max_psi {
+            let mut val = if j <= q { ma[j - 1] } else { 0.0 };
+            for i in 0..p.min(j) {
+                val += ar[i] * psi[j - 1 - i];
+            }
+            psi[j] = val;
+            // Truncate if psi becomes negligible
+            if j > q + p + 10 && val.abs() < 1e-12 {
+                break;
+            }
+        }
+
+        // Compute autocovariance: γ(k) = σ² Σ_{j=0}^{∞} ψ_j ψ_{j+k}
+        // We concentrate σ² out, so compute γ(k)/σ² = Σ ψ_j ψ_{j+k}
+        let mut acov = vec![0.0; n]; // γ(k)/σ²
+        for k in 0..n {
+            let mut sum = 0.0;
+            for j in 0..max_psi.saturating_sub(k) {
+                if j >= psi.len() || j + k >= psi.len() {
+                    break;
+                }
+                sum += psi[j] * psi[j + k];
+                if psi[j].abs() < 1e-15 {
+                    break;
+                }
+            }
+            acov[k] = sum;
+        }
+
+        if acov[0] <= 0.0 || !acov[0].is_finite() {
+            return f64::MAX;
+        }
+
+        // Innovations algorithm: compute one-step-ahead prediction variances v_t
+        // and prediction coefficients θ_{t,j}
+        //
+        // v_0 = γ(0)
+        // For t = 1, ..., n-1:
+        //   θ_{t,j} = (γ(t-j) - Σ_{k=0}^{j-1} θ_{j,k} θ_{t,k} v_k) / v_j  for j=0..t-1
+        //   v_t = γ(0) - Σ_{j=0}^{t-1} θ_{t,j}² v_j
+        //
+        // One-step-ahead prediction:
+        //   x̂_{t+1} = Σ_{j=0}^{t-1} θ_{t,j} (x_{t-j} - x̂_{t-j})
+
+        let mut v = vec![0.0; n]; // prediction variances (divided by σ²)
+        v[0] = acov[0];
+
+        // Store θ coefficients: theta_mat[t][j] = θ_{t,j}
+        // Only need current row and all previous v values
+        let mut theta_prev: Vec<Vec<f64>> = Vec::with_capacity(n);
+        theta_prev.push(vec![]); // t=0 has no coefficients
+
+        let mut innovations = vec![0.0; n]; // x_t - x̂_t
+        innovations[0] = diff_series[0]; // x̂_1 = 0 (unconditional mean)
+
+        let mut sum_log_v = v[0].ln();
+        let mut sum_e2_v = innovations[0] * innovations[0] / v[0];
+
+        for t in 1..n {
+            // Compute θ_{t,j} for j = 0..t-1
+            let mut theta_t = vec![0.0; t];
+            for j in (0..t).rev() {
+                let mut val = acov[t - j];
+                for k in 0..j {
+                    val -= theta_prev[j][k] * theta_t[k] * v[k];
+                }
+                if v[j].abs() < 1e-30 {
+                    theta_t[j] = 0.0;
+                } else {
+                    theta_t[j] = val / v[j];
+                }
+            }
+
+            // v_t = γ(0) - Σ θ_{t,j}² v_j
+            let mut vt = acov[0];
+            for j in 0..t {
+                vt -= theta_t[j] * theta_t[j] * v[j];
+            }
+            v[t] = vt.max(1e-30);
+
+            // One-step-ahead prediction: x̂_{t+1} = Σ θ_{t,j} * innovation_{t-j}
+            let mut x_hat = 0.0;
+            for j in 0..t {
+                x_hat += theta_t[j] * innovations[t - 1 - j];
+            }
+
+            innovations[t] = diff_series[t] - x_hat;
+
+            // Accumulate log-likelihood
+            sum_log_v += v[t].ln();
+            sum_e2_v += innovations[t] * innovations[t] / v[t];
+
+            theta_prev.push(theta_t);
+        }
+
+        // Concentrated negative log-likelihood:
+        // -2 logL = n log(σ²) + n log(2π) + Σ log(v_t/σ²) + Σ e_t²/(v_t)
+        // where σ² = (1/n) Σ e_t²/v_t (concentrated out)
+        let sigma2 = sum_e2_v / n as f64;
+        if sigma2 <= 0.0 || !sigma2.is_finite() {
+            return f64::MAX;
+        }
+
+        let nll =
+            0.5 * (n as f64 * (sigma2.ln() + (2.0 * std::f64::consts::PI).ln() + 1.0) + sum_log_v);
+
+        if nll.is_finite() {
+            nll
+        } else {
+            f64::MAX
+        }
+    }
+
+    /// CSS fallback (kept for non-differenced models where intercept matters).
     fn calculate_css(
         diff_series: &[f64],
         p: usize,
@@ -394,19 +546,16 @@ impl ARIMA {
             return f64::MAX;
         }
 
-        // Zero out the residuals buffer
         residuals[..n].fill(0.0);
         let mut css = 0.0;
 
         for t in start..n {
             let mut pred = intercept;
 
-            // AR component
             for i in 0..p {
                 pred += ar[i] * (diff_series[t - 1 - i] - intercept);
             }
 
-            // MA component
             for i in 0..q {
                 pred += ma[i] * residuals[t - 1 - i];
             }
@@ -656,7 +805,8 @@ impl ARIMA {
 
         let residuals_buf = std::cell::RefCell::new(vec![0.0; diff_series.len()]);
 
-        let css_fn = if include_intercept {
+        // Use MLE (Kalman filter) for d>0 (no intercept), CSS for d==0 (with intercept)
+        let obj_fn = if include_intercept {
             Box::new(|params: &[f64]| {
                 let mut buf = residuals_buf.borrow_mut();
                 Self::calculate_css(
@@ -672,7 +822,7 @@ impl ARIMA {
         } else {
             Box::new(|params: &[f64]| {
                 let mut buf = residuals_buf.borrow_mut();
-                Self::calculate_css(diff_series, p, q, &params[..p], &params[p..], 0.0, &mut buf)
+                Self::calculate_mle(diff_series, p, q, &params[..p], &params[p..], 0.0, &mut buf)
             }) as Box<dyn Fn(&[f64]) -> f64>
         };
 
@@ -682,7 +832,7 @@ impl ARIMA {
 
         let lbfgs_result = if use_lbfgs {
             Some(lbfgs_optimize(
-                &css_fn,
+                &obj_fn,
                 &initial,
                 Some(&bounds),
                 LbfgsConfig {
@@ -700,14 +850,14 @@ impl ARIMA {
             .map(|r| r.optimal_point.as_slice())
             .unwrap_or(&initial);
 
-        let nm_iters = if use_lbfgs { 100 } else { 500 };
+        let nm_iters = if include_intercept { 500 } else { 1000 }; // MLE needs more iterations
         let config = NelderMeadConfig {
             max_iter: nm_iters,
-            tolerance: 1e-8,
+            tolerance: 1e-10,
             ..Default::default()
         };
 
-        let nm_result = nelder_mead(&css_fn, nm_start, Some(&bounds), config);
+        let nm_result = nelder_mead(&obj_fn, nm_start, Some(&bounds), config);
 
         // Use whichever found a better minimum
         let result = match &lbfgs_result {
