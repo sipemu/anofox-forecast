@@ -8,7 +8,7 @@
 use anofox_forecast::core::TimeSeries;
 use anofox_forecast::models::exponential::{
     AutoETS, AutoETSConfig, ETSSeasonalType, ETSSpec, ErrorType, HoltLinearTrend, HoltWinters,
-    SeasonalType, SimpleExponentialSmoothing, TrendType, ETS,
+    ModelPool, SeasonalType, SimpleExponentialSmoothing, TrendType, ETS,
 };
 use anofox_forecast::models::Forecaster;
 use chrono::{Duration, TimeZone, Utc};
@@ -929,4 +929,125 @@ fn ets_aaa_holdout_beats_ses_on_seasonal_data() {
         rmse_ets,
         rmse_ses
     );
+}
+
+// ====== Model pool tests (Petropoulos et al., 2023) ======
+
+#[test]
+fn model_pool_reduced_selects_valid_model_on_seasonal_data() {
+    // The Reduced pool (8 models) should still find a good seasonal model.
+    let period = 12;
+    let n = 96;
+    let values: Vec<f64> = (0..n)
+        .map(|i| {
+            let trend = 50.0 + 0.3 * i as f64;
+            let seasonal = 10.0 * (2.0 * std::f64::consts::PI * i as f64 / period as f64).sin();
+            let noise = ((i * 7 + 3) % 11) as f64 * 0.3 - 1.5;
+            trend + seasonal + noise
+        })
+        .collect();
+    let ts = TimeSeries::univariate(make_timestamps(n), values).unwrap();
+
+    let config = AutoETSConfig::with_period(period).with_model_pool(ModelPool::Reduced);
+    let mut model = AutoETS::with_config(config);
+    model.fit(&ts).unwrap();
+
+    let spec = model.selected_spec().unwrap();
+    let scores = model.model_scores();
+
+    println!("Reduced pool selected: {:?}", spec);
+    println!("Reduced pool candidates evaluated: {}", scores.len());
+
+    // Should select a seasonal model
+    assert!(
+        spec.has_seasonal(),
+        "Reduced pool should select seasonal model on seasonal data, got {:?}",
+        spec
+    );
+    // Reduced pool should evaluate at most 8 models
+    assert!(
+        scores.len() <= 8,
+        "Reduced pool should have at most 8 candidates, got {}",
+        scores.len()
+    );
+}
+
+#[test]
+fn model_pool_reduced_comparable_accuracy_to_complete() {
+    // Key finding from the paper: Reduced pool achieves comparable accuracy.
+    let period = 12;
+    let n_total = 108;
+    let n_train = 96;
+    let horizon = period;
+
+    let values: Vec<f64> = (0..n_total)
+        .map(|i| {
+            let trend = 60.0 + 0.4 * i as f64;
+            let seasonal = 12.0 * (2.0 * std::f64::consts::PI * i as f64 / period as f64).sin();
+            let noise = ((i * 11 + 5) % 13) as f64 * 0.3 - 1.8;
+            trend + seasonal + noise
+        })
+        .collect();
+    let train_ts =
+        TimeSeries::univariate(make_timestamps(n_train), values[..n_train].to_vec()).unwrap();
+    let actual = &values[n_train..n_train + horizon];
+
+    // Fit with Complete pool
+    let mut full = AutoETS::with_config(AutoETSConfig::with_period(period));
+    full.fit(&train_ts).unwrap();
+    let fc_full = full.predict(horizon).unwrap();
+    let rmse_full = rmse(actual, fc_full.primary());
+
+    // Fit with Reduced pool
+    let config = AutoETSConfig::with_period(period).with_model_pool(ModelPool::Reduced);
+    let mut reduced = AutoETS::with_config(config);
+    reduced.fit(&train_ts).unwrap();
+    let fc_reduced = reduced.predict(horizon).unwrap();
+    let rmse_reduced = rmse(actual, fc_reduced.primary());
+
+    println!(
+        "Complete pool: {:?} RMSE={:.4}",
+        full.selected_spec(),
+        rmse_full
+    );
+    println!(
+        "Reduced pool:  {:?} RMSE={:.4}",
+        reduced.selected_spec(),
+        rmse_reduced
+    );
+    println!("Ratio: {:.2}", rmse_reduced / rmse_full);
+
+    // Reduced should be within 50% of full (paper shows comparable performance)
+    assert!(
+        rmse_reduced < rmse_full * 1.5,
+        "Reduced pool RMSE ({:.4}) should not be much worse than Complete ({:.4})",
+        rmse_reduced,
+        rmse_full
+    );
+}
+
+#[test]
+fn model_pool_damped_trend_excludes_undamped() {
+    let period = 12;
+    let n = 96;
+    let values: Vec<f64> = (0..n)
+        .map(|i| {
+            50.0 + 0.3 * i as f64
+                + 8.0 * (2.0 * std::f64::consts::PI * i as f64 / period as f64).sin()
+        })
+        .collect();
+    let ts = TimeSeries::univariate(make_timestamps(n), values).unwrap();
+
+    let config = AutoETSConfig::with_period(period).with_model_pool(ModelPool::DampedTrendOnly);
+    let mut model = AutoETS::with_config(config);
+    model.fit(&ts).unwrap();
+
+    // All scored models should have None or AdditiveDamped trend (never Additive)
+    for (spec, _score) in model.model_scores() {
+        assert_ne!(
+            spec.trend,
+            TrendType::Additive,
+            "DampedTrendOnly pool should not contain undamped trend models"
+        );
+    }
 }
