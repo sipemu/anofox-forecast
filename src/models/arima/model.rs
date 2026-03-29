@@ -302,7 +302,8 @@ impl ARIMA {
             return if score.is_finite() { Some(score) } else { None };
         }
 
-        // Set up optimization
+        // Set up optimization — scoring only needs approximate ranking,
+        // not exact parameters, so use fewer iterations
         let n_params = p + q + 1;
         let mean = diff_series.iter().sum::<f64>() / diff_series.len() as f64;
         let mut initial = vec![0.0; n_params];
@@ -320,8 +321,8 @@ impl ARIMA {
         }
 
         let config = NelderMeadConfig {
-            max_iter: 1000,
-            tolerance: 1e-8,
+            max_iter: 200,
+            tolerance: 1e-6,
             ..Default::default()
         };
 
@@ -1109,9 +1110,10 @@ impl SARIMA {
             bounds.push((-0.99, 0.99));
         }
 
+        // Scoring needs approximate AIC ranking, not exact parameters
         let config = NelderMeadConfig {
-            max_iter: 2000,
-            tolerance: 1e-8,
+            max_iter: 300,
+            tolerance: 1e-6,
             ..Default::default()
         };
 

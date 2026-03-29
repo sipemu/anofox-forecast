@@ -115,5 +115,68 @@ fn bench_tbats(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_models, bench_tbats);
-criterion_main!(benches);
+fn bench_auto_arima(c: &mut Criterion) {
+    use anofox_forecast::models::arima::{AutoARIMA, AutoARIMAConfig, ARIMA};
+
+    let ts_100 = make_series(100);
+    let ts_200 = make_series(200);
+    let ts_500 = make_series(500);
+
+    let mut group = c.benchmark_group("auto_arima");
+    group.sample_size(10);
+    group.measurement_time(std::time::Duration::from_secs(30));
+
+    group.bench_function("ARIMA_1_1_1_n100", |b: &mut criterion::Bencher| {
+        b.iter(|| {
+            let mut m = ARIMA::new(1, 1, 1);
+            m.fit(black_box(&ts_100)).unwrap();
+            m.predict(12).unwrap();
+        })
+    });
+
+    group.bench_function("AutoARIMA_default_n100", |b: &mut criterion::Bencher| {
+        b.iter(|| {
+            let mut m = AutoARIMA::new();
+            m.fit(black_box(&ts_100)).unwrap();
+            m.predict(12).unwrap();
+        })
+    });
+
+    group.bench_function("AutoARIMA_default_n200", |b: &mut criterion::Bencher| {
+        b.iter(|| {
+            let mut m = AutoARIMA::new();
+            m.fit(black_box(&ts_200)).unwrap();
+            m.predict(12).unwrap();
+        })
+    });
+
+    group.bench_function("AutoARIMA_default_n500", |b: &mut criterion::Bencher| {
+        b.iter(|| {
+            let mut m = AutoARIMA::new();
+            m.fit(black_box(&ts_500)).unwrap();
+            m.predict(12).unwrap();
+        })
+    });
+
+    group.bench_function("AutoARIMA_stepwise_n200", |b: &mut criterion::Bencher| {
+        b.iter(|| {
+            let config = AutoARIMAConfig::default().with_true_stepwise();
+            let mut m = AutoARIMA::with_config(config);
+            m.fit(black_box(&ts_200)).unwrap();
+            m.predict(12).unwrap();
+        })
+    });
+
+    group.bench_function("AutoARIMA_seasonal12_n200", |b: &mut criterion::Bencher| {
+        b.iter(|| {
+            let mut m = AutoARIMA::seasonal(12);
+            m.fit(black_box(&ts_200)).unwrap();
+            m.predict(12).unwrap();
+        })
+    });
+
+    group.finish();
+}
+
+criterion_group!(benches2, bench_models, bench_tbats, bench_auto_arima);
+criterion_main!(benches2);
