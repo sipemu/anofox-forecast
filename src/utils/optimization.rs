@@ -679,3 +679,245 @@ mod tests {
         assert_relative_eq!(result.optimal_point[0], 2.0, epsilon = 0.1);
     }
 }
+
+// =========================================================================
+// L-BFGS optimizer with finite-difference gradients
+// =========================================================================
+
+/// Configuration for L-BFGS optimization.
+#[derive(Debug, Clone, Copy)]
+pub struct LbfgsConfig {
+    /// Maximum number of iterations.
+    pub max_iter: usize,
+    /// Gradient norm tolerance for convergence.
+    pub tolerance: f64,
+    /// L-BFGS memory size (number of stored vectors).
+    pub memory_size: usize,
+    /// Step size for finite-difference gradient approximation.
+    pub fd_step: f64,
+    /// Backtracking line search: sufficient decrease parameter (Armijo).
+    pub armijo_c: f64,
+    /// Backtracking line search: step shrink factor.
+    pub backtrack_rho: f64,
+    /// Maximum line search steps.
+    pub max_linesearch: usize,
+}
+
+impl Default for LbfgsConfig {
+    fn default() -> Self {
+        Self {
+            max_iter: 100,
+            tolerance: 1e-6,
+            memory_size: 7,
+            fd_step: 1e-7,
+            armijo_c: 1e-4,
+            backtrack_rho: 0.5,
+            max_linesearch: 20,
+        }
+    }
+}
+
+/// Run L-BFGS optimization with finite-difference gradients and optional box constraints.
+///
+/// Uses the `lbfgs` crate for Hessian approximation, with backtracking line search
+/// and tanh-based parameter transformation for box constraints.
+///
+/// Much faster than Nelder-Mead for smooth objectives (ARIMA CSS): converges in
+/// ~30 iterations vs NM's 200-1000.
+pub fn lbfgs_optimize<F>(
+    objective: F,
+    initial: &[f64],
+    bounds: Option<&[(f64, f64)]>,
+    config: LbfgsConfig,
+) -> NelderMeadResult
+where
+    F: Fn(&[f64]) -> f64,
+{
+    let n = initial.len();
+    if n == 0 {
+        return NelderMeadResult {
+            optimal_point: vec![],
+            optimal_value: f64::NAN,
+            iterations: 0,
+            converged: false,
+        };
+    }
+
+    let has_bounds = bounds.is_some();
+
+    // Transform initial point to unconstrained space if bounds exist
+    let mut x = if has_bounds {
+        to_unconstrained(initial, bounds.unwrap())
+    } else {
+        initial.to_vec()
+    };
+
+    let eval = |x_unc: &[f64]| -> f64 {
+        if has_bounds {
+            let x_con = to_constrained(x_unc, bounds.unwrap());
+            sanitize_objective(objective(&x_con))
+        } else {
+            sanitize_objective(objective(x_unc))
+        }
+    };
+
+    let mut lbfgs_state = lbfgs::Lbfgs::<f64>::new(n, config.memory_size).with_sy_epsilon(1e-10);
+
+    let mut fx = eval(&x);
+    let mut grad = finite_difference_gradient(&eval, &x, config.fd_step);
+
+    // Initial Hessian update
+    lbfgs_state.update_hessian(&grad, &x);
+
+    let mut iterations = 0;
+    let mut converged = false;
+
+    let mut x_new = vec![0.0; n];
+    let mut best_x = x.clone();
+    let mut best_fx = fx;
+
+    while iterations < config.max_iter {
+        iterations += 1;
+
+        // Compute search direction: d = -H^{-1} * g
+        let mut direction = grad.clone();
+        lbfgs_state.apply_hessian(&mut direction);
+        for d in direction.iter_mut() {
+            *d = -*d;
+        }
+
+        // Backtracking line search (Armijo condition)
+        let directional_deriv: f64 = grad.iter().zip(direction.iter()).map(|(g, d)| g * d).sum();
+
+        if directional_deriv >= 0.0 {
+            // Not a descent direction — reset to steepest descent
+            direction.copy_from_slice(&grad);
+            for d in direction.iter_mut() {
+                *d = -*d;
+            }
+        }
+
+        let mut step = 1.0;
+        let mut ls_ok = false;
+
+        for _ in 0..config.max_linesearch {
+            for i in 0..n {
+                x_new[i] = x[i] + step * direction[i];
+            }
+            let fx_new = eval(&x_new);
+
+            if fx_new <= fx + config.armijo_c * step * directional_deriv {
+                fx = fx_new;
+                x.copy_from_slice(&x_new);
+                ls_ok = true;
+                break;
+            }
+            step *= config.backtrack_rho;
+        }
+
+        if !ls_ok {
+            // Line search failed — accept last point
+            break;
+        }
+
+        if fx < best_fx {
+            best_x.copy_from_slice(&x);
+            best_fx = fx;
+        }
+
+        // Compute new gradient
+        let new_grad = finite_difference_gradient(&eval, &x, config.fd_step);
+
+        // Check convergence
+        let grad_norm: f64 = new_grad.iter().map(|g| g * g).sum::<f64>().sqrt();
+        if grad_norm < config.tolerance {
+            converged = true;
+            grad = new_grad;
+            break;
+        }
+
+        // Update L-BFGS Hessian approximation
+        lbfgs_state.update_hessian(&new_grad, &x);
+        grad = new_grad;
+    }
+
+    // Transform back to constrained space
+    let optimal_point = if has_bounds {
+        to_constrained(&best_x, bounds.unwrap())
+    } else {
+        best_x
+    };
+
+    NelderMeadResult {
+        optimal_point,
+        optimal_value: best_fx,
+        iterations,
+        converged,
+    }
+}
+
+/// Compute finite-difference gradient.
+fn finite_difference_gradient(f: &dyn Fn(&[f64]) -> f64, x: &[f64], h: f64) -> Vec<f64> {
+    let n = x.len();
+    let mut grad = vec![0.0; n];
+    let mut x_plus = x.to_vec();
+
+    for i in 0..n {
+        let hi = h * (1.0 + x[i].abs()); // relative step
+        x_plus[i] = x[i] + hi;
+        let f_plus = f(&x_plus);
+        x_plus[i] = x[i] - hi;
+        let f_minus = f(&x_plus);
+        x_plus[i] = x[i]; // restore
+
+        grad[i] = (f_plus - f_minus) / (2.0 * hi);
+        if !grad[i].is_finite() {
+            grad[i] = 0.0;
+        }
+    }
+
+    grad
+}
+
+/// Transform from constrained to unconstrained space using atanh.
+fn to_unconstrained(x: &[f64], bounds: &[(f64, f64)]) -> Vec<f64> {
+    x.iter()
+        .zip(bounds.iter())
+        .map(|(&xi, &(lo, hi))| {
+            if lo.is_infinite() && hi.is_infinite() {
+                xi
+            } else if lo.is_infinite() {
+                // Upper bound only: x = hi - exp(u)
+                (hi - xi).max(1e-10).ln()
+            } else if hi.is_infinite() {
+                // Lower bound only: x = lo + exp(u)
+                (xi - lo).max(1e-10).ln()
+            } else {
+                // Both bounds: x = lo + (hi-lo) * sigmoid(u)
+                let range = hi - lo;
+                let normalized = ((xi - lo) / range).clamp(0.001, 0.999);
+                (normalized / (1.0 - normalized)).ln() // logit
+            }
+        })
+        .collect()
+}
+
+/// Transform from unconstrained to constrained space using sigmoid/exp.
+fn to_constrained(u: &[f64], bounds: &[(f64, f64)]) -> Vec<f64> {
+    u.iter()
+        .zip(bounds.iter())
+        .map(|(&ui, &(lo, hi))| {
+            if lo.is_infinite() && hi.is_infinite() {
+                ui
+            } else if lo.is_infinite() {
+                hi - ui.exp()
+            } else if hi.is_infinite() {
+                lo + ui.exp()
+            } else {
+                let range = hi - lo;
+                let sigmoid = 1.0 / (1.0 + (-ui).exp());
+                lo + range * sigmoid
+            }
+        })
+        .collect()
+}

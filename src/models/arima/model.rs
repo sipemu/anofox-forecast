@@ -22,7 +22,7 @@ use crate::error::{ForecastError, Result};
 use crate::models::arima::diff::{difference, integrate};
 use crate::models::{validate_series_complete, FittedParams, Forecaster};
 use crate::utils::ols::{ols_fit, ols_residuals, OLSResult};
-use crate::utils::optimization::{nelder_mead, NelderMeadConfig};
+use crate::utils::optimization::{lbfgs_optimize, nelder_mead, LbfgsConfig, NelderMeadConfig};
 use crate::utils::stats::quantile_normal;
 use std::collections::HashMap;
 
@@ -302,8 +302,7 @@ impl ARIMA {
             return if score.is_finite() { Some(score) } else { None };
         }
 
-        // Set up optimization — scoring only needs approximate ranking,
-        // not exact parameters, so use fewer iterations
+        // Reduced NM iterations for scoring (fast approximate ranking)
         let n_params = p + q + 1;
         let mean = diff_series.iter().sum::<f64>() / diff_series.len() as f64;
         let mut initial = vec![0.0; n_params];
@@ -1110,16 +1109,16 @@ impl SARIMA {
             bounds.push((-0.99, 0.99));
         }
 
-        // Scoring needs approximate AIC ranking, not exact parameters
-        let config = NelderMeadConfig {
-            max_iter: 300,
+        // Use L-BFGS for fast convergence
+        let lbfgs_config = LbfgsConfig {
+            max_iter: 50,
             tolerance: 1e-6,
             ..Default::default()
         };
 
         let residuals_buf = std::cell::RefCell::new(vec![0.0; diff_series.len()]);
 
-        let result = nelder_mead(
+        let result = lbfgs_optimize(
             |params| {
                 let ar_end = 1 + p;
                 let ma_end = ar_end + q;
@@ -1144,7 +1143,7 @@ impl SARIMA {
             },
             &initial,
             Some(&bounds),
-            config,
+            lbfgs_config,
         );
 
         // Compute AIC/BIC directly from CSS
