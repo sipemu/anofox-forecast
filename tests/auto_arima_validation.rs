@@ -371,6 +371,16 @@ fn mle_at_python_params_vs_ours() {
     let mut buf = vec![0.0; diff.len()];
     let python_nll = ARIMA::calculate_mle_pub(&diff, 2, 0, &[0.963, -0.757], &[], 0.0, &mut buf);
 
+    // Conditional innovations MLE (skip first m=max(p,q)+1=3 observations):
+    // n_eff=96, sigma2_hat=990.51, sum_log_v=0.0, NLL=466.66
+    println!("NLL at Python params: {:.4}", python_nll);
+    println!("Expected NLL: 466.66");
+    assert!(
+        (python_nll - 466.66).abs() < 1.0,
+        "NLL at Python params {:.4} should be close to 466.66",
+        python_nll
+    );
+
     // Evaluate at our params
     let ts = TimeSeries::univariate(
         (0..n)

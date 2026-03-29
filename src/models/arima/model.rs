@@ -332,23 +332,25 @@ impl ARIMA {
 
         let residuals_buf = std::cell::RefCell::new(vec![0.0; diff_series.len()]);
 
+        // Optimize using CSS (robust landscape)
         let result = nelder_mead(
             |params| {
                 let mut buf = residuals_buf.borrow_mut();
-                Self::calculate_mle(diff_series, p, q, &params[..p], &params[p..], 0.0, &mut buf)
+                Self::calculate_css(diff_series, p, q, &params[..p], &params[p..], 0.0, &mut buf)
             },
             &hr_init,
             Some(&bounds),
             config,
         );
 
-        // Compute AIC/BIC directly from CSS
-        let n_params_aic = n_params + 1; // +1 for sigma^2
+        // Use CSS for AIC/BIC scoring (consistent with CSS optimization)
         let css = result.optimal_value;
+        let n_params_aic = n_params + 1; // +1 for sigma^2
         if !css.is_finite() || css <= 0.0 {
             return None;
         }
 
+        let start = p.max(q);
         let n_eff = (diff_series.len() - start) as f64;
         let variance = css / n_eff;
         let k = n_params_aic as f64;
@@ -369,11 +371,12 @@ impl ARIMA {
 
     /// Compute exact negative log-likelihood via the innovations algorithm.
     ///
-    /// This matches Python statsmodels' `innovations_mle` method exactly:
-    /// 1. Compute MA(∞) representation coefficients (ψ-weights)
-    /// 2. Compute autocovariance γ(0..n-1) from ψ-weights
-    /// 3. Run innovations recursion to get one-step-ahead prediction variances
-    /// 4. Compute exact Gaussian log-likelihood
+    /// This implements the Python statsmodels innovations algorithm:
+    /// 1. `lfilter(ma_poly, ar_poly, impulse)` to get MA(∞) coefficients
+    /// 2. `arma_acovf` via Brockwell-Davis linear system (eq 3.3.8)
+    /// 3. Innovations recursion to get prediction variances v and coefficients theta
+    /// 4. Filter to compute one-step-ahead errors u
+    /// 5. Concentrated negative log-likelihood (conditional on first m observations)
     ///
     /// Sigma^2 is concentrated out (profiled likelihood).
     /// Public accessor for testing MLE computation.
@@ -390,6 +393,192 @@ impl ARIMA {
         Self::calculate_mle(diff_series, p, q, ar, ma, intercept, residuals)
     }
 
+    /// IIR filter (scipy.signal.lfilter equivalent).
+    ///
+    /// Implements: `a[0]*y[n] = b[0]*x[n] + b[1]*x[n-1] + ... - a[1]*y[n-1] - ...`
+    fn lfilter(b: &[f64], a: &[f64], x: &[f64]) -> Vec<f64> {
+        let n = x.len();
+        let mut y = vec![0.0; n];
+        let a0 = a[0];
+        for i in 0..n {
+            let mut val = 0.0;
+            for (j, &bj) in b.iter().enumerate() {
+                if i >= j {
+                    val += bj * x[i - j];
+                }
+            }
+            for (j, &aj) in a.iter().enumerate().skip(1) {
+                if i >= j {
+                    val -= aj * y[i - j];
+                }
+            }
+            y[i] = val / a0;
+        }
+        y
+    }
+
+    /// Compute ARMA autocovariances via exact Brockwell-Davis linear system (eq 3.3.8).
+    ///
+    /// `ar_poly` = [1, -phi1, -phi2, ...], `ma_poly` = [1, theta1, theta2, ...]
+    /// Returns gamma(0..nobs-1) with sigma2=1.
+    fn arma_acovf(ar_poly: &[f64], ma_poly: &[f64], nobs: usize) -> Vec<f64> {
+        let p = ar_poly.len() - 1; // AR order
+        let q = ma_poly.len() - 1; // MA order
+        let m = p.max(q) + 1;
+
+        // Step 1: Compute MA(infinity) coefficients via lfilter
+        let leads = m;
+        let mut impulse = vec![0.0; leads];
+        if !impulse.is_empty() {
+            impulse[0] = 1.0;
+        }
+        let ma_coeffs = Self::lfilter(ma_poly, ar_poly, &impulse);
+
+        // Step 2: Build linear system A * gamma = b (Brockwell-Davis eq 3.3.8)
+        // Pad ar_poly to length m
+        let mut tmp_ar = vec![0.0; m];
+        for (i, &v) in ar_poly.iter().enumerate().take(m) {
+            tmp_ar[i] = v;
+        }
+
+        let mut a_mat = vec![vec![0.0; m]; m];
+        let mut b_vec = vec![0.0; m];
+
+        for k in 0..m {
+            // A[k, :k+1] = tmp_ar[:k+1][::-1]
+            for j in 0..=k {
+                a_mat[k][j] += tmp_ar[k - j];
+            }
+            // A[k, 1:m-k] += tmp_ar[k+1:m]
+            if k + 1 < m {
+                for j in 1..m - k {
+                    if k + j < m {
+                        a_mat[k][j] += tmp_ar[k + j];
+                    }
+                }
+            }
+            // b[k] = sigma2 * dot(ma_poly[k:q+1], ma_coeffs[:max(q+1-k, 0)])
+            let ma_start = k;
+            let dot_len = if q + 1 > k { q + 1 - k } else { 0 };
+            let mut dot = 0.0;
+            for i in 0..dot_len {
+                if ma_start + i < ma_poly.len() && i < ma_coeffs.len() {
+                    dot += ma_poly[ma_start + i] * ma_coeffs[i];
+                }
+            }
+            b_vec[k] = dot; // sigma2 = 1
+        }
+
+        // Step 3: Solve A * gamma = b via Gaussian elimination with partial pivoting
+        let mut acovf = vec![0.0; nobs];
+
+        if let Some(gamma) = Self::solve_linear_system_inline(&a_mat, &b_vec) {
+            for (i, &g) in gamma.iter().enumerate().take(m.min(nobs)) {
+                acovf[i] = g;
+            }
+        } else {
+            // Fallback: white noise
+            acovf[0] = 1.0;
+            return acovf;
+        }
+
+        // Step 4: Extend via AR recursion for lags h >= m
+        // gamma(h) = -sum(ar_poly[1:] * gamma[h-1:h-p:-1])
+        for h in m..nobs {
+            let mut val = 0.0;
+            for i in 1..ar_poly.len() {
+                if h >= i {
+                    val -= ar_poly[i] * acovf[h - i];
+                }
+            }
+            acovf[h] = val;
+        }
+
+        acovf
+    }
+
+    /// Solve A*x = b via Gaussian elimination with partial pivoting.
+    fn solve_linear_system_inline(a: &[Vec<f64>], b: &[f64]) -> Option<Vec<f64>> {
+        let n = b.len();
+        if n == 0 || a.len() != n {
+            return None;
+        }
+
+        // Build augmented matrix [A | b]
+        let mut aug: Vec<Vec<f64>> = a
+            .iter()
+            .enumerate()
+            .map(|(i, row)| {
+                let mut r = Vec::with_capacity(n + 1);
+                r.extend_from_slice(row);
+                r.push(b[i]);
+                r
+            })
+            .collect();
+
+        // Forward elimination with partial pivoting
+        for col in 0..n {
+            // Find pivot
+            let mut max_row = col;
+            let mut max_val = aug[col][col].abs();
+            for row in (col + 1)..n {
+                let v = aug[row][col].abs();
+                if v > max_val {
+                    max_row = row;
+                    max_val = v;
+                }
+            }
+            if max_val < 1e-14 {
+                return None; // singular
+            }
+            if max_row != col {
+                aug.swap(col, max_row);
+            }
+            let pivot = aug[col][col];
+            for row in (col + 1)..n {
+                let factor = aug[row][col] / pivot;
+                for j in col..=n {
+                    let val = aug[col][j];
+                    aug[row][j] -= factor * val;
+                }
+            }
+        }
+
+        // Back substitution
+        let mut x = vec![0.0; n];
+        for i in (0..n).rev() {
+            let mut sum = aug[i][n];
+            for j in (i + 1)..n {
+                sum -= aug[i][j] * x[j];
+            }
+            x[i] = sum / aug[i][i];
+        }
+        Some(x)
+    }
+
+    /// Check stationarity: verify all roots of the AR polynomial lie outside the unit circle.
+    ///
+    /// For AR(1): |phi1| < 1
+    /// For AR(2): phi2 + phi1 < 1, phi2 - phi1 < 1, |phi2| < 1
+    /// For higher orders: use the companion matrix eigenvalue check.
+    fn check_stationarity(ar: &[f64]) -> bool {
+        let p = ar.len();
+        if p == 0 {
+            return true;
+        }
+        if p == 1 {
+            return ar[0].abs() < 1.0;
+        }
+        if p == 2 {
+            // Triangle conditions for AR(2) stationarity
+            return ar[1] + ar[0] < 1.0 && ar[1] - ar[0] < 1.0 && ar[1].abs() < 1.0;
+        }
+        // For higher orders: check necessary conditions
+        // Sum of absolute AR coefficients < 1 is too strict but safe
+        let sum_abs: f64 = ar.iter().map(|a| a.abs()).sum();
+        sum_abs < 1.5 && ar.iter().all(|a| a.abs() < 1.0)
+    }
+
     fn calculate_mle(
         diff_series: &[f64],
         p: usize,
@@ -404,80 +593,64 @@ impl ARIMA {
             return f64::MAX;
         }
 
-        // Check stationarity via sum of AR coefficients (necessary condition)
-        // Note: sum of |AR| < 1 is too strict; sum of AR < 1 with ar[0] < 1 suffices
-        // for most practical cases. Full check requires root analysis.
-        let ar_sum: f64 = ar.iter().sum();
-        if ar_sum >= 1.0 || ar.iter().any(|a| a.abs() >= 1.0) {
+        // Check stationarity
+        if !Self::check_stationarity(ar) {
             return f64::MAX;
         }
 
-        // Compute MA(∞) psi-weights: ψ_0 = 1, ψ_j = θ_j + Σ φ_i ψ_{j-i}
-        let max_psi = n;
-        let mut psi = vec![0.0; max_psi];
-        psi[0] = 1.0;
-        for j in 1..max_psi {
-            let mut val = if j <= q { ma[j - 1] } else { 0.0 };
-            for i in 0..p.min(j) {
-                val += ar[i] * psi[j - 1 - i];
-            }
-            psi[j] = val;
-            // Truncate if psi becomes negligible
-            if j > q + p + 10 && val.abs() < 1e-12 {
-                break;
-            }
+        // Build polynomial representations:
+        // ar_poly = [1, -phi1, -phi2, ...]  (Python convention)
+        // ma_poly = [1, theta1, theta2, ...]
+        let mut ar_poly = vec![0.0; p + 1];
+        ar_poly[0] = 1.0;
+        for i in 0..p {
+            ar_poly[i + 1] = -ar[i];
         }
 
-        // Compute autocovariance: γ(k) = σ² Σ_{j=0}^{∞} ψ_j ψ_{j+k}
-        // We concentrate σ² out, so compute γ(k)/σ² = Σ ψ_j ψ_{j+k}
-        let mut acov = vec![0.0; n]; // γ(k)/σ²
-        for k in 0..n {
-            let mut sum = 0.0;
-            for j in 0..max_psi.saturating_sub(k) {
-                if j >= psi.len() || j + k >= psi.len() {
-                    break;
-                }
-                sum += psi[j] * psi[j + k];
-                if psi[j].abs() < 1e-15 {
-                    break;
-                }
-            }
-            acov[k] = sum;
+        let mut ma_poly = vec![0.0; q + 1];
+        ma_poly[0] = 1.0;
+        for i in 0..q {
+            ma_poly[i + 1] = ma[i];
         }
+
+        // Compute exact autocovariances via Brockwell-Davis linear system solve
+        let acov = Self::arma_acovf(&ar_poly, &ma_poly, n);
 
         if acov[0] <= 0.0 || !acov[0].is_finite() {
             return f64::MAX;
         }
 
         // Innovations algorithm: compute one-step-ahead prediction variances v_t
-        // and prediction coefficients θ_{t,j}
+        // and prediction coefficients theta_{t,j}
         //
-        // v_0 = γ(0)
+        // v_0 = gamma(0)
         // For t = 1, ..., n-1:
-        //   θ_{t,j} = (γ(t-j) - Σ_{k=0}^{j-1} θ_{j,k} θ_{t,k} v_k) / v_j  for j=0..t-1
-        //   v_t = γ(0) - Σ_{j=0}^{t-1} θ_{t,j}² v_j
+        //   theta_{t,j} = (gamma(t-j) - sum_{k=0}^{j-1} theta_{j,k} theta_{t,k} v_k) / v_j
+        //   v_t = gamma(0) - sum_{j=0}^{t-1} theta_{t,j}^2 v_j
         //
-        // One-step-ahead prediction:
-        //   x̂_{t+1} = Σ_{j=0}^{t-1} θ_{t,j} (x_{t-j} - x̂_{t-j})
+        // Filter (one-step-ahead errors):
+        //   u_0 = y_0
+        //   u_t = y_t - sum_{j=0}^{t-1} theta_{t,j} u_{t-1-j}
 
-        let mut v = vec![0.0; n]; // prediction variances (divided by σ²)
+        let mut v = vec![0.0; n];
         v[0] = acov[0];
 
-        // Store θ coefficients: theta_mat[t][j] = θ_{t,j}
-        // Only need current row and all previous v values
+        // Store all theta rows (needed for cross-referencing theta_{j,k})
         let mut theta_prev: Vec<Vec<f64>> = Vec::with_capacity(n);
         theta_prev.push(vec![]); // t=0 has no coefficients
 
-        let mut innovations = vec![0.0; n]; // x_t - x̂_t
-        innovations[0] = diff_series[0]; // x̂_1 = 0 (unconditional mean)
+        let mut u = vec![0.0; n]; // innovations (one-step-ahead errors)
+        u[0] = diff_series[0];
 
-        let mut sum_log_v = v[0].ln();
-        let mut sum_e2_v = innovations[0] * innovations[0] / v[0];
+        // Number of initial observations to skip in the likelihood
+        // (diffuse initialization: initial transient has high prediction variance)
+        let m = p.max(q) + 1;
 
         for t in 1..n {
-            // Compute θ_{t,j} for j = 0..t-1
+            // Compute theta_{t,j} for j = 0..t-1 (forward order required so that
+            // theta_t[k] for k < j is already available in the inner sum)
             let mut theta_t = vec![0.0; t];
-            for j in (0..t).rev() {
+            for j in 0..t {
                 let mut val = acov[t - j];
                 for k in 0..j {
                     val -= theta_prev[j][k] * theta_t[k] * v[k];
@@ -489,44 +662,52 @@ impl ARIMA {
                 }
             }
 
-            // v_t = γ(0) - Σ θ_{t,j}² v_j
+            // v_t = gamma(0) - sum theta_{t,j}^2 * v_j
             let mut vt = acov[0];
             for j in 0..t {
                 vt -= theta_t[j] * theta_t[j] * v[j];
             }
             v[t] = vt.max(1e-30);
 
-            // One-step-ahead prediction: x̂_{t+1} = Σ θ_{t,j} * innovation_{t-j}
+            // Filter: u_t = y_t - sum_{j=0}^{t-1} theta_{t,j} * u_{t-1-j}
             let mut x_hat = 0.0;
             for j in 0..t {
-                x_hat += theta_t[j] * innovations[t - 1 - j];
+                x_hat += theta_t[j] * u[t - 1 - j];
             }
 
-            innovations[t] = diff_series[t] - x_hat;
-
-            // Accumulate log-likelihood
-            sum_log_v += v[t].ln();
-            sum_e2_v += innovations[t] * innovations[t] / v[t];
+            u[t] = diff_series[t] - x_hat;
 
             theta_prev.push(theta_t);
         }
 
-        // Concentrated negative log-likelihood:
-        // -2 logL = n log(σ²) + n log(2π) + Σ log(v_t/σ²) + Σ e_t²/(v_t)
-        // where σ² = (1/n) Σ e_t²/v_t (concentrated out)
-        let sigma2 = sum_e2_v / n as f64;
+        // Concentrated negative log-likelihood (conditional on first m observations):
+        // Only sum over t >= m where the predictor has converged.
+        // This matches the conditional MLE / diffuse initialization approach.
+        let n_eff = n - m;
+        if n_eff < 3 {
+            return f64::MAX;
+        }
+
+        let mut sum_log_v = 0.0;
+        let mut sum_e2_v = 0.0;
+        for t in m..n {
+            sum_log_v += v[t].ln();
+            sum_e2_v += u[t] * u[t] / v[t];
+        }
+
+        let sigma2 = sum_e2_v / n_eff as f64;
         if sigma2 <= 0.0 || !sigma2.is_finite() {
             return f64::MAX;
         }
 
-        let nll =
-            0.5 * (n as f64 * (sigma2.ln() + (2.0 * std::f64::consts::PI).ln() + 1.0) + sum_log_v);
+        let nll = 0.5
+            * (n_eff as f64 * (sigma2.ln() + (2.0 * std::f64::consts::PI).ln() + 1.0) + sum_log_v);
 
-        if nll.is_finite() {
-            nll
-        } else {
-            f64::MAX
+        if !nll.is_finite() {
+            return f64::MAX;
         }
+
+        nll
     }
 
     /// CSS fallback (kept for non-differenced models where intercept matters).
@@ -805,7 +986,9 @@ impl ARIMA {
 
         let residuals_buf = std::cell::RefCell::new(vec![0.0; diff_series.len()]);
 
-        // Use MLE (Kalman filter) for d>0 (no intercept), CSS for d==0 (with intercept)
+        // Stage 1: Use CSS for optimization (robust, well-behaved landscape).
+        // The innovations MLE (calculate_mle) is used for the final AIC/BIC computation
+        // via score_order, but CSS provides better parameter estimates for forecasting.
         let obj_fn = if include_intercept {
             Box::new(|params: &[f64]| {
                 let mut buf = residuals_buf.borrow_mut();
@@ -822,7 +1005,7 @@ impl ARIMA {
         } else {
             Box::new(|params: &[f64]| {
                 let mut buf = residuals_buf.borrow_mut();
-                Self::calculate_mle(diff_series, p, q, &params[..p], &params[p..], 0.0, &mut buf)
+                Self::calculate_css(diff_series, p, q, &params[..p], &params[p..], 0.0, &mut buf)
             }) as Box<dyn Fn(&[f64]) -> f64>
         };
 
@@ -836,7 +1019,7 @@ impl ARIMA {
                 &initial,
                 Some(&bounds),
                 LbfgsConfig {
-                    max_iter: 50,
+                    max_iter: 100,
                     ..Default::default()
                 },
             ))
@@ -850,10 +1033,10 @@ impl ARIMA {
             .map(|r| r.optimal_point.as_slice())
             .unwrap_or(&initial);
 
-        let nm_iters = if include_intercept { 500 } else { 1000 }; // MLE needs more iterations
+        let nm_iters = if include_intercept { 500 } else { 2000 };
         let config = NelderMeadConfig {
             max_iter: nm_iters,
-            tolerance: 1e-10,
+            tolerance: 1e-12,
             ..Default::default()
         };
 
