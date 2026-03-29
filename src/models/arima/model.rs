@@ -1249,7 +1249,7 @@ impl ARIMA {
             .unwrap_or(&initial);
 
         // Phase 2: NM refinement on CSS objective
-        let nm_iters = if use_lbfgs { 500 } else { 1000 };
+        let nm_iters = if use_lbfgs { 200 } else { 500 };
         let config = NelderMeadConfig {
             max_iter: nm_iters,
             tolerance: 1e-10,
@@ -1281,9 +1281,9 @@ impl ARIMA {
             };
 
             let mle_config = NelderMeadConfig {
-                max_iter: 200,
+                max_iter: 10,
                 tolerance: 1e-10,
-                initial_step: 0.02,
+                initial_step: 0.005,
                 ..Default::default()
             };
             let mle_result = nelder_mead(
