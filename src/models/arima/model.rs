@@ -1003,19 +1003,42 @@ impl ARIMA {
                 )
             }) as Box<dyn Fn(&[f64]) -> f64>
         } else {
+            // d > 0: CSS without intercept (matches statsmodels convention)
             Box::new(|params: &[f64]| {
                 let mut buf = residuals_buf.borrow_mut();
                 Self::calculate_css(diff_series, p, q, &params[..p], &params[p..], 0.0, &mut buf)
             }) as Box<dyn Fn(&[f64]) -> f64>
         };
 
-        // For complex models: L-BFGS warm-start → NM refinement
-        // For simple models: direct NM from init (faster, no L-BFGS overhead)
+        // Two-phase: L-BFGS warm-start (CSS) → NM refinement (MLE)
+        // For d>0: CSS warm-start gives a good initial point for MLE optimization
         let use_lbfgs = p + q >= 2;
+
+        // Phase 1: CSS warm-start via L-BFGS to get near the optimum
+        let css_buf = std::cell::RefCell::new(vec![0.0; diff_series.len()]);
+        let css_fn: Box<dyn Fn(&[f64]) -> f64> = if include_intercept {
+            Box::new(|params: &[f64]| {
+                let mut buf = css_buf.borrow_mut();
+                Self::calculate_css(
+                    diff_series,
+                    p,
+                    q,
+                    &params[1..1 + p],
+                    &params[1 + p..],
+                    params[0],
+                    &mut buf,
+                )
+            })
+        } else {
+            Box::new(|params: &[f64]| {
+                let mut buf = css_buf.borrow_mut();
+                Self::calculate_css(diff_series, p, q, &params[..p], &params[p..], 0.0, &mut buf)
+            })
+        };
 
         let lbfgs_result = if use_lbfgs {
             Some(lbfgs_optimize(
-                &obj_fn,
+                &css_fn,
                 &initial,
                 Some(&bounds),
                 LbfgsConfig {
@@ -1033,16 +1056,15 @@ impl ARIMA {
             .map(|r| r.optimal_point.as_slice())
             .unwrap_or(&initial);
 
-        let nm_iters = if include_intercept { 500 } else { 2000 };
+        // Phase 2: NM refinement on CSS objective
+        let nm_iters = if use_lbfgs { 500 } else { 1000 };
         let config = NelderMeadConfig {
             max_iter: nm_iters,
-            tolerance: 1e-12,
+            tolerance: 1e-10,
             ..Default::default()
         };
-
         let nm_result = nelder_mead(&obj_fn, nm_start, Some(&bounds), config);
 
-        // Use whichever found a better minimum
         let result = match &lbfgs_result {
             Some(lr) if lr.optimal_value < nm_result.optimal_value => lr.clone(),
             _ => nm_result,
