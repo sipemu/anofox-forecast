@@ -579,6 +579,240 @@ impl ARIMA {
         sum_abs < 1.5 && ar.iter().all(|a| a.abs() < 1.0)
     }
 
+    /// Toeplitz helper: fill a symmetric Toeplitz block in a flat row-major matrix.
+    ///
+    /// Ported from statsmodels `_arma_innovations.pyx::dtoeplitz`.
+    fn toeplitz_fill(
+        n: usize,
+        offset0: usize,
+        offset1: usize,
+        column: &[f64],
+        out: &mut [f64],
+        out_cols: usize,
+    ) {
+        for i in 0..n {
+            for j in 0..=i {
+                out[(offset0 + i) * out_cols + (offset1 + j)] = column[i - j];
+                if i != j {
+                    out[(offset0 + j) * out_cols + (offset1 + i)] = column[i - j];
+                }
+            }
+        }
+    }
+
+    /// Compute the transformed autocovariance matrix and residual acovf vector.
+    ///
+    /// Ported from statsmodels `_arma_innovations.pyx::darma_transformed_acovf_fast`.
+    /// Returns (acovf_matrix [n x n flat row-major], acovf2 [1-D], n) where n = min(2*m, nobs).
+    fn arma_transformed_acovf_fast(
+        ar_poly: &[f64],
+        ma_poly: &[f64],
+        arma_acovf: &[f64],
+    ) -> (Vec<f64>, Vec<f64>, usize) {
+        let nobs = arma_acovf.len();
+        let p = ar_poly.len() - 1;
+        let q = ma_poly.len() - 1;
+        let m = p.max(q);
+        let m2 = 2 * m;
+        let n = m2.min(nobs);
+
+        // acovf: m2 x m2 matrix (flat row-major)
+        let mut acovf = vec![0.0; m2 * m2];
+        // acovf2: 1-D vector of length max(nobs - m, 0)
+        let acovf2_len = if nobs > m { nobs - m } else { 0 };
+        let mut acovf2 = vec![0.0; acovf2_len];
+
+        // Fill upper-left m x m Toeplitz block
+        if m > 0 {
+            Self::toeplitz_fill(m, 0, 0, arma_acovf, &mut acovf, m2);
+        }
+
+        // Fill lower-left m x m block (rows m..m2, cols 0..m) and transpose to upper-right
+        if nobs > m {
+            for j in 0..m {
+                for i in m..m2 {
+                    let mut val = arma_acovf[i - j];
+                    for r in 1..=p {
+                        let tmp_ix = if r > (i - j) {
+                            r - (i - j)
+                        } else {
+                            (i - j) - r
+                        };
+                        val -= -ar_poly[r] * arma_acovf[tmp_ix];
+                    }
+                    acovf[i * m2 + j] = val;
+                }
+            }
+            // acovf[:m, m:m2] = acovf[m:m2, :m].T
+            for i in 0..m {
+                for j in m..m2 {
+                    acovf[i * m2 + j] = acovf[j * m2 + i];
+                }
+            }
+        }
+
+        // Fill acovf2: the stationary part
+        if nobs > m {
+            for i in 0..acovf2_len {
+                for r in 0..=(q.saturating_sub(i)) {
+                    if r < ma_poly.len() && r + i < ma_poly.len() {
+                        acovf2[i] += ma_poly[r] * ma_poly[r + i];
+                    }
+                }
+            }
+        }
+
+        // Return the n x n submatrix (copy into a properly sized flat array)
+        let mut acovf_out = vec![0.0; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                acovf_out[i * n + j] = acovf[i * m2 + j];
+            }
+        }
+
+        (acovf_out, acovf2, n)
+    }
+
+    /// Innovations algorithm: O(n * m^2) version.
+    ///
+    /// Ported from statsmodels `_arma_innovations.pyx::darma_innovations_algo_fast`.
+    /// Returns (theta [nobs x (m+1) flat row-major], v [nobs]).
+    fn arma_innovations_algo_fast(
+        nobs: usize,
+        ar_params: &[f64],
+        ma_params: &[f64],
+        acovf: &[f64],
+        acovf_cols: usize,
+        acovf2: &[f64],
+    ) -> (Vec<f64>, Vec<f64>) {
+        let p = ar_params.len();
+        let q = ma_params.len();
+        let m = p.max(q);
+        let m2 = 2 * m;
+        let theta_cols = m + 1;
+
+        let mut v = vec![0.0; nobs];
+        let mut theta = vec![0.0; nobs * theta_cols];
+
+        if m > 0 {
+            v[0] = acovf[0]; // acovf[0, 0]
+        } else {
+            v[0] = if !acovf2.is_empty() { acovf2[0] } else { 1.0 };
+        }
+
+        for n_idx in 0..(nobs - 1) {
+            let _n = n_idx + 1;
+
+            let start = if n_idx < m { 0 } else { n_idx + 1 - q };
+            for k in start..=n_idx {
+                if n_idx >= m && n_idx - k >= q {
+                    continue;
+                }
+
+                let col = n_idx - k;
+                if col >= theta_cols {
+                    continue;
+                }
+
+                // Initialize theta[_n, n_idx - k]
+                if _n < m2 && k < m {
+                    // Use acovf matrix: acovf[n_idx + 1, k]
+                    if n_idx + 1 < acovf_cols && k < acovf_cols {
+                        theta[_n * theta_cols + col] = acovf[(n_idx + 1) * acovf_cols + k];
+                    }
+                } else {
+                    // Use acovf2 vector
+                    let idx = _n - k;
+                    if idx < acovf2.len() {
+                        theta[_n * theta_cols + col] = acovf2[idx];
+                    }
+                }
+
+                let start2 = if n_idx < m { 0 } else { n_idx - m };
+                for j in start2..k {
+                    let nj = n_idx - j;
+                    if nj < theta_cols {
+                        let kj = k - j - 1;
+                        // theta[k-1+1, k-j-1] = theta[k, kj]
+                        if kj < theta_cols {
+                            theta[_n * theta_cols + col] -=
+                                theta[k * theta_cols + kj] * theta[_n * theta_cols + nj] * v[j];
+                        }
+                    }
+                }
+                if v[k].abs() > 0.0 {
+                    theta[_n * theta_cols + col] /= v[k];
+                }
+            }
+
+            // Compute v[n_idx + 1]
+            if _n < m {
+                // v[n+1] = acovf[n+1, n+1]
+                if _n < acovf_cols {
+                    v[_n] = acovf[_n * acovf_cols + _n];
+                }
+            } else {
+                v[_n] = if !acovf2.is_empty() { acovf2[0] } else { 1.0 };
+            }
+
+            let start_v = if n_idx + 2 > (m + 1) {
+                n_idx + 2 - (m + 1)
+            } else {
+                0
+            };
+            for i in start_v..=n_idx {
+                let ni = n_idx - i;
+                if ni < theta_cols {
+                    v[_n] -= theta[_n * theta_cols + ni].powi(2) * v[i];
+                }
+            }
+        }
+
+        (theta, v)
+    }
+
+    /// Innovations filter: compute one-step-ahead prediction errors.
+    ///
+    /// Ported from statsmodels `_arma_innovations.pyx::darma_innovations_filter`.
+    fn arma_innovations_filter(
+        endog: &[f64],
+        ar_params: &[f64],
+        ma_params: &[f64],
+        theta: &[f64],
+        theta_cols: usize,
+    ) -> Vec<f64> {
+        let p = ar_params.len();
+        let q = ma_params.len();
+        let m = p.max(q);
+        let nobs = endog.len();
+
+        let mut u = vec![0.0; nobs];
+        u[0] = endog[0];
+
+        for i in 1..nobs {
+            let mut hat = 0.0;
+            if i < m {
+                for j in 0..i {
+                    if j < theta_cols {
+                        hat += theta[i * theta_cols + j] * u[i - j - 1];
+                    }
+                }
+            } else {
+                for j in 0..p {
+                    hat += ar_params[j] * endog[i - j - 1];
+                }
+                for j in 0..q {
+                    if j < theta_cols {
+                        hat += theta[i * theta_cols + j] * u[i - j - 1];
+                    }
+                }
+            }
+            u[i] = endog[i] - hat;
+        }
+
+        u
+    }
+
     fn calculate_mle(
         diff_series: &[f64],
         p: usize,
@@ -613,95 +847,55 @@ impl ARIMA {
             ma_poly[i + 1] = ma[i];
         }
 
-        // Compute exact autocovariances via Brockwell-Davis linear system solve
-        let acov = Self::arma_acovf(&ar_poly, &ma_poly, n);
-
-        if acov[0] <= 0.0 || !acov[0].is_finite() {
+        // Step 1: Compute ARMA autocovariances
+        let arma_acov = Self::arma_acovf(&ar_poly, &ma_poly, n);
+        if arma_acov[0] <= 0.0 || !arma_acov[0].is_finite() {
             return f64::MAX;
         }
 
-        // Innovations algorithm: compute one-step-ahead prediction variances v_t
-        // and prediction coefficients theta_{t,j}
-        //
-        // v_0 = gamma(0)
-        // For t = 1, ..., n-1:
-        //   theta_{t,j} = (gamma(t-j) - sum_{k=0}^{j-1} theta_{j,k} theta_{t,k} v_k) / v_j
-        //   v_t = gamma(0) - sum_{j=0}^{t-1} theta_{t,j}^2 v_j
-        //
-        // Filter (one-step-ahead errors):
-        //   u_0 = y_0
-        //   u_t = y_t - sum_{j=0}^{t-1} theta_{t,j} u_{t-1-j}
+        // Step 2: Transformed autocovariance (statsmodels fast path)
+        let (acovf, acovf2, acovf_n) =
+            Self::arma_transformed_acovf_fast(&ar_poly, &ma_poly, &arma_acov);
 
-        let mut v = vec![0.0; n];
-        v[0] = acov[0];
+        // Step 3: Innovations algorithm (O(n * m^2))
+        // ar_params = [phi1, phi2, ...], ma_params = [theta1, theta2, ...]
+        // (raw coefficients, not polynomial form)
+        let (theta, v) = Self::arma_innovations_algo_fast(
+            n, ar, // [phi1, phi2, ...]
+            ma, // [theta1, theta2, ...]
+            &acovf, acovf_n, &acovf2,
+        );
 
-        // Store all theta rows (needed for cross-referencing theta_{j,k})
-        let mut theta_prev: Vec<Vec<f64>> = Vec::with_capacity(n);
-        theta_prev.push(vec![]); // t=0 has no coefficients
+        // Step 4: Innovations filter
+        let theta_cols = p.max(q) + 1;
+        let u = Self::arma_innovations_filter(
+            diff_series,
+            ar, // [phi1, phi2, ...]
+            ma, // [theta1, theta2, ...]
+            &theta,
+            theta_cols,
+        );
 
-        let mut u = vec![0.0; n]; // innovations (one-step-ahead errors)
-        u[0] = diff_series[0];
-
-        // Number of initial observations to skip in the likelihood
-        // (diffuse initialization: initial transient has high prediction variance)
-        let m = p.max(q) + 1;
-
-        for t in 1..n {
-            // Compute theta_{t,j} for j = 0..t-1 (forward order required so that
-            // theta_t[k] for k < j is already available in the inner sum)
-            let mut theta_t = vec![0.0; t];
-            for j in 0..t {
-                let mut val = acov[t - j];
-                for k in 0..j {
-                    val -= theta_prev[j][k] * theta_t[k] * v[k];
-                }
-                if v[j].abs() < 1e-30 {
-                    theta_t[j] = 0.0;
-                } else {
-                    theta_t[j] = val / v[j];
-                }
-            }
-
-            // v_t = gamma(0) - sum theta_{t,j}^2 * v_j
-            let mut vt = acov[0];
-            for j in 0..t {
-                vt -= theta_t[j] * theta_t[j] * v[j];
-            }
-            v[t] = vt.max(1e-30);
-
-            // Filter: u_t = y_t - sum_{j=0}^{t-1} theta_{t,j} * u_{t-1-j}
-            let mut x_hat = 0.0;
-            for j in 0..t {
-                x_hat += theta_t[j] * u[t - 1 - j];
-            }
-
-            u[t] = diff_series[t] - x_hat;
-
-            theta_prev.push(theta_t);
-        }
-
-        // Concentrated negative log-likelihood (conditional on first m observations):
-        // Only sum over t >= m where the predictor has converged.
-        // This matches the conditional MLE / diffuse initialization approach.
-        let n_eff = n - m;
-        if n_eff < 3 {
-            return f64::MAX;
-        }
-
+        // Step 5: Concentrated negative log-likelihood (full, all n observations)
+        // NLL = 0.5 * (n * ln(2*pi*sigma2) + sum(ln(v_t)) + n)
+        // where sigma2 = (1/n) * sum(u_t^2 / v_t)
         let mut sum_log_v = 0.0;
         let mut sum_e2_v = 0.0;
-        for t in m..n {
+        for t in 0..n {
+            if v[t] <= 0.0 || !v[t].is_finite() {
+                return f64::MAX;
+            }
             sum_log_v += v[t].ln();
             sum_e2_v += u[t] * u[t] / v[t];
         }
 
-        let sigma2 = sum_e2_v / n_eff as f64;
+        let sigma2 = sum_e2_v / n as f64;
         if sigma2 <= 0.0 || !sigma2.is_finite() {
             return f64::MAX;
         }
 
-        let nll = 0.5
-            * (n_eff as f64 * (sigma2.ln() + (2.0 * std::f64::consts::PI).ln() + 1.0) + sum_log_v);
+        let nll =
+            0.5 * (n as f64 * (sigma2.ln() + (2.0 * std::f64::consts::PI).ln() + 1.0) + sum_log_v);
 
         if !nll.is_finite() {
             return f64::MAX;
@@ -987,8 +1181,7 @@ impl ARIMA {
         let residuals_buf = std::cell::RefCell::new(vec![0.0; diff_series.len()]);
 
         // Stage 1: Use CSS for optimization (robust, well-behaved landscape).
-        // The innovations MLE (calculate_mle) is used for the final AIC/BIC computation
-        // via score_order, but CSS provides better parameter estimates for forecasting.
+        // For d>0, follow with MLE refinement to match statsmodels.
         let obj_fn = if include_intercept {
             Box::new(|params: &[f64]| {
                 let mut buf = residuals_buf.borrow_mut();
@@ -1010,8 +1203,7 @@ impl ARIMA {
             }) as Box<dyn Fn(&[f64]) -> f64>
         };
 
-        // Two-phase: L-BFGS warm-start (CSS) → NM refinement (MLE)
-        // For d>0: CSS warm-start gives a good initial point for MLE optimization
+        // Two-phase: L-BFGS warm-start (CSS) → NM refinement (CSS) → MLE refinement (d>0)
         let use_lbfgs = p + q >= 2;
 
         // Phase 1: CSS warm-start via L-BFGS to get near the optimum
@@ -1065,20 +1257,71 @@ impl ARIMA {
         };
         let nm_result = nelder_mead(&obj_fn, nm_start, Some(&bounds), config);
 
-        let result = match &lbfgs_result {
+        let css_result = match &lbfgs_result {
             Some(lr) if lr.optimal_value < nm_result.optimal_value => lr.clone(),
             _ => nm_result,
         };
 
-        // Extract optimized parameters
+        // Extract CSS-optimized parameters
         if include_intercept {
-            self.intercept = result.optimal_point[0];
-            self.ar_coefficients = result.optimal_point[1..1 + p].to_vec();
-            self.ma_coefficients = result.optimal_point[1 + p..].to_vec();
+            self.intercept = css_result.optimal_point[0];
+            self.ar_coefficients = css_result.optimal_point[1..1 + p].to_vec();
+            self.ma_coefficients = css_result.optimal_point[1 + p..].to_vec();
         } else {
             self.intercept = 0.0;
-            self.ar_coefficients = result.optimal_point[..p].to_vec();
-            self.ma_coefficients = result.optimal_point[p..].to_vec();
+            self.ar_coefficients = css_result.optimal_point[..p].to_vec();
+            self.ma_coefficients = css_result.optimal_point[p..].to_vec();
+
+            // Phase 3 (d>0 only): MLE NM refinement starting from CSS optimum
+            // Small steps near the CSS solution to match statsmodels exact MLE
+            let mle_buf = std::cell::RefCell::new(vec![0.0; diff_series.len()]);
+            let mle_fn = |params: &[f64]| {
+                let mut buf = mle_buf.borrow_mut();
+                Self::calculate_mle(diff_series, p, q, &params[..p], &params[p..], 0.0, &mut buf)
+            };
+
+            let mle_config = NelderMeadConfig {
+                max_iter: 200,
+                tolerance: 1e-10,
+                initial_step: 0.02,
+                ..Default::default()
+            };
+            let mle_result = nelder_mead(
+                &mle_fn,
+                &css_result.optimal_point,
+                Some(&bounds),
+                mle_config,
+            );
+
+            // Evaluate MLE at the CSS optimum for comparison
+            let css_mle_val = {
+                let mut buf = vec![0.0; diff_series.len()];
+                Self::calculate_mle(
+                    diff_series,
+                    p,
+                    q,
+                    &css_result.optimal_point[..p],
+                    &css_result.optimal_point[p..],
+                    0.0,
+                    &mut buf,
+                )
+            };
+
+            // Use MLE params only if they strictly improve, are stationary,
+            // and AR coefficients are not too close to the unit root boundary
+            // (near-unit-root params can cause explosive integrated forecasts).
+            let mle_ar = &mle_result.optimal_point[..p];
+            let ar_sum: f64 = mle_ar.iter().sum();
+            let ar_abs_sum: f64 = mle_ar.iter().map(|a| a.abs()).sum();
+            let mle_safe = ar_sum < 0.97 && ar_abs_sum < 1.95;
+            if mle_result.optimal_value < css_mle_val
+                && mle_result.optimal_value < f64::MAX
+                && Self::check_stationarity(mle_ar)
+                && mle_safe
+            {
+                self.ar_coefficients = mle_ar.to_vec();
+                self.ma_coefficients = mle_result.optimal_point[p..].to_vec();
+            }
         }
     }
 

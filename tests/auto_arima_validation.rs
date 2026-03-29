@@ -227,10 +227,12 @@ fn auto_arima_optimization_does_not_degrade_quality() {
             // Forecast should be within 5 std devs of training mean
             assert!(
                 (pred - train_mean).abs() < 8.0 * train_std + 30.0,
-                "Forecast {:.2} too far from training mean {:.2} (std {:.2})",
+                "seed={}: Forecast {:.2} too far from training mean {:.2} (std {:.2}), order={:?}",
+                seed,
                 pred,
                 train_mean,
-                train_std
+                train_std,
+                model.selected_order()
             );
         }
 
@@ -371,13 +373,13 @@ fn mle_at_python_params_vs_ours() {
     let mut buf = vec![0.0; diff.len()];
     let python_nll = ARIMA::calculate_mle_pub(&diff, 2, 0, &[0.963, -0.757], &[], 0.0, &mut buf);
 
-    // Conditional innovations MLE (skip first m=max(p,q)+1=3 observations):
-    // n_eff=96, sigma2_hat=990.51, sum_log_v=0.0, NLL=466.66
+    // Exact innovations MLE (full likelihood, all n observations, statsmodels algorithm):
+    // NLL ~ 266.30 matching Python's statsmodels exactly.
     println!("NLL at Python params: {:.4}", python_nll);
-    println!("Expected NLL: 466.66");
+    println!("Expected NLL: ~266.30");
     assert!(
-        (python_nll - 466.66).abs() < 1.0,
-        "NLL at Python params {:.4} should be close to 466.66",
+        (python_nll - 266.30).abs() < 1.0,
+        "NLL at Python params {:.4} should be close to 266.30",
         python_nll
     );
 
