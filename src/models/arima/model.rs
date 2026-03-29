@@ -275,38 +275,69 @@ impl ARIMA {
         diff_series: &[f64],
         use_aic: bool,
     ) -> Option<f64> {
+        let n = diff_series.len();
         let start = p.max(q);
-        if diff_series.len() <= start + 2 {
+        if n <= start + 2 {
             return None;
         }
+        let nstar = n as f64; // effective sample size (after differencing)
 
         if p == 0 && q == 0 {
-            // Just intercept model: compute variance directly
-            let mean = diff_series.iter().sum::<f64>() / diff_series.len() as f64;
-            let n_eff = (diff_series.len() - start) as f64;
-            let variance = diff_series[start..]
-                .iter()
-                .map(|v| (v - mean).powi(2))
-                .sum::<f64>()
-                / n_eff;
-            if variance <= 0.0 || !variance.is_finite() {
-                return None;
-            }
-            let k = 1.0; // just intercept
-            let ll = -0.5 * n_eff * (1.0 + variance.ln() + (2.0 * std::f64::consts::PI).ln());
-            let score = if use_aic {
-                -2.0 * ll + 2.0 * k
-            } else {
-                -2.0 * ll + k * n_eff.ln()
+            // Try both with-mean (drift) and without-mean variants, return best.
+            let mean = diff_series.iter().sum::<f64>() / nstar;
+
+            // Use the same Gaussian loglik formula as non-(0,0) case for consistency.
+            let score_variant = |sigma2: f64, k: f64| -> Option<f64> {
+                if sigma2 < 0.0 || !sigma2.is_finite() {
+                    return None;
+                }
+                let log_s2 = if sigma2 < 1e-15 {
+                    1e-15_f64.ln()
+                } else {
+                    sigma2.ln()
+                };
+                let ll = -0.5 * nstar * (1.0 + log_s2 + (2.0 * std::f64::consts::PI).ln());
+                let score = if use_aic {
+                    let aic = -2.0 * ll + 2.0 * k;
+                    if nstar > k + 1.0 {
+                        aic + 2.0 * k * (k + 1.0) / (nstar - k - 1.0)
+                    } else {
+                        f64::MAX
+                    }
+                } else {
+                    -2.0 * ll + k * nstar.ln()
+                };
+                if score.is_finite() {
+                    Some(score)
+                } else {
+                    None
+                }
             };
-            return if score.is_finite() { Some(score) } else { None };
+
+            // With drift: variance around mean, k = 2 (drift + sigma2)
+            let var_with = diff_series.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / nstar;
+            let score_with = score_variant(var_with, 2.0);
+
+            // Without drift: variance around zero, k = 1 (sigma2 only)
+            let var_without = diff_series.iter().map(|v| v * v).sum::<f64>() / nstar;
+            let score_without = score_variant(var_without, 1.0);
+
+            return match (score_with, score_without) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
+            };
         }
 
-        // score_order operates on already-differenced data — no intercept needed
-        // (matches statsmodels convention: ARIMA with d>0 has no constant)
+        // ARMA(p,q) scoring: CSS optimization with AICc.
+        // HR initialization provides near-optimal starting values.
         let hr_init = if p + q >= 2 {
             let hr = Self::hannan_rissanen_init(diff_series, p, q);
-            hr[1..].to_vec() // skip intercept
+            let raw: Vec<f64> = hr[1..].to_vec(); // skip intercept
+            raw.iter()
+                .map(|&v| v.clamp(-0.98, 0.98))
+                .collect::<Vec<_>>()
         } else {
             let mut init = Vec::with_capacity(p + q);
             for i in 0..p {
@@ -317,47 +348,56 @@ impl ARIMA {
             }
             init
         };
-        let n_params = p + q;
 
         let mut bounds = Vec::with_capacity(p + q);
         for _ in 0..(p + q) {
             bounds.push((-0.99, 0.99));
         }
 
-        let config = NelderMeadConfig {
-            max_iter: 100,
-            tolerance: 1e-6,
-            ..Default::default()
-        };
-
-        let residuals_buf = std::cell::RefCell::new(vec![0.0; diff_series.len()]);
-
-        // Optimize using CSS (robust landscape)
-        let result = nelder_mead(
+        let residuals_buf = std::cell::RefCell::new(vec![0.0; n]);
+        let css_result = nelder_mead(
             |params| {
                 let mut buf = residuals_buf.borrow_mut();
                 Self::calculate_css(diff_series, p, q, &params[..p], &params[p..], 0.0, &mut buf)
             },
             &hr_init,
             Some(&bounds),
-            config,
+            NelderMeadConfig {
+                max_iter: 100,
+                tolerance: 1e-6,
+                ..Default::default()
+            },
         );
 
-        // Use CSS for AIC/BIC scoring (consistent with CSS optimization)
-        let css = result.optimal_value;
-        let n_params_aic = n_params + 1; // +1 for sigma^2
-        if !css.is_finite() || css <= 0.0 {
+        let css = css_result.optimal_value;
+        if !css.is_finite() || css >= f64::MAX {
             return None;
         }
 
-        let start = p.max(q);
-        let n_eff = (diff_series.len() - start) as f64;
-        let variance = css / n_eff;
-        let k = n_params_aic as f64;
-        let ll = -0.5 * n_eff * (1.0 + variance.ln() + (2.0 * std::f64::consts::PI).ln());
-
+        // AICc from CSS variance
+        let n_eff = (n - start) as f64;
+        if n_eff <= 0.0 {
+            return None;
+        }
+        let sigma2 = css / n_eff;
+        if sigma2 < 0.0 || !sigma2.is_finite() {
+            return None;
+        }
+        let log_s2 = if sigma2 < 1e-15 {
+            1e-15_f64.ln()
+        } else {
+            sigma2.ln()
+        };
+        let ll = -0.5 * n_eff * (1.0 + log_s2 + (2.0 * std::f64::consts::PI).ln());
+        let k = (p + q + 1) as f64; // AR + MA + intercept/sigma2
         let score = if use_aic {
-            -2.0 * ll + 2.0 * k
+            let aic = -2.0 * ll + 2.0 * k;
+            // AICc correction
+            if n_eff > k + 1.0 {
+                aic + 2.0 * k * (k + 1.0) / (n_eff - k - 1.0)
+            } else {
+                f64::MAX
+            }
         } else {
             -2.0 * ll + k * n_eff.ln()
         };
@@ -573,10 +613,26 @@ impl ARIMA {
             // Triangle conditions for AR(2) stationarity
             return ar[1] + ar[0] < 1.0 && ar[1] - ar[0] < 1.0 && ar[1].abs() < 1.0;
         }
-        // For higher orders: check necessary conditions
-        // Sum of absolute AR coefficients < 1 is too strict but safe
-        let sum_abs: f64 = ar.iter().map(|a| a.abs()).sum();
-        sum_abs < 1.5 && ar.iter().all(|a| a.abs() < 1.0)
+        // For higher orders: check necessary conditions via AR polynomial.
+        // Individual coefficients must be bounded
+        if ar.iter().any(|a| a.abs() >= 2.0) {
+            return false;
+        }
+        // AR(z) at z=1: 1 - sum(phi_i) > 0 (necessary for stationarity)
+        let sum: f64 = ar.iter().sum();
+        if 1.0 - sum <= 0.0 {
+            return false;
+        }
+        // AR(z) at z=-1: 1 + sum((-1)^i * phi_i) > 0
+        let alt_sum: f64 = ar
+            .iter()
+            .enumerate()
+            .map(|(i, a)| if i % 2 == 0 { -a } else { *a })
+            .sum();
+        if 1.0 + alt_sum <= 0.0 {
+            return false;
+        }
+        true
     }
 
     /// Toeplitz helper: fill a symmetric Toeplitz block in a flat row-major matrix.
@@ -1136,8 +1192,10 @@ impl ARIMA {
         let mean = diff_series.iter().sum::<f64>() / diff_series.len() as f64;
 
         if p == 0 && q == 0 {
-            // When d > 0, no intercept (matches statsmodels convention)
-            self.intercept = if self.spec.d > 0 { 0.0 } else { mean };
+            // For d=0: intercept = mean. For d=1: drift = mean of differences.
+            // For d>=2: no intercept (higher-order differencing removes trend).
+            // This matches R/Python where include.drift = (d + D == 1).
+            self.intercept = if self.spec.d <= 1 { mean } else { 0.0 };
             self.ar_coefficients = vec![];
             self.ma_coefficients = vec![];
             return;
@@ -1362,7 +1420,13 @@ impl ARIMA {
             // Calculate information criteria
             let n_eff = valid_residuals.len() as f64;
             let k = self.spec.num_params() as f64;
-            let ll = -0.5 * n_eff * (1.0 + variance.ln() + (2.0 * std::f64::consts::PI).ln());
+            // Floor variance for perfect-fit cases (e.g., ARIMA(0,1,0) on linear data)
+            let log_var = if variance < 1e-15 {
+                1e-15_f64.ln()
+            } else {
+                variance.ln()
+            };
+            let ll = -0.5 * n_eff * (1.0 + log_var + (2.0 * std::f64::consts::PI).ln());
 
             self.aic = Some(-2.0 * ll + 2.0 * k);
             self.bic = Some(-2.0 * ll + k * n_eff.ln());
@@ -2359,7 +2423,13 @@ impl SARIMA {
             // Calculate information criteria
             let n_eff = valid_residuals.len() as f64;
             let k = self.spec.num_params() as f64;
-            let ll = -0.5 * n_eff * (1.0 + variance.ln() + (2.0 * std::f64::consts::PI).ln());
+            // Floor variance for perfect-fit cases (e.g., ARIMA(0,1,0) on linear data)
+            let log_var = if variance < 1e-15 {
+                1e-15_f64.ln()
+            } else {
+                variance.ln()
+            };
+            let ll = -0.5 * n_eff * (1.0 + log_var + (2.0 * std::f64::consts::PI).ln());
 
             self.aic = Some(-2.0 * ll + 2.0 * k);
             self.bic = Some(-2.0 * ll + k * n_eff.ln());
