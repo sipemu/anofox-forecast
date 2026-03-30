@@ -74,6 +74,9 @@ pub struct MFLES {
     seasonality: Option<Vec<f64>>,
     /// OLS result for exogenous regressors (if any).
     exog_ols: Option<OLSResult>,
+    /// Pre-computed Cholesky factor of X'X for batch processing.
+    /// When set, the Fourier OLS skips X'X computation and Cholesky factoring.
+    shared_cholesky: Option<Vec<Vec<f64>>>,
 }
 
 /// Builder for constructing an [`MFLES`] model with custom parameters.
@@ -237,7 +240,31 @@ impl MFLES {
             is_multiplicative: false,
             seasonality: None,
             exog_ols: None,
+            shared_cholesky: None,
         }
+    }
+
+    /// Inject a pre-computed Cholesky factor of X'X for batch processing.
+    /// When set, the boosting loop reuses this factor instead of recomputing.
+    pub fn set_shared_cholesky(&mut self, cholesky: Option<Vec<Vec<f64>>>) {
+        self.shared_cholesky = cholesky;
+    }
+
+    /// Compute the default Fourier order for a given seasonal period.
+    pub fn default_fourier_order(period: usize) -> usize {
+        Self::set_fourier(period)
+    }
+
+    /// Build the Fourier design matrix for a given (n, period, order).
+    /// Public for batch pre-computation.
+    pub fn build_fourier_series(n: usize, period: usize, order: usize) -> Vec<Vec<f64>> {
+        Self::get_fourier_series(n, period, order)
+    }
+
+    /// Compute Cholesky factor of a symmetric positive definite matrix.
+    /// Public for batch pre-computation.
+    pub fn compute_cholesky_factor(a: &[Vec<f64>]) -> Option<Vec<Vec<f64>>> {
+        Self::cholesky_factor(a)
     }
 
     /// Set maximum boosting rounds.
@@ -1046,10 +1073,12 @@ impl Forecaster for MFLES {
         let mut robust_mode = self.robust;
         let cov_threshold = 0.7; // statsforecast default
 
-        // Pre-cache X'X matrix for Fourier OLS — it's constant across rounds.
-        // Only X'y needs recomputation per round.
+        // Pre-cache X'X Cholesky factor for Fourier OLS — constant across rounds.
+        // If a shared_cholesky was injected (batch mode), reuse it.
         let k = fourier_series.len();
-        let cached_xtx_inv = if k > 0 {
+        let cached_xtx_inv = if let Some(ref chol) = self.shared_cholesky {
+            Some(chol.clone())
+        } else if k > 0 {
             let mut xtx = vec![vec![0.0; k]; k];
             for i in 0..k {
                 for j in i..k {
@@ -1065,7 +1094,6 @@ impl Forecaster for MFLES {
             for i in 0..k {
                 xtx[i][i] += 1e-8;
             }
-            // Pre-compute Cholesky factor for reuse
             Self::cholesky_factor(&xtx)
         } else {
             None
