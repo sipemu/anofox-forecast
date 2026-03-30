@@ -43,7 +43,7 @@ console.log(forecast.values);
 - **Forecasting Models (50+)**
   - ARIMA, SARIMA, and AutoARIMA with automatic order selection
   - Exponential Smoothing: SES, Holt's Linear, Holt-Winters, SeasonalES
-  - ETS (Error-Trend-Seasonal) state-space framework with AutoETS
+  - ETS (Error-Trend-Seasonal) state-space framework with AutoETS and `ModelPool` (Reduced/Complete/DampedTrendOnly/MatchErrorSeasonal)
   - Baseline methods: Naive, Seasonal Naive, Random Walk with Drift, SMA, Window Average
   - Theta family: Theta, Optimized Theta, Dynamic Theta, AutoTheta
   - Intermittent demand: Croston, ADIDA, TSB, IMAPA
@@ -215,7 +215,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-anofox-forecast = "0.5"
+anofox-forecast = "0.5.2"
 ```
 
 ### Optional Features
@@ -467,7 +467,7 @@ println!("Upper: {:?}", intervals.upper());
 |--------|--------|
 | **Auto Selection** | `AutoForecast`, `AutoEnsemble` |
 | **ARIMA** | `ARIMA`, `SARIMA`, `AutoARIMA` |
-| **Exponential Smoothing** | `SES`, `Holt`, `HoltWinters`, `SeasonalES`, `ETS`, `AutoETS` |
+| **Exponential Smoothing** | `SES`, `Holt`, `HoltWinters`, `SeasonalES`, `ETS`, `AutoETS` (with `ModelPool`) |
 | **Theta** | `Theta`, `OptimizedTheta`, `DynamicTheta`, `AutoTheta` |
 | **Baseline** | `Naive`, `Mean`, `SeasonalNaive`, `RandomWalkWithDrift`, `SMA`, `WindowAverage`, `SeasonalWindowAverage` |
 | **Intermittent** | `Croston`, `TSB`, `ADIDA`, `IMAPA` |
@@ -567,6 +567,7 @@ cargo run --example postprocess_conformal   # Conformal prediction intervals
 ## Guides
 
 - [Model Selection Guide](docs/model_selection_guide.md) — Which model to use for your data
+- [M5 ETS Benchmark](docs/m5_ets_benchmark.md) — AutoETS Complete vs Reduced pool on 30,490 M5 series
 
 ## Dependencies
 
