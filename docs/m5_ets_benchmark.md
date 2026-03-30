@@ -1,20 +1,20 @@
-# AutoETS Model Pool Benchmark: M5 Dataset
+# AutoETS Model Pool Benchmark: Full M5 Dataset
 
 Comparison of AutoETS **Complete** (19 models) vs **Reduced** (8 models) pool
-on the M5 retail forecasting dataset, based on Petropoulos et al. (2023)
+on the full M5 retail forecasting dataset (30,490 series), based on Petropoulos et al. (2023)
 "Wielding Occam's razor: Fast and frugal retail forecasting" ([arXiv:2102.13209](https://arxiv.org/abs/2102.13209)).
 
 ## Setup
 
 | Parameter | Value |
 |---|---|
-| Dataset | M5 top-1000 series (daily Walmart sales) |
-| Series evaluated | 998 (filtered: >30% nonzero days) |
+| Dataset | M5 (all 30,490 item-store series, daily Walmart sales) |
+| Series evaluated | 13,766 (filtered: >30% nonzero days) |
 | Training window | 1,941 days (2011-01-29 to 2016-05-22) |
 | Test horizon | 28 days (4 weeks, matching M5 competition) |
 | Seasonal period | 7 (weekly) |
 | Selection criterion | AICc |
-| Platform | Linux, Rust release build, single-threaded |
+| Platform | Linux, Rust release build, rayon parallel (multi-core) |
 
 ## Results
 
@@ -22,48 +22,44 @@ on the M5 retail forecasting dataset, based on Petropoulos et al. (2023)
 
 | Metric | Complete (19 models) | Reduced (8 models) | Difference |
 |---|---|---|---|
-| Avg RMSE | 7.6995 | 7.7003 | +0.001 (+0.01%) |
-| Median RMSE | 5.8341 | 5.8341 | 0.000 |
-| Avg MAPE | 76.50% | 76.51% | +0.01pp |
-| Avg sMAPE | 71.34% | 71.33% | -0.01pp |
-| Success rate | 998/998 (100%) | 998/998 (100%) |
+| Avg RMSE | 2.1998 | 2.1999 | +0.0001 (+0.005%) |
+| Median RMSE | 1.4569 | 1.4571 | +0.0002 (+0.01%) |
+| Avg MAPE | 56.83% | 56.80% | -0.03pp |
+| Avg sMAPE | 111.03% | 111.01% | -0.02pp |
+| Success rate | 13,766/13,766 (100%) | 13,766/13,766 (100%) |
 
 The Reduced pool achieves **virtually identical accuracy** to the Complete pool
-across all 998 series. On 991 of 998 series, both pools selected the same model.
+across all 13,766 evaluated series.
 
 ### Speed
 
-| Metric | Complete | Reduced |
-|---|---|---|
-| Avg fit time | 87.8 ms | 94.0 ms |
-| Total (998 series) | 87.6 s | 93.8 s |
+| Metric | Complete | Reduced | Speedup |
+|---|---|---|---|
+| Wall-clock time | 206.6 s | 119.7 s | **1.73x** |
+| Avg CPU time per series | 311.6 ms | 175.8 ms | **1.77x** |
+| Total CPU time | 4,290 s | 2,420 s | **1.77x** |
+| Throughput | 67 series/s | 115 series/s | **1.72x** |
 
-On long series (n=1,941), optimization cost is dominated by the O(n) likelihood
-evaluation per NM iteration, not the number of candidate models. Both pools
-evaluate only additive-error candidates on M5 data (multiplicative is excluded
-automatically due to zero-valued observations). The timing difference is within
-system variance (sequential runs, CPU thermal effects).
-
-On shorter series (n < 200), Criterion benchmarks show the Reduced pool is
-25-48% faster due to fewer candidates.
+The Reduced pool is **1.7x faster** at scale. With 13,766 series, this saves
+**87 seconds** wall-clock time (207s vs 120s) on a multi-core machine.
 
 ### Model Selection Distribution
 
-| Model | Complete | Reduced |
-|---|---|---|
-| ETS(A,N,A) — seasonal, no trend | 932 (93.4%) | 936 (93.8%) |
-| ETS(A,Ad,A) — seasonal, damped trend | 33 (3.3%) | 34 (3.4%) |
-| ETS(A,N,N) — simple exponential smoothing | 26 (2.6%) | 27 (2.7%) |
-| ETS(A,A,A) — seasonal, undamped trend | 5 (0.5%) | — |
-| ETS(A,A,N) — undamped trend, no season | 2 (0.2%) | — |
-| ETS(A,Ad,N) — damped trend, no season | — | 1 (0.1%) |
+| Model | Complete | Reduced | Notes |
+|---|---|---|---|
+| ETS(A,N,A) | 12,215 (88.7%) | 12,355 (89.8%) | Seasonal, no trend |
+| ETS(A,Ad,A) | 669 (4.9%) | 696 (5.1%) | Seasonal, damped trend |
+| ETS(A,N,N) | 550 (4.0%) | 676 (4.9%) | Simple exponential smoothing |
+| ETS(A,A,A) | 167 (1.2%) | — | Undamped (Complete only) |
+| ETS(A,A,N) | 160 (1.2%) | — | Undamped (Complete only) |
+| ETS(A,Ad,N) | 5 (0.0%) | 39 (0.3%) | Damped trend, no season |
 
 Key observations:
-- **93%+** of M5 series select additive seasonal without trend — ETS(A,N,A)
-- All top models are in the Reduced pool
-- The 7 series using undamped trend (A,A,A / A,A,N) in Complete switched to
-  damped variants (A,Ad,A / A,Ad,N) in Reduced — arguably more robust for
-  retail forecasting where trends rarely persist linearly
+- **89%** of M5 series select ETS(A,N,A) — additive seasonal without trend
+- The 327 series using undamped trend (A,A,A / A,A,N) in Complete switch to
+  damped variants or simpler models in Reduced — more robust for retail
+- All dominant models (A,N,A, A,Ad,A, A,N,N) are in both pools
+- Multiplicative error models are never selected (M5 data contains zeros)
 
 ### Reduced Pool Models
 
@@ -83,15 +79,17 @@ Design principles:
 
 ## Conclusion
 
-On the full M5 top-1000 dataset (998 eligible series), the Reduced pool is
-**accuracy-equivalent** to the Complete pool:
+On the full M5 dataset (13,766 eligible series of 30,490 total):
 
-- RMSE differs by 0.01% (7.7003 vs 7.6995)
-- 99.3% of series select the same model
-- The remaining 0.7% switch from undamped to damped trend (more robust)
+| | Complete | Reduced |
+|---|---|---|
+| **Accuracy** | RMSE 2.1998 | RMSE 2.1999 |
+| **Speed** | 207 s | **120 s (1.7x faster)** |
+| **Models evaluated** | ~9 per series | ~4 per series |
 
-The Reduced pool is recommended for large-scale retail forecasting where
-computational budget is constrained and trend robustness is valued.
+The Reduced pool delivers **identical accuracy** with **1.7x speedup** at scale.
+For high-volume retail forecasting, this translates to significant compute savings
+without any loss in forecast quality.
 
 ### Usage
 
@@ -107,11 +105,11 @@ model.fit(&series).unwrap();
 ### All Available Pools
 
 ```rust
-ModelPool::Complete            // 19 models (default)
+ModelPool::Complete               // 19 models (default)
 ModelPool::NoMultiplicativeTrend  // 15 models
-ModelPool::DampedTrendOnly     // 12 models
-ModelPool::MatchErrorSeasonal  // 16 models
-ModelPool::Reduced             // 8 models (recommended for scale)
+ModelPool::DampedTrendOnly        // 12 models
+ModelPool::MatchErrorSeasonal     // 16 models
+ModelPool::Reduced                // 8 models (recommended for scale)
 ```
 
 ## Reference

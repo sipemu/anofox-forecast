@@ -1,51 +1,60 @@
 //! M5 ETS Benchmark: Complete vs Reduced model pool.
 //!
-//! Compares AutoETS accuracy and speed on M5 retail data (top-1000 series)
+//! Compares AutoETS accuracy and speed on the full M5 retail dataset (~30,490 series)
 //! using the Complete (19 models) and Reduced (8 models) pools from
 //! Petropoulos et al. (2023) "Wielding Occam's razor".
 //!
 //! Run: cargo run --release --all-features --example m5_ets_benchmark
+//!
+//! Requires: validation/data/m5_full.csv (generated via datasetsforecast)
 
 use anofox_forecast::core::TimeSeries;
 use anofox_forecast::models::exponential::{AutoETS, AutoETSConfig, ModelPool};
 use anofox_forecast::models::Forecaster;
-use chrono::{Duration, NaiveDate, TimeZone, Utc};
+use chrono::{NaiveDate, TimeZone, Utc};
+use std::collections::HashMap;
 use std::fs;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 use std::time::Instant;
 
 const HORIZON: usize = 28; // M5 competition horizon (4 weeks)
 const PERIOD: usize = 7; // weekly seasonality
 const MIN_NONZERO_FRAC: f64 = 0.3; // skip very intermittent series
-const MAX_SERIES: usize = 1000; // full M5 top-1000 dataset
 
 fn main() {
-    let path = "validation/data/m5_top1000.csv";
+    // Try full dataset first, fall back to top-1000
+    let path = if fs::metadata("validation/data/m5_full.csv").is_ok() {
+        "validation/data/m5_full.csv"
+    } else {
+        eprintln!("Full M5 not found, falling back to m5_top1000.csv");
+        "validation/data/m5_top1000.csv"
+    };
+
+    eprintln!("Loading {}...", path);
+    let load_start = Instant::now();
     let content = fs::read_to_string(path).expect("Failed to read M5 CSV");
     let mut lines = content.lines();
 
     // Parse header
     let header = lines.next().expect("Empty CSV");
     let col_names: Vec<&str> = header.split(',').collect();
-    let n_series = col_names.len() - 1; // exclude date column
+    let n_series = col_names.len() - 1;
 
     // Parse data rows
-    let mut dates: Vec<chrono::DateTime<Utc>> = Vec::new();
-    let mut data: Vec<Vec<f64>> = vec![Vec::new(); n_series];
+    let mut dates: Vec<chrono::DateTime<Utc>> = Vec::with_capacity(2000);
+    let mut data: Vec<Vec<f64>> = vec![Vec::with_capacity(2000); n_series];
 
     for line in lines {
         let fields: Vec<&str> = line.split(',').collect();
         if fields.len() < n_series + 1 {
             continue;
         }
-
-        // Parse date
         if let Ok(nd) = NaiveDate::parse_from_str(fields[0], "%Y-%m-%d") {
             dates.push(Utc.from_utc_datetime(&nd.and_hms_opt(0, 0, 0).unwrap()));
         } else {
             continue;
         }
-
-        // Parse values
         for (j, field) in fields.iter().enumerate().skip(1) {
             let val: f64 = field.parse().unwrap_or(0.0);
             data[j - 1].push(val);
@@ -54,30 +63,35 @@ fn main() {
 
     let n_total = dates.len();
     let n_train = n_total - HORIZON;
+    let load_secs = load_start.elapsed().as_secs_f64();
+    eprintln!("Loaded in {:.1}s\n", load_secs);
+
     println!(
         "M5 dataset: {} series, {} observations ({} train + {} test)",
         n_series, n_total, n_train, HORIZON
     );
 
     // Filter to series with sufficient non-zero values
-    let mut eligible: Vec<usize> = Vec::new();
-    for (i, series) in data.iter().enumerate() {
-        let nonzero_frac =
-            series[..n_train].iter().filter(|&&v| v > 0.0).count() as f64 / n_train as f64;
-        if nonzero_frac >= MIN_NONZERO_FRAC {
-            eligible.push(i);
-        }
-    }
+    let eligible: Vec<usize> = data
+        .iter()
+        .enumerate()
+        .filter(|(_, series)| {
+            let nonzero_frac =
+                series[..n_train].iter().filter(|&&v| v > 0.0).count() as f64 / n_train as f64;
+            nonzero_frac >= MIN_NONZERO_FRAC
+        })
+        .map(|(i, _)| i)
+        .collect();
+
     println!(
         "Eligible series (>{}% nonzero): {} of {}",
         (MIN_NONZERO_FRAC * 100.0) as usize,
         eligible.len(),
         n_series
     );
+    println!("Evaluating: {} series\n", eligible.len());
 
-    let n_eval = eligible.len().min(MAX_SERIES);
-    let eval_indices = &eligible[..n_eval];
-    println!("Evaluating: {} series\n", n_eval);
+    let train_dates = dates[..n_train].to_vec();
 
     // Run benchmark for both pools
     let pools = [
@@ -85,29 +99,31 @@ fn main() {
         ("Reduced", ModelPool::Reduced),
     ];
 
-    let train_dates = dates[..n_train].to_vec();
-
     for (pool_name, pool) in &pools {
         println!("=== AutoETS pool: {} ===", pool_name);
 
-        let mut total_time_ms = 0.0;
-        let mut rmse_values = Vec::new();
-        let mut mape_values = Vec::new();
-        let mut smape_values = Vec::new();
-        let mut n_success = 0usize;
-        let mut n_fail = 0usize;
-        let mut selected_models: std::collections::HashMap<String, usize> =
-            std::collections::HashMap::new();
+        let total_time_ms = Mutex::new(0.0f64);
+        let rmse_values = Mutex::new(Vec::new());
+        let mape_values = Mutex::new(Vec::new());
+        let smape_values = Mutex::new(Vec::new());
+        let n_success = AtomicUsize::new(0);
+        let n_fail = AtomicUsize::new(0);
+        let selected_models = Mutex::new(HashMap::<String, usize>::new());
+        let progress = AtomicUsize::new(0);
 
-        for (count, &idx) in eval_indices.iter().enumerate() {
+        let pool_start = Instant::now();
+
+        // Process series — use rayon if available
+        let process_one = |idx: &usize| {
+            let idx = *idx;
             let train_vals = data[idx][..n_train].to_vec();
             let test_vals = &data[idx][n_train..n_train + HORIZON];
 
             let ts = match TimeSeries::univariate(train_dates.clone(), train_vals) {
                 Ok(ts) => ts,
                 Err(_) => {
-                    n_fail += 1;
-                    continue;
+                    n_fail.fetch_add(1, Ordering::Relaxed);
+                    return;
                 }
             };
 
@@ -119,21 +135,23 @@ fn main() {
             let elapsed = start.elapsed().as_secs_f64() * 1000.0;
 
             if !fit_ok {
-                n_fail += 1;
-                continue;
+                n_fail.fetch_add(1, Ordering::Relaxed);
+                let done = progress.fetch_add(1, Ordering::Relaxed) + 1;
+                if done % 500 == 0 {
+                    eprintln!("  [{}/{}]", done, eligible.len());
+                }
+                return;
             }
-
-            total_time_ms += elapsed;
 
             match model.predict(HORIZON) {
                 Ok(fc) => {
                     let preds = fc.primary();
-                    n_success += 1;
+                    n_success.fetch_add(1, Ordering::Relaxed);
+                    *total_time_ms.lock().unwrap() += elapsed;
 
-                    // Track selected model
                     if let Some(spec) = model.selected_spec() {
                         let key = format!("{:?}", spec);
-                        *selected_models.entry(key).or_insert(0) += 1;
+                        *selected_models.lock().unwrap().entry(key).or_insert(0) += 1;
                     }
 
                     // RMSE
@@ -143,9 +161,9 @@ fn main() {
                         .map(|(p, a)| (p - a).powi(2))
                         .sum::<f64>()
                         / HORIZON as f64;
-                    rmse_values.push(mse.sqrt());
+                    rmse_values.lock().unwrap().push(mse.sqrt());
 
-                    // MAPE (skip zeros in actual)
+                    // MAPE
                     let mape_pairs: Vec<f64> = preds
                         .iter()
                         .zip(test_vals.iter())
@@ -153,7 +171,10 @@ fn main() {
                         .map(|(p, a)| ((p - a) / a).abs())
                         .collect();
                     if !mape_pairs.is_empty() {
-                        mape_values.push(mape_pairs.iter().sum::<f64>() / mape_pairs.len() as f64);
+                        mape_values
+                            .lock()
+                            .unwrap()
+                            .push(mape_pairs.iter().sum::<f64>() / mape_pairs.len() as f64);
                     }
 
                     // sMAPE
@@ -165,65 +186,85 @@ fn main() {
                         .collect();
                     if !smape_pairs.is_empty() {
                         smape_values
+                            .lock()
+                            .unwrap()
                             .push(smape_pairs.iter().sum::<f64>() / smape_pairs.len() as f64);
                     }
                 }
                 Err(_) => {
-                    n_fail += 1;
+                    n_fail.fetch_add(1, Ordering::Relaxed);
                 }
             }
 
-            // Progress
-            if (count + 1) % 50 == 0 {
+            let done = progress.fetch_add(1, Ordering::Relaxed) + 1;
+            if done % 500 == 0 {
+                let succ = n_success.load(Ordering::Relaxed);
+                let fail = n_fail.load(Ordering::Relaxed);
+                let wall = pool_start.elapsed().as_secs_f64();
                 eprintln!(
-                    "  [{}/{}] {}: {} success, {} fail, {:.1}ms avg",
-                    count + 1,
-                    n_eval,
-                    pool_name,
-                    n_success,
-                    n_fail,
-                    total_time_ms / n_success as f64
+                    "  [{}/{}] {} success, {} fail, {:.0}s wall",
+                    done,
+                    eligible.len(),
+                    succ,
+                    fail,
+                    wall
                 );
             }
+        };
+
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            eligible.par_iter().for_each(process_one);
         }
 
-        // Summary statistics
-        let avg_rmse = rmse_values.iter().sum::<f64>() / rmse_values.len() as f64;
+        #[cfg(not(feature = "parallel"))]
+        {
+            eligible.iter().for_each(process_one);
+        }
+
+        let wall_time = pool_start.elapsed().as_secs_f64();
+        let succ = n_success.load(Ordering::Relaxed);
+        let fail = n_fail.load(Ordering::Relaxed);
+        let total_ms = *total_time_ms.lock().unwrap();
+        let rmse_vals = rmse_values.into_inner().unwrap();
+        let mape_vals = mape_values.into_inner().unwrap();
+        let smape_vals = smape_values.into_inner().unwrap();
+
+        let avg_rmse = rmse_vals.iter().sum::<f64>() / rmse_vals.len() as f64;
         let med_rmse = {
-            let mut sorted = rmse_values.clone();
+            let mut sorted = rmse_vals.clone();
             sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
             sorted[sorted.len() / 2]
         };
-        let avg_mape = if mape_values.is_empty() {
+        let avg_mape = if mape_vals.is_empty() {
             f64::NAN
         } else {
-            mape_values.iter().sum::<f64>() / mape_values.len() as f64
+            mape_vals.iter().sum::<f64>() / mape_vals.len() as f64
         };
-        let avg_smape = if smape_values.is_empty() {
+        let avg_smape = if smape_vals.is_empty() {
             f64::NAN
         } else {
-            smape_values.iter().sum::<f64>() / smape_values.len() as f64
+            smape_vals.iter().sum::<f64>() / smape_vals.len() as f64
         };
-        let avg_time = total_time_ms / n_success as f64;
-        let total_time_s = total_time_ms / 1000.0;
 
-        println!("  Series: {} success, {} failed", n_success, n_fail);
-        println!("  Avg fit time:   {:.2} ms", avg_time);
-        println!("  Total time:     {:.2} s", total_time_s);
-        println!("  Avg RMSE:       {:.4}", avg_rmse);
-        println!("  Median RMSE:    {:.4}", med_rmse);
-        println!("  Avg MAPE:       {:.2}%", avg_mape * 100.0);
-        println!("  Avg sMAPE:      {:.2}%", avg_smape * 100.0);
+        println!("  Series: {} success, {} failed", succ, fail);
+        println!("  Wall-clock time: {:.1} s", wall_time);
+        println!("  Avg CPU time:    {:.2} ms/series", total_ms / succ as f64);
+        println!("  Total CPU time:  {:.1} s", total_ms / 1000.0);
+        println!("  Avg RMSE:        {:.4}", avg_rmse);
+        println!("  Median RMSE:     {:.4}", med_rmse);
+        println!("  Avg MAPE:        {:.2}%", avg_mape * 100.0);
+        println!("  Avg sMAPE:       {:.2}%", avg_smape * 100.0);
 
-        // Top 5 selected models
-        let mut model_counts: Vec<_> = selected_models.into_iter().collect();
+        let mut model_counts: Vec<_> = selected_models.into_inner().unwrap().into_iter().collect();
         model_counts.sort_by(|a, b| b.1.cmp(&a.1));
         println!("  Top selected models:");
-        for (model, count) in model_counts.iter().take(5) {
+        for (model, count) in model_counts.iter().take(7) {
             println!(
-                "    {:>4} ({:>5.1}%) {}",
+                "    {:>5} ({:>5.1}%) {}",
                 count,
-                *count as f64 / n_success as f64 * 100.0,
+                *count as f64 / succ as f64 * 100.0,
                 model
             );
         }
