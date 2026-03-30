@@ -8,8 +8,8 @@ on the full M5 retail forecasting dataset (30,490 series), based on Petropoulos 
 
 | Parameter | Value |
 |---|---|
-| Dataset | M5 (all 30,490 item-store series, daily Walmart sales) |
-| Series evaluated | 13,766 (filtered: >30% nonzero days) |
+| Dataset | M5 — all 30,490 item-store combinations (daily Walmart sales) |
+| Series evaluated | **30,490** (100%, no filtering) |
 | Training window | 1,941 days (2011-01-29 to 2016-05-22) |
 | Test horizon | 28 days (4 weeks, matching M5 competition) |
 | Seasonal period | 7 (weekly) |
@@ -22,43 +22,41 @@ on the full M5 retail forecasting dataset (30,490 series), based on Petropoulos 
 
 | Metric | Complete (19 models) | Reduced (8 models) | Difference |
 |---|---|---|---|
-| Avg RMSE | 2.1998 | 2.1999 | +0.0001 (+0.005%) |
-| Median RMSE | 1.4569 | 1.4571 | +0.0002 (+0.01%) |
-| Avg MAPE | 56.83% | 56.80% | -0.03pp |
-| Avg sMAPE | 111.03% | 111.01% | -0.02pp |
-| Success rate | 13,766/13,766 (100%) | 13,766/13,766 (100%) |
+| Avg RMSE | 1.4332 | 1.4331 | -0.0001 (-0.007%) |
+| Median RMSE | 0.9257 | 0.9257 | 0.0000 |
+| Avg MAPE | 63.72% | 63.70% | -0.02pp |
+| Avg sMAPE | 141.40% | 141.39% | -0.01pp |
+| Success rate | 30,490/30,490 (100%) | 30,490/30,490 (100%) |
 
-The Reduced pool achieves **virtually identical accuracy** to the Complete pool
-across all 13,766 evaluated series.
+**Identical accuracy.** Across all 30,490 series, RMSE differs by less than 0.01%.
 
 ### Speed
 
 | Metric | Complete | Reduced | Speedup |
 |---|---|---|---|
-| Wall-clock time | 206.6 s | 119.7 s | **1.73x** |
-| Avg CPU time per series | 311.6 ms | 175.8 ms | **1.77x** |
-| Total CPU time | 4,290 s | 2,420 s | **1.77x** |
-| Throughput | 67 series/s | 115 series/s | **1.72x** |
+| Wall-clock time | 370.8 s | **184.9 s** | **2.01x** |
+| Avg CPU time per series | 250.7 ms | **121.4 ms** | **2.06x** |
+| Total CPU time | 7,644 s | **3,702 s** | **2.07x** |
+| Throughput | 82 series/s | **165 series/s** | **2.01x** |
 
-The Reduced pool is **1.7x faster** at scale. With 13,766 series, this saves
-**87 seconds** wall-clock time (207s vs 120s) on a multi-core machine.
+The Reduced pool is **2x faster** across all 30,490 series, saving **186 seconds** wall-clock.
 
 ### Model Selection Distribution
 
 | Model | Complete | Reduced | Notes |
 |---|---|---|---|
-| ETS(A,N,A) | 12,215 (88.7%) | 12,355 (89.8%) | Seasonal, no trend |
-| ETS(A,Ad,A) | 669 (4.9%) | 696 (5.1%) | Seasonal, damped trend |
-| ETS(A,N,N) | 550 (4.0%) | 676 (4.9%) | Simple exponential smoothing |
-| ETS(A,A,A) | 167 (1.2%) | — | Undamped (Complete only) |
-| ETS(A,A,N) | 160 (1.2%) | — | Undamped (Complete only) |
-| ETS(A,Ad,N) | 5 (0.0%) | 39 (0.3%) | Damped trend, no season |
+| ETS(A,N,A) | 20,851 (68.4%) | 21,363 (70.1%) | Seasonal, no trend |
+| ETS(A,N,N) | 6,317 (20.7%) | 7,260 (23.8%) | Simple exponential smoothing |
+| ETS(A,A,N) | 1,452 (4.8%) | — | Undamped trend (Complete only) |
+| ETS(A,Ad,A) | 1,183 (3.9%) | 1,269 (4.2%) | Seasonal, damped trend |
+| ETS(A,A,A) | 464 (1.5%) | — | Undamped seasonal (Complete only) |
+| ETS(A,Ad,N) | 223 (0.7%) | 598 (2.0%) | Damped trend, no season |
 
 Key observations:
-- **89%** of M5 series select ETS(A,N,A) — additive seasonal without trend
-- The 327 series using undamped trend (A,A,A / A,A,N) in Complete switch to
-  damped variants or simpler models in Reduced — more robust for retail
-- All dominant models (A,N,A, A,Ad,A, A,N,N) are in both pools
+- **68-70%** of M5 series select ETS(A,N,A) — additive seasonal without trend
+- **21-24%** select ETS(A,N,N) — simple exponential smoothing (highly intermittent SKUs)
+- The ~1,900 series selecting undamped trend (A,A,N / A,A,A) in Complete switch to
+  damped variants or simpler models in Reduced — more robust for retail forecasting
 - Multiplicative error models are never selected (M5 data contains zeros)
 
 ### Reduced Pool Models
@@ -79,17 +77,18 @@ Design principles:
 
 ## Conclusion
 
-On the full M5 dataset (13,766 eligible series of 30,490 total):
+On the **complete M5 dataset** (30,490 series, no filtering):
 
 | | Complete | Reduced |
 |---|---|---|
-| **Accuracy** | RMSE 2.1998 | RMSE 2.1999 |
-| **Speed** | 207 s | **120 s (1.7x faster)** |
-| **Models evaluated** | ~9 per series | ~4 per series |
+| **RMSE** | 1.4332 | **1.4331** |
+| **Wall-clock** | 371 s | **185 s (2.0x faster)** |
+| **CPU/series** | 251 ms | **121 ms (2.1x faster)** |
+| **Failure rate** | 0% | 0% |
 
-The Reduced pool delivers **identical accuracy** with **1.7x speedup** at scale.
-For high-volume retail forecasting, this translates to significant compute savings
-without any loss in forecast quality.
+The Reduced pool delivers **identical accuracy with 2x speedup**. At 30,490 series,
+this saves **3 minutes** wall-clock on a multi-core machine, or **65 minutes** of
+total CPU time (7,644s vs 3,702s).
 
 ### Usage
 

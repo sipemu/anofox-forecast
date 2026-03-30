@@ -20,7 +20,7 @@ use std::time::Instant;
 
 const HORIZON: usize = 28; // M5 competition horizon (4 weeks)
 const PERIOD: usize = 7; // weekly seasonality
-const MIN_NONZERO_FRAC: f64 = 0.3; // skip very intermittent series
+const MIN_NONZERO_FRAC: f64 = 0.0; // include all series
 
 fn main() {
     // Try full dataset first, fall back to top-1000
