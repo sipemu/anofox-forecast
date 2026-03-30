@@ -300,3 +300,7 @@ path = "examples/analysis/period_detection.rs"
 name = "exogenous"
 path = "examples/forecasting/exogenous.rs"
 
+[[example]]
+name = "m5_ets_benchmark"
+path = "examples/m5_ets_benchmark.rs"
+
