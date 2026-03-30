@@ -499,7 +499,7 @@ impl ARIMA {
             }
             // b[k] = sigma2 * dot(ma_poly[k:q+1], ma_coeffs[:max(q+1-k, 0)])
             let ma_start = k;
-            let dot_len = if q + 1 > k { q + 1 - k } else { 0 };
+            let dot_len = (q + 1).saturating_sub(k);
             let mut dot = 0.0;
             for i in 0..dot_len {
                 if ma_start + i < ma_poly.len() && i < ma_coeffs.len() {
@@ -675,7 +675,7 @@ impl ARIMA {
         // acovf: m2 x m2 matrix (flat row-major)
         let mut acovf = vec![0.0; m2 * m2];
         // acovf2: 1-D vector of length max(nobs - m, 0)
-        let acovf2_len = if nobs > m { nobs - m } else { 0 };
+        let acovf2_len = nobs.saturating_sub(m);
         let mut acovf2 = vec![0.0; acovf2_len];
 
         // Fill upper-left m x m Toeplitz block
@@ -689,11 +689,7 @@ impl ARIMA {
                 for i in m..m2 {
                     let mut val = arma_acovf[i - j];
                     for r in 1..=p {
-                        let tmp_ix = if r > (i - j) {
-                            r - (i - j)
-                        } else {
-                            (i - j) - r
-                        };
+                        let tmp_ix = r.abs_diff(i - j);
                         val -= -ar_poly[r] * arma_acovf[tmp_ix];
                     }
                     acovf[i * m2 + j] = val;
@@ -784,7 +780,7 @@ impl ARIMA {
                     }
                 }
 
-                let start2 = if n_idx < m { 0 } else { n_idx - m };
+                let start2 = n_idx.saturating_sub(m);
                 for j in start2..k {
                     let nj = n_idx - j;
                     if nj < theta_cols {
@@ -811,11 +807,7 @@ impl ARIMA {
                 v[_n] = if !acovf2.is_empty() { acovf2[0] } else { 1.0 };
             }
 
-            let start_v = if n_idx + 2 > (m + 1) {
-                n_idx + 2 - (m + 1)
-            } else {
-                0
-            };
+            let start_v = (n_idx + 2).saturating_sub(m + 1);
             for i in start_v..=n_idx {
                 let ni = n_idx - i;
                 if ni < theta_cols {
@@ -1344,12 +1336,8 @@ impl ARIMA {
                 initial_step: 0.005,
                 ..Default::default()
             };
-            let mle_result = nelder_mead(
-                &mle_fn,
-                &css_result.optimal_point,
-                Some(&bounds),
-                mle_config,
-            );
+            let mle_result =
+                nelder_mead(mle_fn, &css_result.optimal_point, Some(&bounds), mle_config);
 
             // Evaluate MLE at the CSS optimum for comparison
             let css_mle_val = {

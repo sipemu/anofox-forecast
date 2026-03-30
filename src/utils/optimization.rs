@@ -854,7 +854,6 @@ where
         let grad_norm: f64 = new_grad.iter().map(|g| g * g).sum::<f64>().sqrt();
         if grad_norm < config.tolerance {
             converged = true;
-            grad = new_grad;
             break;
         }
 
