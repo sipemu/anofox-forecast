@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-03-30
+
 ### Added
 
 - **Global/Batch Forecasting** — shared-parameter models for processing many series simultaneously
