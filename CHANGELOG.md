@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **STL decomposition 2.0-2.5x faster**: running-sum moving average (O(n) vs O(n×window)) and precomputed tricube kernel weights in LOESS smoothing
+- **MSTL decomposition faster**: pre-creates STL instances outside iteration loop to reuse scratch buffers (benefits from underlying STL speedup)
+- **MFLES boosting 90% fewer allocations**: cache X'X Cholesky factor (Fourier design matrix is constant across rounds), pre-allocated residual and temp buffers, `calc_mse_sum()` avoids materializing temp Vecs
+
 ## [0.5.2] - 2026-03-30
 
 ### Added
