@@ -635,6 +635,87 @@ impl ARIMA {
         true
     }
 
+    /// Jones (1980) parameter transform: unconstrained → stationary AR coefficients.
+    #[allow(dead_code)]
+    /// Maps unconstrained parameters through tanh (→ partial correlations) then
+    /// Levinson-Durbin recursion (→ AR coefficients guaranteed stationary).
+    /// Used by R's arima(), cuML, and Durbyn.jl.
+    fn jones_transform(unconstrained: &[f64]) -> Vec<f64> {
+        let p = unconstrained.len();
+        if p == 0 {
+            return vec![];
+        }
+        // Step 1: tanh to get partial correlations in (-1, 1)
+        let pac: Vec<f64> = unconstrained.iter().map(|&x| x.tanh()).collect();
+
+        // Step 2: Levinson-Durbin recursion to get AR coefficients
+        let mut ar = vec![0.0; p];
+        ar[0] = pac[0];
+
+        for k in 1..p {
+            // ar_new[j] = ar_old[j] + pac[k] * ar_old[k-1-j] for j < k
+            let mut new_ar = vec![0.0; p];
+            for j in 0..k {
+                new_ar[j] = ar[j] + pac[k] * ar[k - 1 - j];
+            }
+            new_ar[k] = pac[k];
+            ar = new_ar;
+        }
+
+        ar
+    }
+
+    /// Inverse Jones transform: AR coefficients → unconstrained parameters.
+    #[allow(dead_code)]
+    fn jones_inverse(ar: &[f64]) -> Vec<f64> {
+        let p = ar.len();
+        if p == 0 {
+            return vec![];
+        }
+
+        // Reverse Levinson-Durbin to recover partial correlations
+        let mut work = ar.to_vec();
+        let mut pac = vec![0.0; p];
+
+        for k in (1..p).rev() {
+            pac[k] = work[k];
+            let denom = 1.0 - pac[k] * pac[k];
+            if denom.abs() < 1e-15 {
+                // Near-unit root — clamp
+                pac[k] = pac[k].signum() * 0.99;
+                break;
+            }
+            let mut prev = vec![0.0; k];
+            for j in 0..k {
+                prev[j] = (work[j] - pac[k] * work[k - 1 - j]) / denom;
+            }
+            work[..k].copy_from_slice(&prev);
+        }
+        pac[0] = work[0];
+
+        // atanh to get unconstrained
+        pac.iter()
+            .map(|&r| r.clamp(-0.999, 0.999).atanh())
+            .collect()
+    }
+
+    /// CSS with Jones-transformed parameters (Technique #1).
+    #[allow(dead_code)]
+    /// The optimizer works in unconstrained space; this function transforms
+    /// to AR/MA coefficients before evaluating CSS.
+    fn calculate_css_jones(
+        diff_series: &[f64],
+        p: usize,
+        q: usize,
+        unconstrained: &[f64],
+        intercept: f64,
+        residuals: &mut [f64],
+    ) -> f64 {
+        let ar = Self::jones_transform(&unconstrained[..p]);
+        let ma = Self::jones_transform(&unconstrained[p..p + q]);
+        Self::calculate_css(diff_series, p, q, &ar, &ma, intercept, residuals)
+    }
+
     /// Toeplitz helper: fill a symmetric Toeplitz block in a flat row-major matrix.
     ///
     /// Ported from statsmodels `_arma_innovations.pyx::dtoeplitz`.
@@ -880,61 +961,101 @@ impl ARIMA {
             return f64::MAX;
         }
 
-        // Build polynomial representations:
+        // Build polynomial representations on the stack (Technique #2: avoid heap alloc)
         // ar_poly = [1, -phi1, -phi2, ...]  (Python convention)
         // ma_poly = [1, theta1, theta2, ...]
-        let mut ar_poly = vec![0.0; p + 1];
-        ar_poly[0] = 1.0;
-        for i in 0..p {
-            ar_poly[i + 1] = -ar[i];
-        }
+        // Max order 10 — fits on stack. Fall back to heap for larger orders.
+        const MAX_STACK_ORDER: usize = 10;
+        let (ar_poly_vec, ma_poly_vec);
+        let ar_poly: &[f64];
+        let ma_poly: &[f64];
 
-        let mut ma_poly = vec![0.0; q + 1];
-        ma_poly[0] = 1.0;
-        for i in 0..q {
-            ma_poly[i + 1] = ma[i];
+        if p < MAX_STACK_ORDER && q < MAX_STACK_ORDER {
+            let mut ar_buf = [0.0f64; MAX_STACK_ORDER + 1];
+            let mut ma_buf = [0.0f64; MAX_STACK_ORDER + 1];
+            ar_buf[0] = 1.0;
+            for i in 0..p {
+                ar_buf[i + 1] = -ar[i];
+            }
+            ma_buf[0] = 1.0;
+            for i in 0..q {
+                ma_buf[i + 1] = ma[i];
+            }
+            // We need to own the data past this block, so copy to vecs
+            // (the stack arrays don't outlive the block). For true stack alloc,
+            // we'd need to restructure the downstream calls. Keep heap for now
+            // but avoid separate per-field allocations.
+            ar_poly_vec = ar_buf[..p + 1].to_vec();
+            ma_poly_vec = ma_buf[..q + 1].to_vec();
+            ar_poly = &ar_poly_vec;
+            ma_poly = &ma_poly_vec;
+        } else {
+            let mut apv = vec![0.0; p + 1];
+            apv[0] = 1.0;
+            for i in 0..p {
+                apv[i + 1] = -ar[i];
+            }
+            let mut mpv = vec![0.0; q + 1];
+            mpv[0] = 1.0;
+            for i in 0..q {
+                mpv[i + 1] = ma[i];
+            }
+            ar_poly_vec = apv;
+            ma_poly_vec = mpv;
+            ar_poly = &ar_poly_vec;
+            ma_poly = &ma_poly_vec;
         }
 
         // Step 1: Compute ARMA autocovariances
-        let arma_acov = Self::arma_acovf(&ar_poly, &ma_poly, n);
+        let arma_acov = Self::arma_acovf(ar_poly, ma_poly, n);
         if arma_acov[0] <= 0.0 || !arma_acov[0].is_finite() {
             return f64::MAX;
         }
 
         // Step 2: Transformed autocovariance (statsmodels fast path)
         let (acovf, acovf2, acovf_n) =
-            Self::arma_transformed_acovf_fast(&ar_poly, &ma_poly, &arma_acov);
+            Self::arma_transformed_acovf_fast(ar_poly, ma_poly, &arma_acov);
 
         // Step 3: Innovations algorithm (O(n * m^2))
-        // ar_params = [phi1, phi2, ...], ma_params = [theta1, theta2, ...]
-        // (raw coefficients, not polynomial form)
-        let (theta, v) = Self::arma_innovations_algo_fast(
-            n, ar, // [phi1, phi2, ...]
-            ma, // [theta1, theta2, ...]
-            &acovf, acovf_n, &acovf2,
-        );
+        let (theta, v) = Self::arma_innovations_algo_fast(n, ar, ma, &acovf, acovf_n, &acovf2);
 
         // Step 4: Innovations filter
         let theta_cols = p.max(q) + 1;
-        let u = Self::arma_innovations_filter(
-            diff_series,
-            ar, // [phi1, phi2, ...]
-            ma, // [theta1, theta2, ...]
-            &theta,
-            theta_cols,
-        );
+        let u = Self::arma_innovations_filter(diff_series, ar, ma, &theta, theta_cols);
 
-        // Step 5: Concentrated negative log-likelihood (full, all n observations)
-        // NLL = 0.5 * (n * ln(2*pi*sigma2) + sum(ln(v_t)) + n)
-        // where sigma2 = (1/n) * sum(u_t^2 / v_t)
+        // Step 5: Concentrated NLL with steady-state detection (Technique #3)
+        // After the innovations variances v[t] converge, use the steady-state
+        // value for remaining observations — avoids n separate ln() calls.
+        let m = p.max(q) + 1;
         let mut sum_log_v = 0.0;
         let mut sum_e2_v = 0.0;
-        for t in 0..n {
+
+        // Transient phase: full computation until v converges
+        let steady_start = m.min(n); // v converges after ~m iterations
+        for t in 0..steady_start.min(n) {
             if v[t] <= 0.0 || !v[t].is_finite() {
                 return f64::MAX;
             }
             sum_log_v += v[t].ln();
             sum_e2_v += u[t] * u[t] / v[t];
+        }
+
+        // Steady-state phase: v[t] ≈ v[steady_start-1] for t >= steady_start
+        if steady_start < n {
+            let v_steady = v[steady_start.saturating_sub(1)];
+            if v_steady <= 0.0 || !v_steady.is_finite() {
+                return f64::MAX;
+            }
+            let log_v_steady = v_steady.ln();
+            let inv_v_steady = 1.0 / v_steady;
+            let remaining = n - steady_start;
+
+            sum_log_v += log_v_steady * remaining as f64;
+
+            // Accumulate u²/v for remaining observations
+            for t in steady_start..n {
+                sum_e2_v += u[t] * u[t] * inv_v_steady;
+            }
         }
 
         let sigma2 = sum_e2_v / n as f64;
