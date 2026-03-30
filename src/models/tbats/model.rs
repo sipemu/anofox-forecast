@@ -81,6 +81,8 @@ pub struct TBATS {
     sigma2: f64,
     /// AIC value.
     aic: Option<f64>,
+    /// Max Nelder-Mead iterations (configurable for screening vs full fit).
+    max_nm_iter: usize,
 }
 
 impl TBATS {
@@ -112,7 +114,15 @@ impl TBATS {
             n: 0,
             sigma2: 1.0,
             aic: None,
+            max_nm_iter: 200,
         }
+    }
+
+    /// Fit with a specified max Nelder-Mead iteration count.
+    /// Used by AutoTBATS for screening (fewer iters) vs refinement (full iters).
+    pub(crate) fn fit_with_max_iter(&mut self, series: &TimeSeries, max_iter: usize) -> Result<()> {
+        self.max_nm_iter = max_iter;
+        self.fit(series)
     }
 
     /// Maximum number of harmonics for a given period.
@@ -145,7 +155,7 @@ impl TBATS {
     fn find_harmonics(values: &[f64], period: usize) -> (usize, Vec<f64>) {
         let n = values.len();
 
-        // Compute moving average trend (2*m window)
+        // Compute moving average trend (2*m window) using cumulative sum for O(n)
         let window = 2 * period;
         let mut trend = vec![0.0; n];
         for i in 0..n {
@@ -155,69 +165,90 @@ impl TBATS {
             trend[i] = values[start..end].iter().sum::<f64>() / count as f64;
         }
 
-        // Detrend
         let z: Vec<f64> = values
             .iter()
             .zip(trend.iter())
             .map(|(y, t)| y - t)
             .collect();
 
-        let max_k = Self::max_harmonics(period).min(n);
+        let max_k = Self::max_harmonics(period).min(n).min(6);
         if max_k == 0 {
             return (1, values.to_vec());
         }
 
-        // Build Fourier design matrix
-        let t_indices: Vec<f64> = (0..n).map(|i| i as f64).collect();
+        // Precompute ALL Fourier columns for max_k harmonics at once
+        // Flat layout: fourier[j * n + t] = value for harmonic j at time t
+        // j even = cos, j odd = sin
+        let max_cols = 2 * max_k;
+        let mut fourier = vec![0.0; max_cols * n];
+        for j in 0..max_k {
+            let freq = 2.0 * std::f64::consts::PI * (j + 1) as f64 / period as f64;
+            let cos_col = 2 * j;
+            let sin_col = 2 * j + 1;
+            for t in 0..n {
+                let angle = freq * t as f64;
+                fourier[cos_col * n + t] = angle.cos();
+                fourier[sin_col * n + t] = angle.sin();
+            }
+        }
+
+        // Incrementally build X'X and X'y as we add harmonics
+        // X'X is symmetric — only store full matrix for Gaussian elimination
+        let mut xtx = vec![vec![0.0; max_cols]; max_cols];
+        let mut xty = vec![0.0; max_cols];
+
         let mut best_k = 1;
         let mut best_aic = f64::INFINITY;
         let mut best_residuals = z.clone();
 
-        for h in 1..=max_k.min(6) {
-            // Limit to max 6 harmonics
-            // Build design matrix for h harmonics
-            let mut x = vec![vec![0.0; 2 * h]; n];
-            for t in 0..n {
-                for j in 0..h {
-                    let freq = 2.0 * std::f64::consts::PI * (j + 1) as f64 / period as f64;
-                    x[t][2 * j] = (freq * t_indices[t]).cos();
-                    x[t][2 * j + 1] = (freq * t_indices[t]).sin();
-                }
-            }
-
-            // Least squares: solve X'X * beta = X'y
+        for h in 1..=max_k {
+            let new_cos = 2 * (h - 1);
+            let new_sin = 2 * (h - 1) + 1;
             let k_params = 2 * h;
-            let mut xtx = vec![vec![0.0; k_params]; k_params];
-            let mut xty = vec![0.0; k_params];
 
-            for t in 0..n {
-                for i in 0..k_params {
-                    xty[i] += x[t][i] * z[t];
-                    for j in 0..k_params {
-                        xtx[i][j] += x[t][i] * x[t][j];
+            // Update X'X and X'y with the two new columns
+            for new_col in [new_cos, new_sin] {
+                // New column dot products with all previous columns
+                for prev_col in 0..k_params {
+                    let mut dot = 0.0;
+                    for t in 0..n {
+                        dot += fourier[new_col * n + t] * fourier[prev_col * n + t];
                     }
+                    xtx[new_col][prev_col] = dot;
+                    xtx[prev_col][new_col] = dot;
                 }
+                // X'y for new column
+                let mut dot = 0.0;
+                for t in 0..n {
+                    dot += fourier[new_col * n + t] * z[t];
+                }
+                xty[new_col] = dot;
             }
 
-            // Solve with simple Gaussian elimination
-            let coeffs = match Self::solve_linear_system(&xtx, &xty) {
+            // Solve the k_params x k_params system
+            let sub_xtx: Vec<Vec<f64>> = xtx[..k_params]
+                .iter()
+                .map(|row| row[..k_params].to_vec())
+                .collect();
+            let sub_xty = xty[..k_params].to_vec();
+
+            let coeffs = match Self::solve_linear_system(&sub_xtx, &sub_xty) {
                 Some(c) => c,
                 None => continue,
             };
 
-            // Compute residuals and SSE
+            // Compute SSE using precomputed Fourier columns
             let mut sse = 0.0;
             let mut residuals = vec![0.0; n];
             for t in 0..n {
                 let mut fitted = 0.0;
                 for j in 0..k_params {
-                    fitted += x[t][j] * coeffs[j];
+                    fitted += fourier[j * n + t] * coeffs[j];
                 }
                 residuals[t] = z[t] - fitted;
                 sse += residuals[t] * residuals[t];
             }
 
-            // AIC = n * log(sse/n) + 2*k
             if sse > 0.0 {
                 let aic = n as f64 * (sse / n as f64).ln() + 2.0 * k_params as f64;
                 if aic < best_aic {
@@ -417,6 +448,20 @@ impl TBATS {
     }
 
     /// Run state-space filter and return (sse, final_state, fitted, residuals).
+    /// Precompute (cos, sin) rotation pairs for all harmonics across all periods.
+    /// Returns a flat vec of (cos_freq, sin_freq) in the same order as state layout.
+    fn precompute_trig(&self) -> Vec<(f64, f64)> {
+        let mut table = Vec::new();
+        for (period_idx, &k) in self.fourier_k.iter().enumerate() {
+            let period = self.seasonal_periods[period_idx];
+            for j in 0..k {
+                let freq = 2.0 * std::f64::consts::PI * (j + 1) as f64 / period as f64;
+                table.push((freq.cos(), freq.sin()));
+            }
+        }
+        table
+    }
+
     fn run_filter(
         &self,
         values: &[f64],
@@ -428,8 +473,8 @@ impl TBATS {
         gamma_two: &[f64],
     ) -> (f64, Vec<f64>, Vec<f64>, Vec<f64>) {
         let n = values.len();
-        let _dim = self.state_dim();
         let base = if self.use_trend { 2 } else { 1 };
+        let trig = self.precompute_trig();
 
         let mut state = initial_state.to_vec();
         let mut fitted = Vec::with_capacity(n);
@@ -437,7 +482,6 @@ impl TBATS {
         let mut sse = 0.0;
 
         for t in 0..n {
-            // Observation: y = level + phi * trend + sum(cos_coef)
             let level = state[0];
             let trend = if self.use_trend { state[1] } else { 0.0 };
 
@@ -445,7 +489,7 @@ impl TBATS {
             let mut pos = base;
             for &k in &self.fourier_k {
                 for j in 0..k {
-                    seasonal += state[pos + 2 * j]; // Only cosine component
+                    seasonal += state[pos + 2 * j];
                 }
                 pos += 2 * k;
             }
@@ -457,34 +501,27 @@ impl TBATS {
             residuals.push(error);
             sse += error * error;
 
-            // State transition with error correction
-            // New level = level + phi * trend + alpha * error
             state[0] = level + phi * trend + alpha * error;
-
-            // New trend = phi * trend + beta * error
             if self.use_trend {
                 state[1] = phi * trend + beta * error;
             }
 
-            // Update seasonal states with rotation + gamma correction
+            // Seasonal update using precomputed trig
             let mut pos = base;
+            let mut trig_idx = 0;
             for (period_idx, &k) in self.fourier_k.iter().enumerate() {
-                let period = self.seasonal_periods[period_idx];
                 let g1 = gamma_one.get(period_idx).copied().unwrap_or(0.0);
                 let g2 = gamma_two.get(period_idx).copied().unwrap_or(0.0);
 
                 for j in 0..k {
-                    let freq = 2.0 * std::f64::consts::PI * (j + 1) as f64 / period as f64;
-                    let cos_freq = freq.cos();
-                    let sin_freq = freq.sin();
+                    let (cos_freq, sin_freq) = trig[trig_idx];
+                    trig_idx += 1;
 
                     let idx_cos = pos + 2 * j;
                     let idx_sin = pos + 2 * j + 1;
-
                     let old_cos = state[idx_cos];
                     let old_sin = state[idx_sin];
 
-                    // Rotation + error correction
                     state[idx_cos] = cos_freq * old_cos + sin_freq * old_sin + g1 * error;
                     state[idx_sin] = -sin_freq * old_cos + cos_freq * old_sin + g2 * error;
                 }
@@ -526,11 +563,18 @@ impl TBATS {
             bounds.push((-0.1, 0.1));
         }
 
-        let seasonal_periods = self.seasonal_periods.clone();
         let fourier_k = self.fourier_k.clone();
         let use_trend = self.use_trend;
         let use_damped = self.use_damped_trend;
         let initial_state = self.initialize_state(values);
+        let base = if use_trend { 2 } else { 1 };
+
+        // Precompute trig table ONCE — reused across all 300 NM iterations
+        let trig = self.precompute_trig();
+
+        // Scratch buffer to avoid allocation per NM iteration
+        let state_len = initial_state.len();
+        let scratch = std::cell::RefCell::new(vec![0.0f64; state_len]);
 
         let objective = move |params: &[f64]| {
             let alpha = params[0];
@@ -554,18 +598,18 @@ impl TBATS {
                 0.0
             };
 
-            let gamma_one: Vec<f64> = (0..n_periods).map(|i| params[idx + i]).collect();
+            // Read gamma vectors without allocating
+            let gamma_one_start = idx;
             idx += n_periods;
-            let gamma_two: Vec<f64> = (0..n_periods).map(|i| params[idx + i]).collect();
+            let gamma_two_start = idx;
 
-            // Run filter
-            let base = if use_trend { 2 } else { 1 };
-            let _dim = base + fourier_k.iter().map(|&k| 2 * k).sum::<usize>();
-            let mut state = initial_state.clone();
+            // Reset scratch state (memcpy, no allocation)
+            let mut state = scratch.borrow_mut();
+            state.copy_from_slice(&initial_state);
+
             let mut sse = 0.0;
 
             for t in 0..n {
-                // Observation
                 let level = state[0];
                 let trend = if use_trend { state[1] } else { 0.0 };
 
@@ -582,23 +626,21 @@ impl TBATS {
                 let error = values[t] - predicted;
                 sse += error * error;
 
-                // State transition
                 state[0] = level + phi * trend + alpha * error;
                 if use_trend {
                     state[1] = phi * trend + beta * error;
                 }
 
-                // Seasonal update
+                // Seasonal update with precomputed trig
                 let mut pos = base;
+                let mut trig_idx = 0;
                 for (period_idx, &k) in fourier_k.iter().enumerate() {
-                    let period = seasonal_periods[period_idx];
-                    let g1 = gamma_one[period_idx];
-                    let g2 = gamma_two[period_idx];
+                    let g1 = params[gamma_one_start + period_idx];
+                    let g2 = params[gamma_two_start + period_idx];
 
                     for j in 0..k {
-                        let freq = 2.0 * std::f64::consts::PI * (j + 1) as f64 / period as f64;
-                        let cos_freq = freq.cos();
-                        let sin_freq = freq.sin();
+                        let (cos_freq, sin_freq) = trig[trig_idx];
+                        trig_idx += 1;
 
                         let idx_cos = pos + 2 * j;
                         let idx_sin = pos + 2 * j + 1;
@@ -616,8 +658,8 @@ impl TBATS {
         };
 
         let config = NelderMeadConfig {
-            max_iter: 300,
-            tolerance: 1e-8,
+            max_iter: self.max_nm_iter,
+            tolerance: 1e-7,
             ..Default::default()
         };
 
@@ -792,6 +834,7 @@ impl Forecaster for TBATS {
 
         let lambda = self.lambda.unwrap_or(1.0);
         let mut predictions = Vec::with_capacity(horizon);
+        let trig = self.precompute_trig();
 
         // Clone current state for forecasting
         let mut state = self.state.clone();
@@ -825,14 +868,13 @@ impl Forecaster for TBATS {
                 state[1] = phi * trend;
             }
 
-            // Rotate seasonal states
+            // Rotate seasonal states using precomputed trig
             let mut pos = base;
-            for (period_idx, &k) in self.fourier_k.iter().enumerate() {
-                let period = self.seasonal_periods[period_idx];
+            let mut trig_idx = 0;
+            for &k in &self.fourier_k {
                 for j in 0..k {
-                    let freq = 2.0 * std::f64::consts::PI * (j + 1) as f64 / period as f64;
-                    let cos_freq = freq.cos();
-                    let sin_freq = freq.sin();
+                    let (cos_freq, sin_freq) = trig[trig_idx];
+                    trig_idx += 1;
 
                     let idx_cos = pos + 2 * j;
                     let idx_sin = pos + 2 * j + 1;

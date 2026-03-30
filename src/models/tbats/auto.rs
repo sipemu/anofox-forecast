@@ -100,11 +100,53 @@ impl AutoTBATS {
         self.best_model.as_ref()
     }
 
-    /// Try a single configuration and update best if improved.
-    fn try_config(&mut self, series: &TimeSeries, model: TBATS, config_name: &str) -> bool {
+    /// Try a single configuration with a screening pass and update best if improved.
+    /// Uses a reduced iteration count for the first pass (screening), then does a full
+    /// refinement only if the screening AIC is competitive with the current best.
+    fn try_config_screening(
+        &mut self,
+        series: &TimeSeries,
+        model: TBATS,
+        config_name: &str,
+        screening_iters: usize,
+        full_iters: usize,
+    ) -> bool {
+        // Phase 1: Quick screening pass with reduced iterations
         let mut model = model;
-        if model.fit(series).is_err() {
+        if model.fit_with_max_iter(series, screening_iters).is_err() {
             return false;
+        }
+
+        if let Some(screening_aic) = model.aic() {
+            // Early termination: if screening AIC is much worse than best, skip full fit.
+            // Use a generous absolute threshold since AIC can be negative.
+            if self.best_aic < f64::MAX
+                && screening_aic.is_finite()
+                && screening_aic > self.best_aic + 0.20 * self.best_aic.abs().max(10.0)
+            {
+                return false;
+            }
+        } else {
+            return false;
+        }
+
+        // Phase 2: Full refinement — only reached for competitive configs
+        if full_iters > screening_iters {
+            let mut refined_model = model.clone();
+            // Re-fit with full iterations from scratch for correctness
+            if refined_model.fit_with_max_iter(series, full_iters).is_err() {
+                // Fall back to the screening model if full refinement fails
+                if let Some(aic) = model.aic() {
+                    if aic < self.best_aic && aic.is_finite() {
+                        self.best_aic = aic;
+                        self.best_model = Some(model);
+                        self.selected_config = Some(config_name.to_string());
+                        return true;
+                    }
+                }
+                return false;
+            }
+            model = refined_model;
         }
 
         if let Some(aic) = model.aic() {
@@ -156,16 +198,32 @@ impl Forecaster for AutoTBATS {
         // Check if Box-Cox is possible
         let can_box_cox = values.iter().all(|&v| v > 0.0);
 
-        // Base configurations to try
+        // Screening and full iteration counts.
+        // Most configs get a fast screening pass (100 iterations).
+        // Only configs that pass screening get refined with full iterations (300).
+        let screening_iters = 100;
+        let full_iters = 300;
+
+        // Build all configs in priority order:
+        // 1. Most likely winners first (trend, then damped)
+        // 2. Box-Cox variants later (more expensive, less often needed)
         let mut configs: Vec<(TBATS, String)> = Vec::new();
 
-        // 1. Basic TBATS with trend
+        // High priority: basic trend model
         configs.push((
             TBATS::new(self.seasonal_periods.clone()),
             "TBATS(trend)".to_string(),
         ));
 
-        // 2. TBATS without trend
+        // High priority: damped trend (often the best)
+        if self.try_damped {
+            configs.push((
+                TBATS::new(self.seasonal_periods.clone()).with_damped_trend(0.95),
+                "TBATS(damped_phi=0.95)".to_string(),
+            ));
+        }
+
+        // Medium priority: no trend
         if self.try_no_trend {
             configs.push((
                 TBATS::new(self.seasonal_periods.clone()).without_trend(),
@@ -173,9 +231,9 @@ impl Forecaster for AutoTBATS {
             ));
         }
 
-        // 3. TBATS with damped trend
+        // Medium priority: other damped phi values
         if self.try_damped {
-            for phi in [0.9, 0.95, 0.98] {
+            for phi in [0.9, 0.98] {
                 configs.push((
                     TBATS::new(self.seasonal_periods.clone()).with_damped_trend(phi),
                     format!("TBATS(damped_phi={:.2})", phi),
@@ -183,27 +241,35 @@ impl Forecaster for AutoTBATS {
             }
         }
 
-        // Try configurations without Box-Cox first
+        // Try these priority configs with screening
         for (model, name) in configs.iter() {
-            self.try_config(series, model.clone(), name);
+            self.try_config_screening(series, model.clone(), name, screening_iters, full_iters);
         }
 
-        // Try with Box-Cox if possible
+        // Lower priority: Box-Cox variants (only if data is positive)
         if self.try_box_cox && can_box_cox {
             for lambda in [0.0, 0.25, 0.5, 0.75, 1.0] {
                 // Basic with Box-Cox
                 let model = TBATS::new(self.seasonal_periods.clone()).with_box_cox(lambda);
-                self.try_config(series, model, &format!("TBATS(box_cox={:.2})", lambda));
+                self.try_config_screening(
+                    series,
+                    model,
+                    &format!("TBATS(box_cox={:.2})", lambda),
+                    screening_iters,
+                    full_iters,
+                );
 
                 // Damped with Box-Cox
                 if self.try_damped {
                     let model = TBATS::new(self.seasonal_periods.clone())
                         .with_box_cox(lambda)
                         .with_damped_trend(0.95);
-                    self.try_config(
+                    self.try_config_screening(
                         series,
                         model,
                         &format!("TBATS(box_cox={:.2},damped)", lambda),
+                        screening_iters,
+                        full_iters,
                     );
                 }
             }
@@ -219,7 +285,13 @@ impl Forecaster for AutoTBATS {
         // Try reduced K
         let reduced_k: Vec<usize> = default_k.iter().map(|&k| (k / 2).max(1)).collect();
         let model = TBATS::new(self.seasonal_periods.clone()).with_fourier_k(reduced_k);
-        self.try_config(series, model, "TBATS(reduced_k)");
+        self.try_config_screening(
+            series,
+            model,
+            "TBATS(reduced_k)",
+            screening_iters,
+            full_iters,
+        );
 
         // Try increased K
         let increased_k: Vec<usize> = self
@@ -229,7 +301,13 @@ impl Forecaster for AutoTBATS {
             .map(|(&p, &k)| ((k as f64 * self.max_k_factor) as usize).min(p / 2))
             .collect();
         let model = TBATS::new(self.seasonal_periods.clone()).with_fourier_k(increased_k);
-        self.try_config(series, model, "TBATS(increased_k)");
+        self.try_config_screening(
+            series,
+            model,
+            "TBATS(increased_k)",
+            screening_iters,
+            full_iters,
+        );
 
         if self.best_model.is_none() {
             return Err(ForecastError::ConvergenceFailure(

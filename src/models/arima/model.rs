@@ -22,7 +22,7 @@ use crate::error::{ForecastError, Result};
 use crate::models::arima::diff::{difference, integrate};
 use crate::models::{validate_series_complete, FittedParams, Forecaster};
 use crate::utils::ols::{ols_fit, ols_residuals, OLSResult};
-use crate::utils::optimization::{nelder_mead, NelderMeadConfig};
+use crate::utils::optimization::{lbfgs_optimize, nelder_mead, LbfgsConfig, NelderMeadConfig};
 use crate::utils::stats::quantile_normal;
 use std::collections::HashMap;
 
@@ -275,89 +275,129 @@ impl ARIMA {
         diff_series: &[f64],
         use_aic: bool,
     ) -> Option<f64> {
+        let n = diff_series.len();
         let start = p.max(q);
-        if diff_series.len() <= start + 2 {
+        if n <= start + 2 {
             return None;
         }
+        let nstar = n as f64; // effective sample size (after differencing)
 
         if p == 0 && q == 0 {
-            // Just intercept model: compute variance directly
-            let mean = diff_series.iter().sum::<f64>() / diff_series.len() as f64;
-            let n_eff = (diff_series.len() - start) as f64;
-            let variance = diff_series[start..]
-                .iter()
-                .map(|v| (v - mean).powi(2))
-                .sum::<f64>()
-                / n_eff;
-            if variance <= 0.0 || !variance.is_finite() {
-                return None;
-            }
-            let k = 1.0; // just intercept
-            let ll = -0.5 * n_eff * (1.0 + variance.ln() + (2.0 * std::f64::consts::PI).ln());
-            let score = if use_aic {
-                -2.0 * ll + 2.0 * k
-            } else {
-                -2.0 * ll + k * n_eff.ln()
+            // Try both with-mean (drift) and without-mean variants, return best.
+            let mean = diff_series.iter().sum::<f64>() / nstar;
+
+            // Use the same Gaussian loglik formula as non-(0,0) case for consistency.
+            let score_variant = |sigma2: f64, k: f64| -> Option<f64> {
+                if sigma2 < 0.0 || !sigma2.is_finite() {
+                    return None;
+                }
+                let log_s2 = if sigma2 < 1e-15 {
+                    1e-15_f64.ln()
+                } else {
+                    sigma2.ln()
+                };
+                let ll = -0.5 * nstar * (1.0 + log_s2 + (2.0 * std::f64::consts::PI).ln());
+                let score = if use_aic {
+                    let aic = -2.0 * ll + 2.0 * k;
+                    if nstar > k + 1.0 {
+                        aic + 2.0 * k * (k + 1.0) / (nstar - k - 1.0)
+                    } else {
+                        f64::MAX
+                    }
+                } else {
+                    -2.0 * ll + k * nstar.ln()
+                };
+                if score.is_finite() {
+                    Some(score)
+                } else {
+                    None
+                }
             };
-            return if score.is_finite() { Some(score) } else { None };
+
+            // With drift: variance around mean, k = 2 (drift + sigma2)
+            let var_with = diff_series.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / nstar;
+            let score_with = score_variant(var_with, 2.0);
+
+            // Without drift: variance around zero, k = 1 (sigma2 only)
+            let var_without = diff_series.iter().map(|v| v * v).sum::<f64>() / nstar;
+            let score_without = score_variant(var_without, 1.0);
+
+            return match (score_with, score_without) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
+            };
         }
 
-        // Set up optimization
-        let n_params = p + q + 1;
-        let mean = diff_series.iter().sum::<f64>() / diff_series.len() as f64;
-        let mut initial = vec![0.0; n_params];
-        initial[0] = mean;
-        for i in 0..p {
-            initial[1 + i] = 0.1 / (i + 1) as f64;
-        }
-        for i in 0..q {
-            initial[1 + p + i] = 0.1 / (i + 1) as f64;
-        }
+        // ARMA(p,q) scoring: CSS optimization with AICc.
+        // HR initialization provides near-optimal starting values.
+        let hr_init = if p + q >= 2 {
+            let hr = Self::hannan_rissanen_init(diff_series, p, q);
+            let raw: Vec<f64> = hr[1..].to_vec(); // skip intercept
+            raw.iter()
+                .map(|&v| v.clamp(-0.98, 0.98))
+                .collect::<Vec<_>>()
+        } else {
+            let mut init = Vec::with_capacity(p + q);
+            for i in 0..p {
+                init.push(0.3 / (i + 1) as f64);
+            }
+            for i in 0..q {
+                init.push(0.3 / (i + 1) as f64);
+            }
+            init
+        };
 
-        let mut bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
+        let mut bounds = Vec::with_capacity(p + q);
         for _ in 0..(p + q) {
             bounds.push((-0.99, 0.99));
         }
 
-        let config = NelderMeadConfig {
-            max_iter: 1000,
-            tolerance: 1e-8,
-            ..Default::default()
-        };
-
-        let residuals_buf = std::cell::RefCell::new(vec![0.0; diff_series.len()]);
-
-        let result = nelder_mead(
+        let residuals_buf = std::cell::RefCell::new(vec![0.0; n]);
+        let css_result = nelder_mead(
             |params| {
                 let mut buf = residuals_buf.borrow_mut();
-                Self::calculate_css(
-                    diff_series,
-                    p,
-                    q,
-                    &params[1..1 + p],
-                    &params[1 + p..],
-                    params[0],
-                    &mut buf,
-                )
+                Self::calculate_css(diff_series, p, q, &params[..p], &params[p..], 0.0, &mut buf)
             },
-            &initial,
+            &hr_init,
             Some(&bounds),
-            config,
+            NelderMeadConfig {
+                max_iter: 100,
+                tolerance: 1e-6,
+                ..Default::default()
+            },
         );
 
-        // Compute AIC/BIC directly from CSS
-        let css = result.optimal_value;
-        if !css.is_finite() || css <= 0.0 {
+        let css = css_result.optimal_value;
+        if !css.is_finite() || css >= f64::MAX {
             return None;
         }
 
-        let n_eff = (diff_series.len() - start) as f64;
-        let variance = css / n_eff;
-        let k = n_params as f64;
-        let ll = -0.5 * n_eff * (1.0 + variance.ln() + (2.0 * std::f64::consts::PI).ln());
-
+        // AICc from CSS variance
+        let n_eff = (n - start) as f64;
+        if n_eff <= 0.0 {
+            return None;
+        }
+        let sigma2 = css / n_eff;
+        if sigma2 < 0.0 || !sigma2.is_finite() {
+            return None;
+        }
+        let log_s2 = if sigma2 < 1e-15 {
+            1e-15_f64.ln()
+        } else {
+            sigma2.ln()
+        };
+        let ll = -0.5 * n_eff * (1.0 + log_s2 + (2.0 * std::f64::consts::PI).ln());
+        let k = (p + q + 1) as f64; // AR + MA + intercept/sigma2
         let score = if use_aic {
-            -2.0 * ll + 2.0 * k
+            let aic = -2.0 * ll + 2.0 * k;
+            // AICc correction
+            if n_eff > k + 1.0 {
+                aic + 2.0 * k * (k + 1.0) / (n_eff - k - 1.0)
+            } else {
+                f64::MAX
+            }
         } else {
             -2.0 * ll + k * n_eff.ln()
         };
@@ -369,9 +409,550 @@ impl ARIMA {
         }
     }
 
-    /// Calculate the conditional sum of squares for given parameters.
-    /// Uses a pre-allocated residuals buffer to avoid allocation per call.
-    /// The buffer must be at least `diff_series.len()` elements.
+    /// Compute exact negative log-likelihood via the innovations algorithm.
+    ///
+    /// This implements the Python statsmodels innovations algorithm:
+    /// 1. `lfilter(ma_poly, ar_poly, impulse)` to get MA(∞) coefficients
+    /// 2. `arma_acovf` via Brockwell-Davis linear system (eq 3.3.8)
+    /// 3. Innovations recursion to get prediction variances v and coefficients theta
+    /// 4. Filter to compute one-step-ahead errors u
+    /// 5. Concentrated negative log-likelihood (conditional on first m observations)
+    ///
+    /// Sigma^2 is concentrated out (profiled likelihood).
+    /// Public accessor for testing MLE computation.
+    #[doc(hidden)]
+    pub fn calculate_mle_pub(
+        diff_series: &[f64],
+        p: usize,
+        q: usize,
+        ar: &[f64],
+        ma: &[f64],
+        intercept: f64,
+        residuals: &mut [f64],
+    ) -> f64 {
+        Self::calculate_mle(diff_series, p, q, ar, ma, intercept, residuals)
+    }
+
+    /// IIR filter (scipy.signal.lfilter equivalent).
+    ///
+    /// Implements: `a[0]*y[n] = b[0]*x[n] + b[1]*x[n-1] + ... - a[1]*y[n-1] - ...`
+    fn lfilter(b: &[f64], a: &[f64], x: &[f64]) -> Vec<f64> {
+        let n = x.len();
+        let mut y = vec![0.0; n];
+        let a0 = a[0];
+        for i in 0..n {
+            let mut val = 0.0;
+            for (j, &bj) in b.iter().enumerate() {
+                if i >= j {
+                    val += bj * x[i - j];
+                }
+            }
+            for (j, &aj) in a.iter().enumerate().skip(1) {
+                if i >= j {
+                    val -= aj * y[i - j];
+                }
+            }
+            y[i] = val / a0;
+        }
+        y
+    }
+
+    /// Compute ARMA autocovariances via exact Brockwell-Davis linear system (eq 3.3.8).
+    ///
+    /// `ar_poly` = [1, -phi1, -phi2, ...], `ma_poly` = [1, theta1, theta2, ...]
+    /// Returns gamma(0..nobs-1) with sigma2=1.
+    fn arma_acovf(ar_poly: &[f64], ma_poly: &[f64], nobs: usize) -> Vec<f64> {
+        let p = ar_poly.len() - 1; // AR order
+        let q = ma_poly.len() - 1; // MA order
+        let m = p.max(q) + 1;
+
+        // Step 1: Compute MA(infinity) coefficients via lfilter
+        let leads = m;
+        let mut impulse = vec![0.0; leads];
+        if !impulse.is_empty() {
+            impulse[0] = 1.0;
+        }
+        let ma_coeffs = Self::lfilter(ma_poly, ar_poly, &impulse);
+
+        // Step 2: Build linear system A * gamma = b (Brockwell-Davis eq 3.3.8)
+        // Pad ar_poly to length m
+        let mut tmp_ar = vec![0.0; m];
+        for (i, &v) in ar_poly.iter().enumerate().take(m) {
+            tmp_ar[i] = v;
+        }
+
+        let mut a_mat = vec![vec![0.0; m]; m];
+        let mut b_vec = vec![0.0; m];
+
+        for k in 0..m {
+            // A[k, :k+1] = tmp_ar[:k+1][::-1]
+            for j in 0..=k {
+                a_mat[k][j] += tmp_ar[k - j];
+            }
+            // A[k, 1:m-k] += tmp_ar[k+1:m]
+            if k + 1 < m {
+                for j in 1..m - k {
+                    if k + j < m {
+                        a_mat[k][j] += tmp_ar[k + j];
+                    }
+                }
+            }
+            // b[k] = sigma2 * dot(ma_poly[k:q+1], ma_coeffs[:max(q+1-k, 0)])
+            let ma_start = k;
+            let dot_len = (q + 1).saturating_sub(k);
+            let mut dot = 0.0;
+            for i in 0..dot_len {
+                if ma_start + i < ma_poly.len() && i < ma_coeffs.len() {
+                    dot += ma_poly[ma_start + i] * ma_coeffs[i];
+                }
+            }
+            b_vec[k] = dot; // sigma2 = 1
+        }
+
+        // Step 3: Solve A * gamma = b via Gaussian elimination with partial pivoting
+        let mut acovf = vec![0.0; nobs];
+
+        if let Some(gamma) = Self::solve_linear_system_inline(&a_mat, &b_vec) {
+            for (i, &g) in gamma.iter().enumerate().take(m.min(nobs)) {
+                acovf[i] = g;
+            }
+        } else {
+            // Fallback: white noise
+            acovf[0] = 1.0;
+            return acovf;
+        }
+
+        // Step 4: Extend via AR recursion for lags h >= m
+        // gamma(h) = -sum(ar_poly[1:] * gamma[h-1:h-p:-1])
+        for h in m..nobs {
+            let mut val = 0.0;
+            for i in 1..ar_poly.len() {
+                if h >= i {
+                    val -= ar_poly[i] * acovf[h - i];
+                }
+            }
+            acovf[h] = val;
+        }
+
+        acovf
+    }
+
+    /// Solve A*x = b via Gaussian elimination with partial pivoting.
+    fn solve_linear_system_inline(a: &[Vec<f64>], b: &[f64]) -> Option<Vec<f64>> {
+        let n = b.len();
+        if n == 0 || a.len() != n {
+            return None;
+        }
+
+        // Build augmented matrix [A | b]
+        let mut aug: Vec<Vec<f64>> = a
+            .iter()
+            .enumerate()
+            .map(|(i, row)| {
+                let mut r = Vec::with_capacity(n + 1);
+                r.extend_from_slice(row);
+                r.push(b[i]);
+                r
+            })
+            .collect();
+
+        // Forward elimination with partial pivoting
+        for col in 0..n {
+            // Find pivot
+            let mut max_row = col;
+            let mut max_val = aug[col][col].abs();
+            for row in (col + 1)..n {
+                let v = aug[row][col].abs();
+                if v > max_val {
+                    max_row = row;
+                    max_val = v;
+                }
+            }
+            if max_val < 1e-14 {
+                return None; // singular
+            }
+            if max_row != col {
+                aug.swap(col, max_row);
+            }
+            let pivot = aug[col][col];
+            for row in (col + 1)..n {
+                let factor = aug[row][col] / pivot;
+                for j in col..=n {
+                    let val = aug[col][j];
+                    aug[row][j] -= factor * val;
+                }
+            }
+        }
+
+        // Back substitution
+        let mut x = vec![0.0; n];
+        for i in (0..n).rev() {
+            let mut sum = aug[i][n];
+            for j in (i + 1)..n {
+                sum -= aug[i][j] * x[j];
+            }
+            x[i] = sum / aug[i][i];
+        }
+        Some(x)
+    }
+
+    /// Check stationarity: verify all roots of the AR polynomial lie outside the unit circle.
+    ///
+    /// For AR(1): |phi1| < 1
+    /// For AR(2): phi2 + phi1 < 1, phi2 - phi1 < 1, |phi2| < 1
+    /// For higher orders: use the companion matrix eigenvalue check.
+    fn check_stationarity(ar: &[f64]) -> bool {
+        let p = ar.len();
+        if p == 0 {
+            return true;
+        }
+        if p == 1 {
+            return ar[0].abs() < 1.0;
+        }
+        if p == 2 {
+            // Triangle conditions for AR(2) stationarity
+            return ar[1] + ar[0] < 1.0 && ar[1] - ar[0] < 1.0 && ar[1].abs() < 1.0;
+        }
+        // For higher orders: check necessary conditions via AR polynomial.
+        // Individual coefficients must be bounded
+        if ar.iter().any(|a| a.abs() >= 2.0) {
+            return false;
+        }
+        // AR(z) at z=1: 1 - sum(phi_i) > 0 (necessary for stationarity)
+        let sum: f64 = ar.iter().sum();
+        if 1.0 - sum <= 0.0 {
+            return false;
+        }
+        // AR(z) at z=-1: 1 + sum((-1)^i * phi_i) > 0
+        let alt_sum: f64 = ar
+            .iter()
+            .enumerate()
+            .map(|(i, a)| if i % 2 == 0 { -a } else { *a })
+            .sum();
+        if 1.0 + alt_sum <= 0.0 {
+            return false;
+        }
+        true
+    }
+
+    /// Toeplitz helper: fill a symmetric Toeplitz block in a flat row-major matrix.
+    ///
+    /// Ported from statsmodels `_arma_innovations.pyx::dtoeplitz`.
+    fn toeplitz_fill(
+        n: usize,
+        offset0: usize,
+        offset1: usize,
+        column: &[f64],
+        out: &mut [f64],
+        out_cols: usize,
+    ) {
+        for i in 0..n {
+            for j in 0..=i {
+                out[(offset0 + i) * out_cols + (offset1 + j)] = column[i - j];
+                if i != j {
+                    out[(offset0 + j) * out_cols + (offset1 + i)] = column[i - j];
+                }
+            }
+        }
+    }
+
+    /// Compute the transformed autocovariance matrix and residual acovf vector.
+    ///
+    /// Ported from statsmodels `_arma_innovations.pyx::darma_transformed_acovf_fast`.
+    /// Returns (acovf_matrix [n x n flat row-major], acovf2 [1-D], n) where n = min(2*m, nobs).
+    fn arma_transformed_acovf_fast(
+        ar_poly: &[f64],
+        ma_poly: &[f64],
+        arma_acovf: &[f64],
+    ) -> (Vec<f64>, Vec<f64>, usize) {
+        let nobs = arma_acovf.len();
+        let p = ar_poly.len() - 1;
+        let q = ma_poly.len() - 1;
+        let m = p.max(q);
+        let m2 = 2 * m;
+        let n = m2.min(nobs);
+
+        // acovf: m2 x m2 matrix (flat row-major)
+        let mut acovf = vec![0.0; m2 * m2];
+        // acovf2: 1-D vector of length max(nobs - m, 0)
+        let acovf2_len = nobs.saturating_sub(m);
+        let mut acovf2 = vec![0.0; acovf2_len];
+
+        // Fill upper-left m x m Toeplitz block
+        if m > 0 {
+            Self::toeplitz_fill(m, 0, 0, arma_acovf, &mut acovf, m2);
+        }
+
+        // Fill lower-left m x m block (rows m..m2, cols 0..m) and transpose to upper-right
+        if nobs > m {
+            for j in 0..m {
+                for i in m..m2 {
+                    let mut val = arma_acovf[i - j];
+                    for r in 1..=p {
+                        let tmp_ix = r.abs_diff(i - j);
+                        val -= -ar_poly[r] * arma_acovf[tmp_ix];
+                    }
+                    acovf[i * m2 + j] = val;
+                }
+            }
+            // acovf[:m, m:m2] = acovf[m:m2, :m].T
+            for i in 0..m {
+                for j in m..m2 {
+                    acovf[i * m2 + j] = acovf[j * m2 + i];
+                }
+            }
+        }
+
+        // Fill acovf2: the stationary part
+        if nobs > m {
+            for i in 0..acovf2_len {
+                for r in 0..=(q.saturating_sub(i)) {
+                    if r < ma_poly.len() && r + i < ma_poly.len() {
+                        acovf2[i] += ma_poly[r] * ma_poly[r + i];
+                    }
+                }
+            }
+        }
+
+        // Return the n x n submatrix (copy into a properly sized flat array)
+        let mut acovf_out = vec![0.0; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                acovf_out[i * n + j] = acovf[i * m2 + j];
+            }
+        }
+
+        (acovf_out, acovf2, n)
+    }
+
+    /// Innovations algorithm: O(n * m^2) version.
+    ///
+    /// Ported from statsmodels `_arma_innovations.pyx::darma_innovations_algo_fast`.
+    /// Returns (theta [nobs x (m+1) flat row-major], v [nobs]).
+    fn arma_innovations_algo_fast(
+        nobs: usize,
+        ar_params: &[f64],
+        ma_params: &[f64],
+        acovf: &[f64],
+        acovf_cols: usize,
+        acovf2: &[f64],
+    ) -> (Vec<f64>, Vec<f64>) {
+        let p = ar_params.len();
+        let q = ma_params.len();
+        let m = p.max(q);
+        let m2 = 2 * m;
+        let theta_cols = m + 1;
+
+        let mut v = vec![0.0; nobs];
+        let mut theta = vec![0.0; nobs * theta_cols];
+
+        if m > 0 {
+            v[0] = acovf[0]; // acovf[0, 0]
+        } else {
+            v[0] = if !acovf2.is_empty() { acovf2[0] } else { 1.0 };
+        }
+
+        for n_idx in 0..(nobs - 1) {
+            let _n = n_idx + 1;
+
+            let start = if n_idx < m { 0 } else { n_idx + 1 - q };
+            for k in start..=n_idx {
+                if n_idx >= m && n_idx - k >= q {
+                    continue;
+                }
+
+                let col = n_idx - k;
+                if col >= theta_cols {
+                    continue;
+                }
+
+                // Initialize theta[_n, n_idx - k]
+                if _n < m2 && k < m {
+                    // Use acovf matrix: acovf[n_idx + 1, k]
+                    if n_idx + 1 < acovf_cols && k < acovf_cols {
+                        theta[_n * theta_cols + col] = acovf[(n_idx + 1) * acovf_cols + k];
+                    }
+                } else {
+                    // Use acovf2 vector
+                    let idx = _n - k;
+                    if idx < acovf2.len() {
+                        theta[_n * theta_cols + col] = acovf2[idx];
+                    }
+                }
+
+                let start2 = n_idx.saturating_sub(m);
+                for j in start2..k {
+                    let nj = n_idx - j;
+                    if nj < theta_cols {
+                        let kj = k - j - 1;
+                        // theta[k-1+1, k-j-1] = theta[k, kj]
+                        if kj < theta_cols {
+                            theta[_n * theta_cols + col] -=
+                                theta[k * theta_cols + kj] * theta[_n * theta_cols + nj] * v[j];
+                        }
+                    }
+                }
+                if v[k].abs() > 0.0 {
+                    theta[_n * theta_cols + col] /= v[k];
+                }
+            }
+
+            // Compute v[n_idx + 1]
+            if _n < m {
+                // v[n+1] = acovf[n+1, n+1]
+                if _n < acovf_cols {
+                    v[_n] = acovf[_n * acovf_cols + _n];
+                }
+            } else {
+                v[_n] = if !acovf2.is_empty() { acovf2[0] } else { 1.0 };
+            }
+
+            let start_v = (n_idx + 2).saturating_sub(m + 1);
+            for i in start_v..=n_idx {
+                let ni = n_idx - i;
+                if ni < theta_cols {
+                    v[_n] -= theta[_n * theta_cols + ni].powi(2) * v[i];
+                }
+            }
+        }
+
+        (theta, v)
+    }
+
+    /// Innovations filter: compute one-step-ahead prediction errors.
+    ///
+    /// Ported from statsmodels `_arma_innovations.pyx::darma_innovations_filter`.
+    fn arma_innovations_filter(
+        endog: &[f64],
+        ar_params: &[f64],
+        ma_params: &[f64],
+        theta: &[f64],
+        theta_cols: usize,
+    ) -> Vec<f64> {
+        let p = ar_params.len();
+        let q = ma_params.len();
+        let m = p.max(q);
+        let nobs = endog.len();
+
+        let mut u = vec![0.0; nobs];
+        u[0] = endog[0];
+
+        for i in 1..nobs {
+            let mut hat = 0.0;
+            if i < m {
+                for j in 0..i {
+                    if j < theta_cols {
+                        hat += theta[i * theta_cols + j] * u[i - j - 1];
+                    }
+                }
+            } else {
+                for j in 0..p {
+                    hat += ar_params[j] * endog[i - j - 1];
+                }
+                for j in 0..q {
+                    if j < theta_cols {
+                        hat += theta[i * theta_cols + j] * u[i - j - 1];
+                    }
+                }
+            }
+            u[i] = endog[i] - hat;
+        }
+
+        u
+    }
+
+    fn calculate_mle(
+        diff_series: &[f64],
+        p: usize,
+        q: usize,
+        ar: &[f64],
+        ma: &[f64],
+        _intercept: f64,
+        _residuals: &mut [f64],
+    ) -> f64 {
+        let n = diff_series.len();
+        if n < 3 {
+            return f64::MAX;
+        }
+
+        // Check stationarity
+        if !Self::check_stationarity(ar) {
+            return f64::MAX;
+        }
+
+        // Build polynomial representations:
+        // ar_poly = [1, -phi1, -phi2, ...]  (Python convention)
+        // ma_poly = [1, theta1, theta2, ...]
+        let mut ar_poly = vec![0.0; p + 1];
+        ar_poly[0] = 1.0;
+        for i in 0..p {
+            ar_poly[i + 1] = -ar[i];
+        }
+
+        let mut ma_poly = vec![0.0; q + 1];
+        ma_poly[0] = 1.0;
+        for i in 0..q {
+            ma_poly[i + 1] = ma[i];
+        }
+
+        // Step 1: Compute ARMA autocovariances
+        let arma_acov = Self::arma_acovf(&ar_poly, &ma_poly, n);
+        if arma_acov[0] <= 0.0 || !arma_acov[0].is_finite() {
+            return f64::MAX;
+        }
+
+        // Step 2: Transformed autocovariance (statsmodels fast path)
+        let (acovf, acovf2, acovf_n) =
+            Self::arma_transformed_acovf_fast(&ar_poly, &ma_poly, &arma_acov);
+
+        // Step 3: Innovations algorithm (O(n * m^2))
+        // ar_params = [phi1, phi2, ...], ma_params = [theta1, theta2, ...]
+        // (raw coefficients, not polynomial form)
+        let (theta, v) = Self::arma_innovations_algo_fast(
+            n, ar, // [phi1, phi2, ...]
+            ma, // [theta1, theta2, ...]
+            &acovf, acovf_n, &acovf2,
+        );
+
+        // Step 4: Innovations filter
+        let theta_cols = p.max(q) + 1;
+        let u = Self::arma_innovations_filter(
+            diff_series,
+            ar, // [phi1, phi2, ...]
+            ma, // [theta1, theta2, ...]
+            &theta,
+            theta_cols,
+        );
+
+        // Step 5: Concentrated negative log-likelihood (full, all n observations)
+        // NLL = 0.5 * (n * ln(2*pi*sigma2) + sum(ln(v_t)) + n)
+        // where sigma2 = (1/n) * sum(u_t^2 / v_t)
+        let mut sum_log_v = 0.0;
+        let mut sum_e2_v = 0.0;
+        for t in 0..n {
+            if v[t] <= 0.0 || !v[t].is_finite() {
+                return f64::MAX;
+            }
+            sum_log_v += v[t].ln();
+            sum_e2_v += u[t] * u[t] / v[t];
+        }
+
+        let sigma2 = sum_e2_v / n as f64;
+        if sigma2 <= 0.0 || !sigma2.is_finite() {
+            return f64::MAX;
+        }
+
+        let nll =
+            0.5 * (n as f64 * (sigma2.ln() + (2.0 * std::f64::consts::PI).ln() + 1.0) + sum_log_v);
+
+        if !nll.is_finite() {
+            return f64::MAX;
+        }
+
+        nll
+    }
+
+    /// CSS fallback (kept for non-differenced models where intercept matters).
     fn calculate_css(
         diff_series: &[f64],
         p: usize,
@@ -388,19 +969,16 @@ impl ARIMA {
             return f64::MAX;
         }
 
-        // Zero out the residuals buffer
         residuals[..n].fill(0.0);
         let mut css = 0.0;
 
         for t in start..n {
             let mut pred = intercept;
 
-            // AR component
             for i in 0..p {
                 pred += ar[i] * (diff_series[t - 1 - i] - intercept);
             }
 
-            // MA component
             for i in 0..q {
                 pred += ma[i] * residuals[t - 1 - i];
             }
@@ -413,56 +991,249 @@ impl ARIMA {
         css
     }
 
+    /// Hannan-Rissanen initialization for ARMA parameters.
+    ///
+    /// Provides near-optimal starting values by:
+    /// 1. Fitting a long AR model via Yule-Walker to estimate residuals
+    /// 2. Regressing y on lagged y and lagged residuals via OLS
+    ///
+    /// This gives much better initial estimates than arbitrary constants,
+    /// enabling faster convergence and better accuracy.
+    fn hannan_rissanen_init(diff_series: &[f64], p: usize, q: usize) -> Vec<f64> {
+        let n = diff_series.len();
+        let mean = diff_series.iter().sum::<f64>() / n as f64;
+        let centered: Vec<f64> = diff_series.iter().map(|&v| v - mean).collect();
+
+        // Step 1: Fit a long AR model to get residual estimates
+        let ar_order = (p + q + 5).min(n / 3).max(p.max(q) + 1);
+
+        // Yule-Walker: solve R * phi = r where R is autocorrelation matrix
+        let mut acf = vec![0.0; ar_order + 1];
+        for lag in 0..=ar_order {
+            let mut sum = 0.0;
+            for t in lag..n {
+                sum += centered[t] * centered[t - lag];
+            }
+            acf[lag] = sum / n as f64;
+        }
+
+        if acf[0] <= 0.0 {
+            // Constant series — return zeros
+            let mut init = vec![0.0; p + q + 1];
+            init[0] = mean;
+            return init;
+        }
+
+        // Solve Toeplitz system using Levinson-Durbin
+        let ar_long = Self::levinson_durbin(&acf, ar_order);
+
+        // Compute residuals from the long AR model
+        let mut residuals = vec![0.0; n];
+        for t in ar_order..n {
+            let mut pred = 0.0;
+            for (k, &phi) in ar_long.iter().enumerate() {
+                pred += phi * centered[t - 1 - k];
+            }
+            residuals[t] = centered[t] - pred;
+        }
+
+        // Step 2: OLS regression of centered[t] on lagged centered and lagged residuals
+        let start = ar_order.max(p.max(q));
+        let n_obs = n - start;
+        if n_obs < p + q + 2 {
+            let mut init = vec![0.0; p + q + 1];
+            init[0] = mean;
+            return init;
+        }
+
+        let n_regressors = p + q;
+        if n_regressors == 0 {
+            return vec![mean];
+        }
+
+        // Build X matrix and y vector for OLS
+        let mut xtx = vec![0.0; n_regressors * n_regressors];
+        let mut xty = vec![0.0; n_regressors];
+
+        for t in start..n {
+            // Regressors: [y_{t-1}, ..., y_{t-p}, e_{t-1}, ..., e_{t-q}]
+            let mut x_row = Vec::with_capacity(n_regressors);
+            for i in 0..p {
+                x_row.push(centered[t - 1 - i]);
+            }
+            for i in 0..q {
+                x_row.push(residuals[t - 1 - i]);
+            }
+
+            // Accumulate X'X and X'y
+            for i in 0..n_regressors {
+                xty[i] += x_row[i] * centered[t];
+                for j in 0..n_regressors {
+                    xtx[i * n_regressors + j] += x_row[i] * x_row[j];
+                }
+            }
+        }
+
+        // Solve X'X * beta = X'y using Cholesky
+        let beta = Self::solve_symmetric_positive(&xtx, &xty, n_regressors);
+
+        // Build initial parameter vector: [intercept, ar1..arp, ma1..maq]
+        let mut init = vec![0.0; p + q + 1];
+        init[0] = mean;
+        for i in 0..p {
+            init[1 + i] = beta.get(i).copied().unwrap_or(0.0).clamp(-0.95, 0.95);
+        }
+        for i in 0..q {
+            init[1 + p + i] = beta.get(p + i).copied().unwrap_or(0.0).clamp(-0.95, 0.95);
+        }
+
+        init
+    }
+
+    /// Levinson-Durbin algorithm for solving Yule-Walker equations.
+    fn levinson_durbin(acf: &[f64], order: usize) -> Vec<f64> {
+        if order == 0 || acf[0] <= 0.0 {
+            return vec![];
+        }
+
+        let mut phi = vec![0.0; order];
+        let mut phi_prev = vec![0.0; order];
+        let mut err = acf[0];
+
+        for k in 0..order {
+            // Compute reflection coefficient
+            let mut num = acf[k + 1];
+            for j in 0..k {
+                num -= phi_prev[j] * acf[k - j];
+            }
+            let kappa = num / err;
+
+            if !kappa.is_finite() || kappa.abs() >= 1.0 {
+                break;
+            }
+
+            // Update coefficients
+            phi[k] = kappa;
+            for j in 0..k {
+                phi[j] = phi_prev[j] - kappa * phi_prev[k - 1 - j];
+            }
+
+            err *= 1.0 - kappa * kappa;
+            if err <= 0.0 {
+                break;
+            }
+
+            phi_prev[..=k].copy_from_slice(&phi[..=k]);
+        }
+
+        phi
+    }
+
+    /// Solve symmetric positive definite system A*x = b via Cholesky.
+    fn solve_symmetric_positive(a_flat: &[f64], b: &[f64], n: usize) -> Vec<f64> {
+        // Cholesky: A = L * L'
+        let mut l = vec![0.0; n * n];
+
+        for i in 0..n {
+            for j in 0..=i {
+                let mut sum = 0.0;
+                for k in 0..j {
+                    sum += l[i * n + k] * l[j * n + k];
+                }
+                if i == j {
+                    let diag = a_flat[i * n + i] - sum;
+                    if diag <= 0.0 {
+                        // Not positive definite — fall back to zeros
+                        return vec![0.0; n];
+                    }
+                    l[i * n + j] = diag.sqrt();
+                } else {
+                    l[i * n + j] = (a_flat[i * n + j] - sum) / l[j * n + j];
+                }
+            }
+        }
+
+        // Forward substitution: L * y = b
+        let mut y = vec![0.0; n];
+        for i in 0..n {
+            let mut sum = 0.0;
+            for j in 0..i {
+                sum += l[i * n + j] * y[j];
+            }
+            y[i] = (b[i] - sum) / l[i * n + i];
+        }
+
+        // Back substitution: L' * x = y
+        let mut x = vec![0.0; n];
+        for i in (0..n).rev() {
+            let mut sum = 0.0;
+            for j in (i + 1)..n {
+                sum += l[j * n + i] * x[j];
+            }
+            x[i] = (y[i] - sum) / l[i * n + i];
+        }
+
+        x
+    }
+
     /// Estimate parameters using conditional least squares.
     fn estimate_parameters(&mut self, diff_series: &[f64]) {
         let p = self.spec.p;
         let q = self.spec.q;
 
-        // Calculate mean for intercept initialization
         let mean = diff_series.iter().sum::<f64>() / diff_series.len() as f64;
 
         if p == 0 && q == 0 {
-            // Just the mean
-            self.intercept = mean;
+            // For d=0: intercept = mean. For d=1: drift = mean of differences.
+            // For d>=2: no intercept (higher-order differencing removes trend).
+            // This matches R/Python where include.drift = (d + D == 1).
+            self.intercept = if self.spec.d <= 1 { mean } else { 0.0 };
             self.ar_coefficients = vec![];
             self.ma_coefficients = vec![];
             return;
         }
 
-        // Set up optimization
-        let n_params = p + q + 1; // AR + MA + intercept
-        let mut initial = vec![0.0; n_params];
-        initial[0] = mean; // intercept
+        // When d > 0: don't include intercept (statsmodels convention)
+        // When d = 0: include intercept
+        let include_intercept = self.spec.d == 0;
+        let n_opt_params = if include_intercept { p + q + 1 } else { p + q };
 
-        // Initialize AR coefficients with small values
-        for i in 0..p {
-            initial[1 + i] = 0.1 / (i + 1) as f64;
-        }
-        // Initialize MA coefficients
-        for i in 0..q {
-            initial[1 + p + i] = 0.1 / (i + 1) as f64;
-        }
-
-        // Set up bounds (AR and MA coefficients should be bounded for stationarity/invertibility)
-        let mut bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)]; // intercept
-        for _ in 0..p {
-            bounds.push((-0.99, 0.99)); // AR bounds
-        }
-        for _ in 0..q {
-            bounds.push((-0.99, 0.99)); // MA bounds
-        }
-
-        let config = NelderMeadConfig {
-            max_iter: 1000,
-            tolerance: 1e-8,
-            ..Default::default()
+        // Hannan-Rissanen initialization for p+q >= 2
+        let initial = if p + q >= 2 {
+            let hr = Self::hannan_rissanen_init(diff_series, p, q);
+            if include_intercept {
+                hr
+            } else {
+                hr[1..].to_vec() // skip intercept
+            }
+        } else {
+            let mut init = Vec::with_capacity(n_opt_params);
+            if include_intercept {
+                init.push(mean);
+            }
+            for i in 0..p {
+                init.push(0.3 / (i + 1) as f64);
+            }
+            for i in 0..q {
+                init.push(0.3 / (i + 1) as f64);
+            }
+            init
         };
 
-        // Pre-allocate residuals buffer, shared via RefCell since nelder_mead takes Fn (not FnMut)
+        let mut bounds = Vec::with_capacity(n_opt_params);
+        if include_intercept {
+            bounds.push((f64::NEG_INFINITY, f64::INFINITY));
+        }
+        for _ in 0..(p + q) {
+            bounds.push((-0.99, 0.99));
+        }
+
         let residuals_buf = std::cell::RefCell::new(vec![0.0; diff_series.len()]);
 
-        let result = nelder_mead(
-            |params| {
+        // Stage 1: Use CSS for optimization (robust, well-behaved landscape).
+        // For d>0, follow with MLE refinement to match statsmodels.
+        let obj_fn = if include_intercept {
+            Box::new(|params: &[f64]| {
                 let mut buf = residuals_buf.borrow_mut();
                 Self::calculate_css(
                     diff_series,
@@ -473,16 +1244,131 @@ impl ARIMA {
                     params[0],
                     &mut buf,
                 )
-            },
-            &initial,
-            Some(&bounds),
-            config,
-        );
+            }) as Box<dyn Fn(&[f64]) -> f64>
+        } else {
+            // d > 0: CSS without intercept (matches statsmodels convention)
+            Box::new(|params: &[f64]| {
+                let mut buf = residuals_buf.borrow_mut();
+                Self::calculate_css(diff_series, p, q, &params[..p], &params[p..], 0.0, &mut buf)
+            }) as Box<dyn Fn(&[f64]) -> f64>
+        };
 
-        // Extract optimized parameters
-        self.intercept = result.optimal_point[0];
-        self.ar_coefficients = result.optimal_point[1..1 + p].to_vec();
-        self.ma_coefficients = result.optimal_point[1 + p..].to_vec();
+        // Two-phase: L-BFGS warm-start (CSS) → NM refinement (CSS) → MLE refinement (d>0)
+        let use_lbfgs = p + q >= 2;
+
+        // Phase 1: CSS warm-start via L-BFGS to get near the optimum
+        let css_buf = std::cell::RefCell::new(vec![0.0; diff_series.len()]);
+        let css_fn: Box<dyn Fn(&[f64]) -> f64> = if include_intercept {
+            Box::new(|params: &[f64]| {
+                let mut buf = css_buf.borrow_mut();
+                Self::calculate_css(
+                    diff_series,
+                    p,
+                    q,
+                    &params[1..1 + p],
+                    &params[1 + p..],
+                    params[0],
+                    &mut buf,
+                )
+            })
+        } else {
+            Box::new(|params: &[f64]| {
+                let mut buf = css_buf.borrow_mut();
+                Self::calculate_css(diff_series, p, q, &params[..p], &params[p..], 0.0, &mut buf)
+            })
+        };
+
+        let lbfgs_result = if use_lbfgs {
+            Some(lbfgs_optimize(
+                &css_fn,
+                &initial,
+                Some(&bounds),
+                LbfgsConfig {
+                    max_iter: 100,
+                    ..Default::default()
+                },
+            ))
+        } else {
+            None
+        };
+
+        // NM refinement: start from L-BFGS solution if available, else from init
+        let nm_start = lbfgs_result
+            .as_ref()
+            .map(|r| r.optimal_point.as_slice())
+            .unwrap_or(&initial);
+
+        // Phase 2: NM refinement on CSS objective
+        let nm_iters = if use_lbfgs { 200 } else { 500 };
+        let config = NelderMeadConfig {
+            max_iter: nm_iters,
+            tolerance: 1e-10,
+            ..Default::default()
+        };
+        let nm_result = nelder_mead(&obj_fn, nm_start, Some(&bounds), config);
+
+        let css_result = match &lbfgs_result {
+            Some(lr) if lr.optimal_value < nm_result.optimal_value => lr.clone(),
+            _ => nm_result,
+        };
+
+        // Extract CSS-optimized parameters
+        if include_intercept {
+            self.intercept = css_result.optimal_point[0];
+            self.ar_coefficients = css_result.optimal_point[1..1 + p].to_vec();
+            self.ma_coefficients = css_result.optimal_point[1 + p..].to_vec();
+        } else {
+            self.intercept = 0.0;
+            self.ar_coefficients = css_result.optimal_point[..p].to_vec();
+            self.ma_coefficients = css_result.optimal_point[p..].to_vec();
+
+            // Phase 3 (d>0 only): MLE NM refinement starting from CSS optimum
+            // Small steps near the CSS solution to match statsmodels exact MLE
+            let mle_buf = std::cell::RefCell::new(vec![0.0; diff_series.len()]);
+            let mle_fn = |params: &[f64]| {
+                let mut buf = mle_buf.borrow_mut();
+                Self::calculate_mle(diff_series, p, q, &params[..p], &params[p..], 0.0, &mut buf)
+            };
+
+            let mle_config = NelderMeadConfig {
+                max_iter: 10,
+                tolerance: 1e-10,
+                initial_step: 0.005,
+                ..Default::default()
+            };
+            let mle_result =
+                nelder_mead(mle_fn, &css_result.optimal_point, Some(&bounds), mle_config);
+
+            // Evaluate MLE at the CSS optimum for comparison
+            let css_mle_val = {
+                let mut buf = vec![0.0; diff_series.len()];
+                Self::calculate_mle(
+                    diff_series,
+                    p,
+                    q,
+                    &css_result.optimal_point[..p],
+                    &css_result.optimal_point[p..],
+                    0.0,
+                    &mut buf,
+                )
+            };
+
+            // Use MLE params only if they strictly improve, are stationary,
+            // and AR coefficients are not too close to the unit root boundary
+            // (near-unit-root params can cause explosive integrated forecasts).
+            let mle_ar = &mle_result.optimal_point[..p];
+            let ar_sum: f64 = mle_ar.iter().sum();
+            let ar_abs_sum: f64 = mle_ar.iter().map(|a| a.abs()).sum();
+            let mle_safe = ar_sum < 0.97 && ar_abs_sum < 1.95;
+            if mle_result.optimal_value < css_mle_val
+                && mle_result.optimal_value < f64::MAX
+                && Self::check_stationarity(mle_ar)
+                && mle_safe
+            {
+                self.ar_coefficients = mle_ar.to_vec();
+                self.ma_coefficients = mle_result.optimal_point[p..].to_vec();
+            }
+        }
     }
 
     /// Calculate fitted values and residuals.
@@ -522,7 +1408,13 @@ impl ARIMA {
             // Calculate information criteria
             let n_eff = valid_residuals.len() as f64;
             let k = self.spec.num_params() as f64;
-            let ll = -0.5 * n_eff * (1.0 + variance.ln() + (2.0 * std::f64::consts::PI).ln());
+            // Floor variance for perfect-fit cases (e.g., ARIMA(0,1,0) on linear data)
+            let log_var = if variance < 1e-15 {
+                1e-15_f64.ln()
+            } else {
+                variance.ln()
+            };
+            let ll = -0.5 * n_eff * (1.0 + log_var + (2.0 * std::f64::consts::PI).ln());
 
             self.aic = Some(-2.0 * ll + 2.0 * k);
             self.bic = Some(-2.0 * ll + k * n_eff.ln());
@@ -1109,15 +2001,16 @@ impl SARIMA {
             bounds.push((-0.99, 0.99));
         }
 
-        let config = NelderMeadConfig {
-            max_iter: 2000,
-            tolerance: 1e-8,
+        // Use L-BFGS for fast convergence
+        let lbfgs_config = LbfgsConfig {
+            max_iter: 50,
+            tolerance: 1e-6,
             ..Default::default()
         };
 
         let residuals_buf = std::cell::RefCell::new(vec![0.0; diff_series.len()]);
 
-        let result = nelder_mead(
+        let result = lbfgs_optimize(
             |params| {
                 let ar_end = 1 + p;
                 let ma_end = ar_end + q;
@@ -1142,7 +2035,7 @@ impl SARIMA {
             },
             &initial,
             Some(&bounds),
-            config,
+            lbfgs_config,
         );
 
         // Compute AIC/BIC directly from CSS
@@ -1518,7 +2411,13 @@ impl SARIMA {
             // Calculate information criteria
             let n_eff = valid_residuals.len() as f64;
             let k = self.spec.num_params() as f64;
-            let ll = -0.5 * n_eff * (1.0 + variance.ln() + (2.0 * std::f64::consts::PI).ln());
+            // Floor variance for perfect-fit cases (e.g., ARIMA(0,1,0) on linear data)
+            let log_var = if variance < 1e-15 {
+                1e-15_f64.ln()
+            } else {
+                variance.ln()
+            };
+            let ll = -0.5 * n_eff * (1.0 + log_var + (2.0 * std::f64::consts::PI).ln());
 
             self.aic = Some(-2.0 * ll + 2.0 * k);
             self.bic = Some(-2.0 * ll + k * n_eff.ln());

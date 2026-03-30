@@ -28,7 +28,7 @@ checksum = "4b46cbb362ab8752921c97e041f5e366ee6297bd428a31275b9fcf1e380f7299"
 
 [[package]]
 name = "anofox-forecast"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anofox-regression",
  "anofox-statistics",
@@ -39,6 +39,7 @@ dependencies = [
  "faer",
  "fdars-core",
  "getrandom 0.2.16",
+ "lbfgs",
  "proptest",
  "rand 0.8.5",
  "rayon",
@@ -51,7 +52,7 @@ dependencies = [
 
 [[package]]
 name = "anofox-forecast-js"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anofox-forecast",
  "chrono",
@@ -797,6 +798,15 @@ checksum = "464a3709c7f55f1f721e5389aa6ea4e3bc6aba669353300af094b29ffbdde1d8"
 dependencies = [
  "once_cell",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "lbfgs"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9fc0f9b082f5ec7327d5092d6617680d0edc657fc7630ec69de3798b7a23b96b"
+dependencies = [
+ "num-traits",
 ]
 
 [[package]]
