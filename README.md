@@ -82,6 +82,7 @@ console.log(forecast.values);
 - **Hierarchical Forecasting**
   - `HierarchyTree`: Define parent-children structure for grouped series
   - Bottom-up, top-down, MiddleOut, MinTrace OLS, and MinTrace Shrink (Ledoit-Wolf) reconciliation
+  - Scalable MinTrace: `MinTraceVariance` and `MinTraceStruct` with sparse summing matrix — safe for 100k+ series (no N×N covariance)
   - Ensures coherent forecasts across hierarchical levels
 
 ### Analysis & Decomposition
@@ -505,7 +506,7 @@ println!("Upper: {:?}", intervals.upper());
 | **State-Space** | `KalmanFilter`, `StateSpaceModel` (local level, local linear trend) |
 | **Ensemble** | `Ensemble` (Mean, Median, Weighted MSE, InverseAIC, Stacking, HorizonAdaptive) |
 | **Regression** | `RegressionForecaster` (OLS, Ridge, ElasticNet, Quantile, WLS, RLS, Tweedie, Poisson, BLS, Dynamic) |
-| **Hierarchical** | `HierarchyTree` (BottomUp, TopDown, MiddleOut, MinTraceOls, MinTraceShrink) |
+| **Hierarchical** | `HierarchyTree` (BottomUp, TopDown, MiddleOut, MinTraceOls, MinTraceShrink, MinTraceVariance, MinTraceStruct) |
 | **Batch/Global** | `GlobalETS`, `GlobalAutoETS`, `GlobalCroston`, `GlobalTheta`, `batch::auto_ets`, `batch::ets`, `batch::mfles` |
 
 ### Utilities

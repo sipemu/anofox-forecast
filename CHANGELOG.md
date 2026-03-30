@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Scalable hierarchical reconciliation** for large hierarchies (100k+ series)
+  - `MinTraceVariance`: diagonal W from residual variances, sparse summing matrix. O(N + M²) memory.
+  - `MinTraceStruct`: diagonal W from hierarchy structure (no residuals needed). O(N + M²) memory.
+  - Both avoid the N×N covariance matrix that causes OOM in `MinTraceShrink` at N > 5k.
+
 ## [0.5.3] - 2026-03-30
 
 ### Added
