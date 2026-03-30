@@ -16,10 +16,12 @@
 
 mod auto;
 mod dynamic;
+mod global_theta;
 mod model;
 mod optimized;
 
 pub use auto::{AutoTheta, ThetaModelType};
 pub use dynamic::{DynamicOptimizedTheta, DynamicTheta};
+pub use global_theta::GlobalTheta;
 pub use model::{DecompositionType, Theta};
 pub use optimized::OptimizedTheta;
