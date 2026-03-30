@@ -48,7 +48,7 @@ console.log(forecast.values);
   - Theta family: Theta, Optimized Theta, Dynamic Theta, AutoTheta
   - Intermittent demand: Croston, ADIDA, TSB, IMAPA
   - TBATS/AutoTBATS for complex seasonality
-  - MFLES (Multiple Frequency Locally Estimated Scatterplot)
+  - MFLES (Multiple Frequency Locally Estimated Scatterplot) with cached Cholesky Fourier OLS
   - MSTL-based forecasting with configurable trend/seasonal methods and pre-regression exogenous support
   - GARCH for volatility modeling
   - VAR (Vector Autoregression) for multivariate forecasting with Granger causality
@@ -79,7 +79,7 @@ console.log(forecast.values);
 
 - **Seasonality & Decomposition**
   - `SeasonalComponent` / `TrendComponent` traits — composable, dual-purpose (standalone + feature extraction)
-  - STL (Seasonal-Trend decomposition using LOESS) with `StlBuilder` for ergonomic configuration
+  - STL (Seasonal-Trend decomposition using LOESS) with `StlBuilder` — optimized with running-sum MA and precomputed tricube kernel (2-2.5x faster)
   - MSTL (Multiple Seasonal-Trend decomposition) for complex seasonality, with pre-regression exogenous regressor support
   - Prophet-style Fourier seasonality (`FourierSeasonality`) with flexible harmonic modeling
   - Dummy (one-hot) seasonality (`DummySeasonality`) — captures arbitrary seasonal shapes without smoothness assumptions
