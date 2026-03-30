@@ -962,24 +962,46 @@ where
         ));
     }
 
-    let mut group_results = Vec::with_capacity(series_vec.len());
+    // Evaluate each group — parallel across groups when feature enabled.
+    #[cfg(feature = "parallel")]
+    let group_results: Vec<(String, CVResults)> = {
+        use rayon::prelude::*;
+        let results: Vec<std::result::Result<(String, CVResults), ForecastError>> = series_vec
+            .into_par_iter()
+            .map(|(group_id, series)| {
+                let cv_result = cross_validate_with_folds(config, &series, &folds, &model_factory)?;
+                Ok((group_id, cv_result))
+            })
+            .collect();
+        let mut group_results = Vec::with_capacity(results.len());
+        for r in results {
+            group_results.push(r?);
+        }
+        group_results
+    };
+
+    #[cfg(not(feature = "parallel"))]
+    let group_results: Vec<(String, CVResults)> = {
+        let mut group_results = Vec::with_capacity(series_vec.len());
+        for (group_id, series) in series_vec {
+            let cv_result = cross_validate_with_folds(config, &series, &folds, &model_factory)?;
+            group_results.push((group_id, cv_result));
+        }
+        group_results
+    };
+
     let mut all_mae = Vec::new();
     let mut all_rmse = Vec::new();
     let mut all_smape = Vec::new();
     let mut all_mape = Vec::new();
 
-    for (group_id, series) in series_vec {
-        // Run CV using the shared folds (not series-specific folds)
-        let cv_result = cross_validate_with_folds(config, &series, &folds, &model_factory)?;
-
+    for (_, cv_result) in &group_results {
         all_mae.push(cv_result.aggregated.mae);
         all_rmse.push(cv_result.aggregated.rmse);
         all_smape.push(cv_result.aggregated.smape);
         if let Some(mape) = cv_result.aggregated.mape {
             all_mape.push(mape);
         }
-
-        group_results.push((group_id, cv_result));
     }
 
     let n_groups = group_results.len() as f64;
