@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Global/Batch Forecasting** — shared-parameter models for processing many series simultaneously
+  - `GlobalETS`: shared smoothing parameters (α, β, γ, φ) across N series, per-series initial states. 75-96x faster than N individual ETS fits for seasonal models.
+  - `GlobalAutoETS`: automatic model selection across N series — each candidate spec fitted once globally, best spec selected per series by NLL. 28-32x faster than N individual AutoETS fits.
+  - `GlobalCroston`: shared α across N intermittent demand series. Classic and SBA variants. 3-6x faster.
+  - `GlobalTheta`: shared α for Standard Theta Method across N series.
+  - `batch::auto_ets()`, `batch::ets()`, `batch::mfles()`: convenience functions for parallel batch processing
+  - `STL::decompose_batch()`: batch decomposition with scratch buffer reuse and rayon parallelism
+
+- **Parallel grouped cross-validation**: `grouped_cross_validate` now processes groups concurrently via rayon (was sequential)
+
+### Changed
+
+- **STL decomposition 2.0-2.5x faster**: running-sum moving average (O(n) vs O(n×window)) and precomputed tricube kernel weights in LOESS smoothing
+- **MSTL decomposition faster**: pre-creates STL instances outside iteration loop to reuse scratch buffers (benefits from underlying STL speedup)
+- **MFLES boosting 90% fewer allocations**: cache X'X Cholesky factor (Fourier design matrix is constant across rounds), pre-allocated residual and temp buffers, `calc_mse_sum()` avoids materializing temp Vecs
+
+## [0.5.2] - 2026-03-30
+
+### Added
+
+- **AutoETS Model Pools** — based on Petropoulos et al. (2023) "Wielding Occam's razor" ([arXiv:2102.13209](https://arxiv.org/abs/2102.13209))
+  - `ModelPool` enum: `Complete` (19 models, default), `NoMultiplicativeTrend` (15), `DampedTrendOnly` (12), `MatchErrorSeasonal` (16), `Reduced` (8)
+  - `AutoETSConfig::with_model_pool(ModelPool::Reduced)` — 2x faster on M5 dataset (30,490 series) with identical accuracy
+  - All models remain available for explicit fitting; pool only controls AutoETS candidate generation
+
+- **AutoARIMA Accuracy Improvements** — model order selection now matches Python statsforecast (3/4 test cases)
+  - AICc scoring (corrected AIC) replacing plain AIC for better small-sample penalization
+  - Drift parameter for ARIMA(0,1,0) matching R/Python `include.drift` convention
+  - Expanded stepwise grid candidates to include p=3 orders
+  - Greedy first-improvement stepwise search with 94-model cap (matching Python)
+  - Fixed d-selection to use KPSS-suggested value directly (no neighbor search)
+
+- **Innovations MLE for ARIMA** — exact maximum likelihood via ported statsmodels Cython
+  - `arma_innovations_algo_fast`: O(n·m²) innovations recursion
+  - `arma_acovf`: Brockwell-Davis linear system (eq 3.3.8)
+  - `arma_transformed_acovf_fast`, `arma_innovations_filter`, `lfilter`
+  - Three-phase optimization: L-BFGS CSS → NM CSS → NM MLE
+  - Hannan-Rissanen initialization for near-optimal starting values
+  - Parameters match Python to 5 decimal places on validation data
+
+- **Nelder-Mead Stagnation Early Stopping**
+  - `NelderMeadConfig::stagnation_window` — terminate when best value hasn't improved for N iterations
+  - Applied to ETS seasonal optimization (25-48% faster AutoETS)
+
+- **M5 Benchmark** (`docs/m5_ets_benchmark.md`)
+  - Full M5 dataset: 30,490 series, 28-day holdout, weekly seasonality
+  - Complete vs Reduced pool comparison: RMSE 1.4332 vs 1.4331 (0.007% diff), 2x speedup
+
+### Changed
+
+- TBATS/AutoTBATS 2.2-2.5x faster via trig precomputation, incremental Fourier, scratch buffers
+- AutoETS sorts candidates non-seasonal-first for earlier convergence
+- `check_stationarity()` relaxed for p≥3: proper AR polynomial root conditions replace overly strict `sum_abs < 1.5`
+- Variance floor (1e-15) in `calculate_fitted` prevents -inf AIC on perfect-fit series
+
+### Fixed
+
+- AutoARIMA `score_order` AIC formula inconsistency between (0,0) and non-(0,0) cases
+- AutoARIMA zero-variance bug: `score_order` returned None for constant series after differencing
+- ARIMA(0,1,0) missing drift: forecasts were flat instead of continuing trend
+- `calculate_fitted` -inf AIC on zero-variance residuals (e.g., linear data after differencing)
+
 ## [0.5.1] - 2026-03-28
 
 ### Added

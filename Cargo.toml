@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "anofox-forecast"
-version = "0.5.1"
+version = "0.5.2"
 edition = "2021"
 authors = ["Simon M"]
 description = "Time series forecasting library - Rust port of anofox-time"
@@ -33,6 +33,7 @@ thiserror = "2.0"
 rand = "0.8"
 anofox-regression = { version = "0.5.3", optional = true }
 anofox-statistics = "0.4"
+lbfgs = "0.3"
 fdars-core = { version = "0.9", optional = true, default-features = false }
 faer = { version = "0.23", optional = true, default-features = false, features = ["std", "linalg"] }
 serde = { version = "1.0", features = ["derive"], optional = true }
@@ -296,6 +297,14 @@ name = "period_detection"
 path = "examples/analysis/period_detection.rs"
 
 [[example]]
+name = "batch_global"
+path = "examples/forecasting/batch_global.rs"
+
+[[example]]
 name = "exogenous"
 path = "examples/forecasting/exogenous.rs"
+
+[[example]]
+name = "m5_ets_benchmark"
+path = "examples/m5_ets_benchmark.rs"
 

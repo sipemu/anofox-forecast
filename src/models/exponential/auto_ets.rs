@@ -26,11 +26,54 @@ pub enum SelectionCriterion {
     BIC,
 }
 
+/// Model pool for AutoETS candidate generation.
+///
+/// Controls which subset of the 30 ETS model combinations to consider.
+/// Based on Petropoulos et al. (2023) "Wielding Occam's razor: Fast and
+/// frugal retail forecasting" (arXiv:2102.13209), which demonstrates that
+/// reduced model pools perform comparably to the full set while being
+/// significantly faster.
+///
+/// All pools are subsets — they restrict which models are *considered* by
+/// default, but do not prevent any model from being fitted explicitly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ModelPool {
+    /// All 19 applicable ETS models (R's ets() default).
+    /// Excludes 11 problematic combinations with estimation difficulties
+    /// or infinite forecast variances.
+    #[default]
+    Complete,
+
+    /// 15 models: excludes multiplicative trend variants (MMN, MMdN, MMM, MMdM).
+    /// Multiplicative trends rarely improve accuracy and are computationally
+    /// expensive (require simulation for prediction intervals).
+    NoMultiplicativeTrend,
+
+    /// 12 models: only damped trends allowed (no AAN, AAA, MAN, MAA, MAM, MMN, MMM).
+    /// Damped trends are more robust — undamped trends produce positively
+    /// biased forecasts at longer horizons.
+    DampedTrendOnly,
+
+    /// 16 models: error and seasonal types must match (no MNA, MAA, MAdA).
+    /// Mismatched types (e.g., multiplicative error with additive seasonality)
+    /// cause numerical difficulties and tend to overestimate variance.
+    MatchErrorSeasonal,
+
+    /// 8 models: intersection of all restrictions above.
+    /// Balanced coverage: 2 level-only, 2 trend-only, 2 seasonal-only,
+    /// 2 trend+seasonal. Models: ANN, MNN, AAdN, MAdN, ANA, MNM, AAdA, MAdM.
+    /// Recommended for large-scale forecasting (fastest, comparable accuracy).
+    Reduced,
+}
+
 /// Configuration for AutoETS.
 #[derive(Debug, Clone)]
 pub struct AutoETSConfig {
     /// Selection criterion to use.
     pub criterion: SelectionCriterion,
+    /// Model pool controlling which ETS variants to consider.
+    /// See [`ModelPool`] for details on the available pools.
+    pub model_pool: ModelPool,
     /// Seasonal period (None for automatic detection or non-seasonal).
     pub seasonal_period: Option<usize>,
     /// Allow multiplicative errors.
@@ -49,6 +92,7 @@ impl Default for AutoETSConfig {
     fn default() -> Self {
         Self {
             criterion: SelectionCriterion::AICc,
+            model_pool: ModelPool::Complete,
             seasonal_period: None,
             allow_multiplicative_error: true,
             allow_multiplicative_seasonal: true,
@@ -92,6 +136,16 @@ impl AutoETSConfig {
         self.allow_multiplicative_seasonal = true;
         self.additive_only = false;
         self.multiplicative_seasonal_only = true;
+        self
+    }
+
+    /// Set the model pool (see [`ModelPool`] for available pools).
+    ///
+    /// Based on Petropoulos et al. (2023) "Wielding Occam's razor".
+    /// The `Reduced` pool (8 models) offers the best speed/accuracy tradeoff
+    /// for large-scale forecasting.
+    pub fn with_model_pool(mut self, pool: ModelPool) -> Self {
+        self.model_pool = pool;
         self
     }
 
@@ -212,17 +266,67 @@ impl AutoETS {
             ]
         };
 
+        let pool = self.config.model_pool;
+
         for &error in &error_types {
             for &trend in &trend_types {
                 for &seasonal in &seasonal_types {
-                    // Skip invalid combinations
-                    // Multiplicative errors with additive components can be problematic
+                    // Skip invalid combinations (M,A,A and M,Ad,A are unstable)
                     if error == ErrorType::Multiplicative
                         && (trend == TrendType::Additive || trend == TrendType::AdditiveDamped)
                         && seasonal == SeasonalType::Additive
                     {
-                        continue; // M,A,A and M,Ad,A can be unstable
+                        continue;
                     }
+
+                    // Apply model pool filters (Petropoulos et al., 2023)
+                    match pool {
+                        ModelPool::Complete => {}
+                        ModelPool::NoMultiplicativeTrend => {
+                            // Skip multiplicative trend variants
+                            // (our TrendType doesn't have multiplicative, so this is a no-op
+                            // in the current implementation — kept for API completeness)
+                        }
+                        ModelPool::DampedTrendOnly => {
+                            // Only allow damped trends (skip non-damped Additive trend)
+                            if trend == TrendType::Additive {
+                                continue;
+                            }
+                        }
+                        ModelPool::MatchErrorSeasonal => {
+                            // Error and seasonal type must match:
+                            // Additive error → additive seasonal, Mult error → mult seasonal
+                            if error == ErrorType::Multiplicative
+                                && seasonal == SeasonalType::Additive
+                            {
+                                continue; // MNA, MAA, MAdA excluded
+                            }
+                            if error == ErrorType::Additive
+                                && seasonal == SeasonalType::Multiplicative
+                            {
+                                continue; // ANM, AAM, AAdM excluded
+                            }
+                        }
+                        ModelPool::Reduced => {
+                            // Intersection: damped only + matched error/seasonal
+                            // Result: ANN, MNN, AAdN, MAdN, ANA, MNM, AAdA, MAdM
+                            if trend == TrendType::Additive {
+                                continue; // no undamped trend
+                            }
+                            // Match error with seasonal
+                            if error == ErrorType::Multiplicative
+                                && seasonal == SeasonalType::Additive
+                            {
+                                continue;
+                            }
+                            if error == ErrorType::Additive
+                                && seasonal == SeasonalType::Multiplicative
+                            {
+                                continue;
+                            }
+                        }
+                    }
+
                     candidates.push(ETSSpec::new(error, trend, seasonal));
                 }
             }
@@ -363,8 +467,11 @@ impl Forecaster for AutoETS {
             false
         };
 
-        // Generate candidate models
-        let candidates = self.generate_candidates(has_seasonal, has_non_positive);
+        // Generate candidate models, sorted so non-seasonal (cheap) models run first.
+        // This enables early termination for the sequential path.
+        let mut candidates = self.generate_candidates(has_seasonal, has_non_positive);
+        candidates.sort_by_key(|spec| if spec.has_seasonal() { 1 } else { 0 });
+
         self.model_scores.clear();
 
         let criterion = self.config.criterion;

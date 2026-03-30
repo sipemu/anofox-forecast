@@ -43,12 +43,12 @@ console.log(forecast.values);
 - **Forecasting Models (50+)**
   - ARIMA, SARIMA, and AutoARIMA with automatic order selection
   - Exponential Smoothing: SES, Holt's Linear, Holt-Winters, SeasonalES
-  - ETS (Error-Trend-Seasonal) state-space framework with AutoETS
+  - ETS (Error-Trend-Seasonal) state-space framework with AutoETS and `ModelPool` (Reduced/Complete/DampedTrendOnly/MatchErrorSeasonal)
   - Baseline methods: Naive, Seasonal Naive, Random Walk with Drift, SMA, Window Average
   - Theta family: Theta, Optimized Theta, Dynamic Theta, AutoTheta
   - Intermittent demand: Croston, ADIDA, TSB, IMAPA
   - TBATS/AutoTBATS for complex seasonality
-  - MFLES (Multiple Frequency Locally Estimated Scatterplot)
+  - MFLES (Multiple Frequency Locally Estimated Scatterplot) with cached Cholesky Fourier OLS
   - MSTL-based forecasting with configurable trend/seasonal methods and pre-regression exogenous support
   - GARCH for volatility modeling
   - VAR (Vector Autoregression) for multivariate forecasting with Granger causality
@@ -63,6 +63,15 @@ console.log(forecast.values);
   - Selection by cross-validation error
   - Builder API: `AutoForecast::builder().seasonal_period(12).include_arima(true).build()`
   - `fit_predict()` convenience method on all models
+
+- **Batch / Global Forecasting** — process many series with shared computation
+  - `GlobalETS`: shared smoothing params across N series (75-96x faster for seasonal ETS)
+  - `GlobalAutoETS`: automatic model selection across N series (28-32x faster)
+  - `GlobalCroston`: shared α across N intermittent demand series (3-6x faster)
+  - `GlobalTheta`: shared α for Standard Theta Method
+  - `batch::auto_ets()`, `batch::ets()`, `batch::mfles()`: parallel batch convenience functions
+  - `STL::decompose_batch()`: batch decomposition with parallel support
+  - Validated on M5 dataset (30,490 series): identical accuracy, 2x speedup with Reduced pool
 
 - **Ensemble Methods**
   - Mean, Median, Weighted MSE, InverseAIC, Stacking, HorizonAdaptive combination strategies
@@ -79,7 +88,7 @@ console.log(forecast.values);
 
 - **Seasonality & Decomposition**
   - `SeasonalComponent` / `TrendComponent` traits — composable, dual-purpose (standalone + feature extraction)
-  - STL (Seasonal-Trend decomposition using LOESS) with `StlBuilder` for ergonomic configuration
+  - STL (Seasonal-Trend decomposition using LOESS) with `StlBuilder` — optimized with running-sum MA and precomputed tricube kernel (2-2.5x faster)
   - MSTL (Multiple Seasonal-Trend decomposition) for complex seasonality, with pre-regression exogenous regressor support
   - Prophet-style Fourier seasonality (`FourierSeasonality`) with flexible harmonic modeling
   - Dummy (one-hot) seasonality (`DummySeasonality`) — captures arbitrary seasonal shapes without smoothness assumptions
@@ -215,7 +224,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-anofox-forecast = "0.5"
+anofox-forecast = "0.5.2"
 ```
 
 ### Optional Features
@@ -364,6 +373,25 @@ pipeline.fit(&ts)?;
 let forecast = pipeline.predict(12)?;
 ```
 
+### Batch Forecasting (Many Series)
+
+```rust
+use anofox_forecast::models::exponential::{GlobalAutoETS, GlobalETS, ETSSpec, ModelPool};
+
+// 1000 series, each a Vec<f64> — all same length
+let all_series: Vec<Vec<f64>> = load_my_data();
+
+// GlobalAutoETS: select best model per series, shared optimization (28-32x faster)
+let mut model = GlobalAutoETS::new(12, ModelPool::Reduced);
+model.fit(&all_series).unwrap();
+let forecasts = model.predict(12); // Vec<Vec<f64>>, one per series
+
+// GlobalETS: fit a known spec across all series (75-96x faster)
+let mut model = GlobalETS::new(ETSSpec::ana(), 12);
+model.fit(&all_series).unwrap();
+let forecasts = model.predict(12);
+```
+
 ### Exogenous Regressors
 
 ```rust
@@ -467,7 +495,7 @@ println!("Upper: {:?}", intervals.upper());
 |--------|--------|
 | **Auto Selection** | `AutoForecast`, `AutoEnsemble` |
 | **ARIMA** | `ARIMA`, `SARIMA`, `AutoARIMA` |
-| **Exponential Smoothing** | `SES`, `Holt`, `HoltWinters`, `SeasonalES`, `ETS`, `AutoETS` |
+| **Exponential Smoothing** | `SES`, `Holt`, `HoltWinters`, `SeasonalES`, `ETS`, `AutoETS` (with `ModelPool`) |
 | **Theta** | `Theta`, `OptimizedTheta`, `DynamicTheta`, `AutoTheta` |
 | **Baseline** | `Naive`, `Mean`, `SeasonalNaive`, `RandomWalkWithDrift`, `SMA`, `WindowAverage`, `SeasonalWindowAverage` |
 | **Intermittent** | `Croston`, `TSB`, `ADIDA`, `IMAPA` |
@@ -478,6 +506,7 @@ println!("Upper: {:?}", intervals.upper());
 | **Ensemble** | `Ensemble` (Mean, Median, Weighted MSE, InverseAIC, Stacking, HorizonAdaptive) |
 | **Regression** | `RegressionForecaster` (OLS, Ridge, ElasticNet, Quantile, WLS, RLS, Tweedie, Poisson, BLS, Dynamic) |
 | **Hierarchical** | `HierarchyTree` (BottomUp, TopDown, MiddleOut, MinTraceOls, MinTraceShrink) |
+| **Batch/Global** | `GlobalETS`, `GlobalAutoETS`, `GlobalCroston`, `GlobalTheta`, `batch::auto_ets`, `batch::ets`, `batch::mfles` |
 
 ### Utilities
 
@@ -567,6 +596,7 @@ cargo run --example postprocess_conformal   # Conformal prediction intervals
 ## Guides
 
 - [Model Selection Guide](docs/model_selection_guide.md) — Which model to use for your data
+- [M5 ETS Benchmark](docs/m5_ets_benchmark.md) — AutoETS Complete vs Reduced pool on 30,490 M5 series
 
 ## Dependencies
 

@@ -28,6 +28,7 @@ compile_error!(
     "The 'parallel' feature is not supported on WASM targets. Build without --features parallel"
 );
 
+pub mod batch;
 pub mod changepoint;
 pub mod core;
 pub mod detection;

@@ -47,7 +47,7 @@ impl Default for AutoARIMAConfig {
             max_cap_d: 1,
             seasonal_period: 0,
             stepwise: true,
-            true_stepwise: false, // Default to grid stepwise for backwards compatibility
+            true_stepwise: false, // Grid stepwise for reliable model selection
             use_aic: true,
         }
     }
@@ -217,7 +217,8 @@ impl AutoARIMA {
     fn stepwise_candidates(&self, d: usize, cap_d: usize) -> Vec<ModelOrder> {
         let s = self.config.seasonal_period;
 
-        // Non-seasonal candidates
+        // Non-seasonal candidates: core set up to (2,2) plus selective p=3 extensions
+        // to match Python's model selection reach without excessive overfit candidates
         let nonseasonal = vec![
             (0, 0),
             (1, 0),
@@ -228,6 +229,12 @@ impl AutoARIMA {
             (2, 1),
             (1, 2),
             (2, 2),
+            (3, 0),
+            (0, 3),
+            (3, 1),
+            (1, 3),
+            (3, 2),
+            (2, 3),
         ];
 
         let mut candidates = Vec::new();
@@ -402,47 +409,18 @@ impl AutoARIMA {
     }
 
     /// Generate neighbors of a given order (for true stepwise search).
+    /// Matches Python statsforecast neighbor ordering:
+    /// Seasonal first (P-1, Q-1, P+1, Q+1, diagonals),
+    /// then non-seasonal (p-1, q-1, p+1, q+1, diagonals).
     fn get_neighbors(&self, order: ModelOrder) -> Vec<ModelOrder> {
         let mut neighbors = Vec::new();
         let s = self.config.seasonal_period;
 
-        // Non-seasonal neighbors: vary p and q by ±1
-        if order.p > 0 {
-            neighbors.push(ModelOrder {
-                p: order.p - 1,
-                ..order
-            });
-        }
-        if order.p < self.config.max_p {
-            neighbors.push(ModelOrder {
-                p: order.p + 1,
-                ..order
-            });
-        }
-        if order.q > 0 {
-            neighbors.push(ModelOrder {
-                q: order.q - 1,
-                ..order
-            });
-        }
-        if order.q < self.config.max_q {
-            neighbors.push(ModelOrder {
-                q: order.q + 1,
-                ..order
-            });
-        }
-
-        // Seasonal neighbors (if applicable)
+        // Seasonal neighbors first (matching Python's order)
         if s > 1 {
             if order.cap_p > 0 {
                 neighbors.push(ModelOrder {
                     cap_p: order.cap_p - 1,
-                    ..order
-                });
-            }
-            if order.cap_p < self.config.max_cap_p {
-                neighbors.push(ModelOrder {
-                    cap_p: order.cap_p + 1,
                     ..order
                 });
             }
@@ -452,19 +430,110 @@ impl AutoARIMA {
                     ..order
                 });
             }
+            if order.cap_p < self.config.max_cap_p {
+                neighbors.push(ModelOrder {
+                    cap_p: order.cap_p + 1,
+                    ..order
+                });
+            }
             if order.cap_q < self.config.max_cap_q {
                 neighbors.push(ModelOrder {
                     cap_q: order.cap_q + 1,
                     ..order
                 });
             }
+            // Seasonal diagonals
+            if order.cap_p > 0 && order.cap_q > 0 {
+                neighbors.push(ModelOrder {
+                    cap_p: order.cap_p - 1,
+                    cap_q: order.cap_q - 1,
+                    ..order
+                });
+            }
+            if order.cap_p > 0 && order.cap_q < self.config.max_cap_q {
+                neighbors.push(ModelOrder {
+                    cap_p: order.cap_p - 1,
+                    cap_q: order.cap_q + 1,
+                    ..order
+                });
+            }
+            if order.cap_p < self.config.max_cap_p && order.cap_q > 0 {
+                neighbors.push(ModelOrder {
+                    cap_p: order.cap_p + 1,
+                    cap_q: order.cap_q - 1,
+                    ..order
+                });
+            }
+            if order.cap_p < self.config.max_cap_p && order.cap_q < self.config.max_cap_q {
+                neighbors.push(ModelOrder {
+                    cap_p: order.cap_p + 1,
+                    cap_q: order.cap_q + 1,
+                    ..order
+                });
+            }
+        }
+
+        // Non-seasonal neighbors (matching Python's order: p-1, q-1, p+1, q+1)
+        if order.p > 0 {
+            neighbors.push(ModelOrder {
+                p: order.p - 1,
+                ..order
+            });
+        }
+        if order.q > 0 {
+            neighbors.push(ModelOrder {
+                q: order.q - 1,
+                ..order
+            });
+        }
+        if order.p < self.config.max_p {
+            neighbors.push(ModelOrder {
+                p: order.p + 1,
+                ..order
+            });
+        }
+        if order.q < self.config.max_q {
+            neighbors.push(ModelOrder {
+                q: order.q + 1,
+                ..order
+            });
+        }
+        // Non-seasonal diagonals
+        if order.p > 0 && order.q > 0 {
+            neighbors.push(ModelOrder {
+                p: order.p - 1,
+                q: order.q - 1,
+                ..order
+            });
+        }
+        if order.p > 0 && order.q < self.config.max_q {
+            neighbors.push(ModelOrder {
+                p: order.p - 1,
+                q: order.q + 1,
+                ..order
+            });
+        }
+        if order.p < self.config.max_p && order.q > 0 {
+            neighbors.push(ModelOrder {
+                p: order.p + 1,
+                q: order.q - 1,
+                ..order
+            });
+        }
+        if order.p < self.config.max_p && order.q < self.config.max_q {
+            neighbors.push(ModelOrder {
+                p: order.p + 1,
+                q: order.q + 1,
+                ..order
+            });
         }
 
         neighbors
     }
 
-    /// True stepwise search using neighbor-based hill climbing.
-    /// Starts from a baseline model and iteratively moves to the best neighbor.
+    /// True stepwise search matching Python statsforecast / R's auto.arima.
+    /// Greedy first-improvement: takes the first neighbor that improves the IC,
+    /// then restarts the neighbor scan from the beginning.
     /// Uses score-only evaluation with pre-computed differenced series.
     fn true_stepwise_search(
         &mut self,
@@ -474,18 +543,21 @@ impl AutoARIMA {
     ) -> Option<(ModelOrder, f64)> {
         let s = self.config.seasonal_period;
         let use_aic = self.config.use_aic;
+        let max_models = 94; // matching Python's nmodels limit
 
-        // Start with baseline: ARIMA(1, d, 1) or (0, d, 0) for simpler case
+        // Initial models matching Python statsforecast starting points
         let initial_orders = vec![
+            // Model 0: (start_p, d, start_q) with seasonal
             ModelOrder {
-                p: 1,
+                p: 2,
                 d,
-                q: 1,
+                q: 2,
                 cap_p: if s > 1 { 1 } else { 0 },
                 cap_d,
                 cap_q: if s > 1 { 1 } else { 0 },
                 s,
             },
+            // Model 1: null model with constant
             ModelOrder {
                 p: 0,
                 d,
@@ -495,13 +567,32 @@ impl AutoARIMA {
                 cap_q: 0,
                 s,
             },
+            // Model 2: pure AR
             ModelOrder {
-                p: 2,
+                p: if self.config.max_p > 0 { 1 } else { 0 },
                 d,
-                q: 2,
-                cap_p: 0,
+                q: 0,
+                cap_p: if s > 1 && self.config.max_cap_p > 0 {
+                    1
+                } else {
+                    0
+                },
                 cap_d,
                 cap_q: 0,
+                s,
+            },
+            // Model 3: pure MA
+            ModelOrder {
+                p: 0,
+                d,
+                q: if self.config.max_q > 0 { 1 } else { 0 },
+                cap_p: 0,
+                cap_d,
+                cap_q: if s > 1 && self.config.max_cap_q > 0 {
+                    1
+                } else {
+                    0
+                },
                 s,
             },
         ];
@@ -509,8 +600,17 @@ impl AutoARIMA {
         // Find best starting point
         let mut best_order: Option<ModelOrder> = None;
         let mut best_score = f64::INFINITY;
+        let mut n_models = 0usize;
 
+        let mut visited = std::collections::HashSet::new();
         for order in initial_orders {
+            let key = (order.p, order.q, order.cap_p, order.cap_q);
+            if visited.contains(&key) {
+                continue;
+            }
+            visited.insert(key);
+            n_models += 1;
+
             if let Some(score) = Self::score_order_static(order, diff_series, use_aic) {
                 self.model_scores.push((order, score));
                 if score < best_score {
@@ -523,16 +623,15 @@ impl AutoARIMA {
         let mut current_order = best_order?;
         let mut current_score = best_score;
 
-        // Hill climbing: keep moving to best neighbor until no improvement
-        let mut visited = std::collections::HashSet::new();
-        visited.insert((
-            current_order.p,
-            current_order.q,
-            current_order.cap_p,
-            current_order.cap_q,
-        ));
-
+        // Greedy first-improvement hill climbing (matching Python statsforecast).
+        // On each iteration, generate ALL neighbors in a fixed order.
+        // Take the FIRST one that improves the IC and restart from the top.
+        // Stop when no neighbor improves or max_models reached.
         loop {
+            if n_models >= max_models {
+                break;
+            }
+
             let neighbors = self.get_neighbors(current_order);
             let mut improved = false;
 
@@ -542,6 +641,7 @@ impl AutoARIMA {
                     continue;
                 }
                 visited.insert(key);
+                n_models += 1;
 
                 if let Some(score) = Self::score_order_static(neighbor, diff_series, use_aic) {
                     self.model_scores.push((neighbor, score));
@@ -550,7 +650,12 @@ impl AutoARIMA {
                         current_score = score;
                         current_order = neighbor;
                         improved = true;
+                        break; // greedy: take first improvement, restart scan
                     }
+                }
+
+                if n_models >= max_models {
+                    break;
                 }
             }
 
@@ -671,7 +776,8 @@ impl Forecaster for AutoARIMA {
             });
         }
 
-        // Determine differencing orders - search over range instead of fixing
+        // Determine differencing orders (fixed, matching Python/R convention).
+        // Python/R use statistical tests (KPSS) to determine d and D, then fix them.
         let suggested_d = suggest_differencing(values).min(self.config.max_d);
         let suggested_cap_d = if s > 1 {
             Self::suggest_seasonal_differencing(values, s).min(self.config.max_cap_d)
@@ -679,23 +785,12 @@ impl Forecaster for AutoARIMA {
             0
         };
 
-        // Build range of d values to try (suggested and neighbors)
-        let mut d_range = vec![suggested_d];
-        if suggested_d > 0 {
-            d_range.push(suggested_d - 1);
-        }
-        if suggested_d < self.config.max_d {
-            d_range.push(suggested_d + 1);
-        }
-        d_range.sort();
-        d_range.dedup();
+        // Fix d at the suggested value (matching Python statsforecast / R auto.arima)
+        let d_range = vec![suggested_d];
 
-        // Build range of D values to try (both 0 and suggested for seasonal)
-        let cap_d_range: Vec<usize> = if s > 1 && self.config.max_cap_d > 0 {
-            let mut range = vec![0, suggested_cap_d];
-            range.sort();
-            range.dedup();
-            range
+        // Fix D at the suggested value
+        let cap_d_range: Vec<usize> = if s > 1 {
+            vec![suggested_cap_d]
         } else {
             vec![0]
         };

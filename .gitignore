@@ -46,3 +46,5 @@ tarpaulin-report.html
 
 # Claude Code worktrees
 .claude/worktrees/
+validation/data/m5_top1000.csv
+validation/data/m5_full.csv

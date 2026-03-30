@@ -74,6 +74,9 @@ pub struct MFLES {
     seasonality: Option<Vec<f64>>,
     /// OLS result for exogenous regressors (if any).
     exog_ols: Option<OLSResult>,
+    /// Pre-computed Cholesky factor of X'X for batch processing.
+    /// When set, the Fourier OLS skips X'X computation and Cholesky factoring.
+    shared_cholesky: Option<Vec<Vec<f64>>>,
 }
 
 /// Builder for constructing an [`MFLES`] model with custom parameters.
@@ -237,7 +240,31 @@ impl MFLES {
             is_multiplicative: false,
             seasonality: None,
             exog_ols: None,
+            shared_cholesky: None,
         }
+    }
+
+    /// Inject a pre-computed Cholesky factor of X'X for batch processing.
+    /// When set, the boosting loop reuses this factor instead of recomputing.
+    pub fn set_shared_cholesky(&mut self, cholesky: Option<Vec<Vec<f64>>>) {
+        self.shared_cholesky = cholesky;
+    }
+
+    /// Compute the default Fourier order for a given seasonal period.
+    pub fn default_fourier_order(period: usize) -> usize {
+        Self::set_fourier(period)
+    }
+
+    /// Build the Fourier design matrix for a given (n, period, order).
+    /// Public for batch pre-computation.
+    pub fn build_fourier_series(n: usize, period: usize, order: usize) -> Vec<Vec<f64>> {
+        Self::get_fourier_series(n, period, order)
+    }
+
+    /// Compute Cholesky factor of a symmetric positive definite matrix.
+    /// Public for batch pre-computation.
+    pub fn compute_cholesky_factor(a: &[Vec<f64>]) -> Option<Vec<Vec<f64>>> {
+        Self::cholesky_factor(a)
     }
 
     /// Set maximum boosting rounds.
@@ -428,6 +455,7 @@ impl MFLES {
 
     /// OLS fit: X @ (X'X)^-1 @ X' @ y
     /// Returns (fitted_values, coefficients)
+    #[cfg_attr(not(test), allow(dead_code))]
     fn ols_with_coeffs(x: &[Vec<f64>], y: &[f64]) -> (Vec<f64>, Vec<f64>) {
         let n = y.len();
         if x.is_empty() || n == 0 {
@@ -473,6 +501,7 @@ impl MFLES {
     }
 
     /// Solve symmetric positive definite system using Cholesky decomposition.
+    #[cfg_attr(not(test), allow(dead_code))]
     fn solve_symmetric(a: &[Vec<f64>], b: &[f64]) -> Option<Vec<f64>> {
         let n = b.len();
         if n == 0 || a.len() != n {
@@ -521,6 +550,97 @@ impl MFLES {
         }
 
         Some(x)
+    }
+
+    /// Compute Cholesky factor L of a symmetric positive definite matrix.
+    /// Returns L such that A = L L'. Used for caching across multiple solves.
+    fn cholesky_factor(a: &[Vec<f64>]) -> Option<Vec<Vec<f64>>> {
+        let n = a.len();
+        let mut l = vec![vec![0.0; n]; n];
+        for i in 0..n {
+            for j in 0..=i {
+                let mut sum = a[i][j];
+                for k in 0..j {
+                    sum -= l[i][k] * l[j][k];
+                }
+                if i == j {
+                    if sum <= 0.0 {
+                        return None;
+                    }
+                    l[i][j] = sum.sqrt();
+                } else {
+                    l[i][j] = sum / l[j][j];
+                }
+            }
+        }
+        Some(l)
+    }
+
+    /// Solve L L' x = b using a pre-computed Cholesky factor.
+    fn solve_with_cholesky(l: &[Vec<f64>], b: &[f64]) -> Vec<f64> {
+        let n = b.len();
+        // Forward substitution: L y = b
+        let mut y = vec![0.0; n];
+        for i in 0..n {
+            let mut sum = b[i];
+            for j in 0..i {
+                sum -= l[i][j] * y[j];
+            }
+            y[i] = sum / l[i][i];
+        }
+        // Backward substitution: L' x = y
+        let mut x = vec![0.0; n];
+        for i in (0..n).rev() {
+            let mut sum = y[i];
+            for j in (i + 1)..n {
+                sum -= l[j][i] * x[j];
+            }
+            x[i] = sum / l[i][i];
+        }
+        x
+    }
+
+    /// OLS with pre-cached Cholesky factor of X'X. Only recomputes X'y.
+    fn ols_with_cached_cholesky(
+        x: &[Vec<f64>],
+        y: &[f64],
+        cholesky_l: &[Vec<f64>],
+        fitted: &mut [f64],
+    ) -> Vec<f64> {
+        let n = y.len();
+        // Compute X'y
+        let xty: Vec<f64> = x
+            .iter()
+            .map(|col| col.iter().zip(y.iter()).map(|(a, b)| a * b).sum())
+            .collect();
+        // Solve using cached Cholesky factor
+        let coeffs = Self::solve_with_cholesky(cholesky_l, &xty);
+        // Compute fitted values: X @ coeffs (write into pre-allocated buffer)
+        fitted[..n].fill(0.0);
+        for (j, coef) in coeffs.iter().enumerate() {
+            for (i, val) in x[j].iter().enumerate() {
+                fitted[i] += coef * val;
+            }
+        }
+        coeffs
+    }
+
+    /// Compute MSE between y and (a + b) without allocating a temp Vec.
+    fn calc_mse_sum(y: &[f64], a: &[f64], b: &[f64]) -> f64 {
+        let n = y.len();
+        if n == 0 {
+            return 0.0;
+        }
+        let sum: f64 = y
+            .iter()
+            .zip(a.iter())
+            .zip(b.iter())
+            .map(|((yi, ai), bi)| {
+                let diff = yi - ai - bi;
+                diff * diff
+            })
+            .sum();
+        sum / n as f64
     }
 
     /// Fast OLS for linear trend.
@@ -908,8 +1028,6 @@ impl Forecaster for MFLES {
             return Ok(());
         }
 
-        let _og_y = y.clone();
-
         // Fourier order for seasonal fitting
         let fourier_order = self
             .fourier_order
@@ -955,11 +1073,43 @@ impl Forecaster for MFLES {
         let mut robust_mode = self.robust;
         let cov_threshold = 0.7; // statsforecast default
 
+        // Pre-cache X'X Cholesky factor for Fourier OLS — constant across rounds.
+        // If a shared_cholesky was injected (batch mode), reuse it.
+        let k = fourier_series.len();
+        let cached_xtx_inv = if let Some(ref chol) = self.shared_cholesky {
+            Some(chol.clone())
+        } else if k > 0 {
+            let mut xtx = vec![vec![0.0; k]; k];
+            for i in 0..k {
+                for j in i..k {
+                    let dot: f64 = fourier_series[i]
+                        .iter()
+                        .zip(fourier_series[j].iter())
+                        .map(|(a, b)| a * b)
+                        .sum();
+                    xtx[i][j] = dot;
+                    xtx[j][i] = dot;
+                }
+            }
+            for i in 0..k {
+                xtx[i][i] += 1e-8;
+            }
+            Self::cholesky_factor(&xtx)
+        } else {
+            None
+        };
+
+        // Pre-allocate reusable buffers to avoid per-round heap allocations
+        let mut resids = vec![0.0; n];
+        let mut temp_fitted = vec![0.0; n]; // for MSE checks without allocation
+
         // Main boosting loop
         let mut final_round = 0;
         for round in 0..self.max_rounds {
             final_round = round;
-            let resids: Vec<f64> = y.iter().zip(fitted.iter()).map(|(a, b)| a - b).collect();
+            for i in 0..n {
+                resids[i] = y[i] - fitted[i];
+            }
 
             // Auto-detect robust mode after round 0 (statsforecast behavior)
             if round == 0 && !self.robust {
@@ -990,27 +1140,37 @@ impl Forecaster for MFLES {
                 }
             }
 
-            // Fit seasonal component
+            // Fit seasonal component using cached Cholesky factor
             if self.season_length > 0 && !fourier_series.is_empty() {
-                let (seas, coeffs) = Self::ols_with_coeffs(&fourier_series, &resids);
-                let seas_scaled: Vec<f64> = seas.iter().map(|&s| s * self.seasonal_lr).collect();
+                let (coeffs, seas_valid) = if let Some(ref chol) = cached_xtx_inv {
+                    let c = Self::ols_with_cached_cholesky(
+                        &fourier_series,
+                        &resids,
+                        chol,
+                        &mut temp_fitted,
+                    );
+                    (c, true)
+                } else {
+                    (vec![], false)
+                };
+
+                // Scale seasonal and coefficients by learning rate
+                if seas_valid {
+                    for i in 0..n {
+                        temp_fitted[i] *= self.seasonal_lr;
+                    }
+                }
                 let coeffs_scaled: Vec<f64> =
                     coeffs.iter().map(|&c| c * self.seasonal_lr).collect();
 
-                let component_mse = Self::calc_mse(
-                    &y,
-                    &fitted
-                        .iter()
-                        .zip(seas_scaled.iter())
-                        .map(|(f, s)| f + s)
-                        .collect::<Vec<_>>(),
-                );
+                // MSE check without temp Vec allocation
+                let component_mse = Self::calc_mse_sum(&y, &fitted, &temp_fitted);
 
                 if mse.is_none_or(|m| m > component_mse) {
                     mse = Some(component_mse);
                     for i in 0..n {
-                        fitted[i] += seas_scaled[i];
-                        seasonal_component[i] += seas_scaled[i];
+                        fitted[i] += temp_fitted[i];
+                        seasonal_component[i] += temp_fitted[i];
                     }
 
                     // Accumulate Fourier coefficients for forecasting
@@ -1023,7 +1183,9 @@ impl Forecaster for MFLES {
             }
 
             // Recompute residuals after seasonal
-            let resids: Vec<f64> = y.iter().zip(fitted.iter()).map(|(a, b)| a - b).collect();
+            for i in 0..n {
+                resids[i] = y[i] - fitted[i];
+            }
 
             // Odd rounds: fit linear trend
             if round % 2 == 1 {
@@ -1033,32 +1195,27 @@ impl Forecaster for MFLES {
                     Self::fast_ols(&resids)
                 };
 
-                let tren_scaled: Vec<f64> = tren.iter().map(|&t| t * self.trend_lr).collect();
+                // Scale into temp buffer
+                for i in 0..n {
+                    temp_fitted[i] = tren[i] * self.trend_lr;
+                }
 
-                let component_mse = Self::calc_mse(
-                    &y,
-                    &fitted
-                        .iter()
-                        .zip(tren_scaled.iter())
-                        .map(|(f, t)| f + t)
-                        .collect::<Vec<_>>(),
-                );
+                let component_mse = Self::calc_mse_sum(&y, &fitted, &temp_fitted);
 
                 if mse.is_none_or(|m| m > component_mse) {
                     mse = Some(component_mse);
                     for i in 0..n {
-                        fitted[i] += tren_scaled[i];
-                        linear_component[i] += tren_scaled[i];
+                        fitted[i] += temp_fitted[i];
+                        linear_component[i] += temp_fitted[i];
                     }
 
                     // Accumulate linear component to trend (last 2 values)
-                    // statsforecast: self.trend += tren[-2:]
                     if n >= 2 {
-                        trend_accum[0] += tren_scaled[n - 2];
-                        trend_accum[1] += tren_scaled[n - 1];
+                        trend_accum[0] += temp_fitted[n - 2];
+                        trend_accum[1] += temp_fitted[n - 1];
                     } else if n == 1 {
-                        trend_accum[0] += tren_scaled[0];
-                        trend_accum[1] += tren_scaled[0];
+                        trend_accum[0] += temp_fitted[0];
+                        trend_accum[1] += temp_fitted[0];
                     }
 
                     // Compute penalty on first linear fit
@@ -1069,32 +1226,28 @@ impl Forecaster for MFLES {
             }
             // Even rounds after round 4: SES ensemble
             else if round > 4 && round % 2 == 0 {
-                let resids: Vec<f64> = y.iter().zip(fitted.iter()).map(|(a, b)| a - b).collect();
+                for i in 0..n {
+                    resids[i] = y[i] - fitted[i];
+                }
                 // statsforecast default: smoother=False, order=1 (uses rolling_mean with window=2)
                 let ses = Self::ses_ensemble(&resids, 0.05, 1.0, false, 1);
-                let ses_scaled: Vec<f64> = ses.iter().map(|&s| s * self.rs_lr).collect();
+                for i in 0..n {
+                    temp_fitted[i] = ses[i] * self.rs_lr;
+                }
 
-                let component_mse = Self::calc_mse(
-                    &y,
-                    &fitted
-                        .iter()
-                        .zip(ses_scaled.iter())
-                        .map(|(f, s)| f + s)
-                        .collect::<Vec<_>>(),
-                );
+                let component_mse = Self::calc_mse_sum(&y, &fitted, &temp_fitted);
 
                 // Add round penalty to avoid overfitting
                 let round_penalty = 0.0001;
                 if mse.is_none_or(|m| m > component_mse + round_penalty * m) {
                     mse = Some(component_mse);
                     for i in 0..n {
-                        fitted[i] += ses_scaled[i];
-                        ses_component[i] += ses_scaled[i];
+                        fitted[i] += temp_fitted[i];
+                        ses_component[i] += temp_fitted[i];
                     }
 
                     // Accumulate SES to trend (scalar added to both)
-                    // statsforecast: self.trend += tren[-1]
-                    let ses_last = ses_scaled[n - 1];
+                    let ses_last = temp_fitted[n - 1];
                     trend_accum[0] += ses_last;
                     trend_accum[1] += ses_last;
                 }
