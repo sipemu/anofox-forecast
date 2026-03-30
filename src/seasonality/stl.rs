@@ -359,21 +359,49 @@ impl STL {
         Self::loess_smooth_into(buf_a, self.low_pass_smoothness, unit_weights, result);
     }
 
-    /// Simple centered moving average, writing into pre-allocated buffer.
+    /// Simple centered moving average using a running sum for O(n) complexity.
     fn moving_average_into(series: &[f64], window: usize, result: &mut Vec<f64>) {
         let n = series.len();
         let half = window / 2;
         result.resize(n, 0.0);
 
-        for (i, res) in result.iter_mut().enumerate() {
-            let start = i.saturating_sub(half);
-            let end = (i + half + 1).min(n);
-            let sum: f64 = series[start..end].iter().sum();
-            *res = sum / (end - start) as f64;
+        if n == 0 {
+            return;
+        }
+
+        // Bootstrap: compute initial window sum for i=0
+        let init_end = (half + 1).min(n);
+        let mut running_sum: f64 = series[..init_end].iter().sum();
+        let mut count = init_end;
+        result[0] = running_sum / count as f64;
+
+        // Slide the window: add entering element, remove leaving element
+        for i in 1..n {
+            let new_end = i + half + 1;
+            let old_start_prev = (i - 1).saturating_sub(half);
+            let old_start = i.saturating_sub(half);
+
+            // Add new element entering the right side
+            if new_end <= n && new_end > 0 {
+                let prev_end = i + half;
+                if prev_end < n {
+                    running_sum += series[prev_end];
+                    count += 1;
+                }
+            }
+
+            // Remove element leaving the left side
+            if old_start > old_start_prev {
+                running_sum -= series[old_start_prev];
+                count -= 1;
+            }
+
+            result[i] = running_sum / count as f64;
         }
     }
 
     /// LOESS smoothing, writing into pre-allocated buffer.
+    /// Uses precomputed tricube kernel weights for O(n × span) with no per-point recomputation.
     fn loess_smooth_into(values: &[f64], span: usize, weights: &[f64], result: &mut Vec<f64>) {
         let n = values.len();
         result.resize(n, 0.0);
@@ -382,26 +410,34 @@ impl STL {
         }
 
         let half_span = span / 2;
+        let max_dist = half_span as f64 + 1.0;
+        let inv_max_dist = 1.0 / max_dist;
+
+        // Precompute tricube kernel: kernel[d] = tricube(d / max_dist)
+        // Only depends on distance from center, reused for every point
+        let kernel: Vec<f64> = (0..=half_span)
+            .map(|d| {
+                let u = d as f64 * inv_max_dist;
+                if u < 1.0 {
+                    let u3 = u * u * u;
+                    let t = 1.0 - u3;
+                    t * t * t
+                } else {
+                    0.0
+                }
+            })
+            .collect();
 
         for i in 0..n {
-            // Determine window
             let start = i.saturating_sub(half_span);
             let end = (i + half_span + 1).min(n);
 
-            // Compute weighted local regression (simplified to weighted mean)
             let mut sum_weights = 0.0;
             let mut sum_values = 0.0;
 
             for j in start..end {
-                let dist = (i as f64 - j as f64).abs();
-                let max_dist = half_span as f64 + 1.0;
-                let u = dist / max_dist;
-                let tricube = if u < 1.0 {
-                    (1.0 - u.powi(3)).powi(3)
-                } else {
-                    0.0
-                };
-                let w = tricube * weights[j];
+                let dist = j.abs_diff(i);
+                let w = kernel[dist] * weights[j];
                 sum_weights += w;
                 sum_values += w * values[j];
             }
