@@ -4,10 +4,10 @@ resolver = "2"
 
 [package]
 name = "anofox-forecast"
-version = "0.5.2"
+version = "0.5.3"
 edition = "2021"
-authors = ["Simon M"]
-description = "Time series forecasting library - Rust port of anofox-time"
+authors = ["Simon Müller"]
+description = "Time series forecasting library"
 license = "MIT"
 repository = "https://github.com/sipemu/anofox-forecast"
 keywords = ["time-series", "forecasting", "arima", "ets", "statistics"]
