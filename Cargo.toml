@@ -297,6 +297,10 @@ name = "period_detection"
 path = "examples/analysis/period_detection.rs"
 
 [[example]]
+name = "batch_global"
+path = "examples/forecasting/batch_global.rs"
+
+[[example]]
 name = "exogenous"
 path = "examples/forecasting/exogenous.rs"
 

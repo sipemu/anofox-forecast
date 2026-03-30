@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Global/Batch Forecasting** — shared-parameter models for processing many series simultaneously
+  - `GlobalETS`: shared smoothing parameters (α, β, γ, φ) across N series, per-series initial states. 75-96x faster than N individual ETS fits for seasonal models.
+  - `GlobalAutoETS`: automatic model selection across N series — each candidate spec fitted once globally, best spec selected per series by NLL. 28-32x faster than N individual AutoETS fits.
+  - `GlobalCroston`: shared α across N intermittent demand series. Classic and SBA variants. 3-6x faster.
+  - `GlobalTheta`: shared α for Standard Theta Method across N series.
+  - `batch::auto_ets()`, `batch::ets()`, `batch::mfles()`: convenience functions for parallel batch processing
+  - `STL::decompose_batch()`: batch decomposition with scratch buffer reuse and rayon parallelism
+
+- **Parallel grouped cross-validation**: `grouped_cross_validate` now processes groups concurrently via rayon (was sequential)
+
 ### Changed
 
 - **STL decomposition 2.0-2.5x faster**: running-sum moving average (O(n) vs O(n×window)) and precomputed tricube kernel weights in LOESS smoothing
