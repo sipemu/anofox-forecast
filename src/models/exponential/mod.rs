@@ -18,7 +18,7 @@ mod ses;
 
 pub use auto_ets::{AutoETS, AutoETSConfig, ModelPool, SelectionCriterion};
 pub use ets::{ETSSpec, ErrorType, SeasonalType as ETSSeasonalType, TrendType, ETS};
-pub use global_ets::GlobalETS;
+pub use global_ets::{GlobalAutoETS, GlobalETS};
 pub use holt::HoltLinearTrend;
 pub use holt_winters::{HoltWinters, SeasonalType};
 pub use seasonal_es::{SeasonalES, SeasonalESErrorType};
