@@ -147,6 +147,25 @@ impl MSTL {
         // Reusable buffer for deseasonalized/adjusted data (avoids allocations per iteration)
         let mut buf = vec![0.0_f64; n];
 
+        // Pre-create STL instances outside the loop to reuse scratch buffers
+        let stl_trend = if self.robust {
+            STL::new(max_period).robust()
+        } else {
+            STL::new(max_period)
+        };
+
+        let stl_seasonals: Vec<STL> = self
+            .seasonal_periods
+            .iter()
+            .map(|&period| {
+                if self.robust {
+                    STL::new(period).robust()
+                } else {
+                    STL::new(period)
+                }
+            })
+            .collect();
+
         // Iterative decomposition
         for _ in 0..self.iterations {
             // Deseasonalize: buf = series - sum(all seasonal components)
@@ -158,24 +177,13 @@ impl MSTL {
             }
 
             // Extract trend using STL with the longest period
-            let stl_trend = if self.robust {
-                STL::new(max_period).robust()
-            } else {
-                STL::new(max_period)
-            };
-
             if let Some(trend_result) = stl_trend.decompose(&buf) {
                 trend = trend_result.trend;
             }
 
             // Extract each seasonal component
             for s_idx in 0..num_seasonals {
-                let period = self.seasonal_periods[s_idx];
-
                 // adjusted = series - trend - sum(other seasonal components)
-                // Equivalent to: series - trend - sum(all seasonals) + seasonal[s_idx]
-                // Which is: deseasonalized - trend + seasonal[s_idx]
-                // But we rebuild from series to avoid error accumulation.
                 buf.copy_from_slice(series);
                 for i in 0..n {
                     buf[i] -= trend[i];
@@ -188,14 +196,8 @@ impl MSTL {
                     }
                 }
 
-                // Extract this seasonal component using STL
-                let stl_seasonal = if self.robust {
-                    STL::new(period).robust()
-                } else {
-                    STL::new(period)
-                };
-
-                if let Some(seasonal_result) = stl_seasonal.decompose(&buf) {
+                // Extract this seasonal component using pre-created STL
+                if let Some(seasonal_result) = stl_seasonals[s_idx].decompose(&buf) {
                     seasonal_components[s_idx] = seasonal_result.seasonal;
                 }
             }
