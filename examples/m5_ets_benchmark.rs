@@ -16,7 +16,7 @@ use std::time::Instant;
 const HORIZON: usize = 28; // M5 competition horizon (4 weeks)
 const PERIOD: usize = 7; // weekly seasonality
 const MIN_NONZERO_FRAC: f64 = 0.3; // skip very intermittent series
-const MAX_SERIES: usize = 500; // cap for reasonable runtime
+const MAX_SERIES: usize = 1000; // full M5 top-1000 dataset
 
 fn main() {
     let path = "validation/data/m5_top1000.csv";
