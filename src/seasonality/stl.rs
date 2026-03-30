@@ -198,6 +198,36 @@ impl STL {
         self.decompose_with_scratch(series, &mut scratch)
     }
 
+    /// Batch decompose many series of the same length.
+    ///
+    /// Reuses a single scratch buffer across all series, avoiding
+    /// per-series heap allocation. With the `parallel` feature enabled,
+    /// series are processed in parallel using rayon.
+    ///
+    /// Returns one `Option<STLResult>` per series.
+    pub fn decompose_batch(&self, all_series: &[&[f64]]) -> Vec<Option<STLResult>> {
+        #[cfg(feature = "parallel")]
+        {
+            use rayon::prelude::*;
+            all_series
+                .par_iter()
+                .map(|series| {
+                    let mut scratch = StlScratch::new();
+                    self.decompose_with_scratch(series, &mut scratch)
+                })
+                .collect()
+        }
+
+        #[cfg(not(feature = "parallel"))]
+        {
+            let mut scratch = StlScratch::new();
+            all_series
+                .iter()
+                .map(|series| self.decompose_with_scratch(series, &mut scratch))
+                .collect()
+        }
+    }
+
     /// Decompose the time series, reusing pre-allocated scratch buffers.
     ///
     /// This avoids heap allocation when called repeatedly (e.g., across

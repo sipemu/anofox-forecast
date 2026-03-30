@@ -23,6 +23,7 @@
 //! assert_eq!(forecasts.len(), 2);
 //! ```
 
+use super::auto_ets::ModelPool;
 use super::ets::{ETSSpec, ErrorType, SeasonalType, TrendType};
 use crate::error::{ForecastError, Result};
 use crate::utils::optimization::{nelder_mead, NelderMeadConfig};
@@ -571,5 +572,229 @@ impl GlobalETS {
             trend,
             seasonals,
         }
+    }
+}
+
+/// Global AutoETS: automatic model selection across many series using GlobalETS.
+///
+/// For each candidate ETS spec, fits a single GlobalETS across all series.
+/// Then selects the best spec per series based on the per-series NLL.
+/// Much faster than N independent AutoETS fits because each candidate
+/// is evaluated with one NM optimization (not N).
+///
+/// # Example
+///
+/// ```rust
+/// use anofox_forecast::models::exponential::{GlobalAutoETS, ModelPool};
+///
+/// let series = vec![
+///     (0..28).map(|i| 10.0 + (i as f64 * 0.9).sin() * 5.0).collect::<Vec<_>>(),
+///     (0..28).map(|i| 20.0 - i as f64 * 0.1).collect::<Vec<_>>(),
+/// ];
+/// let mut model = GlobalAutoETS::new(7, ModelPool::Reduced);
+/// model.fit(&series).unwrap();
+/// let forecasts = model.predict(7);
+/// assert_eq!(forecasts.len(), 2);
+/// ```
+#[derive(Debug, Clone)]
+pub struct GlobalAutoETS {
+    period: usize,
+    pool: ModelPool,
+    /// Per-series: (best_spec, forecaster)
+    per_series: Vec<(
+        ETSSpec,
+        SeriesState,
+        f64,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+    )>,
+    fitted: bool,
+}
+
+impl GlobalAutoETS {
+    /// Create with a seasonal period and model pool.
+    pub fn new(period: usize, pool: ModelPool) -> Self {
+        Self {
+            period,
+            pool,
+            per_series: Vec::new(),
+            fitted: false,
+        }
+    }
+
+    /// Fit: evaluate each candidate spec globally, pick best per series.
+    pub fn fit(&mut self, all_series: &[Vec<f64>]) -> Result<()> {
+        if all_series.is_empty() {
+            return Err(ForecastError::InsufficientData {
+                needed: 1,
+                got: 0,
+                hint: Some("GlobalAutoETS requires at least one series".into()),
+            });
+        }
+
+        let n_series = all_series.len();
+        let period = self.period;
+
+        // Check for non-positive values (restricts multiplicative)
+        let has_non_positive = all_series.iter().any(|s| s.iter().any(|&v| v <= 0.0));
+
+        // Detect seasonality: simple check on first few series
+        let has_seasonal = period > 1 && all_series[0].len() >= 2 * period;
+
+        // Generate candidates based on pool
+        let candidates = Self::generate_candidates(self.pool, has_seasonal, has_non_positive);
+
+        // Per-series: track best NLL and corresponding spec
+        let mut best_nll: Vec<f64> = vec![f64::MAX; n_series];
+        let mut best_spec: Vec<ETSSpec> = vec![ETSSpec::ann(); n_series];
+        let mut best_states: Vec<SeriesState> = (0..n_series)
+            .map(|_| SeriesState {
+                level: 0.0,
+                trend: 0.0,
+                seasonals: vec![],
+            })
+            .collect();
+        let mut best_params: Vec<(f64, Option<f64>, Option<f64>, Option<f64>)> =
+            vec![(0.3, None, None, None); n_series];
+
+        // Evaluate each candidate spec globally
+        for spec in &candidates {
+            let mut global = GlobalETS::new(*spec, period);
+            if global.fit(all_series).is_err() {
+                continue;
+            }
+
+            let (alpha, beta, gamma, phi) = global.params();
+
+            // Compute per-series NLL at the optimized parameters
+            for (s, values) in all_series.iter().enumerate() {
+                let init = &global.states[s];
+                let nll =
+                    GlobalETS::series_nll(values, init, *spec, period, alpha, beta, gamma, phi);
+                if nll < best_nll[s] {
+                    best_nll[s] = nll;
+                    best_spec[s] = *spec;
+                    best_states[s] = global.final_states[s].clone();
+                    best_params[s] = (alpha, beta, gamma, phi);
+                }
+            }
+        }
+
+        // Store per-series results
+        self.per_series = best_spec
+            .into_iter()
+            .zip(best_states)
+            .zip(best_params)
+            .map(|((spec, state), (a, b, g, p))| (spec, state, a, b, g, p))
+            .collect();
+
+        self.fitted = true;
+        Ok(())
+    }
+
+    /// Predict h steps ahead for all series.
+    pub fn predict(&self, horizon: usize) -> Vec<Vec<f64>> {
+        if !self.fitted {
+            return vec![];
+        }
+        self.per_series
+            .iter()
+            .map(|(spec, state, _, _, _, phi)| {
+                GlobalETS::forecast_from_state(state, *spec, self.period, *phi, horizon)
+            })
+            .collect()
+    }
+
+    /// Get the selected spec per series.
+    pub fn selected_specs(&self) -> Vec<ETSSpec> {
+        self.per_series.iter().map(|(spec, ..)| *spec).collect()
+    }
+
+    /// Generate candidate specs based on pool.
+    fn generate_candidates(
+        pool: ModelPool,
+        has_seasonal: bool,
+        has_non_positive: bool,
+    ) -> Vec<ETSSpec> {
+        let error_types = if has_non_positive {
+            vec![ErrorType::Additive]
+        } else {
+            vec![ErrorType::Additive, ErrorType::Multiplicative]
+        };
+
+        let trend_types = vec![
+            TrendType::None,
+            TrendType::Additive,
+            TrendType::AdditiveDamped,
+        ];
+
+        let seasonal_types = if !has_seasonal {
+            vec![SeasonalType::None]
+        } else if has_non_positive {
+            vec![SeasonalType::None, SeasonalType::Additive]
+        } else {
+            vec![
+                SeasonalType::None,
+                SeasonalType::Additive,
+                SeasonalType::Multiplicative,
+            ]
+        };
+
+        let mut candidates = Vec::new();
+        for &error in &error_types {
+            for &trend in &trend_types {
+                for &seasonal in &seasonal_types {
+                    // Skip M,A,A and M,Ad,A (unstable)
+                    if error == ErrorType::Multiplicative
+                        && (trend == TrendType::Additive || trend == TrendType::AdditiveDamped)
+                        && seasonal == SeasonalType::Additive
+                    {
+                        continue;
+                    }
+
+                    // Apply pool filters
+                    match pool {
+                        ModelPool::Complete => {}
+                        ModelPool::NoMultiplicativeTrend => {}
+                        ModelPool::DampedTrendOnly => {
+                            if trend == TrendType::Additive {
+                                continue;
+                            }
+                        }
+                        ModelPool::MatchErrorSeasonal => {
+                            if error == ErrorType::Multiplicative
+                                && seasonal == SeasonalType::Additive
+                            {
+                                continue;
+                            }
+                            if error == ErrorType::Additive
+                                && seasonal == SeasonalType::Multiplicative
+                            {
+                                continue;
+                            }
+                        }
+                        ModelPool::Reduced => {
+                            if trend == TrendType::Additive {
+                                continue;
+                            }
+                            if error == ErrorType::Multiplicative
+                                && seasonal == SeasonalType::Additive
+                            {
+                                continue;
+                            }
+                            if error == ErrorType::Additive
+                                && seasonal == SeasonalType::Multiplicative
+                            {
+                                continue;
+                            }
+                        }
+                    }
+
+                    candidates.push(ETSSpec::new(error, trend, seasonal));
+                }
+            }
+        }
+        candidates
     }
 }
