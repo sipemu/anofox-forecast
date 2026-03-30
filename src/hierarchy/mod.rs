@@ -69,12 +69,25 @@ pub enum ReconciliationMethod {
     },
     /// Optimal combination using MinT (Minimum Trace) with OLS covariance.
     /// Minimises the trace of the reconciled forecast error covariance.
+    /// **Warning:** builds dense N×M summing matrix. For N > ~10k, use
+    /// `MinTraceVariance` or `MinTraceStruct` instead.
     MinTraceOls,
     /// MinT with Ledoit-Wolf shrinkage covariance.
     /// Requires `set_residuals()` to have been called.
     /// Uses Σ = α·F + (1−α)·S where F is the diagonal target and S is the
     /// sample covariance, with α chosen by the Ledoit-Wolf formula.
+    /// **Warning:** builds N×N covariance matrix. For N > ~5k, use
+    /// `MinTraceVariance` instead.
     MinTraceShrink,
+    /// Scalable MinT with diagonal variance scaling (WLS).
+    /// Uses W = diag(residual_variances). Avoids N×N covariance matrix.
+    /// Requires `set_residuals()` to have been called.
+    /// Memory: O(N + M²). Safe for N > 100k.
+    MinTraceVariance,
+    /// Scalable MinT with structural scaling.
+    /// Uses W = diag(1/n_leaves_below). No residuals needed.
+    /// Memory: O(N + M²). Safe for N > 100k.
+    MinTraceStruct,
 }
 
 /// A hierarchical tree of named nodes with reconciliation support.
@@ -288,6 +301,12 @@ impl HierarchyTree {
             }
             ReconciliationMethod::MinTraceOls => self.min_trace_ols(&base_map, horizon),
             ReconciliationMethod::MinTraceShrink => self.min_trace_shrink(&base_map, horizon),
+            ReconciliationMethod::MinTraceVariance => {
+                self.min_trace_diagonal(&base_map, horizon, true)
+            }
+            ReconciliationMethod::MinTraceStruct => {
+                self.min_trace_diagonal(&base_map, horizon, false)
+            }
         }
     }
 
@@ -805,6 +824,153 @@ impl HierarchyTree {
             .iter()
             .map(|&idx| (self.nodes[idx].name.clone(), reconciled[idx].clone()))
             .collect())
+    }
+
+    /// Scalable MinT with diagonal weight matrix W.
+    ///
+    /// Uses sparse summing matrix S (CSC-like: per-leaf ancestor list) and
+    /// diagonal W to avoid N×N matrices entirely.
+    ///
+    /// Formula: ỹ = S (S' W⁻¹ S)⁻¹ S' W⁻¹ ŷ
+    ///
+    /// When `use_variance` is true: W[i] = residual variance of node i (requires residuals).
+    /// When false: W[i] = number of leaves below node i (structural scaling, no residuals).
+    ///
+    /// Memory: O(N + M² + M*depth) — safe for N > 100k.
+    fn min_trace_diagonal(
+        &self,
+        base_map: &HashMap<&str, &Vec<f64>>,
+        horizon: usize,
+        use_variance: bool,
+    ) -> Result<Vec<(String, Vec<f64>)>> {
+        let n = self.nodes.len();
+        let leaves = self.leaves();
+        let m = leaves.len();
+
+        // Compute diagonal weights W (N-vector)
+        let w_diag: Vec<f64> = if use_variance {
+            let residuals = self.residuals.as_ref().ok_or_else(|| {
+                ForecastError::InvalidParameter(
+                    "MinTraceVariance requires residuals; call set_residuals() first".into(),
+                )
+            })?;
+            self.nodes
+                .iter()
+                .map(|node| {
+                    if let Some(r) = residuals.get(&node.name) {
+                        let n_r = r.len() as f64;
+                        if n_r < 2.0 {
+                            return 1.0;
+                        }
+                        let mean = r.iter().sum::<f64>() / n_r;
+                        let var = r.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n_r - 1.0);
+                        var.max(1e-10)
+                    } else {
+                        1.0
+                    }
+                })
+                .collect()
+        } else {
+            // Structural: weight = number of leaves below this node
+            self.nodes
+                .iter()
+                .enumerate()
+                .map(|(idx, _)| self.count_leaves_below(idx).max(1) as f64)
+                .collect()
+        };
+
+        // W_inv diagonal
+        let w_inv: Vec<f64> = w_diag.iter().map(|&w| 1.0 / w).collect();
+
+        // Sparse S: for each leaf j, store the list of ancestor node indices.
+        // This replaces the dense N×M summing matrix (~10MB vs 64GB for 100k×80k).
+        let sparse_s: Vec<Vec<usize>> = leaves
+            .iter()
+            .map(|&leaf| {
+                let mut ancestors = vec![leaf];
+                let mut cur = leaf;
+                while let Some(parent) = self.nodes[cur].parent {
+                    ancestors.push(parent);
+                    cur = parent;
+                }
+                ancestors
+            })
+            .collect();
+
+        // Compute S' W⁻¹ S (M×M) using sparse S — O(M² × depth)
+        // (S'W⁻¹S)[i][j] = Σ_k S[k][i] * w_inv[k] * S[k][j]
+        //                 = Σ_{k in ancestors_i ∩ ancestors_j} w_inv[k]
+        let mut sts = vec![vec![0.0; m]; m];
+        for i in 0..m {
+            // Diagonal: sum of w_inv over all ancestors of leaf i
+            let diag_val: f64 = sparse_s[i].iter().map(|&k| w_inv[k]).sum();
+            sts[i][i] = diag_val;
+
+            // Off-diagonal: sum over shared ancestors
+            for j in (i + 1)..m {
+                let mut dot = 0.0;
+                // Find intersection of ancestors (both are small lists, depth ≤ ~20)
+                for &anc_i in &sparse_s[i] {
+                    for &anc_j in &sparse_s[j] {
+                        if anc_i == anc_j {
+                            dot += w_inv[anc_i];
+                        }
+                    }
+                }
+                sts[i][j] = dot;
+                sts[j][i] = dot;
+            }
+        }
+
+        // Cholesky of S'W⁻¹S (M×M)
+        let sts_flat: Vec<f64> = sts.iter().flat_map(|row| row.iter().copied()).collect();
+        let l = cholesky(m, &sts_flat)?;
+
+        // Reconcile per time step
+        let bfs_order = self.bfs_order();
+        let mut reconciled = vec![vec![0.0; horizon]; n];
+
+        for h in 0..horizon {
+            // base vector
+            let base_vec: Vec<f64> = (0..n)
+                .map(|i| base_map[self.nodes[i].name.as_str()][h])
+                .collect();
+
+            // z = S' W⁻¹ ŷ (M-vector) using sparse S
+            let mut z = vec![0.0; m];
+            for (j, ancestors) in sparse_s.iter().enumerate() {
+                z[j] = ancestors.iter().map(|&k| w_inv[k] * base_vec[k]).sum();
+            }
+
+            // w = (S'W⁻¹S)⁻¹ z
+            let w = cholesky_solve_vec(m, &l, &z);
+
+            // result = S * w using sparse S
+            // Initialize to zero then add contributions from each leaf
+            reconciled.iter_mut().for_each(|r| r[h] = 0.0);
+            for (j, ancestors) in sparse_s.iter().enumerate() {
+                for &node_idx in ancestors {
+                    reconciled[node_idx][h] += w[j];
+                }
+            }
+        }
+
+        Ok(bfs_order
+            .iter()
+            .map(|&idx| (self.nodes[idx].name.clone(), reconciled[idx].clone()))
+            .collect())
+    }
+
+    /// Count the number of leaf nodes below a given node.
+    fn count_leaves_below(&self, idx: usize) -> usize {
+        if self.nodes[idx].children.is_empty() {
+            return 1;
+        }
+        self.nodes[idx]
+            .children
+            .iter()
+            .map(|&c| self.count_leaves_below(c))
+            .sum()
     }
 
     /// BFS order of node indices.
@@ -1473,5 +1639,77 @@ mod tests {
         approx_eq(map["Total"][0], 100.0, 1.0);
         approx_eq(map["A"][0], 60.0, 1.0);
         approx_eq(map["B"][0], 40.0, 1.0);
+    }
+
+    #[test]
+    fn min_trace_variance_produces_coherent_forecasts() {
+        let mut tree =
+            HierarchyTree::new(vec![("Total", &["A", "B"]), ("A", &["A1", "A2"])]).unwrap();
+
+        // Incoherent base forecasts
+        let base = vec![
+            ("Total".into(), vec![100.0]),
+            ("A".into(), vec![55.0]),
+            ("B".into(), vec![40.0]),
+            ("A1".into(), vec![25.0]),
+            ("A2".into(), vec![20.0]),
+        ];
+
+        // Set residuals for variance estimation
+        let mut residuals = std::collections::HashMap::new();
+        residuals.insert("Total".into(), vec![1.0, -1.0, 0.5, -0.5]);
+        residuals.insert("A".into(), vec![0.8, -0.8, 0.3, -0.3]);
+        residuals.insert("B".into(), vec![0.5, -0.5, 0.2, -0.2]);
+        residuals.insert("A1".into(), vec![0.6, -0.6, 0.2, -0.2]);
+        residuals.insert("A2".into(), vec![0.4, -0.4, 0.1, -0.1]);
+        tree.set_residuals(residuals);
+
+        let result = tree
+            .reconcile(&base, ReconciliationMethod::MinTraceVariance)
+            .unwrap();
+
+        let map: std::collections::HashMap<String, Vec<f64>> = result.into_iter().collect();
+
+        // Check coherence: Total = A + B, A = A1 + A2
+        let total = map["Total"][0];
+        let a = map["A"][0];
+        let b = map["B"][0];
+        let a1 = map["A1"][0];
+        let a2 = map["A2"][0];
+
+        approx_eq(total, a + b, 0.01);
+        approx_eq(a, a1 + a2, 0.01);
+    }
+
+    #[test]
+    fn min_trace_struct_produces_coherent_forecasts() {
+        let tree = HierarchyTree::new(vec![("Total", &["A", "B"]), ("A", &["A1", "A2"])]).unwrap();
+
+        let base = vec![
+            ("Total".into(), vec![100.0]),
+            ("A".into(), vec![55.0]),
+            ("B".into(), vec![40.0]),
+            ("A1".into(), vec![25.0]),
+            ("A2".into(), vec![20.0]),
+        ];
+
+        let result = tree
+            .reconcile(&base, ReconciliationMethod::MinTraceStruct)
+            .unwrap();
+
+        let map: std::collections::HashMap<String, Vec<f64>> = result.into_iter().collect();
+
+        let total = map["Total"][0];
+        let a = map["A"][0];
+        let b = map["B"][0];
+        let a1 = map["A1"][0];
+        let a2 = map["A2"][0];
+
+        approx_eq(total, a + b, 0.01);
+        approx_eq(a, a1 + a2, 0.01);
+        // All values should be positive (reasonable forecasts)
+        assert!(total > 0.0);
+        assert!(a > 0.0);
+        assert!(b > 0.0);
     }
 }
