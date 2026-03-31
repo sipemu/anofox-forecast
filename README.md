@@ -126,6 +126,8 @@ console.log(forecast.values);
 
 - **Changepoint Detection**
   - PELT algorithm with O(n) average complexity
+  - `auto_detect()`: automatic penalty selection via CROPS (Haynes et al. 2017) + elbow detection
+  - `crops()`: explore the penalty landscape (penalty vs n_changepoints curve)
   - Builder API: `Pelt::new(CostFunction::L2).min_size(5).penalty(5.0).detect(&data)`
   - Multiple cost functions: L1, L2, Normal, Poisson, LinearTrend, MeanVariance, Cusum
 
@@ -423,10 +425,17 @@ if let Some(ols) = model.exog_coefficients() {
 ```rust
 use anofox_forecast::changepoint::{Pelt, CostFunction};
 
-let pelt = Pelt::new(CostFunction::L2, 10.0)?;
-let changepoints = pelt.detect(&ts)?;
+// Automatic penalty selection (recommended)
+let result = Pelt::new(CostFunction::L2)
+    .min_size(5)
+    .auto_detect(&data);
+println!("Found {} changepoints at {:?}", result.result.n_changepoints, result.result.changepoints);
+println!("Auto-selected penalty: {:.2}", result.penalty);
 
-println!("Changepoints at indices: {:?}", changepoints);
+// Manual penalty
+let result = Pelt::new(CostFunction::L2)
+    .penalty(10.0)
+    .detect(&data);
 ```
 
 ### Spectral Analysis
