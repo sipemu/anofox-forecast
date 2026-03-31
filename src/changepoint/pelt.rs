@@ -119,6 +119,210 @@ impl Pelt {
     pub fn config(&self) -> &PeltConfig {
         &self.config
     }
+
+    /// Automatically select the penalty and detect changepoints.
+    ///
+    /// Uses CROPS (Changepoints for a Range of Penalties) to evaluate
+    /// PELT over a geometric range of penalties, then selects the "elbow"
+    /// where adding more changepoints yields diminishing cost reduction.
+    ///
+    /// This is the recommended entry point when you don't know the penalty.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use anofox_forecast::changepoint::{Pelt, CostFunction};
+    ///
+    /// let mut series = vec![0.0; 50];
+    /// series.extend(vec![10.0; 50]);
+    /// series.extend(vec![5.0; 50]);
+    ///
+    /// let result = Pelt::new(CostFunction::L2)
+    ///     .min_size(5)
+    ///     .auto_detect(&series);
+    ///
+    /// assert!(result.result.n_changepoints >= 1);
+    /// println!("Optimal penalty: {:.2}", result.penalty);
+    /// ```
+    pub fn auto_detect(&self, series: &[f64]) -> AutoPeltResult {
+        let n = series.len();
+        if n < 4 {
+            return AutoPeltResult {
+                result: PeltResult {
+                    changepoints: vec![],
+                    segments: vec![(0, n)],
+                    cost: 0.0,
+                    n_changepoints: 0,
+                },
+                penalty: 0.0,
+                crops: vec![],
+            };
+        }
+
+        // Run CROPS over a geometric range of penalties
+        let crops = self.crops(series, None, None);
+
+        // Find the elbow: the penalty where the marginal cost reduction
+        // per additional changepoint drops below threshold.
+        let best = Self::select_elbow(&crops);
+
+        AutoPeltResult {
+            result: best.1.clone(),
+            penalty: best.0,
+            crops,
+        }
+    }
+
+    /// CROPS: Changepoints for a Range of Penalties (Haynes et al., 2017).
+    ///
+    /// Runs PELT over a geometric range of penalties from `pen_min` to `pen_max`,
+    /// returning all distinct segmentations found. Efficient because PELT's
+    /// O(n) average complexity means each run is cheap.
+    ///
+    /// Default range: `[0.01 * log(n), 100 * log(n)]` with ~30 steps.
+    pub fn crops(
+        &self,
+        series: &[f64],
+        pen_min: Option<f64>,
+        pen_max: Option<f64>,
+    ) -> Vec<(f64, PeltResult)> {
+        let n = series.len();
+        let log_n = (n as f64).ln().max(1.0);
+
+        // Default range: [0.5*log(n), 100*log(n)].
+        // Starting at 0.5*log(n) avoids over-segmentation on noisy data
+        // while still finding changepoints with strong signal.
+        let p_min = pen_min.unwrap_or(0.5 * log_n);
+        let p_max = pen_max.unwrap_or(100.0 * log_n);
+
+        let n_steps = 30;
+        let ratio = (p_max / p_min.max(1e-6)).powf(1.0 / n_steps as f64);
+
+        let mut results: Vec<(f64, PeltResult)> = Vec::new();
+        let mut prev_n_cp = usize::MAX;
+
+        let mut pen = p_min;
+        for _ in 0..=n_steps {
+            let config = PeltConfig {
+                penalty: pen,
+                cost_fn: self.config.cost_fn,
+                min_segment_length: self.config.min_segment_length,
+            };
+            let result = pelt_detect(series, &config);
+
+            // Only keep distinct segmentations (different n_changepoints)
+            if result.n_changepoints != prev_n_cp {
+                prev_n_cp = result.n_changepoints;
+                results.push((pen, result));
+            }
+
+            pen *= ratio;
+            if pen > p_max * 1.01 {
+                break;
+            }
+        }
+
+        // Ensure we also try the exact 0-changepoint case (high penalty)
+        if results.last().is_none_or(|r| r.1.n_changepoints > 0) {
+            let config = PeltConfig {
+                penalty: p_max * 10.0,
+                cost_fn: self.config.cost_fn,
+                min_segment_length: self.config.min_segment_length,
+            };
+            let result = pelt_detect(series, &config);
+            if result.n_changepoints == 0 {
+                results.push((p_max * 10.0, result));
+            }
+        }
+
+        // Sort by penalty (ascending) = by n_changepoints (descending)
+        results.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        results
+    }
+
+    /// Select the optimal penalty from CROPS results using the largest-gap method.
+    ///
+    /// Computes the marginal cost per changepoint at each penalty level.
+    /// The "elbow" is at the largest jump in marginal cost — where adding
+    /// another changepoint suddenly becomes much more expensive.
+    /// Falls back to BIC penalty when no clear elbow is found.
+    fn select_elbow(crops: &[(f64, PeltResult)]) -> (f64, &PeltResult) {
+        if crops.is_empty() {
+            unreachable!("crops should never be empty");
+        }
+        if crops.len() == 1 {
+            return (crops[0].0, &crops[0].1);
+        }
+
+        // Compute marginal cost reduction for each adjacent pair.
+        // crops is sorted by penalty ascending = n_changepoints descending.
+        let mut marginals: Vec<(usize, f64, f64)> = Vec::new(); // (index, marginal, penalty)
+        for i in 0..crops.len() - 1 {
+            let cp_diff = crops[i].1.n_changepoints as f64 - crops[i + 1].1.n_changepoints as f64;
+            if cp_diff > 0.0 {
+                let cost_diff = crops[i + 1].1.cost - crops[i].1.cost;
+                let marginal = cost_diff / cp_diff;
+                marginals.push((i, marginal, crops[i + 1].0));
+            }
+        }
+
+        if marginals.is_empty() {
+            let mid = crops.len() / 2;
+            return (crops[mid].0, &crops[mid].1);
+        }
+
+        // Find the largest gap in marginal costs.
+        // The transition from "cheap to add CPs" → "expensive to add CPs"
+        // indicates the natural number of changepoints.
+        if marginals.len() >= 2 {
+            let mut best_gap = 0.0f64;
+            let mut best_idx = 0;
+
+            for i in 0..marginals.len() - 1 {
+                let gap = marginals[i + 1].1 - marginals[i].1;
+                if gap > best_gap {
+                    best_gap = gap;
+                    best_idx = i + 1;
+                }
+            }
+
+            if best_gap > 0.0 {
+                // Select the penalty at the gap transition
+                let idx = marginals[best_idx].0;
+                return (crops[idx].0, &crops[idx].1);
+            }
+        }
+
+        // Fallback: select the result closest to BIC penalty = 2*log(n)
+        let n_total = crops[0]
+            .1
+            .segments
+            .iter()
+            .map(|(_, e)| *e)
+            .max()
+            .unwrap_or(100);
+        let bic_pen = 2.0 * (n_total as f64).ln();
+
+        let bic_idx = crops
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, (pen, _))| ((pen - bic_pen).abs() * 1000.0) as i64)
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+
+        (crops[bic_idx].0, &crops[bic_idx].1)
+    }
+}
+
+/// Result of automatic changepoint detection.
+#[derive(Debug, Clone)]
+pub struct AutoPeltResult {
+    /// The best changepoint detection result.
+    pub result: PeltResult,
+    /// The automatically selected penalty.
+    pub penalty: f64,
+    /// All CROPS results: (penalty, result) pairs sorted by penalty.
+    pub crops: Vec<(f64, PeltResult)>,
 }
 
 /// Result of PELT changepoint detection.

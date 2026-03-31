@@ -44,4 +44,4 @@ pub use cost::{
     cusum_cost, l1_cost, l2_cost, linear_trend_cost, mean_variance_cost, normal_cost, poisson_cost,
     segment_cost, total_cost, CostFunction,
 };
-pub use pelt::{pelt_detect, Pelt, PeltConfig, PeltResult};
+pub use pelt::{pelt_detect, AutoPeltResult, Pelt, PeltConfig, PeltResult};
