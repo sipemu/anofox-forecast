@@ -16,6 +16,8 @@ Provides 50+ forecasting models, 76+ statistical features, automatic model selec
 
 ## Use Cases
 
+**Want to try it out?** Use the [anofox app](https://muon-stat.com/apps/anofox-app/) for interactive forecasting in the browser.
+
 **Need to run this on 10GB of data?** Use our [DuckDB extension](https://github.com/DataZooDE/anofox-forecast) for SQL-native forecasting at scale.
 
 **Need to use this in a React Dashboard?** Use our [npm package](https://www.npmjs.com/package/@sipemu/anofox-forecast) for WebAssembly-powered forecasting in the browser.
