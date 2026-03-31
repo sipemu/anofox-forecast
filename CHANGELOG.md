@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Automatic changepoint penalty selection** (`Pelt::auto_detect()`)
+  - CROPS (Changepoints for a Range of Penalties, Haynes et al. 2017): evaluates ~30 penalties automatically
+  - Largest-gap elbow detection selects optimal penalty; BIC fallback when ambiguous
+  - `Pelt::crops()` for manual exploration of the penalty landscape
+  - Returns `AutoPeltResult` with selected penalty, best result, and all CROPS segmentations
+
+- **ARIMA MLE optimization**: steady-state innovations detection (1.05-1.27x faster individual fits), Jones (1980) parameter transform foundation
+
 - **Scalable hierarchical reconciliation** for large hierarchies (100k+ series)
   - `MinTraceVariance`: diagonal W from residual variances, sparse summing matrix. O(N + M²) memory.
   - `MinTraceStruct`: diagonal W from hierarchy structure (no residuals needed). O(N + M²) memory.
