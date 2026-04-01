@@ -331,9 +331,21 @@ impl ARIMA {
         }
 
         // ARMA(p,q) scoring: CSS optimization with AICc.
-        // HR initialization provides near-optimal starting values.
+        // For long series (n > 500), use approximate scoring on the tail only
+        // (matching R's auto.arima approximation=TRUE). The first residuals
+        // are poor (initialized to zero), so the tail gives nearly identical
+        // AICc rankings at a fraction of the cost.
+        let score_series = if n > 500 {
+            &diff_series[n - 500..]
+        } else {
+            diff_series
+        };
+        let score_n = score_series.len();
+        let score_start = p.max(q);
+
+        // HR initialization on the scoring subseries
         let hr_init = if p + q >= 2 {
-            let hr = Self::hannan_rissanen_init(diff_series, p, q);
+            let hr = Self::hannan_rissanen_init(score_series, p, q);
             let raw: Vec<f64> = hr[1..].to_vec(); // skip intercept
             raw.iter()
                 .map(|&v| v.clamp(-0.98, 0.98))
@@ -354,11 +366,19 @@ impl ARIMA {
             bounds.push((-0.99, 0.99));
         }
 
-        let residuals_buf = std::cell::RefCell::new(vec![0.0; n]);
+        let residuals_buf = std::cell::RefCell::new(vec![0.0; score_n]);
         let css_result = nelder_mead(
             |params| {
                 let mut buf = residuals_buf.borrow_mut();
-                Self::calculate_css(diff_series, p, q, &params[..p], &params[p..], 0.0, &mut buf)
+                Self::calculate_css(
+                    score_series,
+                    p,
+                    q,
+                    &params[..p],
+                    &params[p..],
+                    0.0,
+                    &mut buf,
+                )
             },
             &hr_init,
             Some(&bounds),
@@ -374,8 +394,8 @@ impl ARIMA {
             return None;
         }
 
-        // AICc from CSS variance
-        let n_eff = (n - start) as f64;
+        // AICc from CSS variance (using scoring subseries length)
+        let n_eff = (score_n - score_start) as f64;
         if n_eff <= 0.0 {
             return None;
         }
@@ -2074,13 +2094,23 @@ impl SARIMA {
             return None;
         }
 
+        // For long series, use approximate scoring on the tail (matches R's approximation=TRUE).
+        // Need enough data for seasonal lags + burn-in.
+        let min_approx_len = start + 200;
+        let score_series = if diff_series.len() > min_approx_len && diff_series.len() > 500 {
+            &diff_series[diff_series.len() - 500.max(min_approx_len)..]
+        } else {
+            diff_series
+        };
+        let score_n = score_series.len();
+
         let n_params = 1 + p + q + cap_p + cap_q;
 
         if p == 0 && q == 0 && cap_p == 0 && cap_q == 0 {
             // Just intercept model
-            let mean = diff_series.iter().sum::<f64>() / diff_series.len() as f64;
-            let n_eff = (diff_series.len() - start) as f64;
-            let variance = diff_series[start..]
+            let mean = score_series.iter().sum::<f64>() / score_n as f64;
+            let n_eff = (score_n - start) as f64;
+            let variance = score_series[start..]
                 .iter()
                 .map(|v| (v - mean).powi(2))
                 .sum::<f64>()
@@ -2098,8 +2128,8 @@ impl SARIMA {
             return if score.is_finite() { Some(score) } else { None };
         }
 
-        // Set up optimization
-        let mean = diff_series.iter().sum::<f64>() / diff_series.len() as f64;
+        // Set up optimization (on scoring subseries)
+        let mean = score_series.iter().sum::<f64>() / score_n as f64;
         let mut initial = vec![0.0; n_params];
         initial[0] = mean;
 
@@ -2132,7 +2162,7 @@ impl SARIMA {
             ..Default::default()
         };
 
-        let residuals_buf = std::cell::RefCell::new(vec![0.0; diff_series.len()]);
+        let residuals_buf = std::cell::RefCell::new(vec![0.0; score_n]);
 
         let result = lbfgs_optimize(
             |params| {
@@ -2143,7 +2173,7 @@ impl SARIMA {
 
                 let mut buf = residuals_buf.borrow_mut();
                 Self::calculate_css(
-                    diff_series,
+                    score_series,
                     p,
                     q,
                     cap_p,
@@ -2168,7 +2198,7 @@ impl SARIMA {
             return None;
         }
 
-        let n_eff = (diff_series.len() - start) as f64;
+        let n_eff = (score_n - start) as f64;
         let variance = css / n_eff;
         let k = n_params as f64;
         let ll = -0.5 * n_eff * (1.0 + variance.ln() + (2.0 * std::f64::consts::PI).ln());
