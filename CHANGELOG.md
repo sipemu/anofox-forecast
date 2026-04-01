@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.5] - 2026-04-01
+
+### Changed
+
+- **AutoARIMA sequential 21x faster** (critical for DuckDB extension which can't use `parallel` feature)
+  - Reduce default `max_cap_p`/`max_cap_q` from 2 to 1 (matches R's `auto.arima` default), halving SARIMA candidates
+  - Sequential path: use cheap `score_order_static` for all candidates, full fit only for the winner
+  - Approximate CSS scoring on last 500 observations for series >500 (matches R's `approximation=TRUE`)
+  - Sort candidates simpler-first for faster early-winner detection
+  - n=2358 p=7: 3.86s → 183ms sequential (no accuracy regression)
+
+### Fixed
+
+- Dead code cleanup: removed unused fields from DynamicTheta, KalmanFilter, regression
+
 ## [0.5.4] - 2026-04-01
 
 ### Added
