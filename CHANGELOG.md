@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-04-01
+
 ### Added
 
 - **Automatic changepoint penalty selection** (`Pelt::auto_detect()`)
@@ -15,12 +17,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `Pelt::crops()` for manual exploration of the penalty landscape
   - Returns `AutoPeltResult` with selected penalty, best result, and all CROPS segmentations
 
-- **ARIMA MLE optimization**: steady-state innovations detection (1.05-1.27x faster individual fits), Jones (1980) parameter transform foundation
-
 - **Scalable hierarchical reconciliation** for large hierarchies (100k+ series)
   - `MinTraceVariance`: diagonal W from residual variances, sparse summing matrix. O(N + M²) memory.
   - `MinTraceStruct`: diagonal W from hierarchy structure (no residuals needed). O(N + M²) memory.
   - Both avoid the N×N covariance matrix that causes OOM in `MinTraceShrink` at N > 5k.
+
+### Changed
+
+- **ARIMA MLE 1.05-1.27x faster**: steady-state innovations detection skips redundant ln() calls after convergence; Jones (1980) parameter transform foundation added
+- **AutoARIMA 49-158x faster than Python statsforecast** (validated on n=100-500, seasonal/nonseasonal)
 
 ## [0.5.3] - 2026-03-30
 
