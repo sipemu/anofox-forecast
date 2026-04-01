@@ -636,10 +636,13 @@ impl ARIMA {
     }
 
     /// Jones (1980) parameter transform: unconstrained → stationary AR coefficients.
-    #[allow(dead_code)]
     /// Maps unconstrained parameters through tanh (→ partial correlations) then
     /// Levinson-Durbin recursion (→ AR coefficients guaranteed stationary).
     /// Used by R's arima(), cuML, and Durbyn.jl.
+    ///
+    /// Reserved for future use in `estimate_parameters` (not yet integrated into
+    /// `score_order` as it changes the AICc landscape for model selection).
+    #[allow(dead_code)]
     fn jones_transform(unconstrained: &[f64]) -> Vec<f64> {
         let p = unconstrained.len();
         if p == 0 {

@@ -51,9 +51,6 @@ pub struct DynamicTheta {
     decomposition_type: DecompositionType,
     /// Whether decomposition type was automatically changed due to fallback rules.
     decomposition_fallback: bool,
-    /// Seasonal indices (for deseasonalizing).
-    #[allow(dead_code)]
-    seasonals: Option<Vec<f64>>,
     /// Seasonal forecast pattern (last cycle, for reseasonalizing forecasts).
     seasonal_forecast: Option<Vec<f64>>,
     /// Fitted level.
@@ -88,7 +85,6 @@ impl DynamicTheta {
             seasonal_period: 0,
             decomposition_type: DecompositionType::Multiplicative,
             decomposition_fallback: false,
-            seasonals: None,
             seasonal_forecast: None,
             level: None,
             an: None,
@@ -112,7 +108,6 @@ impl DynamicTheta {
             seasonal_period: 0,
             decomposition_type: DecompositionType::Multiplicative,
             decomposition_fallback: false,
-            seasonals: None,
             seasonal_forecast: None,
             level: None,
             an: None,
@@ -491,7 +486,6 @@ impl DynamicTheta {
             seasonal_period: 0,
             decomposition_type: DecompositionType::Multiplicative,
             decomposition_fallback: false,
-            seasonals: None,
             seasonal_forecast: None,
             level: None,
             an: None,

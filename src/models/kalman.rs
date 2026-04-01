@@ -619,8 +619,6 @@ pub struct KalmanState {
 /// Kalman filter with filtering, smoothing, and prediction.
 #[derive(Debug, Clone)]
 pub struct KalmanFilter {
-    #[allow(dead_code)]
-    model: StateSpaceModel,
     internal: InternalSSM,
     state: Option<Vec<f64>>,
     covariance: Option<DenseMatrix>,
@@ -634,7 +632,6 @@ impl KalmanFilter {
         model.validate()?;
         let internal = InternalSSM::from_model(&model);
         Ok(Self {
-            model,
             internal,
             state: None,
             covariance: None,
