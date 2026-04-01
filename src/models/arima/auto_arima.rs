@@ -42,8 +42,8 @@ impl Default for AutoARIMAConfig {
             max_p: 5,
             max_q: 5,
             max_d: 2,
-            max_cap_p: 2,
-            max_cap_q: 2,
+            max_cap_p: 1,
+            max_cap_q: 1,
             max_cap_d: 1,
             seasonal_period: 0,
             stepwise: true,
@@ -699,10 +699,20 @@ impl AutoARIMA {
             .copied()
             .collect();
 
+        // Two-phase evaluation: score non-seasonal candidates first (cheap),
+        // then seasonal candidates. Sort candidates so simpler models evaluate
+        // first, enabling early termination in the sequential path.
+        let mut sorted_candidates = valid_candidates;
+        sorted_candidates.sort_by_key(|o| {
+            let total_params = o.p + o.q + o.cap_p + o.cap_q;
+            let is_seasonal = if o.cap_p > 0 || o.cap_q > 0 { 1 } else { 0 };
+            (is_seasonal, total_params)
+        });
+
         #[cfg(feature = "parallel")]
         {
             // Parallel: score-only with pre-computed diffs, then re-fit winner
-            let scores: Vec<(ModelOrder, f64)> = valid_candidates
+            let scores: Vec<(ModelOrder, f64)> = sorted_candidates
                 .par_iter()
                 .filter_map(|&order| {
                     let diff_series = diff_series_map.get(&(order.d, order.cap_d))?;
@@ -724,15 +734,28 @@ impl AutoARIMA {
 
         #[cfg(not(feature = "parallel"))]
         {
-            // Sequential: full fit, keep best model directly (no re-fit overhead)
-            let mut scores = Vec::with_capacity(valid_candidates.len());
+            // Sequential with early termination: evaluate simpler models first,
+            // skip complex candidates when they can't plausibly beat the best.
+            let mut scores = Vec::with_capacity(sorted_candidates.len());
             let mut best: Option<(SelectedModel, ModelOrder, f64)> = None;
+            let mut best_score = f64::INFINITY;
 
-            for &order in &valid_candidates {
-                if let Some((model, score)) = Self::evaluate_model_static(series, order, use_aic) {
-                    scores.push((order, score));
-                    if best.as_ref().is_none_or(|(_, _, bs)| score < *bs) {
-                        best = Some((model, order, score));
+            for &order in &sorted_candidates {
+                // Score-only first (cheap) to decide if full fit is worthwhile
+                if let Some(diff_series) = diff_series_map.get(&(order.d, order.cap_d)) {
+                    if let Some(quick_score) = Self::score_order_static(order, diff_series, use_aic)
+                    {
+                        scores.push((order, quick_score));
+
+                        // Only do full fit if this candidate is competitive
+                        if quick_score < best_score {
+                            if let Some((model, _)) =
+                                Self::evaluate_model_static(series, order, use_aic)
+                            {
+                                best_score = quick_score;
+                                best = Some((model, order, quick_score));
+                            }
+                        }
                     }
                 }
             }
