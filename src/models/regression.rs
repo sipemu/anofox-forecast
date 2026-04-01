@@ -545,18 +545,6 @@ mod ols_impl {
     }
 
     impl FittedComponentState {
-        /// Feature safety classification.
-        #[allow(dead_code)]
-        fn safety(&self) -> FeatureSafety {
-            match self {
-                Self::Polynomial(_) | Self::Exponential(_) | Self::TheilSen(_) | Self::Dummy(_) => {
-                    FeatureSafety::DataDependent
-                }
-                Self::Fourier { .. } => FeatureSafety::Deterministic,
-                Self::Structural { .. } => FeatureSafety::Structural,
-            }
-        }
-
         /// Generate future feature columns for this component.
         ///
         /// Returns one `Vec<f64>` per column (most components produce 1 column,

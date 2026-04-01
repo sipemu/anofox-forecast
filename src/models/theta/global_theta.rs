@@ -24,11 +24,9 @@ use crate::utils::optimization::{nelder_mead, NelderMeadConfig};
 
 /// Per-series state after fitting.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 struct ThetaState {
     level: f64,
     b: f64,
-    n: usize,
 }
 
 /// Global Theta model: shared α, per-series level and slope.
@@ -96,7 +94,6 @@ impl GlobalTheta {
         self.states = all_series
             .iter()
             .map(|values| {
-                let n = values.len();
                 // SES to get final level
                 let mut level = values[0];
                 for &y in values.iter().skip(1) {
@@ -104,7 +101,7 @@ impl GlobalTheta {
                 }
                 // OLS slope
                 let b = Self::ols_slope(values);
-                ThetaState { level, b, n }
+                ThetaState { level, b }
             })
             .collect();
 
