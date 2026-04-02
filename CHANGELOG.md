@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.6] - 2026-04-02
+
+### Fixed
+
+- **AutoARIMA accuracy on long seasonal series**: adaptive CSS scoring window (`n/2`, capped at 1500) replaces fixed 500-observation window. Fixes 72-78% MAE gap on ~50 M4 outlier series (e.g., D2305: 699→163, D2300: 973→275). Sequential speed: 242ms for n=2358 p=7 (was 183ms with fixed-500, still 16x faster than v0.5.4 baseline of 3.86s).
+
+### Added
+
+- Full statsforecast validation: 35 models across 5 data types, 86% within MAD<1.0, 97% within MAD<5.0. See `docs/statsforecast_validation.md`.
+
 ## [0.5.5] - 2026-04-01
 
 ### Changed
