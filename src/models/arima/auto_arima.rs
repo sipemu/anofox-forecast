@@ -182,6 +182,26 @@ impl AutoARIMA {
         &self.model_scores
     }
 
+    /// Test whether the series has a detectable seasonal pattern at the given period.
+    /// Uses STL decomposition + seasonal strength heuristic, matching statsforecast's
+    /// `seas_heuristic()` / `nsdiffs()` exactly:
+    ///   strength = 1 - Var(remainder) / Var(seasonal + remainder)
+    ///   seasonal if strength > 0.64
+    fn has_seasonal_pattern(values: &[f64], period: usize) -> bool {
+        use crate::seasonality::STL;
+
+        if period < 2 || values.len() < 3 * period {
+            return false;
+        }
+
+        let stl = STL::new(period);
+        if let Some(result) = stl.decompose(values) {
+            result.seasonal_strength() > 0.64
+        } else {
+            false
+        }
+    }
+
     /// Suggest seasonal differencing order using strength of seasonality.
     fn suggest_seasonal_differencing(values: &[f64], period: usize) -> usize {
         if period < 2 || values.len() < 2 * period {
@@ -798,6 +818,15 @@ impl Forecaster for AutoARIMA {
                 }),
             });
         }
+
+        // Seasonal strength test: check if the data actually has a seasonal pattern
+        // at the configured period. If not, fall back to non-seasonal search.
+        // This matches statsforecast/R's behavior where nsdiffs() returns 0.
+        let s = if s > 1 && !Self::has_seasonal_pattern(values, s) {
+            0 // Fall back to non-seasonal
+        } else {
+            s
+        };
 
         // Determine differencing orders (fixed, matching Python/R convention).
         // Python/R use statistical tests (KPSS) to determine d and D, then fix them.
