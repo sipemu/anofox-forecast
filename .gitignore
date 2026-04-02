@@ -48,3 +48,5 @@ tarpaulin-report.html
 .claude/worktrees/
 validation/data/m5_top1000.csv
 validation/data/m5_full.csv
+validation/data/m4_daily_train.json
+validation/data/m4_daily_test.json

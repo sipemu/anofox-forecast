@@ -331,13 +331,10 @@ impl ARIMA {
         }
 
         // ARMA(p,q) scoring: CSS optimization with AICc.
-        // For long series, use approximate scoring on the tail
-        // (matching R's auto.arima approximation=TRUE). Adaptive window:
-        // use at least n/2 observations (capped at 1500) to preserve
-        // scoring quality for long seasonal series.
-        let approx_window = (n / 2).clamp(200, 1500);
-        let score_series = if n > approx_window {
-            &diff_series[n - approx_window..]
+        // For long series (n > 500), use approximate scoring on the tail
+        // (matching R's auto.arima approximation=TRUE).
+        let score_series = if n > 500 {
+            &diff_series[n - 500..]
         } else {
             diff_series
         };
@@ -2096,12 +2093,11 @@ impl SARIMA {
         }
 
         // For long series, use approximate scoring on the tail (matches R's approximation=TRUE).
-        // Adaptive window: use n/2 (capped at 1500) to preserve seasonal scoring quality.
+        // For long series, use approximate scoring on the tail (matches R's approximation=TRUE).
         let n_full = diff_series.len();
         let min_approx_len = start + 200;
-        let approx_window = (n_full / 2).clamp(min_approx_len, 1500);
-        let score_series = if n_full > approx_window {
-            &diff_series[n_full - approx_window..]
+        let score_series = if n_full > min_approx_len && n_full > 500 {
+            &diff_series[n_full - 500.max(min_approx_len)..]
         } else {
             diff_series
         };

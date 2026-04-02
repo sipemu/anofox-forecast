@@ -7,15 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.5.6] - 2026-04-02
+## [0.5.7] - 2026-04-02
 
 ### Fixed
 
-- **AutoARIMA accuracy on long seasonal series**: adaptive CSS scoring window (`n/2`, capped at 1500) replaces fixed 500-observation window. Fixes 72-78% MAE gap on ~50 M4 outlier series (e.g., D2305: 699→163, D2300: 973→275). Sequential speed: 242ms for n=2358 p=7 (was 183ms with fixed-500, still 16x faster than v0.5.4 baseline of 3.86s).
+- **AutoARIMA seasonal detection**: add `seas_heuristic` matching statsforecast's `nsdiffs()` — STL decomposition + seasonal strength test (threshold 0.64). Series without detectable weekly pattern now fall back to non-seasonal ARIMA. Fixes M4 Daily accuracy: MAE 177→176 (+3.4% vs statsforecast, down from +4.3%). Excluding 50 outliers, anofox is 13.5% better than statsforecast.
 
 ### Added
 
 - Full statsforecast validation: 35 models across 5 data types, 86% within MAD<1.0, 97% within MAD<5.0. See `docs/statsforecast_validation.md`.
+
+## [0.5.6] - 2026-04-02 [YANKED]
+
+### Note
+
+v0.5.6 introduced an adaptive scoring window that regressed overall M4 accuracy (+12.4% gap vs +4.3% in v0.5.5). Use v0.5.7 instead.
 
 ## [0.5.5] - 2026-04-01
 
