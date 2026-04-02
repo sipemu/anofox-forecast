@@ -7,7 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.5.6] - 2026-04-02
+## [0.5.7] - 2026-04-02
+
+### Fixed
+
+- **Revert v0.5.6 adaptive scoring window**: The adaptive `n/2` window from v0.5.6 fixed 50 outlier series but regressed overall M4 accuracy (MAE 177→191, mean gap 12%→37%). Reverted to v0.5.5's fixed 500-observation window which gives the best overall accuracy/speed tradeoff.
+
+## [0.5.6] - 2026-04-02 [YANKED]
 
 ### Fixed
 
