@@ -1,6 +1,8 @@
 # @sipemu/anofox-forecast
 
-WebAssembly bindings for [anofox-forecast](https://crates.io/crates/anofox-forecast), a comprehensive time series forecasting library with 50+ models, automatic model selection, probabilistic postprocessing, and more.
+WebAssembly bindings for the [anofox-forecast](https://crates.io/crates/anofox-forecast) time series forecasting library.
+
+40+ forecasting models, automatic model selection, probabilistic postprocessing, and more — running entirely in the browser via WebAssembly.
 
 ## Installation
 
@@ -8,337 +10,150 @@ WebAssembly bindings for [anofox-forecast](https://crates.io/crates/anofox-forec
 npm install @sipemu/anofox-forecast
 ```
 
-## Usage
-
-### Basic Example
+## Quick Start
 
 ```javascript
-import { TimeSeries, NaiveForecaster, ThetaForecaster } from '@sipemu/anofox-forecast';
+import init, { TimeSeries, AutoForecaster, NaiveForecaster } from '@sipemu/anofox-forecast';
 
-// Create a time series from values
-const data = [10, 12, 15, 14, 18, 20, 22, 25, 24, 28];
-const ts = new TimeSeries(new Float64Array(data));
+await init();
 
-// Create and fit a forecaster
-const model = new NaiveForecaster();
+const ts = new TimeSeries(new Float64Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]));
+const model = new AutoForecaster();
 model.fit(ts);
-
-// Generate predictions
 const forecast = model.predict(5);
-console.log('Predictions:', forecast.values);
+console.log(forecast.values); // Float64Array with 5 predictions
 ```
 
-### With Timestamps
-
-```javascript
-import { TimeSeries } from '@sipemu/anofox-forecast';
-
-const values = [10, 12, 15, 14, 18];
-const timestamps = [
-  Date.parse('2024-01-01'),
-  Date.parse('2024-01-02'),
-  Date.parse('2024-01-03'),
-  Date.parse('2024-01-04'),
-  Date.parse('2024-01-05'),
-];
-
-const ts = TimeSeries.withTimestamps(
-  new Float64Array(values),
-  new Float64Array(timestamps)
-);
-```
-
-## Available Forecasters
-
-### Baseline Models
-
-| Forecaster | Description | Parameters |
-|------------|-------------|------------|
-| `NaiveForecaster` | Last observation repeated | - |
-| `MeanForecaster` | Historical mean | - |
-| `SeasonalNaiveForecaster` | Same season from previous cycle | `period` |
-| `RandomWalkDriftForecaster` | Random walk with trend | - |
-| `SMAForecaster` | Simple Moving Average | `window` |
-| `WindowAverageForecaster` | Rolling window average | `window_size` |
-| `SeasonalWindowAverageForecaster` | Seasonal window average | `period`, `window` |
-
-### Exponential Smoothing Models
-
-| Forecaster | Description | Parameters |
-|------------|-------------|------------|
-| `SESForecaster` | Simple Exponential Smoothing | `alpha` |
-| `HoltForecaster` | Holt Linear Trend (Double ES) | `alpha`, `beta` |
-| `HoltWintersForecaster` | Triple Exponential Smoothing | `alpha`, `beta`, `gamma`, `period` |
-| `SeasonalESForecaster` | Seasonal Exponential Smoothing | `period` |
-| `ETSForecaster` | ETS state-space model | `error`, `trend`, `seasonal`, `period` |
-| `AutoETSForecaster` | Automatic ETS selection | - |
-
-### Theta Models
-
-| Forecaster | Description | Parameters |
-|------------|-------------|------------|
-| `ThetaForecaster` | Standard Theta method | - |
-| `OptimizedThetaForecaster` | Optimized Theta | - |
-| `DynamicThetaForecaster` | Dynamic coefficient updates | `alpha` |
-| `AutoThetaForecaster` | Automatic Theta selection | - |
-
-### ARIMA Models
-
-| Forecaster | Description | Parameters |
-|------------|-------------|------------|
-| `ARIMAForecaster` | ARIMA | `p`, `d`, `q` |
-| `SARIMAForecaster` | Seasonal ARIMA | `p`, `d`, `q`, `P`, `D`, `Q`, `period` |
-| `AutoARIMAForecaster` | Automatic ARIMA selection | - |
-
-### Intermittent Demand Models
-
-| Forecaster | Description | Parameters |
-|------------|-------------|------------|
-| `CrostonForecaster` | Croston's method | - |
-| `TSBForecaster` | Teunter-Syntetos-Babai | - |
-| `ADIDAForecaster` | Aggregate-Disaggregate approach | - |
-| `IMAPAForecaster` | Multiple Aggregation Prediction | - |
-
-### Advanced Models
-
-| Forecaster | Description | Parameters |
-|------------|-------------|------------|
-| `TBATSForecaster` | TBATS (complex seasonality) | `seasonal_periods[]` |
-| `AutoTBATSForecaster` | Automatic TBATS | `seasonal_periods[]` |
-| `MFLESForecaster` | Multiple Frequency LOESS | `seasonal_periods[]` |
-| `MSTLForecasterWrapper` | MSTL decomposition | `seasonal_periods[]` |
-| `GARCHForecaster` | GARCH volatility model | `p`, `q` |
+## Available Models
 
 ### Auto Selection
+- `AutoForecaster` — selects best model across ARIMA, ETS, and Theta families
+- `AutoEnsembleForecaster` — automatic ensemble of top-K models
+- `AutoARIMAForecaster` — automatic ARIMA order selection
+- `AutoETSForecaster` — automatic ETS model selection
+- `AutoThetaForecaster` — automatic Theta variant selection
+- `AutoTBATSForecaster` — automatic TBATS configuration
 
-| Forecaster | Description | Parameters |
-|------------|-------------|------------|
-| `AutoForecaster` | Best of ARIMA, ETS, Theta | - |
-| `AutoEnsembleForecaster` | Ensemble of top-K models | - |
+### Exponential Smoothing
+- `SESForecaster` — Simple Exponential Smoothing
+- `HoltForecaster` — Holt's Linear Trend
+- `HoltWintersForecaster` — Holt-Winters (additive/multiplicative seasonality)
+- `SeasonalESForecaster` — Seasonal Exponential Smoothing
+- `ETSForecaster` — Error-Trend-Seasonal state-space framework
 
-## Prediction Intervals
+### ARIMA
+- `ARIMAForecaster` — ARIMA(p,d,q) model
 
-Most models support prediction intervals:
+### Theta
+- `ThetaForecaster` — Standard Theta
+- `OptimizedThetaForecaster` — Optimized Theta
+- `DynamicThetaForecaster` — Dynamic Theta
 
-```javascript
-import { NaiveForecaster } from '@sipemu/anofox-forecast';
+### Baseline
+- `NaiveForecaster`, `MeanForecaster`, `SeasonalNaiveForecaster`
+- `RandomWalkWithDriftForecaster`, `SMAForecaster`, `WindowAverageForecaster`
+- `SeasonalWindowAverageForecaster`
 
-const model = new NaiveForecaster();
-model.fit(ts);
+### Intermittent Demand
+- `CrostonForecaster`, `ADIDAForecaster`, `TSBForecaster`, `IMAPAForecaster`
 
-// Get forecast with 95% prediction intervals
-const forecast = model.predictWithIntervals(5, 0.95);
+### Complex Seasonality & Volatility
+- `TBATSForecaster`, `MFLESForecaster`, `MSTLForecaster`
+- `GARCHForecaster` — volatility modeling
 
-console.log('Point predictions:', forecast.values);
-console.log('Lower bound:', forecast.lower);
-console.log('Upper bound:', forecast.upper);
-```
-
-## API Reference
-
-### TimeSeries
-
-- `new TimeSeries(values: Float64Array)` - Create from values
-- `TimeSeries.withTimestamps(values, timestamps)` - Create with timestamps (ms since epoch)
-- `ts.length` - Number of observations
-- `ts.values` - Get values as array
-- `ts.isEmpty()` - Check if empty
-- `ts.hasMissingValues()` - Check for NaN values
-- `ts.slice(start, end)` - Get a slice of the series
-
-### Forecast
-
-- `forecast.horizon` - Number of predictions
-- `forecast.values` - Point predictions
-- `forecast.lower` - Lower prediction interval (if available)
-- `forecast.upper` - Upper prediction interval (if available)
-- `forecast.hasLower()` - Check if lower interval exists
-- `forecast.hasUpper()` - Check if upper interval exists
-
-### ETS Model Specification
-
-For `ETSForecaster`, use string codes:
-- **Error**: `"A"` (additive) or `"M"` (multiplicative)
-- **Trend**: `"N"` (none), `"A"` (additive), or `"Ad"` (additive damped)
-- **Seasonal**: `"N"` (none), `"A"` (additive), or `"M"` (multiplicative)
-
-```javascript
-// ETS(A,A,M) - Additive error, Additive trend, Multiplicative seasonal
-const ets = new ETSForecaster("A", "A", "M", 12);
-```
-
-#### Standard ETS Notation
-
-You can also use standard ETS notation (following [FPP3 taxonomy](https://otexts.com/fpp3/taxonomy.html)):
-
-```javascript
-// Create from notation string
-const model = ETSForecaster.fromNotation("AAA", 12);  // Holt-Winters additive
-const model = ETSForecaster.fromNotation("MAM", 12);  // Multiplicative Holt-Winters
-const model = ETSForecaster.fromNotation("AAdM", 12); // Damped trend, multiplicative seasonal
-```
-
-Valid notation format: `ErrorTrendSeasonal`
-- First letter: Error (A or M)
-- Second letter(s): Trend (N, A, or Ad)
-- Third letter: Seasonal (N, A, or M)
-
-#### Model Validation
-
-Some ETS combinations are unstable and will throw an error:
-- `MAA` - Multiplicative error + Additive trend + Additive seasonal
-- `MAdA` - Multiplicative error + Damped trend + Additive seasonal
-
-You can check validity before creating:
-
-```javascript
-// Check if a specification is valid
-ETSForecaster.isValidSpec("A", "A", "A");  // true
-ETSForecaster.isValidSpec("M", "A", "M");  // true
-ETSForecaster.isValidSpec("M", "A", "A");  // false (unstable)
-```
+### Ensemble
+- `EnsembleForecaster` — combine multiple models
 
 ## Probabilistic Postprocessing
 
-Generate calibrated prediction intervals using conformal prediction, historical simulation, or normal approximation:
+Generate calibrated prediction intervals using conformal prediction, historical simulation, or normal approximation.
 
 ```javascript
 import { JsConformalPredictor, JsPointForecasts, JsPostProcessor } from '@sipemu/anofox-forecast';
 
-// Conformal prediction intervals (distribution-free)
+// Conformal prediction intervals
 const predictor = new JsConformalPredictor(0.9); // 90% coverage
 predictor.calibrate(forecasts, actuals);
 const intervals = predictor.predictIntervals(newForecasts);
-console.log('Lower:', intervals.lower);
-console.log('Upper:', intervals.upper);
+console.log(intervals.lower);  // Float64Array
+console.log(intervals.upper);  // Float64Array
 
 // Unified PostProcessor API
 const processor = JsPostProcessor.conformal(0.95);
 const trained = processor.train(forecasts, actuals);
 const pi = processor.predictIntervals(trained, newForecasts);
+
+// Backtesting
+const config = new JsBacktestConfig(50, 5, 7); // window=50, step=5, horizon=7
+const result = backtestPostProcessor(processor, forecasts, actuals, config);
+console.log(`Coverage: ${result.coverage}`);
 ```
 
-### Available Methods
-- `JsConformalPredictor` — distribution-free intervals (split, cross-val, jackknife+)
+### Available Postprocessing Methods
+- `JsConformalPredictor` — distribution-free prediction intervals (split, cross-val, jackknife+)
 - `JsNormalPredictor` — Gaussian error assumption baseline
 - `JsHistoricalSimulator` — non-parametric empirical error distribution
 - `JsPostProcessor` — unified API wrapping all methods
 - `JsBacktestConfig` / `JsBacktestResult` — rolling/expanding window backtesting
+
+## Common API Pattern
+
+All forecasters share the same interface:
+
+```javascript
+const model = new SomeForecaster(/* config */);
+model.fit(timeSeries);
+
+// Point forecasts
+const forecast = model.predict(horizon);
+console.log(forecast.values);
+
+// With confidence intervals
+const forecastCI = model.predictWithIntervals(horizon, 0.95);
+console.log(forecastCI.lower);
+console.log(forecastCI.upper);
+```
+
+## ETS Notation
+
+Create ETS models using standard notation (A=Additive, M=Multiplicative, N=None):
+
+```javascript
+const ets = ETSForecaster.fromNotation('AAA', 12); // ETS(A,A,A) with period 12
+ets.fit(ts);
+const forecast = ets.predict(12);
+```
 
 ## Calendar Annotations
 
 Add holidays and named regressors for models that support exogenous variables:
 
 ```javascript
-import { CalendarAnnotations } from '@sipemu/anofox-forecast';
-
 const calendar = new CalendarAnnotations();
 calendar.addHoliday(Date.parse('2024-12-25'));
-calendar.addRegressor('temperature', new Float64Array([20, 22, 25, 23]));
+calendar.addRegressor('temperature', new Float64Array([20, 22, 25, ...]));
 
 ts.setCalendar(calendar);
-model.fit(ts); // ARIMA, MFLES, etc. will automatically use the regressors
+model.fit(ts); // ARIMA, MFLES, etc. will use the regressors
 ```
 
-## Browser Usage
+## TypeScript Support
 
-```html
-<script type="module">
-  import init, { TimeSeries, ThetaForecaster } from './anofox_forecast_js.js';
+Full TypeScript definitions are included. Import types directly:
 
-  async function main() {
-    await init();
+```typescript
+import { TimeSeries, Forecast, AutoForecaster } from '@sipemu/anofox-forecast';
 
-    const data = new Float64Array([10, 12, 15, 14, 18, 20, 22, 25]);
-    const ts = new TimeSeries(data);
-
-    const model = new ThetaForecaster();
-    model.fit(ts);
-
-    const forecast = model.predict(5);
-    console.log('Forecast:', forecast.values);
-  }
-
-  main();
-</script>
+const ts: TimeSeries = new TimeSeries(new Float64Array([1, 2, 3]));
+const forecast: Forecast = model.predict(5);
 ```
 
-## Node.js Usage
+## Links
 
-```javascript
-import { TimeSeries, AutoARIMAForecaster } from '@sipemu/anofox-forecast';
-
-// Load your data
-const data = [/* your time series data */];
-const ts = new TimeSeries(new Float64Array(data));
-
-// Forecast with AutoARIMA
-const model = new AutoARIMAForecaster();
-model.fit(ts);
-const forecast = model.predict(10);
-```
-
-## Calendar Feature Engineering
-
-```javascript
-import { FeatureGenerator, generateFutureTimestamps } from '@sipemu/anofox-forecast';
-
-// Build a feature generator
-const gen = new FeatureGenerator();
-gen.fourier(7, 2);              // weekly Fourier terms
-gen.cyclical('month');           // sin/cos month encoding
-gen.cyclical('day_of_week');     // sin/cos day-of-week
-gen.binary('weekend');           // 0/1 weekend indicator
-gen.binary('month_end');         // 0/1 month-end
-gen.advanced('days_in_month');   // 28-31
-
-// Generate features from timestamps (ms since epoch)
-const features = gen.generate(timestamps);  // { month_sin: [...], weekend: [...], ... }
-const names = gen.featureNames();
-
-// Generate future timestamps (calendar-aware)
-const future = generateFutureTimestamps(lastTimestampMs, '1mo', 12);  // monthly
-const weekly = generateFutureTimestamps(lastTimestampMs, '1w', 4);    // weekly
-
-// Auto-infer from TimeSeries
-const futureTs = ts.futureTimestamps(12);
-```
-
-## Bootstrap Prediction Intervals
-
-```javascript
-import { JsBootstrapPredictor } from '@sipemu/anofox-forecast';
-
-const bp = new JsBootstrapPredictor(0.95);
-bp.nReplicates(1000);
-bp.seed(42);
-
-const result = bp.fit(fittedValues, actuals);
-const intervals = bp.predictIntervals(result, pointForecast);
-console.log(intervals.lower, intervals.upper);
-
-// Multi-quantile forecasts
-const quantiles = bp.predictQuantiles(result, pointForecast, [0.10, 0.25, 0.50, 0.75, 0.90]);
-```
-
-## Per-Step Conformal Prediction
-
-```javascript
-// Per-horizon-step intervals (tighter at h=1, wider at h=12)
-const perStep = predictor.fitPerStep(foldForecasts, foldActuals);
-console.log(perStep.halfWidths);  // different width per step
-
-const intervals = perStep.predictIntervals(pointForecast);
-
-// Multi-quantile conformal forecasts
-const quantiles = predictor.predictQuantiles(result, pointForecast, [0.10, 0.50, 0.90]);
-```
-
-## Limitations
-
-- The `parallel` feature from the Rust crate is not available in WASM
-- IDR (Isotonic Distributional Regression) and QRA are not yet exposed in WASM
-- RegressionForecaster (11 regression backends) is Rust-only (not yet in WASM)
+- [Rust crate](https://crates.io/crates/anofox-forecast)
+- [API documentation](https://docs.rs/anofox-forecast)
+- [GitHub repository](https://github.com/sipemu/anofox-forecast)
+- [DuckDB extension](https://github.com/DataZooDE/anofox-forecast)
 
 ## License
 

@@ -7,7 +7,7 @@ use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
 use anofox_forecast::changepoint::{
-    pelt_detect, CostFunction as InnerCostFunction, PeltConfig as InnerPeltConfig,
+    pelt_detect, CostFunction as InnerCostFunction, Pelt, PeltConfig as InnerPeltConfig,
 };
 
 /// Result of changepoint detection, serialized to JavaScript.
@@ -92,6 +92,64 @@ pub fn detect_changepoints_bic(
 ) -> Result<JsValue, JsError> {
     let penalty = (values.len() as f64).ln();
     detect_changepoints(values, penalty, cost_function, None)
+}
+
+/// Result of automatic changepoint detection with CROPS.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AutoPeltResultJs {
+    changepoints: Vec<usize>,
+    segments: Vec<(usize, usize)>,
+    cost: f64,
+    n_changepoints: usize,
+    segment_means: Vec<f64>,
+    penalty: f64,
+    n_crops_evaluated: usize,
+}
+
+/// Automatically detect changepoints with data-driven penalty selection.
+///
+/// Uses CROPS (Changepoints for a Range of Penalties) to evaluate ~30 penalties
+/// and selects the optimal one via elbow detection.
+///
+/// @param values - Array of numeric values
+/// @param costFunction - Cost function (default: "l2")
+/// @param minSegmentLength - Minimum segment length (default: 5)
+/// @returns Object with changepoints, penalty, and CROPS results
+#[wasm_bindgen(js_name = autoDetectChangepoints)]
+pub fn auto_detect_changepoints(
+    values: &[f64],
+    cost_function: Option<String>,
+    min_segment_length: Option<usize>,
+) -> Result<JsValue, JsError> {
+    let cost_fn = match cost_function.as_deref() {
+        Some("l1") | Some("L1") => InnerCostFunction::L1,
+        Some("l2") | Some("L2") | None => InnerCostFunction::L2,
+        Some("normal") | Some("Normal") => InnerCostFunction::Normal,
+        Some("poisson") | Some("Poisson") => InnerCostFunction::Poisson,
+        Some("linearTrend") | Some("LinearTrend") => InnerCostFunction::LinearTrend,
+        Some("meanVariance") | Some("MeanVariance") => InnerCostFunction::MeanVariance,
+        Some("cusum") | Some("Cusum") | Some("CUSUM") => InnerCostFunction::Cusum,
+        Some(other) => {
+            return Err(JsError::new(&format!("Unknown cost function '{}'", other)));
+        }
+    };
+
+    let result = Pelt::new(cost_fn)
+        .min_size(min_segment_length.unwrap_or(5))
+        .auto_detect(values);
+
+    let js_result = AutoPeltResultJs {
+        segment_means: result.result.segment_means(values),
+        changepoints: result.result.changepoints,
+        segments: result.result.segments,
+        cost: result.result.cost,
+        n_changepoints: result.result.n_changepoints,
+        penalty: result.penalty,
+        n_crops_evaluated: result.crops.len(),
+    };
+
+    serde_wasm_bindgen::to_value(&js_result).map_err(|e| JsError::new(&e.to_string()))
 }
 
 #[cfg(test)]
