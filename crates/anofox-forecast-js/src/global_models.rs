@@ -11,6 +11,7 @@ use anofox_forecast::models::exponential::{
     GlobalETS as InnerGlobalETS, ModelPool as InnerModelPool, TrendType,
 };
 use anofox_forecast::models::intermittent::GlobalCroston as InnerGlobalCroston;
+use anofox_forecast::models::theta::GlobalTheta as InnerGlobalTheta;
 
 /// Parse a ModelPool string into the Rust enum.
 fn parse_model_pool(pool: &str) -> Result<InnerModelPool, JsError> {
@@ -196,6 +197,37 @@ pub fn global_croston(
     let forecasts = model.predict(horizon);
 
     let result = GlobalCrostonResult {
+        forecasts,
+        alpha: model.alpha(),
+    };
+    serde_wasm_bindgen::to_value(&result).map_err(|e| JsError::new(&e.to_string()))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GlobalThetaResult {
+    forecasts: Vec<Vec<f64>>,
+    alpha: f64,
+}
+
+/// Fit a GlobalTheta model: shared α for the Standard Theta Method across
+/// many series.
+///
+/// @param series - Array of arrays (each inner array is one series)
+/// @param horizon - Forecast horizon
+/// @returns Object with forecasts array and shared alpha
+#[wasm_bindgen(js_name = globalTheta)]
+pub fn global_theta(series: JsValue, horizon: usize) -> Result<JsValue, JsError> {
+    let all_series: Vec<Vec<f64>> =
+        serde_wasm_bindgen::from_value(series).map_err(|e| JsError::new(&e.to_string()))?;
+
+    let mut model = InnerGlobalTheta::new();
+    model
+        .fit(&all_series)
+        .map_err(|e| JsError::new(&e.to_string()))?;
+
+    let forecasts = model.predict(horizon);
+    let result = GlobalThetaResult {
         forecasts,
         alpha: model.alpha(),
     };

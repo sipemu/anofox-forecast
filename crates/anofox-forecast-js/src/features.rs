@@ -8,8 +8,9 @@ use wasm_bindgen::prelude::*;
 
 use anofox_forecast::core::{generate_future_timestamps as gen_future_ts, Frequency};
 use anofox_forecast::features::{
-    autocorrelation as acf_fn, basic, distribution, entropy, partial_autocorrelation as pacf_fn,
-    AdvancedFeature, BinaryIndicator, FeatureGenerator as InnerFeatureGenerator, TimeComponent,
+    autocorrelation as acf_fn, basic, change, complexity, counting, distribution, entropy,
+    partial_autocorrelation as pacf_fn, trend, AdvancedFeature, BinaryIndicator,
+    FeatureGenerator as InnerFeatureGenerator, TimeComponent,
 };
 
 /// Compute the autocorrelation of a time series at a specific lag.
@@ -381,4 +382,314 @@ mod tests {
         let se = sample_entropy(&values, 2, 0.2);
         assert!(!se.is_nan());
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  Extended feature library — thin wrappers over `anofox_forecast::features`.
+// ─────────────────────────────────────────────────────────────────────────
+
+// ── basic ───────────────────────────────────────────────────────────────
+
+#[wasm_bindgen(js_name = absEnergy)]
+pub fn abs_energy(values: &[f64]) -> f64 {
+    basic::abs_energy(values)
+}
+
+#[wasm_bindgen(js_name = absoluteMaximum)]
+pub fn absolute_maximum(values: &[f64]) -> f64 {
+    basic::absolute_maximum(values)
+}
+
+#[wasm_bindgen(js_name = absoluteSumOfChanges)]
+pub fn absolute_sum_of_changes(values: &[f64]) -> f64 {
+    basic::absolute_sum_of_changes(values)
+}
+
+#[wasm_bindgen]
+pub fn maximum(values: &[f64]) -> f64 {
+    basic::maximum(values)
+}
+
+#[wasm_bindgen]
+pub fn minimum(values: &[f64]) -> f64 {
+    basic::minimum(values)
+}
+
+#[wasm_bindgen]
+pub fn median(values: &[f64]) -> f64 {
+    basic::median(values)
+}
+
+#[wasm_bindgen(js_name = meanAbsChange)]
+pub fn mean_abs_change(values: &[f64]) -> f64 {
+    basic::mean_abs_change(values)
+}
+
+#[wasm_bindgen(js_name = meanChange)]
+pub fn mean_change(values: &[f64]) -> f64 {
+    basic::mean_change(values)
+}
+
+#[wasm_bindgen(js_name = meanSecondDerivativeCentral)]
+pub fn mean_second_derivative_central(values: &[f64]) -> f64 {
+    basic::mean_second_derivative_central(values)
+}
+
+#[wasm_bindgen(js_name = meanNAbsoluteMax)]
+pub fn mean_n_absolute_max(values: &[f64], n: usize) -> f64 {
+    basic::mean_n_absolute_max(values, n)
+}
+
+#[wasm_bindgen(js_name = rootMeanSquare)]
+pub fn root_mean_square(values: &[f64]) -> f64 {
+    basic::root_mean_square(values)
+}
+
+#[wasm_bindgen(js_name = standardDeviation)]
+pub fn standard_deviation(values: &[f64]) -> f64 {
+    basic::standard_deviation(values)
+}
+
+#[wasm_bindgen(js_name = sumValues)]
+pub fn sum_values(values: &[f64]) -> f64 {
+    basic::sum_values(values)
+}
+
+#[wasm_bindgen(js_name = varianceSample)]
+pub fn variance_sample(values: &[f64]) -> f64 {
+    basic::variance_sample(values)
+}
+
+// ── distribution ────────────────────────────────────────────────────────
+
+#[wasm_bindgen]
+pub fn quantile(values: &[f64], q: f64) -> f64 {
+    distribution::quantile(values, q)
+}
+
+#[wasm_bindgen(js_name = variationCoefficient)]
+pub fn variation_coefficient(values: &[f64]) -> f64 {
+    distribution::variation_coefficient(values)
+}
+
+#[wasm_bindgen(js_name = largeStandardDeviation)]
+pub fn large_standard_deviation(values: &[f64], r: f64) -> bool {
+    distribution::large_standard_deviation(values, r)
+}
+
+#[wasm_bindgen(js_name = varianceLargerThanStandardDeviation)]
+pub fn variance_larger_than_standard_deviation(values: &[f64]) -> bool {
+    distribution::variance_larger_than_standard_deviation(values)
+}
+
+#[wasm_bindgen(js_name = symmetryLooking)]
+pub fn symmetry_looking(values: &[f64], r: f64) -> bool {
+    distribution::symmetry_looking(values, r)
+}
+
+#[wasm_bindgen(js_name = ratioBeyondRSigma)]
+pub fn ratio_beyond_r_sigma(values: &[f64], r: f64) -> f64 {
+    distribution::ratio_beyond_r_sigma(values, r)
+}
+
+// ── entropy ─────────────────────────────────────────────────────────────
+
+#[wasm_bindgen(js_name = permutationEntropy)]
+pub fn permutation_entropy(values: &[f64], order: usize, delay: usize) -> f64 {
+    entropy::permutation_entropy(values, order, delay)
+}
+
+#[wasm_bindgen(js_name = permutationEntropyNormalized)]
+pub fn permutation_entropy_normalized(values: &[f64], order: usize, delay: usize) -> f64 {
+    entropy::permutation_entropy_normalized(values, order, delay)
+}
+
+#[wasm_bindgen(js_name = binnedEntropy)]
+pub fn binned_entropy(values: &[f64], max_bins: usize) -> f64 {
+    entropy::binned_entropy(values, max_bins)
+}
+
+#[wasm_bindgen(js_name = fourierEntropy)]
+pub fn fourier_entropy(values: &[f64]) -> f64 {
+    entropy::fourier_entropy(values)
+}
+
+// ── complexity ──────────────────────────────────────────────────────────
+
+#[wasm_bindgen(js_name = cidCe)]
+pub fn cid_ce(values: &[f64], normalize: bool) -> f64 {
+    complexity::cid_ce(values, normalize)
+}
+
+#[wasm_bindgen]
+pub fn c3(values: &[f64], lag: usize) -> f64 {
+    complexity::c3(values, lag)
+}
+
+#[wasm_bindgen(js_name = lempelZivComplexity)]
+pub fn lempel_ziv_complexity(values: &[f64], bins: usize) -> f64 {
+    complexity::lempel_ziv_complexity(values, bins)
+}
+
+#[wasm_bindgen(js_name = lempelZivComplexityBinary)]
+pub fn lempel_ziv_complexity_binary(values: &[f64]) -> f64 {
+    complexity::lempel_ziv_complexity_binary(values)
+}
+
+// ── counting ────────────────────────────────────────────────────────────
+
+#[wasm_bindgen(js_name = countAbove)]
+pub fn count_above(values: &[f64], threshold: f64) -> usize {
+    counting::count_above(values, threshold)
+}
+
+#[wasm_bindgen(js_name = countBelow)]
+pub fn count_below(values: &[f64], threshold: f64) -> usize {
+    counting::count_below(values, threshold)
+}
+
+#[wasm_bindgen(js_name = countAboveMean)]
+pub fn count_above_mean(values: &[f64]) -> usize {
+    counting::count_above_mean(values)
+}
+
+#[wasm_bindgen(js_name = countBelowMean)]
+pub fn count_below_mean(values: &[f64]) -> usize {
+    counting::count_below_mean(values)
+}
+
+#[wasm_bindgen(js_name = numberPeaks)]
+pub fn number_peaks(values: &[f64], support: usize) -> usize {
+    counting::number_peaks(values, support)
+}
+
+#[wasm_bindgen(js_name = numberCrossingM)]
+pub fn number_crossing_m(values: &[f64], m: f64) -> usize {
+    counting::number_crossing_m(values, m)
+}
+
+#[wasm_bindgen(js_name = longestStrikeAboveMean)]
+pub fn longest_strike_above_mean(values: &[f64]) -> usize {
+    counting::longest_strike_above_mean(values)
+}
+
+#[wasm_bindgen(js_name = longestStrikeBelowMean)]
+pub fn longest_strike_below_mean(values: &[f64]) -> usize {
+    counting::longest_strike_below_mean(values)
+}
+
+#[wasm_bindgen(js_name = firstLocationOfMaximum)]
+pub fn first_location_of_maximum(values: &[f64]) -> f64 {
+    counting::first_location_of_maximum(values)
+}
+
+#[wasm_bindgen(js_name = firstLocationOfMinimum)]
+pub fn first_location_of_minimum(values: &[f64]) -> f64 {
+    counting::first_location_of_minimum(values)
+}
+
+#[wasm_bindgen(js_name = lastLocationOfMaximum)]
+pub fn last_location_of_maximum(values: &[f64]) -> f64 {
+    counting::last_location_of_maximum(values)
+}
+
+#[wasm_bindgen(js_name = lastLocationOfMinimum)]
+pub fn last_location_of_minimum(values: &[f64]) -> f64 {
+    counting::last_location_of_minimum(values)
+}
+
+#[wasm_bindgen(js_name = hasDuplicate)]
+pub fn has_duplicate(values: &[f64]) -> bool {
+    counting::has_duplicate(values)
+}
+
+#[wasm_bindgen(js_name = hasDuplicateMax)]
+pub fn has_duplicate_max(values: &[f64]) -> bool {
+    counting::has_duplicate_max(values)
+}
+
+#[wasm_bindgen(js_name = hasDuplicateMin)]
+pub fn has_duplicate_min(values: &[f64]) -> bool {
+    counting::has_duplicate_min(values)
+}
+
+#[wasm_bindgen(js_name = indexMassQuantile)]
+pub fn index_mass_quantile(values: &[f64], q: f64) -> f64 {
+    counting::index_mass_quantile(values, q)
+}
+
+#[wasm_bindgen(js_name = valueCount)]
+pub fn value_count(values: &[f64], value: f64) -> usize {
+    counting::value_count(values, value)
+}
+
+#[wasm_bindgen(js_name = rangeCount)]
+pub fn range_count(values: &[f64], min: f64, max: f64) -> usize {
+    counting::range_count(values, min, max)
+}
+
+// ── change ──────────────────────────────────────────────────────────────
+
+#[wasm_bindgen(js_name = energyRatioByChunks)]
+pub fn energy_ratio_by_chunks(values: &[f64], n_chunks: usize, chunk_index: usize) -> f64 {
+    change::energy_ratio_by_chunks(values, n_chunks, chunk_index)
+}
+
+#[wasm_bindgen(js_name = percentageOfReoccurringDatapointsToAllDatapoints)]
+pub fn percentage_of_reoccurring_datapoints_to_all_datapoints(values: &[f64]) -> f64 {
+    change::percentage_of_reoccurring_datapoints_to_all_datapoints(values)
+}
+
+#[wasm_bindgen(js_name = percentageOfReoccurringValuesToAllValues)]
+pub fn percentage_of_reoccurring_values_to_all_values(values: &[f64]) -> f64 {
+    change::percentage_of_reoccurring_values_to_all_values(values)
+}
+
+#[wasm_bindgen(js_name = ratioValueNumberToTimeSeriesLength)]
+pub fn ratio_value_number_to_time_series_length(values: &[f64]) -> f64 {
+    change::ratio_value_number_to_time_series_length(values)
+}
+
+#[wasm_bindgen(js_name = sumOfReoccurringDataPoints)]
+pub fn sum_of_reoccurring_data_points(values: &[f64]) -> f64 {
+    change::sum_of_reoccurring_data_points(values)
+}
+
+#[wasm_bindgen(js_name = sumOfReoccurringValues)]
+pub fn sum_of_reoccurring_values(values: &[f64]) -> f64 {
+    change::sum_of_reoccurring_values(values)
+}
+
+// ── autocorrelation (extra) ─────────────────────────────────────────────
+
+#[wasm_bindgen(js_name = aggAutocorrelation)]
+pub fn agg_autocorrelation(values: &[f64], max_lag: usize, agg_func: &str) -> f64 {
+    anofox_forecast::features::agg_autocorrelation(values, max_lag, agg_func)
+}
+
+#[wasm_bindgen(js_name = timeReversalAsymmetryStatistic)]
+pub fn time_reversal_asymmetry_statistic(values: &[f64], lag: usize) -> f64 {
+    anofox_forecast::features::time_reversal_asymmetry_statistic(values, lag)
+}
+
+// ── trend / AR ──────────────────────────────────────────────────────────
+
+#[wasm_bindgen(js_name = aggLinearTrend)]
+pub fn agg_linear_trend(values: &[f64], chunk_len: usize, agg_func: &str, attribute: &str) -> f64 {
+    trend::agg_linear_trend(values, chunk_len, agg_func, attribute)
+}
+
+#[wasm_bindgen(js_name = arCoefficient)]
+pub fn ar_coefficient(values: &[f64], k: usize, coeff: usize) -> f64 {
+    trend::ar_coefficient(values, k, coeff)
+}
+
+#[wasm_bindgen(js_name = arCoefficientYuleWalker)]
+pub fn ar_coefficient_yule_walker(values: &[f64], k: usize) -> f64 {
+    trend::ar_coefficient_yule_walker(values, k)
+}
+
+#[wasm_bindgen(js_name = augmentedDickeyFuller)]
+pub fn augmented_dickey_fuller(values: &[f64]) -> f64 {
+    trend::augmented_dickey_fuller(values)
 }

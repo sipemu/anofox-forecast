@@ -8,13 +8,17 @@ use wasm_bindgen::prelude::*;
 
 use anofox_forecast::postprocess::{
     BacktestConfig as InnerBacktestConfig, BacktestResult as InnerBacktestResult,
+    BinnedConformalPredictor as InnerBinnedConformalPredictor,
+    BinnedConformalResult as InnerBinnedConformalResult,
     BootstrapPredictor as InnerBootstrapPredictor, BootstrapResult as InnerBootstrapResult,
     ConformalPredictor as InnerConformalPredictor, ConformalResult as InnerConformalResult,
     HistoricalSimResult as InnerHistoricalSimResult,
-    HistoricalSimulator as InnerHistoricalSimulator, NormalPredictor as InnerNormalPredictor,
+    HistoricalSimulator as InnerHistoricalSimulator, IDRPredictor as InnerIDRPredictor,
+    IDRResult as InnerIDRResult, NormalPredictor as InnerNormalPredictor,
     NormalResult as InnerNormalResult, PerStepConformalResult as InnerPerStepConformalResult,
     PointForecasts as InnerPointForecasts, PostProcessor as InnerPostProcessor,
-    PredictionIntervals as InnerPredictionIntervals, QuantileForecasts as InnerQuantileForecasts,
+    PredictionIntervals as InnerPredictionIntervals, QRAPredictor as InnerQRAPredictor,
+    QRAResult as InnerQRAResult, QuantileForecasts as InnerQuantileForecasts,
     TrainedModel as InnerTrainedModel,
 };
 
@@ -876,4 +880,245 @@ impl JsPerStepConformalResult {
 struct PerStepPredictJs {
     lower: Vec<f64>,
     upper: Vec<f64>,
+}
+
+// =============================================================================
+// BINNED CONFORMAL PREDICTOR
+// =============================================================================
+
+/// Binned conformal predictor for heteroscedastic prediction intervals.
+///
+/// Bins calibration residuals by predicted magnitude so that intervals widen
+/// where errors are systematically larger.
+///
+/// ```javascript
+/// const binned = new JsBinnedConformalPredictor(0.9, 3);
+/// const result = binned.fit(trainForecasts, trainActuals);
+/// const intervals = binned.predict(result, newForecasts);
+/// ```
+#[wasm_bindgen]
+pub struct JsBinnedConformalPredictor {
+    inner: InnerBinnedConformalPredictor,
+}
+
+#[wasm_bindgen]
+pub struct JsBinnedConformalResult {
+    inner: InnerBinnedConformalResult,
+}
+
+#[wasm_bindgen]
+impl JsBinnedConformalResult {
+    #[wasm_bindgen(getter, js_name = binEdges)]
+    pub fn bin_edges(&self) -> Vec<f64> {
+        self.inner.bin_edges().to_vec()
+    }
+
+    #[wasm_bindgen(getter, js_name = binQuantiles)]
+    pub fn bin_quantiles(&self) -> Vec<f64> {
+        self.inner.bin_quantiles().to_vec()
+    }
+
+    #[wasm_bindgen(getter, js_name = globalQuantile)]
+    pub fn global_quantile(&self) -> f64 {
+        self.inner.global_quantile()
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn coverage(&self) -> f64 {
+        self.inner.coverage()
+    }
+
+    #[wasm_bindgen(getter, js_name = nBins)]
+    pub fn n_bins(&self) -> usize {
+        self.inner.n_bins()
+    }
+}
+
+#[wasm_bindgen]
+impl JsBinnedConformalPredictor {
+    /// Create a binned conformal predictor with a target coverage and
+    /// number of bins.
+    #[wasm_bindgen(constructor)]
+    pub fn new(coverage: f64, n_bins: usize) -> Self {
+        Self {
+            inner: InnerBinnedConformalPredictor::new(coverage, n_bins),
+        }
+    }
+
+    /// Fit the predictor on historical forecasts and actuals.
+    pub fn fit(
+        &self,
+        forecasts: &[f64],
+        actuals: &[f64],
+    ) -> Result<JsBinnedConformalResult, JsError> {
+        let res = self
+            .inner
+            .fit(forecasts, actuals)
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(JsBinnedConformalResult { inner: res })
+    }
+
+    /// Apply the fitted result to new point forecasts.
+    pub fn predict(
+        &self,
+        result: &JsBinnedConformalResult,
+        point_forecasts: &[f64],
+    ) -> Result<JsValue, JsError> {
+        let intervals = self.inner.predict(&result.inner, point_forecasts);
+        let out = BinnedIntervalsJs {
+            lower: intervals.lower().to_vec(),
+            upper: intervals.upper().to_vec(),
+            coverage: intervals.coverage(),
+        };
+        serde_wasm_bindgen::to_value(&out).map_err(|e| JsError::new(&e.to_string()))
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BinnedIntervalsJs {
+    lower: Vec<f64>,
+    upper: Vec<f64>,
+    coverage: f64,
+}
+
+// =============================================================================
+// QRA PREDICTOR
+// =============================================================================
+
+/// Quantile Regression Averaging predictor — combines forecasts from multiple
+/// models into calibrated quantile forecasts.
+#[wasm_bindgen]
+pub struct JsQRAPredictor {
+    inner: InnerQRAPredictor,
+}
+
+#[wasm_bindgen]
+pub struct JsQRAResult {
+    inner: InnerQRAResult,
+}
+
+#[wasm_bindgen]
+impl JsQRAResult {
+    #[wasm_bindgen(getter)]
+    pub fn quantiles(&self) -> Vec<f64> {
+        self.inner.quantiles().to_vec()
+    }
+
+    #[wasm_bindgen(getter, js_name = nForecasters)]
+    pub fn n_forecasters(&self) -> usize {
+        self.inner.n_forecasters()
+    }
+
+    #[wasm_bindgen(getter, js_name = hasIntercept)]
+    pub fn has_intercept(&self) -> bool {
+        self.inner.has_intercept()
+    }
+}
+
+#[wasm_bindgen]
+impl JsQRAPredictor {
+    /// Create a QRA predictor with the given target quantiles (unregularised).
+    #[wasm_bindgen(constructor)]
+    pub fn new(quantiles: Vec<f64>) -> Self {
+        Self {
+            inner: InnerQRAPredictor::standard(quantiles),
+        }
+    }
+
+    /// Create a Lasso-regularised QRA predictor.
+    pub fn lasso(quantiles: Vec<f64>, lambda: f64) -> Self {
+        Self {
+            inner: InnerQRAPredictor::lasso(quantiles, lambda),
+        }
+    }
+
+    /// Fit the predictor on a matrix of forecasts from multiple models and
+    /// the corresponding actual values.
+    ///
+    /// @param forecastsMatrix - Vec<Vec<f64>>: rows = time, cols = models
+    /// @param actuals - Actual values (length == rows of matrix)
+    pub fn fit(&self, forecasts_matrix: JsValue, actuals: &[f64]) -> Result<JsQRAResult, JsError> {
+        let matrix: Vec<Vec<f64>> = serde_wasm_bindgen::from_value(forecasts_matrix)
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        let res = self
+            .inner
+            .fit(&matrix, actuals)
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(JsQRAResult { inner: res })
+    }
+
+    /// Produce quantile forecasts for a new matrix of model forecasts.
+    pub fn predict(
+        &self,
+        result: &JsQRAResult,
+        forecasts_matrix: JsValue,
+    ) -> Result<JsValue, JsError> {
+        let matrix: Vec<Vec<f64>> = serde_wasm_bindgen::from_value(forecasts_matrix)
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        let quantile_forecasts = self
+            .inner
+            .predict(&result.inner, &matrix)
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        let out = QuantileForecastsJs::from_inner(&quantile_forecasts);
+        serde_wasm_bindgen::to_value(&out).map_err(|e| JsError::new(&e.to_string()))
+    }
+}
+
+// =============================================================================
+// IDR PREDICTOR
+// =============================================================================
+
+/// Isotonic Distributional Regression predictor — state-of-the-art
+/// calibration via monotonic rank-based mapping.
+#[wasm_bindgen]
+pub struct JsIDRPredictor {
+    inner: InnerIDRPredictor,
+}
+
+#[wasm_bindgen]
+pub struct JsIDRResult {
+    inner: InnerIDRResult,
+}
+
+#[wasm_bindgen]
+impl JsIDRResult {
+    #[wasm_bindgen(getter)]
+    pub fn quantiles(&self) -> Vec<f64> {
+        self.inner.quantiles().to_vec()
+    }
+}
+
+#[wasm_bindgen]
+impl JsIDRPredictor {
+    /// Create an IDR predictor with the given target quantiles.
+    #[wasm_bindgen(constructor)]
+    pub fn new(quantiles: Vec<f64>) -> Self {
+        Self {
+            inner: InnerIDRPredictor::new(quantiles),
+        }
+    }
+
+    /// Fit on historical forecasts and actuals.
+    pub fn fit(&self, forecasts: &[f64], actuals: &[f64]) -> Result<JsIDRResult, JsError> {
+        let res = self
+            .inner
+            .fit(forecasts, actuals)
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        Ok(JsIDRResult { inner: res })
+    }
+
+    /// Produce quantile forecasts for new point forecasts.
+    pub fn predict(
+        &self,
+        result: &JsIDRResult,
+        point_forecasts: &JsPointForecasts,
+    ) -> Result<JsValue, JsError> {
+        let quantile_forecasts = self
+            .inner
+            .predict(&result.inner, point_forecasts.inner())
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        let out = QuantileForecastsJs::from_inner(&quantile_forecasts);
+        serde_wasm_bindgen::to_value(&out).map_err(|e| JsError::new(&e.to_string()))
+    }
 }

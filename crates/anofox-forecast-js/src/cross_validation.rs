@@ -10,7 +10,9 @@ use anofox_forecast::models::arima::AutoARIMA;
 use anofox_forecast::models::baseline::{Naive, SimpleMovingAverage};
 use anofox_forecast::models::exponential::{AutoETS, HoltLinearTrend, SimpleExponentialSmoothing};
 use anofox_forecast::models::theta::AutoTheta;
-use anofox_forecast::utils::cross_validation::{cross_validate, CVConfig};
+use anofox_forecast::utils::cross_validation::{
+    cross_validate, rolling_forecast, CVConfig, RollingForecastConfig,
+};
 
 /// Result of cross-validation, serialized to JavaScript.
 #[derive(Serialize)]
@@ -106,6 +108,110 @@ fn run_cv_for_model(
         s if s.starts_with("sma") => {
             let window: usize = s[3..].parse().unwrap_or(5);
             cross_validate(config, ts.inner(), || SimpleMovingAverage::new(window))
+                .map_err(|e| JsError::new(&e.to_string()))
+        }
+        other => Err(JsError::new(&format!(
+            "Unknown model type '{}'. Use: naive, ses, holt, autoarima, autoets, autotheta, sma<N>",
+            other
+        ))),
+    }
+}
+
+/// Result of a rolling / expanding forecast evaluation.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RollingForecastResultJs {
+    /// All predictions concatenated in chronological order.
+    all_predictions: Vec<f64>,
+    /// All actuals concatenated in chronological order.
+    all_actuals: Vec<f64>,
+    /// Number of windows evaluated.
+    n_windows: usize,
+    /// Aggregated MAE across all windows.
+    mae: f64,
+    /// Aggregated RMSE across all windows.
+    rmse: f64,
+    /// Aggregated MAPE across all windows (NaN if unavailable).
+    mape: f64,
+    /// Aggregated sMAPE across all windows.
+    smape: f64,
+}
+
+/// Walk-forward rolling / expanding window forecast evaluation.
+///
+/// Trains a model on a historical window, forecasts `horizon` steps,
+/// records predictions vs actuals, advances the origin by `stepSize`, and
+/// repeats. Produces realistic out-of-sample accuracy estimates.
+///
+/// @param values - Array of numeric values
+/// @param timestamps - Optional array of timestamps as milliseconds since epoch
+/// @param modelType - Model type: "naive", "ses", "holt", "autoarima", "autoets", "autotheta", "sma<N>"
+/// @param initialTrainSize - Size of the first training window
+/// @param horizon - Number of steps to forecast at each origin
+/// @param stepSize - Steps between successive origins (default: `horizon`)
+/// @param expanding - `true` for expanding window (default), `false` for rolling window
+/// @returns Object with `allPredictions`, `allActuals`, `nWindows`, `mae`, `rmse`, `mape`, `smape`
+#[wasm_bindgen(js_name = rollingForecast)]
+pub fn rolling_forecast_js(
+    values: &[f64],
+    timestamps: Option<Vec<f64>>,
+    model_type: &str,
+    initial_train_size: usize,
+    horizon: usize,
+    step_size: Option<usize>,
+    expanding: Option<bool>,
+) -> Result<JsValue, JsError> {
+    let ts = match timestamps {
+        Some(ref ts_ms) => TimeSeries::with_timestamps(values, ts_ms)?,
+        None => TimeSeries::new(values)?,
+    };
+
+    let mut config = RollingForecastConfig::new(initial_train_size, horizon);
+    if let Some(s) = step_size {
+        config = config.step_size(s);
+    }
+    if let Some(e) = expanding {
+        config = config.expanding(e);
+    }
+
+    let result = run_rolling_for_model(&config, &ts, model_type)?;
+
+    let js_result = RollingForecastResultJs {
+        n_windows: result.windows.len(),
+        all_predictions: result.all_predictions,
+        all_actuals: result.all_actuals,
+        mae: result.aggregated.mae,
+        rmse: result.aggregated.rmse,
+        mape: result.aggregated.mape.unwrap_or(f64::NAN),
+        smape: result.aggregated.smape,
+    };
+
+    serde_wasm_bindgen::to_value(&js_result).map_err(|e| JsError::new(&e.to_string()))
+}
+
+fn run_rolling_for_model(
+    config: &RollingForecastConfig,
+    ts: &TimeSeries,
+    model_type: &str,
+) -> Result<anofox_forecast::utils::cross_validation::RollingForecastResult, JsError> {
+    match model_type.to_lowercase().as_str() {
+        "naive" => rolling_forecast(ts.inner(), config, Naive::new)
+            .map_err(|e| JsError::new(&e.to_string())),
+        "ses" | "simpleexponentialsmoothing" => {
+            rolling_forecast(ts.inner(), config, SimpleExponentialSmoothing::auto)
+                .map_err(|e| JsError::new(&e.to_string()))
+        }
+        "holt" | "holtlineartrend" => rolling_forecast(ts.inner(), config, HoltLinearTrend::auto)
+            .map_err(|e| JsError::new(&e.to_string())),
+        "autoarima" => rolling_forecast(ts.inner(), config, AutoARIMA::new)
+            .map_err(|e| JsError::new(&e.to_string())),
+        "autoets" => rolling_forecast(ts.inner(), config, AutoETS::new)
+            .map_err(|e| JsError::new(&e.to_string())),
+        "autotheta" => rolling_forecast(ts.inner(), config, AutoTheta::new)
+            .map_err(|e| JsError::new(&e.to_string())),
+        s if s.starts_with("sma") => {
+            let window: usize = s[3..].parse().unwrap_or(5);
+            rolling_forecast(ts.inner(), config, move || SimpleMovingAverage::new(window))
                 .map_err(|e| JsError::new(&e.to_string()))
         }
         other => Err(JsError::new(&format!(

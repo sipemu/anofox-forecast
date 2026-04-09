@@ -11,11 +11,17 @@ pub mod calendar;
 pub mod changepoint;
 pub mod cross_validation;
 pub mod decomposition;
+pub mod detection;
+pub mod diagnostics;
 pub mod features;
+pub mod filters;
 pub mod forecaster;
 pub mod global_models;
+pub mod hierarchy;
 pub mod monitor;
+pub mod pipeline;
 pub mod postprocess;
+pub mod regression;
 pub mod time_series;
 pub mod validation;
 
@@ -24,13 +30,26 @@ pub use auto_models::{AutoEnsembleForecaster, AutoForecastBuilder, AutoForecaste
 pub use bootstrap::bootstrap_forecast_js;
 pub use calendar::*;
 pub use changepoint::{auto_detect_changepoints, detect_changepoints, detect_changepoints_bic};
-pub use cross_validation::cross_validate_js;
+pub use cross_validation::{cross_validate_js, rolling_forecast_js};
 pub use decomposition::{mstl_decompose, stl_decompose};
+pub use detection::{
+    detect_dominant_period, detect_outliers, detect_outliers_auto, welch_periodogram,
+};
+pub use diagnostics::{
+    analyze_demand, intermittent_diagnostics, intermittent_diagnostics_with_forecast,
+    intermittent_diagnostics_with_intervals,
+};
 pub use features::*;
+pub use filters::{
+    bk_filter, cf_filter, find_min_fractional_d, fractional_difference, hamilton_filter, hp_filter,
+};
 pub use forecaster::*;
-pub use global_models::{global_auto_ets, global_croston, global_ets};
+pub use global_models::{global_auto_ets, global_croston, global_ets, global_theta};
+pub use hierarchy::HierarchyTree;
 pub use monitor::{monitor_forecast_errors, update_forecast_monitor};
+pub use pipeline::{Pipeline, PipelineBuilder};
 pub use postprocess::*;
+pub use regression::{RegressionFeatures, RegressionForecaster};
 pub use time_series::*;
 pub use validation::*;
 

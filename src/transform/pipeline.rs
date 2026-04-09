@@ -112,6 +112,13 @@ impl PipelineBuilder {
         self
     }
 
+    /// Append a pre-boxed transform — convenience for FFI / dynamic
+    /// construction where the concrete type isn't statically known.
+    pub fn transform_boxed(mut self, t: Box<dyn Transform>) -> Self {
+        self.transforms.push(t);
+        self
+    }
+
     /// Set the inner forecasting model.
     pub fn model(mut self, model: BoxedForecaster) -> Self {
         self.model = Some(model);
