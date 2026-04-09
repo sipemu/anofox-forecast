@@ -57,7 +57,7 @@ console.log(forecast.values);
   - Kalman filter / state-space models (local level, local linear trend, custom)
   - Exogenous regressor support across model families with OLS coefficient extraction (`exog_coefficients()`)
   - `FeatureGenerator`: deterministic regressor generation (Fourier harmonics, day-of-week, month-of-year, quarter, holiday indicators, cyclical sin/cos encoding, binary calendar indicators)
-  - `RegressionForecaster`: `anofox-regression` backends as `Forecaster` — 11 regression backends (OLS, Ridge, ElasticNet, Quantile, WLS, RLS, Tweedie, Poisson, BLS, NNLS, Dynamic), configurable trend/seasonal/structural features, recursive multi-step prediction, auto-lag selection (BIC/AIC), differencing and seasonal differencing
+  - `RegressionForecaster`: `anofox-regression` backends as `Forecaster` — 11 regression backends (OLS, Ridge, ElasticNet, Quantile, WLS, RLS, Tweedie, Poisson, BLS, NNLS, Dynamic), configurable trend/seasonal/structural features, recursive multi-step prediction, auto-lag selection (BIC/AIC), differencing and seasonal differencing, **rolling-window features** (mean/std/var/min/max/median/sum/EWM) via the `RecursiveFeature` trait — recomputed at every horizon step using the rolling history buffer, with built-in `lag >= 1` leakage guard
 
 - **Automatic Model Selection**
   - `AutoForecast`: Unified selection across ARIMA, ETS, and Theta families (parallel with `parallel` feature)
@@ -132,6 +132,15 @@ console.log(forecast.values);
   - `crops()`: explore the penalty landscape (penalty vs n_changepoints curve)
   - Builder API: `Pelt::new(CostFunction::L2).min_size(5).penalty(5.0).detect(&data)`
   - Multiple cost functions: L1, L2, Normal, Poisson, LinearTrend, MeanVariance, Cusum
+
+- **Sequential Monitoring of Forecast Errors** (`monitor::` module)
+  - Online changepoint detection on a stream of forecast residuals — flags the moment a fitted model becomes inaccurate
+  - Four CUSUM detectors: `PageCusum` (default), `PageCusum1`, `Cusum`, `Cusum1` (two-sided and one-sided variants)
+  - Detects mean shifts (raw stream), variance shifts (squared stream), or both in parallel
+  - Constant-size online state: `SequentialDetector::update(&new_errors)` is bit-equivalent to a fresh fit on the full series — production-safe streaming
+  - Baked-in 228-entry critical-value table (4 detectors × 19 γ × 3 α) with reproducible Monte-Carlo regeneration
+  - `Forecaster` trait integration: `monitor_forecaster()` (in-sample residuals, cheap) and `monitor_forecaster_cv()` (rolling-origin CV residuals, calibrated)
+  - Rust port of [`changepoint.forecast`](https://github.com/grundy95/changepoint.forecast) by Thomas Grundy (Lancaster), based on [Fremdt (2014)](https://doi.org/10.1080/02331888.2014.921899)
 
 - **Anomaly Detection & Outlier Handling**
   - Statistical methods (IQR, z-score, modified z-score)
@@ -229,7 +238,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-anofox-forecast = "0.5.7"
+anofox-forecast = "0.6.0"
 ```
 
 ### Optional Features
@@ -237,13 +246,13 @@ anofox-forecast = "0.5.7"
 ```toml
 [dependencies]
 # Parallel AutoARIMA (4-8x speedup via rayon, opt-in for embedding contexts like DuckDB)
-anofox-forecast = { version = "0.5", features = ["parallel"] }
+anofox-forecast = { version = "0.6", features = ["parallel"] }
 
 # Model serialization (save/load to JSON)
-anofox-forecast = { version = "0.5", features = ["serde"] }
+anofox-forecast = { version = "0.6", features = ["serde"] }
 
 # Probabilistic postprocessing (conformal, IDR, QRA — enabled by default)
-anofox-forecast = { version = "0.5", default-features = false }  # to disable
+anofox-forecast = { version = "0.6", default-features = false }  # to disable
 ```
 
 | Feature | Default | Description |
@@ -360,6 +369,33 @@ println!("Seasonal: {:?}", decomposition.seasonal());
 println!("Remainder: {:?}", decomposition.remainder());
 ```
 
+### Rolling Features in Regression Models
+
+```rust
+use anofox_forecast::models::regression::{
+    RegressionFeatures, RegressionForecaster, RollingStatKind,
+};
+
+// OLS with lag-1, a rolling mean of the last 7 values, and a rolling std.
+// Every rolling feature is recomputed at each horizon step using the
+// previous predictions — correct recursive multi-step semantics.
+let mut model = RegressionForecaster::ols(
+    RegressionFeatures::new()
+        .no_trend()
+        .lags(1)
+        .with_rolling_mean(7)?                        // last 7, lag=1
+        .with_rolling_std(14)?                        // last 14, lag=1
+        .with_ewm_mean(20, 0.3)?                      // EWM window=20, α=0.3
+        .no_exog(),
+);
+model.fit(&ts)?;
+let forecast = model.predict(12)?;
+
+// All `RollingStatKind` variants: Mean, Std, Var, Min, Max, Median, Sum,
+// EwmMean { alpha }, EwmStd { alpha }. Custom lag via `.with_rolling_lagged(w, lag, kind)`.
+// `lag == 0` is rejected at build time to prevent target leakage.
+```
+
 ### Transform Pipeline
 
 ```rust
@@ -438,6 +474,45 @@ println!("Auto-selected penalty: {:.2}", result.penalty);
 let result = Pelt::new(CostFunction::L2)
     .penalty(10.0)
     .detect(&data);
+```
+
+### Sequential Monitoring of Forecast Errors
+
+Online detection of when a fitted model has become inaccurate. Port of the R
+package [`changepoint.forecast`](https://github.com/grundy95/changepoint.forecast)
+by Thomas Grundy, based on
+[Fremdt (2014)](https://doi.org/10.1080/02331888.2014.921899).
+
+```rust
+use anofox_forecast::models::baseline::Naive;
+use anofox_forecast::monitor::{
+    monitor_forecaster, Detector, ForecastErrorType, SequentialConfig, SequentialDetector,
+};
+
+// Option A: monitor a fitted forecaster's residuals directly
+let mut model = Naive::new();
+model.fit(&ts)?;
+
+let cfg = SequentialConfig::new(200)        // training window length m
+    .detector(Detector::PageCusum)          // recommended default
+    .error_type(ForecastErrorType::Both);   // monitor mean AND variance
+let detector = monitor_forecaster(&model, cfg)?;
+
+if let Some(tau) = detector.first_detection() {
+    println!("Model drifted at observation {}", tau);
+}
+
+// Option B: bring your own residual stream and update it online
+let cfg = SequentialConfig::new(100).detector(Detector::PageCusum);
+let mut detector = SequentialDetector::fit(&residuals, cfg)?;
+
+// Each time a new actual arrives, compute the new error and stream it in.
+// State is constant-size; this is bit-equivalent to a fresh fit on the full
+// concatenated series.
+detector.update(&[new_error])?;
+if detector.has_detected() {
+    // refit the forecasting model
+}
 ```
 
 ### Spectral Analysis
@@ -556,10 +631,12 @@ println!("Upper: {:?}", intervals.upper());
 | `BinnedConformalPredictor` | Heteroscedastic prediction intervals binned by predicted magnitude |
 | `RegressionForecaster` | Multi-backend regression: OLS, Ridge, ElasticNet, Quantile, WLS, RLS, Tweedie, Poisson, BLS, Dynamic |
 | `RegressionBackend` | Backend selection enum with convenience constructors (`ridge()`, `quantile()`, `wls_decay()`, etc.) |
-| `RegressionFeatures` | Feature builder for regression models (trend, seasonal, lags, structural, exog) |
+| `RegressionFeatures` | Feature builder for regression models (trend, seasonal, lags, structural, recursive, exog) |
 | `FeatureSafety` | Feature leakage classification: Deterministic, DataDependent, Structural, External |
 | `StructuralFeature` | Trait for forward-filled features during prediction (changepoints, outlier indicators) |
 | `ChangepointFeature` | Structural feature for regime indicators (StepFunctions, RegimeIndex, CumulativeCount) |
+| `RecursiveFeature` | Trait for features recomputed at every horizon step from the rolling history buffer |
+| `RollingFeature` / `RollingStatKind` | Rolling window statistics (Mean, Std, Var, Min, Max, Median, Sum, EwmMean, EwmStd) as regression features |
 | `Pipeline` / `PipelineBuilder` | Composable transform → model chains (BoxCox → Difference → Model → inverse) |
 | `Transform` trait | Reversible transforms: `DifferenceTransform`, `SeasonalDifferenceTransform`, `BoxCoxTransform`, `ScaleTransform`, `LogTransform` |
 | `FeatureGenerator` | Deterministic feature generation: `fourier()`, `day_of_week()`, `month_of_year()`, `quarter()`, `holiday()` |
@@ -622,7 +699,7 @@ cargo run --example postprocess_conformal   # Conformal prediction intervals
 
 ## Acknowledgments
 
-The postprocessing module is a Rust port of [PostForecasts.jl](https://github.com/lipiecki/PostForecasts.jl). Feature extraction is inspired by [tsfresh](https://github.com/blue-yonder/tsfresh). Forecasting models are validated against [StatsForecast](https://github.com/Nixtla/statsforecast) by Nixtla. See [THIRDPARTY_NOTICE.md](THIRDPARTY_NOTICE.md) for full attribution and references to the research papers that inspired this implementation.
+The postprocessing module is a Rust port of [PostForecasts.jl](https://github.com/lipiecki/PostForecasts.jl). The sequential monitoring module (`monitor::`) is a Rust port of [changepoint.forecast](https://github.com/grundy95/changepoint.forecast) by Thomas Grundy (Lancaster University), based on [Fremdt (2014)](https://doi.org/10.1080/02331888.2014.921899). Feature extraction is inspired by [tsfresh](https://github.com/blue-yonder/tsfresh). Forecasting models are validated against [StatsForecast](https://github.com/Nixtla/statsforecast) by Nixtla. See [THIRDPARTY_NOTICE.md](THIRDPARTY_NOTICE.md) for full attribution and references to the research papers that inspired this implementation.
 
 ## License
 

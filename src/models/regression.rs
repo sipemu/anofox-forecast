@@ -219,6 +219,328 @@ mod ols_impl {
         }
     }
 
+    // ── Recursive feature trait ──────────────────────────────────────
+
+    /// A feature that depends on past observations and must be **recomputed
+    /// at every horizon step** during recursive multi-step prediction.
+    ///
+    /// Unlike [`StructuralFeature`], which is forward-filled with a constant
+    /// value, a `RecursiveFeature` consumes the rolling history buffer
+    /// (training tail + predictions emitted so far) and returns a fresh
+    /// value for the next prediction step. This is the right abstraction
+    /// for rolling statistics, EWMs, and any other target-derived feature
+    /// whose "correct" value at horizon `h` depends on forecasts at
+    /// horizons `0..h`.
+    ///
+    /// # Contract
+    ///
+    /// - [`compute_fit`](Self::compute_fit) is called once per training row
+    ///   with the full series and the target index. Implementations must
+    ///   read only from positions strictly before `target_idx` (the feature
+    ///   must not see its own target).
+    /// - [`compute_predict`](Self::compute_predict) is called once per
+    ///   horizon step with the rolling `recent` buffer. `recent.last()` is
+    ///   the most recently known (or predicted) value **before** the
+    ///   observation being forecast.
+    /// - [`warmup`](Self::warmup) is the minimum history required before
+    ///   the feature is valid. The enclosing [`RegressionFeatures`] uses
+    ///   this to grow the lag offset and drops unusable warmup rows.
+    pub trait RecursiveFeature: std::fmt::Debug + Send + Sync {
+        /// Column names this feature produces.
+        fn column_names(&self) -> Vec<String>;
+
+        /// Number of output columns.
+        fn n_columns(&self) -> usize {
+            self.column_names().len()
+        }
+
+        /// Minimum history length required for the feature to be valid.
+        ///
+        /// Rows where `target_idx < warmup()` are unusable at fit time
+        /// and must be dropped.
+        fn warmup(&self) -> usize;
+
+        /// Populate the row corresponding to predicting `values[target_idx]`.
+        ///
+        /// Implementations must read only from `values[..target_idx]`
+        /// (strictly-before, no leakage). `out.len() == n_columns()`.
+        fn compute_fit(&self, values: &[f64], target_idx: usize, out: &mut [f64]);
+
+        /// Populate the next prediction row from the rolling history buffer.
+        ///
+        /// `recent` is the training tail extended with predictions emitted
+        /// so far; `recent.last()` is the most recent known or predicted
+        /// value before the observation being forecast. `out.len() == n_columns()`.
+        fn compute_predict(&self, recent: &[f64], out: &mut [f64]);
+
+        /// Human-readable name for reporting.
+        fn name(&self) -> &str;
+
+        /// Clone into a boxed trait object (for `Vec<Arc<dyn RecursiveFeature>>`).
+        fn clone_box(&self) -> Box<dyn RecursiveFeature>;
+    }
+
+    // ── Rolling statistic kinds ──────────────────────────────────────
+
+    /// Which rolling statistic to compute in a [`RollingFeature`].
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub enum RollingStatKind {
+        /// Arithmetic mean of the window.
+        Mean,
+        /// Sample standard deviation with Bessel's correction (ddof=1).
+        Std,
+        /// Sample variance with Bessel's correction (ddof=1).
+        Var,
+        /// Minimum of the window.
+        Min,
+        /// Maximum of the window.
+        Max,
+        /// Median of the window (linear interpolation of order statistics).
+        Median,
+        /// Sum of the window.
+        Sum,
+        /// Exponentially weighted mean with smoothing factor `alpha` ∈ (0, 1].
+        ///
+        /// Updated iteratively over the window as
+        /// `s_k = alpha · x_k + (1 - alpha) · s_{k-1}`, seeded with the first
+        /// value. The `window` parameter determines how many past observations
+        /// contribute to the EWM — larger windows produce smoother values.
+        EwmMean { alpha: f64 },
+        /// Exponentially weighted standard deviation over the window.
+        ///
+        /// Equivalent to `EwmVar` followed by `sqrt`.
+        EwmStd { alpha: f64 },
+    }
+
+    impl RollingStatKind {
+        fn short_name(&self) -> &'static str {
+            match self {
+                Self::Mean => "mean",
+                Self::Std => "std",
+                Self::Var => "var",
+                Self::Min => "min",
+                Self::Max => "max",
+                Self::Median => "median",
+                Self::Sum => "sum",
+                Self::EwmMean { .. } => "ewm_mean",
+                Self::EwmStd { .. } => "ewm_std",
+            }
+        }
+
+        fn compute(&self, window: &[f64]) -> f64 {
+            let n = window.len();
+            if n == 0 {
+                return 0.0;
+            }
+            match *self {
+                Self::Mean => window.iter().sum::<f64>() / n as f64,
+                Self::Sum => window.iter().sum::<f64>(),
+                Self::Min => window.iter().cloned().fold(f64::INFINITY, f64::min),
+                Self::Max => window.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+                Self::Var => sample_variance_of(window),
+                Self::Std => sample_variance_of(window).sqrt(),
+                Self::Median => median_of(window),
+                Self::EwmMean { alpha } => ewm_mean_of(window, alpha),
+                Self::EwmStd { alpha } => ewm_var_of(window, alpha).sqrt(),
+            }
+        }
+    }
+
+    #[inline]
+    fn sample_variance_of(xs: &[f64]) -> f64 {
+        let n = xs.len();
+        if n < 2 {
+            return 0.0;
+        }
+        let m = xs.iter().sum::<f64>() / n as f64;
+        let sum_sq: f64 = xs.iter().map(|x| (x - m) * (x - m)).sum();
+        sum_sq / (n - 1) as f64
+    }
+
+    #[inline]
+    fn median_of(xs: &[f64]) -> f64 {
+        let mut v: Vec<f64> = xs.to_vec();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let n = v.len();
+        if n == 0 {
+            return 0.0;
+        }
+        if n % 2 == 1 {
+            v[n / 2]
+        } else {
+            0.5 * (v[n / 2 - 1] + v[n / 2])
+        }
+    }
+
+    #[inline]
+    fn ewm_mean_of(xs: &[f64], alpha: f64) -> f64 {
+        if xs.is_empty() {
+            return 0.0;
+        }
+        let mut s = xs[0];
+        for &x in &xs[1..] {
+            s = alpha * x + (1.0 - alpha) * s;
+        }
+        s
+    }
+
+    #[inline]
+    fn ewm_var_of(xs: &[f64], alpha: f64) -> f64 {
+        if xs.len() < 2 {
+            return 0.0;
+        }
+        // Pandas-style EWM variance with adjust=False, bias=False is complex;
+        // we use the simpler biased recursion:
+        // s_k = α x_k + (1-α) s_{k-1}
+        // v_k = (1-α) (v_{k-1} + α (x_k - s_{k-1})²)
+        let mut s = xs[0];
+        let mut v = 0.0;
+        for &x in &xs[1..] {
+            let diff = x - s;
+            v = (1.0 - alpha) * (v + alpha * diff * diff);
+            s = alpha * x + (1.0 - alpha) * s;
+        }
+        v
+    }
+
+    // ── Rolling feature ──────────────────────────────────────────────
+
+    /// A rolling-window statistic of the target used as a regression feature.
+    ///
+    /// Computes `kind(values[target - lag - window + 1 ..= target - lag])` for
+    /// each training row, and is recomputed at every horizon step during
+    /// multi-step prediction using the rolling history buffer.
+    ///
+    /// # Leakage guard
+    ///
+    /// `lag == 0` would include the target value in its own feature window,
+    /// which is data leakage for any rolling statistic of the target series.
+    /// Both [`RollingFeature::new`] and [`RollingFeature::with_lag`] reject
+    /// `lag == 0` at construction time. The default `lag = 1` is always safe.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use anofox_forecast::models::regression::{RollingFeature, RollingStatKind};
+    ///
+    /// // Rolling mean of the last 7 values (lag=1 by default)
+    /// let f = RollingFeature::new(7, RollingStatKind::Mean).unwrap();
+    ///
+    /// // Rolling std of values from 2..=8 steps ago
+    /// let f = RollingFeature::with_lag(7, 2, RollingStatKind::Std).unwrap();
+    /// ```
+    #[derive(Debug, Clone)]
+    pub struct RollingFeature {
+        window: usize,
+        lag: usize,
+        kind: RollingStatKind,
+    }
+
+    impl RollingFeature {
+        /// Create a rolling feature with the given `window` and `kind`, using
+        /// the default `lag = 1` (safe — window excludes the current target).
+        pub fn new(window: usize, kind: RollingStatKind) -> Result<Self> {
+            Self::with_lag(window, 1, kind)
+        }
+
+        /// Create a rolling feature with an explicit `lag`.
+        ///
+        /// `lag >= 1` is required to prevent target leakage.
+        pub fn with_lag(window: usize, lag: usize, kind: RollingStatKind) -> Result<Self> {
+            if window == 0 {
+                return Err(ForecastError::InvalidParameter(
+                    "RollingFeature: window must be >= 1".to_string(),
+                ));
+            }
+            if lag == 0 {
+                return Err(ForecastError::InvalidParameter(
+                    "RollingFeature: lag must be >= 1 to avoid target leakage. \
+                     The default lag = 1 (via RollingFeature::new) is the \
+                     standard choice."
+                        .to_string(),
+                ));
+            }
+            match kind {
+                RollingStatKind::EwmMean { alpha } | RollingStatKind::EwmStd { alpha } => {
+                    if !(0.0 < alpha && alpha <= 1.0) {
+                        return Err(ForecastError::InvalidParameter(format!(
+                            "RollingFeature: EWM alpha must satisfy 0 < α ≤ 1, got {}",
+                            alpha
+                        )));
+                    }
+                }
+                _ => {}
+            }
+            Ok(Self { window, lag, kind })
+        }
+
+        /// Return the window size.
+        pub fn window(&self) -> usize {
+            self.window
+        }
+
+        /// Return the lag.
+        pub fn lag(&self) -> usize {
+            self.lag
+        }
+
+        /// Return the statistic kind.
+        pub fn kind(&self) -> RollingStatKind {
+            self.kind
+        }
+    }
+
+    impl RecursiveFeature for RollingFeature {
+        fn column_names(&self) -> Vec<String> {
+            vec![format!(
+                "__rolling_{}_w{}_l{}",
+                self.kind.short_name(),
+                self.window,
+                self.lag
+            )]
+        }
+
+        fn warmup(&self) -> usize {
+            // Block is values[t - lag - window + 1 ..= t - lag].
+            // We need t - lag - window + 1 >= 0, i.e. t >= lag + window - 1.
+            // warmup returns the minimum valid target_idx for which
+            // compute_fit can be called.
+            self.lag + self.window - 1
+        }
+
+        fn compute_fit(&self, values: &[f64], target_idx: usize, out: &mut [f64]) {
+            debug_assert_eq!(out.len(), 1);
+            // Block: values[start..end_excl]
+            //   end_excl = target_idx - lag + 1   (so last included index is target - lag)
+            //   start    = end_excl - window
+            // Safe under the warmup contract: target_idx >= lag + window - 1 ≥ lag.
+            let end_excl = (target_idx + 1).saturating_sub(self.lag);
+            let start = end_excl.saturating_sub(self.window);
+            let end = end_excl.min(values.len());
+            out[0] = self.kind.compute(&values[start..end]);
+        }
+
+        fn compute_predict(&self, recent: &[f64], out: &mut [f64]) {
+            debug_assert_eq!(out.len(), 1);
+            // At predict step we are about to forecast position P, with
+            // recent[len - 1] == values[P - 1]. The block ends at
+            // values[P - lag] = recent[len - lag] (inclusive), which is
+            // exclusive-end len - lag + 1.
+            let len = recent.len();
+            let end_excl = (len + 1).saturating_sub(self.lag).min(len);
+            let start = end_excl.saturating_sub(self.window);
+            out[0] = self.kind.compute(&recent[start..end_excl]);
+        }
+
+        fn name(&self) -> &str {
+            "RollingFeature"
+        }
+
+        fn clone_box(&self) -> Box<dyn RecursiveFeature> {
+            Box::new(self.clone())
+        }
+    }
+
     // ── Regression backend ────────────────────────────────────────────
 
     /// Strategy for generating observation weights in WLS.
@@ -545,6 +867,17 @@ mod ols_impl {
     }
 
     impl FittedComponentState {
+        /// Number of columns this component contributes to the design matrix.
+        fn n_columns(&self) -> usize {
+            match self {
+                Self::Polynomial(_) | Self::Exponential(_) | Self::TheilSen(_) | Self::Dummy(_) => {
+                    1
+                }
+                Self::Fourier { order, .. } => 2 * order,
+                Self::Structural { fill_values } => fill_values.len(),
+            }
+        }
+
         /// Generate future feature columns for this component.
         ///
         /// Returns one `Vec<f64>` per column (most components produce 1 column,
@@ -586,7 +919,8 @@ mod ols_impl {
     /// 3. Trend component columns ([`TrendType`])
     /// 4. Seasonal component columns ([`SeasonalSpec`])
     /// 5. Structural feature columns ([`StructuralFeature`])
-    /// 6. Exogenous regressors (if `use_exog`)
+    /// 6. Recursive feature columns ([`RecursiveFeature`], e.g. [`RollingFeature`])
+    /// 7. Exogenous regressors (if `use_exog`)
     #[derive(Debug, Clone)]
     pub struct RegressionFeatures {
         /// Include a linear trend index (0, 1, …, n-1).
@@ -606,6 +940,9 @@ mod ols_impl {
         pub seasonal_components: Vec<SeasonalSpec>,
         /// Structural features (forward-filled during prediction).
         pub structural_features: Vec<Arc<dyn StructuralFeature>>,
+        /// Recursive features (recomputed from the rolling history buffer at
+        /// every horizon step — e.g. [`RollingFeature`]).
+        pub recursive_features: Vec<Arc<dyn RecursiveFeature>>,
         /// Regular differencing order (d). Applied before fitting, integrated after predict.
         pub diff_order: usize,
         /// Seasonal differencing specs: Vec of (order D, period s). Applied in order before fitting, integrated in reverse after predict.
@@ -628,6 +965,7 @@ mod ols_impl {
                 trend_components: Vec::new(),
                 seasonal_components: Vec::new(),
                 structural_features: Vec::new(),
+                recursive_features: Vec::new(),
                 diff_order: 0,
                 seasonal_diffs: Vec::new(),
                 frac_diff_order: None,
@@ -843,6 +1181,83 @@ mod ols_impl {
             self.with_structural(Arc::new(ChangepointFeature::new(indices, encoding)))
         }
 
+        /// Add a recursive feature (recomputed at every horizon step during
+        /// multi-step prediction — see [`RecursiveFeature`]).
+        pub fn with_recursive(mut self, feature: Arc<dyn RecursiveFeature>) -> Self {
+            self.recursive_features.push(feature);
+            self
+        }
+
+        /// Add a rolling statistic as a feature.
+        ///
+        /// Uses the default `lag = 1` (the window excludes the current target).
+        ///
+        /// Returns an error if the rolling feature parameters are invalid.
+        pub fn with_rolling(self, window: usize, kind: RollingStatKind) -> Result<Self> {
+            let feat = RollingFeature::new(window, kind)?;
+            Ok(self.with_recursive(Arc::new(feat)))
+        }
+
+        /// Add a rolling statistic with an explicit lag.
+        ///
+        /// `lag >= 1` is required (target-leakage guard).
+        pub fn with_rolling_lagged(
+            self,
+            window: usize,
+            lag: usize,
+            kind: RollingStatKind,
+        ) -> Result<Self> {
+            let feat = RollingFeature::with_lag(window, lag, kind)?;
+            Ok(self.with_recursive(Arc::new(feat)))
+        }
+
+        /// Add a rolling mean feature (shorthand for
+        /// `with_rolling(window, RollingStatKind::Mean)`).
+        pub fn with_rolling_mean(self, window: usize) -> Result<Self> {
+            self.with_rolling(window, RollingStatKind::Mean)
+        }
+
+        /// Add a rolling sample standard deviation feature.
+        pub fn with_rolling_std(self, window: usize) -> Result<Self> {
+            self.with_rolling(window, RollingStatKind::Std)
+        }
+
+        /// Add a rolling sample variance feature.
+        pub fn with_rolling_var(self, window: usize) -> Result<Self> {
+            self.with_rolling(window, RollingStatKind::Var)
+        }
+
+        /// Add a rolling minimum feature.
+        pub fn with_rolling_min(self, window: usize) -> Result<Self> {
+            self.with_rolling(window, RollingStatKind::Min)
+        }
+
+        /// Add a rolling maximum feature.
+        pub fn with_rolling_max(self, window: usize) -> Result<Self> {
+            self.with_rolling(window, RollingStatKind::Max)
+        }
+
+        /// Add a rolling median feature.
+        pub fn with_rolling_median(self, window: usize) -> Result<Self> {
+            self.with_rolling(window, RollingStatKind::Median)
+        }
+
+        /// Add a rolling sum feature.
+        pub fn with_rolling_sum(self, window: usize) -> Result<Self> {
+            self.with_rolling(window, RollingStatKind::Sum)
+        }
+
+        /// Add an exponentially weighted mean feature with smoothing factor
+        /// `alpha ∈ (0, 1]` over a window of `window` observations.
+        pub fn with_ewm_mean(self, window: usize, alpha: f64) -> Result<Self> {
+            self.with_rolling(window, RollingStatKind::EwmMean { alpha })
+        }
+
+        /// Add an exponentially weighted standard deviation feature.
+        pub fn with_ewm_std(self, window: usize, alpha: f64) -> Result<Self> {
+            self.with_rolling(window, RollingStatKind::EwmStd { alpha })
+        }
+
         /// Apply regular differencing of order `d` before fitting.
         ///
         /// The model automatically integrates (undoes differencing) during predict.
@@ -878,9 +1293,20 @@ mod ols_impl {
             self
         }
 
-        /// Number of observations lost to lagging.
+        /// Maximum warmup required by any recursive feature (0 if none).
+        fn max_recursive_warmup(&self) -> usize {
+            self.recursive_features
+                .iter()
+                .map(|f| f.warmup())
+                .max()
+                .unwrap_or(0)
+        }
+
+        /// Number of observations lost to lagging and recursive-feature warmup.
+        ///
+        /// The design matrix drops the first `lag_offset()` rows.
         fn lag_offset(&self) -> usize {
-            self.max_effective_lag()
+            self.max_effective_lag().max(self.max_recursive_warmup())
         }
 
         /// Build feature column names for a given TimeSeries.
@@ -919,6 +1345,10 @@ mod ols_impl {
             // Structural feature columns
             for sf in &self.structural_features {
                 names.extend(sf.column_names());
+            }
+            // Recursive feature columns (rolling stats, etc.)
+            for rf in &self.recursive_features {
+                names.extend(rf.column_names());
             }
             if self.use_exog {
                 for name in exog_names {
@@ -974,6 +1404,14 @@ mod ols_impl {
             for sf in &self.structural_features {
                 for col_name in sf.column_names() {
                     result.push((col_name, FeatureSafety::Structural));
+                }
+            }
+            for rf in &self.recursive_features {
+                for col_name in rf.column_names() {
+                    // Recursive features (rolling stats, EWMs) are derived
+                    // deterministically from past target values at predict
+                    // time — no fitted parameters, no external data.
+                    result.push((col_name, FeatureSafety::Deterministic));
                 }
             }
             if self.use_exog {
@@ -1174,6 +1612,21 @@ mod ols_impl {
                 fitted_components.push(FittedComponentState::Structural { fill_values: fill });
             }
 
+            // Recursive feature columns (rolling statistics, EWMs, …).
+            // For row i, the "target" is values[offset + i] and the feature
+            // must be computed from strictly-prior values only.
+            for rf in &self.recursive_features {
+                let n_cols = rf.n_columns();
+                let mut scratch = vec![0.0_f64; n_cols];
+                for i in 0..n_train {
+                    rf.compute_fit(values, offset + i, &mut scratch);
+                    for (k, &v) in scratch.iter().enumerate() {
+                        x[(i, col_idx + k)] = v;
+                    }
+                }
+                col_idx += n_cols;
+            }
+
             // Exogenous regressors (sliced to match after lag offset)
             if self.use_exog {
                 let regressors = series.all_regressors();
@@ -1248,6 +1701,12 @@ mod ols_impl {
                     }
                     col_idx += 1;
                 }
+            }
+
+            // Recursive feature columns — filled per step during predict_recursive.
+            // Leave placeholders for predict_recursive to overwrite.
+            for rf in &self.recursive_features {
+                col_idx += rf.n_columns();
             }
 
             // Exogenous regressors
@@ -1590,19 +2049,26 @@ mod ols_impl {
             )?;
 
             let eff_lags = state.features.effective_lags();
-            if eff_lags.is_empty() {
-                // No lags — direct (non-recursive) prediction
+            let has_recursive = !state.features.recursive_features.is_empty();
+
+            if eff_lags.is_empty() && !has_recursive {
+                // No lags and no recursive features — direct prediction.
                 let preds = state.model.predict(&x_future);
                 return Ok(preds.iter().copied().collect());
             }
 
-            // Recursive: predict one step at a time, feeding predictions back as lags
+            // Recursive: predict one step at a time, feeding predictions back.
             let trend_offset = if state.features.use_trend { 1 } else { 0 };
+            // Column layout: [trend?] [lags] [components…] [recursive features] [exog]
+            // — matches build_future_matrix/build_matrices.
+            let component_cols: usize = state.components.iter().map(|c| c.n_columns()).sum();
+            let recursive_start_col = trend_offset + eff_lags.len() + component_cols;
+
             let mut predictions = Vec::with_capacity(horizon);
             let mut recent: Vec<f64> = state.tail_values.clone();
 
             for h in 0..horizon {
-                // Update lag columns with most recent known/predicted values
+                // Update lag columns with most recent known/predicted values.
                 for (col_offset, &lag) in eff_lags.iter().enumerate() {
                     let col = trend_offset + col_offset;
                     let idx = recent.len() as isize - lag as isize;
@@ -1611,7 +2077,19 @@ mod ols_impl {
                     }
                 }
 
-                // Predict this single step
+                // Update recursive feature columns from the rolling buffer.
+                let mut rcol = recursive_start_col;
+                for rf in &state.features.recursive_features {
+                    let n_cols = rf.n_columns();
+                    let mut scratch = vec![0.0_f64; n_cols];
+                    rf.compute_predict(&recent, &mut scratch);
+                    for (k, &v) in scratch.iter().enumerate() {
+                        x_future[(h, rcol + k)] = v;
+                    }
+                    rcol += n_cols;
+                }
+
+                // Predict this single step.
                 let row = x_future.submatrix(h, 0, 1, x_future.ncols());
                 let row_mat = Mat::from_fn(1, row.ncols(), |r, c| row[(r, c)]);
                 let pred = state.model.predict(&row_mat);
@@ -1706,8 +2184,14 @@ mod ols_impl {
                 residuals[total_offset + i] = diff_values[lag_offset + i] - in_sample_preds[i];
             }
 
-            // Store tail values for recursive prediction (from differenced series)
-            let tail_len = self.features.max_effective_lag().max(1);
+            // Store tail values for recursive prediction (from differenced series).
+            // Must cover the largest history reach: max lag AND largest
+            // rolling window + lag (i.e. recursive warmup).
+            let tail_len = self
+                .features
+                .max_effective_lag()
+                .max(self.features.max_recursive_warmup())
+                .max(1);
             let tail_values =
                 working_values[working_values.len().saturating_sub(tail_len)..].to_vec();
 
@@ -3509,14 +3993,265 @@ mod ols_impl {
                 );
             }
         }
+
+        // ── Rolling / recursive feature tests ────────────────────────
+
+        #[test]
+        fn rolling_feature_rejects_zero_lag() {
+            let err = RollingFeature::with_lag(5, 0, RollingStatKind::Mean);
+            assert!(err.is_err());
+            if let Err(ForecastError::InvalidParameter(msg)) = err {
+                assert!(msg.contains("lag"));
+            }
+        }
+
+        #[test]
+        fn rolling_feature_rejects_zero_window() {
+            assert!(RollingFeature::new(0, RollingStatKind::Mean).is_err());
+        }
+
+        #[test]
+        fn rolling_feature_rejects_invalid_ewm_alpha() {
+            assert!(RollingFeature::new(5, RollingStatKind::EwmMean { alpha: 0.0 }).is_err());
+            assert!(RollingFeature::new(5, RollingStatKind::EwmMean { alpha: 1.5 }).is_err());
+            assert!(RollingFeature::new(5, RollingStatKind::EwmStd { alpha: -0.1 }).is_err());
+            assert!(RollingFeature::new(5, RollingStatKind::EwmMean { alpha: 1.0 }).is_ok());
+        }
+
+        #[test]
+        fn rolling_feature_warmup_is_window_plus_lag_minus_one() {
+            let f = RollingFeature::new(7, RollingStatKind::Mean).unwrap();
+            assert_eq!(f.warmup(), 7);
+            let f = RollingFeature::with_lag(5, 3, RollingStatKind::Mean).unwrap();
+            assert_eq!(f.warmup(), 7); // 5 + 3 - 1
+        }
+
+        #[test]
+        fn rolling_mean_compute_fit_matches_hand_calculation() {
+            // series = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+            // window=3, lag=1 → at target_idx=3, block is values[0..3] = [1,2,3], mean = 2
+            let values: Vec<f64> = (1..=10).map(|i| i as f64).collect();
+            let feat = RollingFeature::new(3, RollingStatKind::Mean).unwrap();
+            let mut out = vec![0.0];
+            feat.compute_fit(&values, 3, &mut out);
+            assert_relative_eq!(out[0], 2.0, epsilon = 1e-12);
+            feat.compute_fit(&values, 5, &mut out);
+            assert_relative_eq!(out[0], 4.0, epsilon = 1e-12); // mean(3,4,5)
+            feat.compute_fit(&values, 9, &mut out);
+            assert_relative_eq!(out[0], 8.0, epsilon = 1e-12); // mean(7,8,9)
+        }
+
+        #[test]
+        fn rolling_mean_compute_predict_anchors_correctly() {
+            // recent = [8, 9, 10] (last 3 training values), about to predict t=10
+            // window=3, lag=1 → block is recent[0..3] = [8,9,10], mean = 9
+            let recent = vec![8.0, 9.0, 10.0];
+            let feat = RollingFeature::new(3, RollingStatKind::Mean).unwrap();
+            let mut out = vec![0.0];
+            feat.compute_predict(&recent, &mut out);
+            assert_relative_eq!(out[0], 9.0, epsilon = 1e-12);
+
+            // After predicting y_hat_0 = 11 and appending, next block is [9, 10, 11]
+            let recent = vec![8.0, 9.0, 10.0, 11.0];
+            feat.compute_predict(&recent, &mut out);
+            assert_relative_eq!(out[0], 10.0, epsilon = 1e-12);
+        }
+
+        #[test]
+        fn rolling_feature_with_lag_2_skips_a_step() {
+            // window=3, lag=2 → at target=5, block is values[1..4] = [2,3,4], mean=3
+            let values: Vec<f64> = (1..=10).map(|i| i as f64).collect();
+            let feat = RollingFeature::with_lag(3, 2, RollingStatKind::Mean).unwrap();
+            let mut out = vec![0.0];
+            feat.compute_fit(&values, 5, &mut out);
+            assert_relative_eq!(out[0], 3.0, epsilon = 1e-12);
+
+            // recent = [..., 8, 9, 10] — for next prediction at t=10:
+            // block is recent[len-2-3+1 .. len-2+1] = recent[len-4 .. len-1]
+            let recent = vec![7.0, 8.0, 9.0, 10.0];
+            feat.compute_predict(&recent, &mut out);
+            // block is recent[0..3] = [7, 8, 9], mean = 8
+            assert_relative_eq!(out[0], 8.0, epsilon = 1e-12);
+        }
+
+        #[test]
+        fn rolling_std_and_var_match_definition() {
+            // window = [1, 2, 3, 4, 5] — sample var = 2.5, std = sqrt(2.5)
+            let values: Vec<f64> = (1..=6).map(|i| i as f64).collect();
+            let feat = RollingFeature::new(5, RollingStatKind::Var).unwrap();
+            let mut out = vec![0.0];
+            feat.compute_fit(&values, 5, &mut out);
+            assert_relative_eq!(out[0], 2.5, epsilon = 1e-10);
+
+            let feat = RollingFeature::new(5, RollingStatKind::Std).unwrap();
+            feat.compute_fit(&values, 5, &mut out);
+            assert_relative_eq!(out[0], 2.5_f64.sqrt(), epsilon = 1e-10);
+        }
+
+        #[test]
+        fn rolling_min_max_median_sum_basic() {
+            let values: Vec<f64> = vec![3.0, 1.0, 4.0, 1.0, 5.0, 9.0];
+            // At target=5, window=5, lag=1 → block is values[0..5] = [3,1,4,1,5]
+            for (kind, expected) in [
+                (RollingStatKind::Min, 1.0),
+                (RollingStatKind::Max, 5.0),
+                (RollingStatKind::Median, 3.0), // sorted: 1,1,3,4,5
+                (RollingStatKind::Sum, 14.0),
+            ] {
+                let feat = RollingFeature::new(5, kind).unwrap();
+                let mut out = vec![0.0];
+                feat.compute_fit(&values, 5, &mut out);
+                assert_relative_eq!(out[0], expected, epsilon = 1e-12);
+            }
+        }
+
+        #[test]
+        fn ewm_mean_converges_on_constant_input() {
+            let feat = RollingFeature::new(20, RollingStatKind::EwmMean { alpha: 0.3 }).unwrap();
+            let values = vec![7.0; 25];
+            let mut out = vec![0.0];
+            feat.compute_fit(&values, 20, &mut out);
+            // Constant input → EWM should equal the constant exactly.
+            assert_relative_eq!(out[0], 7.0, epsilon = 1e-12);
+        }
+
+        #[test]
+        fn rolling_feature_end_to_end_fit_and_predict() {
+            // y[t] = rolling_mean(y[t-3..t]) + 2
+            // so after warmup, the pattern is predictable.
+            let n = 60;
+            let mut values = vec![10.0_f64, 10.0, 10.0];
+            for _ in 3..n {
+                let k = values.len();
+                let rm = (values[k - 3] + values[k - 2] + values[k - 1]) / 3.0;
+                values.push(rm + 2.0);
+            }
+            let ts = TimeSeries::univariate(make_timestamps(n), values.clone()).unwrap();
+
+            let mut model = RegressionForecaster::ols(
+                RegressionFeatures::new()
+                    .no_trend()
+                    .with_rolling_mean(3)
+                    .unwrap()
+                    .no_exog(),
+            );
+            model.fit(&ts).unwrap();
+
+            let forecast = model.predict(5).unwrap();
+            assert_eq!(forecast.primary().len(), 5);
+            for &v in forecast.primary() {
+                assert!(v.is_finite());
+                assert!(
+                    v > *values.last().unwrap() * 0.5,
+                    "forecast should track the growing pattern"
+                );
+            }
+
+            // Recursive semantics: h=1 rolling-mean feature should equal
+            // mean of (tail[-2], tail[-1], y_hat_0).
+            // We can't introspect feature columns from Forecast, but we can
+            // check that forecasts are monotonically increasing under this
+            // pattern (each step adds ~2).
+            let preds = forecast.primary();
+            for i in 1..preds.len() {
+                assert!(
+                    preds[i] > preds[i - 1],
+                    "pattern forecasts should grow; got {:?}",
+                    preds
+                );
+            }
+        }
+
+        #[test]
+        fn rolling_feature_combined_with_lags() {
+            // Mix lag-1 and rolling_mean(5) features on a noisy AR(1)
+            let n = 120;
+            let mut values = vec![0.0_f64; n];
+            values[0] = 1.0;
+            for i in 1..n {
+                let noise = ((i * 13 + 7) % 17) as f64 * 0.01 - 0.085;
+                values[i] = 0.8 * values[i - 1] + noise;
+            }
+            let ts = TimeSeries::univariate(make_timestamps(n), values).unwrap();
+
+            let mut model = RegressionForecaster::ols(
+                RegressionFeatures::new()
+                    .no_trend()
+                    .lags(1)
+                    .with_rolling_mean(5)
+                    .unwrap()
+                    .no_exog(),
+            );
+            model.fit(&ts).unwrap();
+
+            let forecast = model.predict(10).unwrap();
+            assert_eq!(forecast.primary().len(), 10);
+            for &v in forecast.primary() {
+                assert!(v.is_finite());
+            }
+        }
+
+        #[test]
+        fn rolling_feature_warmup_absorbs_lag_offset() {
+            // window=10, lag=1 → warmup=10. max_lag=3. offset should be max(3,10)=10.
+            let feats = RegressionFeatures::new()
+                .no_trend()
+                .lags(3)
+                .with_rolling_mean(10)
+                .unwrap()
+                .no_exog();
+            assert_eq!(feats.max_effective_lag(), 3);
+            assert_eq!(feats.max_recursive_warmup(), 10);
+            assert_eq!(feats.lag_offset(), 10);
+        }
+
+        #[test]
+        fn rolling_feature_classify_as_deterministic() {
+            let feats = RegressionFeatures::new()
+                .no_trend()
+                .with_rolling_mean(5)
+                .unwrap()
+                .no_exog();
+            let classified = feats.classify_features(&[]);
+            assert_eq!(classified.len(), 1);
+            assert_eq!(classified[0].1, FeatureSafety::Deterministic);
+            assert!(classified[0].0.starts_with("__rolling_mean"));
+        }
+
+        #[test]
+        fn rolling_feature_cross_validation_round_trip() {
+            // The feature must survive rolling-origin cross-validation — each
+            // fold creates a fresh forecaster via the factory closure.
+            use crate::utils::cross_validation::{cross_validate, CVConfig};
+
+            let n = 80;
+            let values: Vec<f64> = (0..n).map(|i| (i as f64 * 0.1).sin() + 5.0).collect();
+            let ts = TimeSeries::univariate(make_timestamps(n), values).unwrap();
+
+            let factory = || {
+                RegressionForecaster::ols(
+                    RegressionFeatures::new()
+                        .no_trend()
+                        .with_rolling_mean(5)
+                        .unwrap()
+                        .no_exog(),
+                )
+            };
+
+            let cv_config = CVConfig::expanding(50, 3);
+            let result = cross_validate(&cv_config, &ts, factory);
+            assert!(result.is_ok(), "CV failed: {:?}", result.err());
+            let results = result.unwrap();
+            assert!(results.n_folds >= 1);
+        }
     }
 }
 
 #[cfg(feature = "postprocess")]
 pub use ols_impl::{
     ChangepointEncoding, ChangepointFeature, FeatureSafety, LagSelectionCriterion,
-    RegressionBackend, RegressionFeatures, RegressionForecaster, SeasonalSpec, StructuralFeature,
-    TrendType, WeightStrategy,
+    RecursiveFeature, RegressionBackend, RegressionFeatures, RegressionForecaster, RollingFeature,
+    RollingStatKind, SeasonalSpec, StructuralFeature, TrendType, WeightStrategy,
 };
 // Re-export InformationCriterion so users can configure Dynamic backend without
 // depending on anofox-regression directly.
