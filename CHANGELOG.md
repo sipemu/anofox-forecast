@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-04-09
+
+### Added
+
+- **Rolling-window features for `RegressionForecaster`** — target-derived features that participate correctly in recursive multi-step prediction.
+  - New `RecursiveFeature` trait with `compute_fit(values, target_idx, out)` and `compute_predict(recent, out)`; distinct from `StructuralFeature` which is forward-filled with a constant. Recursive features are **recomputed at every horizon step** using the rolling history buffer (training tail + predictions emitted so far) — the same mechanism lag features already use.
+  - New `RollingFeature { window, lag, kind }` struct + `RollingStatKind` enum with 9 variants: `Mean`, `Std`, `Var`, `Min`, `Max`, `Median`, `Sum`, `EwmMean { alpha }`, `EwmStd { alpha }`.
+  - Builder shortcuts on `RegressionFeatures`: `.with_rolling_mean(w)`, `.with_rolling_std(w)`, `.with_rolling_var(w)`, `.with_rolling_min(w)`, `.with_rolling_max(w)`, `.with_rolling_median(w)`, `.with_rolling_sum(w)`, `.with_ewm_mean(w, α)`, `.with_ewm_std(w, α)`, plus general `.with_rolling(w, kind)` and `.with_rolling_lagged(w, lag, kind)`.
+  - **Leakage guard**: `lag == 0` is rejected at construction time (would include the target in its own feature window). Default `lag = 1` is safe; larger lags are accepted.
+  - Warmup handling: `lag_offset()` now takes `max(max_effective_lag, max_recursive_warmup)` so the first unusable rows are dropped correctly. `tail_values` grows to match.
+  - 14 new tests covering fit correctness (hand-checked for Mean/Std/Var/Min/Max/Median/Sum), recursive predict semantics (anchor verification), leakage guards, end-to-end OLS fit+predict on a rolling-mean-generated pattern, combination with lag features, and cross-validation round-trip.
+
+- **Sequential monitoring of forecast errors** (`monitor::` module) — online changepoint detection on residual streams to flag when a fitted forecaster has drifted.
+  - Four CUSUM detectors: `PageCusum` (default, recommended), `PageCusum1`, `Cusum`, `Cusum1`. Two-sided and one-sided variants for both Page and original CUSUM.
+  - Three error transformations: `Raw` (mean changes), `Squared` (variance changes), `Both` (default — runs both streams in parallel).
+  - `SequentialDetector::fit()` for batch initialisation; `SequentialDetector::update()` for online streaming with constant-size state — bit-equivalent to a single full fit.
+  - Baked-in critical value table: full 228-entry grid (4 detectors × 19 γ × 3 α) reproducible from a deterministic Monte Carlo simulator. Off-grid `(γ, α)` falls through to live simulation. Manual override via `CriticalValue::Fixed` and `with_sigma2()` for autocorrelated residuals.
+  - `Forecaster` trait integration: `monitor_forecaster()` for cheap in-sample residuals, `monitor_forecaster_cv()` for unbiased rolling-origin CV residuals (calibrated nominal α).
+  - JS/WASM bindings: `monitorForecastErrors()` + `updateForecastMonitor()` with full state round-trip via `serde-wasm-bindgen`.
+  - Rust port of the R package [`changepoint.forecast`](https://github.com/grundy95/changepoint.forecast) by Thomas Grundy (Lancaster), MIT License. Asymptotic theory from [Fremdt (2014)](https://doi.org/10.1080/02331888.2014.921899).
+
 ## [0.5.7] - 2026-04-02
 
 ### Fixed

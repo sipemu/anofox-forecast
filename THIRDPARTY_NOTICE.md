@@ -64,6 +64,28 @@ Some forecasting models and baseline methods are inspired by [StatsForecast](htt
 
 **License**: Apache License 2.0
 
+## changepoint.forecast
+
+The sequential monitoring module (`src/monitor/`) is a Rust port of the R package [changepoint.forecast](https://github.com/grundy95/changepoint.forecast), which performs online changepoint detection on forecast errors via Page's CUSUM and the original CUSUM detectors.
+
+**Original Authors**: Thomas Grundy and Rebecca Killick (Lancaster University)
+
+**License**: MIT License
+
+### Features Ported
+
+- Four CUSUM detectors (`PageCusum`, `PageCusum1`, `Cusum`, `Cusum1`) with raw / squared / both error transformations
+- Time-varying threshold via the `√m · (1 + k/m) · (k/(k+m))^γ` weight function
+- Online state update with constant-size state per stream (`SequentialDetector::update`)
+- Pre-simulated critical-value lookup table (4 detectors × 19 γ × 3 α) and Wiener Monte-Carlo simulator
+- Full `Forecaster` trait integration via `monitor_forecaster` (in-sample residuals) and `monitor_forecaster_cv` (rolling-origin CV residuals)
+
+**References**:
+
+- Fremdt, S. (2014). Page's sequential procedure for change-point detection in time series regression. *Statistics*, 49(1), 128–155. <https://doi.org/10.1080/02331888.2014.921899>
+- Grundy, T., Killick, R., & Mihaylov, G. (2020). High-dimensional changepoint detection via a geometrically inspired mapping. *Statistics and Computing*, 30, 1155–1166. <https://doi.org/10.1007/s11222-020-09940-y>
+- Aue, A., & Horváth, L. (2004). Delay time in sequential detection of change. *Statistics & Probability Letters*, 67(3), 221–231. <https://doi.org/10.1016/j.spl.2004.01.001>
+
 ## tsfresh
 
 The time series feature extraction module (`src/features/`) is inspired by [tsfresh](https://github.com/blue-yonder/tsfresh), a Python library for automatic extraction of relevant features from time series.
