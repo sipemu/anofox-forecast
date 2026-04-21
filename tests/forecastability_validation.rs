@@ -95,13 +95,14 @@ fn knn_mi_tracks_ar1_theoretical_ami() {
         );
     }
 
-    // Track theoretical values within 15% (observed ratios: 0.90–1.08)
+    // Observed ratios: [0.8973, 1.0077, 0.9078, 1.0828, 1.0699]
+    // Pin to ±12% — just outside the observed extremes.
     let theoretical = ar1_theoretical_ami(0.8, 5);
     for h in 0..5 {
         let ratio = ami[h] / theoretical[h];
         assert!(
-            (0.85..1.15).contains(&ratio),
-            "AMI(h={}) = {:.4}, theoretical = {:.4}, ratio = {:.2} — outside 15% tolerance",
+            (0.88..1.12).contains(&ratio),
+            "AMI(h={}) = {:.6}, theoretical = {:.6}, ratio = {:.4} — outside 12% band",
             h + 1,
             ami[h],
             theoretical[h],
@@ -137,8 +138,8 @@ fn gcmi_independent_is_near_zero() {
     let mi = gcmi(&x, &y);
     // Python reference: 0.000373, observed: 0.000357
     assert!(
-        mi.abs() < 0.005,
-        "GCMI of independent should be < 0.005, got {}",
+        mi.abs() < 0.002,
+        "GCMI of independent should be < 0.002, got {}",
         mi
     );
 }
@@ -147,13 +148,8 @@ fn gcmi_independent_is_near_zero() {
 fn gcmi_curve_decays_for_ar1() {
     let series = make_ar1(2000, 0.8, 42);
     let curve = gcmi_curve(&series, 5);
-    // Observed: [0.690, 0.354, 0.207, 0.124, 0.077]
-    // Observed: 0.690
-    assert!(
-        curve[0] > 0.6,
-        "GCMI(1) should be > 0.6 for AR(1) φ=0.8, got {:.4}",
-        curve[0]
-    );
+    // Observed: [0.690, 0.354, 0.207, 0.124, 0.077]. Pin lag-1 to ±3%.
+    assert_relative_eq!(curve[0], 0.690, epsilon = 0.02);
     // Strict decay
     for h in 1..curve.len() {
         assert!(
@@ -184,9 +180,10 @@ fn dcor_independent_is_near_zero() {
     let x = make_white_noise(1000, 99);
     let y = make_white_noise(1000, 77);
     let dc = distance_correlation(&x, &y);
+    // Observed: 0.065
     assert!(
-        dc < 0.08,
-        "dCor of independent should be < 0.08, got {}",
+        dc < 0.07,
+        "dCor of independent should be < 0.07, got {}",
         dc
     );
 }
@@ -206,7 +203,7 @@ fn dcor_detects_nonlinear_quadratic() {
         dc
     );
     // Python reference: 0.4915, observed: 0.4917
-    assert_relative_eq!(dc, 0.4917, epsilon = 0.01);
+    assert_relative_eq!(dc, 0.4917, epsilon = 0.002);
     let _ = pearson;
 }
 
@@ -217,12 +214,8 @@ fn pearson_curve_ar1_decays() {
     // Observed: [0.785, 0.623, 0.500, 0.396, 0.318]
     let series = make_ar1(2000, 0.8, 42);
     let curve = pearson_curve(&series, 5);
-    // Observed: 0.7854
-    assert!(
-        curve[0] > 0.75,
-        "Pearson(1) should be > 0.75 for AR(1) φ=0.8, got {:.4}",
-        curve[0]
-    );
+    // Observed: 0.7854. Pin to ±2%.
+    assert_relative_eq!(curve[0], 0.785, epsilon = 0.015);
     // Strict decay
     for h in 1..curve.len() {
         assert!(
@@ -241,11 +234,8 @@ fn spearman_curve_ar1_decays() {
     // Observed: [0.773, 0.611, 0.488, 0.385, 0.310]
     let series = make_ar1(2000, 0.8, 42);
     let curve = spearman_curve(&series, 5);
-    assert!(
-        curve[0] > 0.75,
-        "Spearman(1) should be > 0.75 for AR(1) φ=0.8, got {:.4}",
-        curve[0]
-    );
+    // Observed: 0.7734. Pin to ±2%.
+    assert_relative_eq!(curve[0], 0.773, epsilon = 0.015);
     // Strict decay
     for h in 1..curve.len() {
         assert!(
@@ -314,13 +304,10 @@ fn digamma_matches_scipy() {
 
 #[test]
 fn knn_mi_identical_variables_high() {
-    // I(X; X) = H(X). For standard normal, H ≈ 1.42 nats. kNN estimate
-    // observed: 4.197 (overestimates because identical-variable ε = 0
-    // leads to large marginal counts). Pinned range: 3.0–6.0.
+    // Observed: 4.197. Pin to ±10%.
     let x = make_white_noise(500, 42);
     let mi = knn_mutual_information(&x, &x, 8);
-    assert!(mi > 3.0, "I(X;X) should be > 3.0, got {}", mi);
-    assert!(mi < 6.0, "I(X;X) should be < 6.0, got {}", mi);
+    assert_relative_eq!(mi, 4.197, epsilon = 0.5);
 }
 
 #[test]
@@ -330,8 +317,8 @@ fn knn_mi_independent_variables_near_zero() {
     let y = make_white_noise(500, 77);
     let mi = knn_mutual_information(&x, &y, 8);
     assert!(
-        mi < 0.05,
-        "I(independent X, Y) should be < 0.05, got {}",
+        mi < 0.01,
+        "I(independent X, Y) should be < 0.01, got {}",
         mi
     );
 }
@@ -359,9 +346,9 @@ fn gcmi_bounded_by_ami_for_ar1() {
         } else {
             1.0
         };
-        // Observed ratios: 1.02, 1.00, 1.01 — pinned to ±5%
+        // Observed ratios: 1.02, 1.00, 1.01 — pinned to ±3%
         assert!(
-            (0.95..1.10).contains(&ratio),
+            (0.97..1.05).contains(&ratio),
             "GCMI/AMI ratio at lag {} = {:.2} (GCMI_nats={:.4}, AMI={:.4}) — should be ~1.0 for linear AR(1)",
             h + 1,
             ratio,
