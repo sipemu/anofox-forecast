@@ -13,8 +13,21 @@
 //! ```
 //!
 //! This captures only **linear** dependence (since copula-Gaussian MI =
-//! Pearson MI on rank-normalized data). Fully deterministic — no random state.
+//! Pearson MI on rank-normalized data).
+//!
+//! ## Discrete / integer data
+//!
+//! For count time series (integer-valued with many ties), the standard
+//! rank transform produces step-function CDFs that degenerate after the
+//! probit transform. This implementation adds **uniform jitter** of
+//! amplitude `0.5` (half the minimum integer spacing) before ranking,
+//! following the recommendation in Kraskov et al. (2004) and as
+//! implemented in the Java Information Dynamics Toolkit (JIDT). The
+//! jitter is deterministic (seeded from a hash of the input data) so
+//! GCMI remains reproducible for a given input.
 
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use statrs::distribution::{ContinuousCDF, Normal};
 
 /// Compute the Gaussian Copula Mutual Information between `x` and `y`.
@@ -29,9 +42,20 @@ pub fn gcmi(x: &[f64], y: &[f64]) -> f64 {
         return 0.0;
     }
 
-    // Rank-transform → probit.
-    let gx = rank_to_probit(x);
-    let gy = rank_to_probit(y);
+    // Detect whether jitter is needed (significant ties in either variable).
+    let needs_jitter = has_significant_ties(x) || has_significant_ties(y);
+
+    let (gx, gy) = if needs_jitter {
+        // Add deterministic jitter to break ties on integer/count data.
+        // Seed from a hash of the input so the result is reproducible.
+        let seed = deterministic_seed(x, y);
+        let mut rng = StdRng::seed_from_u64(seed);
+        let xj: Vec<f64> = x.iter().map(|&v| v + rng.gen_range(-0.5..0.5)).collect();
+        let yj: Vec<f64> = y.iter().map(|&v| v + rng.gen_range(-0.5..0.5)).collect();
+        (rank_to_probit(&xj), rank_to_probit(&yj))
+    } else {
+        (rank_to_probit(x), rank_to_probit(y))
+    };
 
     // Pearson correlation on probit-transformed data.
     let rho = pearson(&gx, &gy);
@@ -42,6 +66,42 @@ pub fn gcmi(x: &[f64], y: &[f64]) -> f64 {
     }
 
     -0.5 * (1.0 - rho2).log2()
+}
+
+/// Check whether a series has significant ties (> 10% of values repeated).
+/// This triggers jitter for integer/count data.
+fn has_significant_ties(values: &[f64]) -> bool {
+    let n = values.len();
+    if n < 10 {
+        return false;
+    }
+    let mut sorted: Vec<f64> = values.to_vec();
+    sorted.sort_unstable_by(|a, b| a.total_cmp(b));
+    let mut tie_count = 0usize;
+    for w in sorted.windows(2) {
+        if (w[1] - w[0]).abs() < 1e-10 {
+            tie_count += 1;
+        }
+    }
+    // > 10% consecutive ties indicates discrete/integer data
+    tie_count as f64 / n as f64 > 0.10
+}
+
+/// Deterministic seed from input data — ensures reproducibility for a
+/// given (x, y) pair without requiring an explicit seed parameter.
+fn deterministic_seed(x: &[f64], y: &[f64]) -> u64 {
+    // Simple FNV-1a-style hash of the first + last few values.
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &v in x.iter().take(8).chain(x.iter().rev().take(4)) {
+        h ^= v.to_bits();
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    for &v in y.iter().take(8).chain(y.iter().rev().take(4)) {
+        h ^= v.to_bits();
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h ^= (x.len() as u64).wrapping_mul(0x9e3779b97f4a7c15);
+    h
 }
 
 /// Pre-compute a probit lookup table: probit[k] = Φ⁻¹((k+1) / (n+1)) for
@@ -160,5 +220,56 @@ mod tests {
         let a = gcmi(&x, &y);
         let b = gcmi(&x, &y);
         assert_relative_eq!(a, b, epsilon = 1e-15);
+    }
+
+    #[test]
+    fn gcmi_integer_data_with_jitter_detects_linear() {
+        // Simulate integer count data: y = 2*x + noise, rounded to integers.
+        // Without jitter, GCMI ≈ 0 due to tied ranks. With jitter, GCMI
+        // should be positive (captures the linear relationship).
+        let x: Vec<f64> = (0..300).map(|i| (i % 10) as f64).collect();
+        let y: Vec<f64> = x
+            .iter()
+            .enumerate()
+            .map(|(i, &xi)| (2.0 * xi + ((i * 3 + 1) % 5) as f64).round())
+            .collect();
+        let mi = gcmi(&x, &y);
+        assert!(
+            mi > 0.1,
+            "GCMI on integer data with linear structure should be > 0.1 (jitter breaks ties), got {}",
+            mi
+        );
+    }
+
+    #[test]
+    fn gcmi_integer_data_independent_near_zero() {
+        // Independent integer data — jitter should not create spurious MI.
+        let x: Vec<f64> = (0..300).map(|i| (i % 7) as f64).collect();
+        let y: Vec<f64> = (0..300).map(|i| ((i * 13 + 5) % 11) as f64).collect();
+        let mi = gcmi(&x, &y);
+        assert!(
+            mi < 0.3,
+            "GCMI on independent integers should be small, got {}",
+            mi
+        );
+    }
+
+    #[test]
+    fn gcmi_integer_data_deterministic() {
+        // Jitter is seeded from data → same input = same output.
+        let x: Vec<f64> = (0..200).map(|i| (i % 5) as f64).collect();
+        let y: Vec<f64> = (0..200).map(|i| (i % 3) as f64).collect();
+        let a = gcmi(&x, &y);
+        let b = gcmi(&x, &y);
+        assert_relative_eq!(a, b, epsilon = 1e-15);
+    }
+
+    #[test]
+    fn has_significant_ties_detects_integers() {
+        let integers: Vec<f64> = (0..100).map(|i| (i % 5) as f64).collect();
+        assert!(has_significant_ties(&integers));
+
+        let continuous: Vec<f64> = (0..100).map(|i| i as f64 * 0.1 + 0.001).collect();
+        assert!(!has_significant_ties(&continuous));
     }
 }
