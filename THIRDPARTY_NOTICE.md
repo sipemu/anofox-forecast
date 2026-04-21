@@ -86,6 +86,21 @@ The sequential monitoring module (`src/monitor/`) is a Rust port of the R packag
 - Grundy, T., Killick, R., & Mihaylov, G. (2020). High-dimensional changepoint detection via a geometrically inspired mapping. *Statistics and Computing*, 30, 1155–1166. <https://doi.org/10.1007/s11222-020-09940-y>
 - Aue, A., & Horváth, L. (2004). Delay time in sequential detection of change. *Statistics & Probability Letters*, 67(3), 221–231. <https://doi.org/10.1016/j.spl.2004.01.001>
 
+## dependence-forecastability
+
+The forecastability analysis module (`src/forecastability/`) is inspired by the Python package [dependence-forecastability](https://github.com/AdamKrysztopa/dependence-forecastability) by Adam Krysztopa. The algorithms (kNN MI, GCMI, distance correlation, phase surrogates, transfer entropy, forecastability fingerprint, Lyapunov exponent) are implemented from their published mathematical definitions, not ported line-by-line.
+
+**Original Author**: Adam Krysztopa
+
+**License**: MIT License
+
+**References**:
+
+- Kraskov, A., Stögbauer, H., & Grassberger, P. (2004). Estimating mutual information. *Physical Review E*, 69(6), 066138.
+- Ince, R. A. A., et al. (2017). A statistical framework for neuroimaging data analysis based on mutual information estimated via a Gaussian copula. *Human Brain Mapping*, 38(3), 1541–1573.
+- Szekely, G. J., Rizzo, M. L., & Bakirov, N. K. (2007). Measuring and testing dependence by correlation of distances. *The Annals of Statistics*, 35(6), 2769–2794.
+- Rosenstein, M. T., Collins, J. J., & De Luca, C. J. (1993). A practical method for calculating largest Lyapunov exponents from small data sets. *Physica D*, 65(1–2), 117–134.
+
 ## tsfresh
 
 The time series feature extraction module (`src/features/`) is inspired by [tsfresh](https://github.com/blue-yonder/tsfresh), a Python library for automatic extraction of relevant features from time series.

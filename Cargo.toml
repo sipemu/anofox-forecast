@@ -18,6 +18,7 @@ default = ["postprocess"]
 parallel = ["rayon"]
 js = ["getrandom/js"]
 postprocess = ["dep:faer", "dep:anofox-regression"]
+forecastability = []
 seasonal-detection = ["dep:fdars-core"]
 serde = ["dep:serde", "dep:serde_json", "dep:bincode"]
 

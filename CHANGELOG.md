@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Forecastability analysis module** (`forecastability::`, feature-gated behind `forecastability`) — pre-modeling triage via information-theoretic dependence measures. Port inspired by [dependence-forecastability](https://github.com/AdamKrysztopa/dependence-forecastability) (MIT).
+  - **kNN Mutual Information** (Kraskov KSG1): `knn_mutual_information(x, y, k)` — brute-force O(n²k) estimator with digamma, binary-search marginal counting.
+  - **AMI curve**: `ami_curve(series, max_lag)` — MI at each horizon lag h=1..max_lag.
+  - **pAMI curve**: `pami_curve(series, max_lag, backend)` — partial/conditional AMI via linear residualization (OLS).
+  - **Transfer Entropy**: `transfer_entropy_curve(source, target, max_lag)` — directional TE as conditional MI.
+  - **GCMI**: `gcmi(x, y)` — Gaussian Copula MI (Ince 2017), rank → probit → closed-form `I = -0.5 log₂(1 - ρ²)`. Plus `gcmi_curve`.
+  - **Distance correlation**: `distance_correlation(x, y)` — Szekely/Rizzo (2007), O(n²) doubly-centered distance matrices.
+  - **Phase-randomized surrogates**: `phase_surrogates(series, n, seed)` — FFT + random phases + IFFT. `significance_bands()` for any lag-curve metric.
+  - **Lag correlations**: `pearson_curve`, `spearman_curve`, `kendall_curve` — |corr(X_t, X_{t+h})| at each lag.
+  - **Forecastability fingerprint**: `ForecastabilityFingerprint::compute()` — `information_mass`, `information_horizon`, `information_structure`, `nonlinear_share`, `signal_to_noise`, `directness_ratio`, `informative_horizons`.
+  - **Largest Lyapunov exponent**: `largest_lyapunov_exponent()` — Rosenstein (1993), Takens delay embedding + NN divergence slope.
+  - **10-scorer registry**: `score(series, Scorer::*)` — Mi, Pearson, Spearman, Kendall, Distance, TransferEntropy, Gcmi, PermutationEntropy, SpectralEntropy, SpectralPredictability.
+  - **AR(1) theoretical AMI**: `ar1_theoretical_ami(phi, max_lag)` — validation formula.
+  - **Radix-2 complex FFT/IFFT**: `fft_complex::fft()` — used by surrogates, self-contained.
+  - 36 new tests covering all primitives, lag curves, fingerprint (AR(1) + white noise), and LLE (sine + logistic map).
+
 ## [0.6.0] - 2026-04-09
 
 ### Added
