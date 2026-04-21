@@ -16,16 +16,12 @@
 //! neighbor counts for each point, and `<·>` is the sample average.
 
 /// Digamma function via Stirling + recurrence for small arguments.
-///
-/// Accurate to ~1e-12 for integer/half-integer args and ~1e-8 in general.
 fn digamma(mut x: f64) -> f64 {
-    // Shift to large-argument regime (x ≥ 8) via recurrence ψ(x) = ψ(x+1) - 1/x.
     let mut result = 0.0;
     while x < 8.0 {
         result -= 1.0 / x;
         x += 1.0;
     }
-    // Stirling series for ψ(x) when x ≥ 8.
     let inv_x = 1.0 / x;
     let inv_x2 = inv_x * inv_x;
     result += x.ln()
@@ -34,9 +30,13 @@ fn digamma(mut x: f64) -> f64 {
     result
 }
 
+/// Pre-computed digamma table: `DIGAMMA_TABLE[i] = ψ(i + 1)` for i = 0..n.
+/// Avoids 2n calls to the recurrence-based `digamma()` per MI estimation.
+fn digamma_table(max_arg: usize) -> Vec<f64> {
+    (0..=max_arg).map(|i| digamma((i + 1) as f64)).collect()
+}
+
 /// Count how many values in `sorted` fall strictly within `(center - eps, center + eps)`.
-///
-/// Uses binary search for O(log n) per query.
 fn count_within_eps(sorted: &[f64], center: f64, eps: f64) -> usize {
     if eps <= 0.0 {
         return 0;
@@ -48,42 +48,175 @@ fn count_within_eps(sorted: &[f64], center: f64, eps: f64) -> usize {
     right.saturating_sub(left)
 }
 
-/// Compute the k-th nearest neighbor ε (Chebyshev / L∞ distance) for each
-/// point in the joint (X, Y) space.
-///
-/// Returns one ε per point. Uses `select_nth_unstable_by` (introselect,
-/// O(n) average) instead of a full sort, and reuses a single distance
-/// buffer across all points to avoid n² small allocations.
-fn kth_neighbor_eps(x: &[f64], y: &[f64], k: usize) -> Vec<f64> {
-    let n = x.len();
-    let mut result = Vec::with_capacity(n);
-    // Reusable buffer: one entry per point (including self).
-    let mut dists = Vec::with_capacity(n);
+// ---------------------------------------------------------------------------
+// 2D KD-tree for Chebyshev (L∞) k-nearest-neighbor queries
+// ---------------------------------------------------------------------------
 
-    for i in 0..n {
-        dists.clear();
-        for j in 0..n {
-            if j == i {
-                // Self-distance: set to infinity so it's never selected as
-                // a neighbor. Avoids the filter allocation + branch.
-                dists.push(f64::INFINITY);
+/// A node in the 2D KD-tree. Stores the original index and coordinates.
+#[derive(Clone)]
+struct KdNode {
+    idx: usize,
+    xy: [f64; 2],
+}
+
+/// 2D KD-tree with Chebyshev distance for bulk k-NN queries.
+///
+/// Uses a flat sorted-subarray layout: the median at each level is stored
+/// at the midpoint of the subarray, with left/right children in the
+/// respective halves.
+struct KdTree {
+    tree: Vec<KdNode>,
+}
+
+impl KdTree {
+    /// Build a KD-tree from n 2D points. O(n log n).
+    fn build(x: &[f64], y: &[f64]) -> Self {
+        let n = x.len();
+        let mut nodes: Vec<KdNode> = (0..n)
+            .map(|i| KdNode {
+                idx: i,
+                xy: [x[i], y[i]],
+            })
+            .collect();
+        let mut tree = vec![
+            KdNode {
+                idx: 0,
+                xy: [0.0, 0.0]
+            };
+            n
+        ];
+        Self::build_recursive(&mut nodes, &mut tree, 0, n, 0);
+        Self { tree }
+    }
+
+    fn build_recursive(
+        nodes: &mut [KdNode],
+        tree: &mut [KdNode],
+        start: usize,
+        end: usize,
+        depth: usize,
+    ) {
+        if start >= end {
+            return;
+        }
+        let dim = depth % 2;
+        let mid = (start + end) / 2;
+        // Partial sort to place the median at `mid`.
+        nodes[start..end]
+            .select_nth_unstable_by(mid - start, |a, b| a.xy[dim].total_cmp(&b.xy[dim]));
+        tree[mid] = nodes[mid].clone();
+        if mid > start {
+            Self::build_recursive(nodes, tree, start, mid, depth + 1);
+        }
+        if mid + 1 < end {
+            Self::build_recursive(nodes, tree, mid + 1, end, depth + 1);
+        }
+    }
+
+    /// Find the k nearest neighbors (by Chebyshev L∞ distance) of query point,
+    /// excluding the point at `exclude_idx`. Returns the k-th neighbor distance.
+    fn kth_neighbor_chebyshev(&self, qx: f64, qy: f64, exclude_idx: usize, k: usize) -> f64 {
+        let n = self.tree.len();
+        if n == 0 {
+            return f64::INFINITY;
+        }
+        // Max-heap of size k: stores (distance, idx). We want the k smallest.
+        let mut heap: Vec<f64> = Vec::with_capacity(k + 1);
+        self.search_recursive(qx, qy, exclude_idx, k, 0, n, 0, &mut heap);
+        // The largest element in the heap is the k-th nearest distance.
+        heap.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+    }
+
+    fn search_recursive(
+        &self,
+        qx: f64,
+        qy: f64,
+        exclude_idx: usize,
+        k: usize,
+        start: usize,
+        end: usize,
+        depth: usize,
+        heap: &mut Vec<f64>,
+    ) {
+        if start >= end {
+            return;
+        }
+        let mid = (start + end) / 2;
+        let node = &self.tree[mid];
+
+        // Chebyshev distance.
+        let dist = (qx - node.xy[0]).abs().max((qy - node.xy[1]).abs());
+
+        if node.idx != exclude_idx {
+            if heap.len() < k {
+                heap.push(dist);
             } else {
-                let dx = (x[i] - x[j]).abs();
-                let dy = (y[i] - y[j]).abs();
-                dists.push(dx.max(dy));
+                // Find max in heap.
+                let max_pos = heap
+                    .iter()
+                    .enumerate()
+                    .max_by(|a, b| a.1.total_cmp(b.1))
+                    .map(|(i, _)| i)
+                    .unwrap();
+                if dist < heap[max_pos] {
+                    heap[max_pos] = dist;
+                }
             }
         }
-        // Partial selection: O(n) average to place the k-th smallest at
-        // index k-1, without sorting the rest.
-        let kth_idx = k - 1;
-        dists.select_nth_unstable_by(kth_idx, |a, b| a.partial_cmp(b).unwrap());
-        result.push(dists[kth_idx]);
+
+        let worst = if heap.len() < k {
+            f64::INFINITY
+        } else {
+            heap.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+        };
+
+        let dim = depth % 2;
+        let q_dim = if dim == 0 { qx } else { qy };
+        let split = node.xy[dim];
+        let diff = q_dim - split;
+
+        // Visit the side containing the query first.
+        let (first_start, first_end, second_start, second_end) = if diff <= 0.0 {
+            (start, mid, mid + 1, end)
+        } else {
+            (mid + 1, end, start, mid)
+        };
+
+        self.search_recursive(
+            qx,
+            qy,
+            exclude_idx,
+            k,
+            first_start,
+            first_end,
+            depth + 1,
+            heap,
+        );
+
+        // Prune: only visit the other side if the splitting plane is closer
+        // than the worst distance in the heap. For Chebyshev distance,
+        // the minimum distance to any point on the other side is |diff|.
+        if diff.abs() < worst || heap.len() < k {
+            self.search_recursive(
+                qx,
+                qy,
+                exclude_idx,
+                k,
+                second_start,
+                second_end,
+                depth + 1,
+                heap,
+            );
+        }
     }
-    result
 }
 
 /// Estimate the mutual information `I(X; Y)` using the KSG1 (Kraskov
 /// Algorithm 1) k-nearest-neighbor estimator.
+///
+/// Uses a 2D KD-tree for O(n log n) k-NN queries instead of brute-force
+/// O(n²). Combined with a pre-computed digamma table, this makes the
+/// estimator fast for n up to ~100k.
 ///
 /// # Arguments
 /// * `x` — first variable (length N)
@@ -92,9 +225,6 @@ fn kth_neighbor_eps(x: &[f64], y: &[f64], k: usize) -> Vec<f64> {
 ///
 /// # Returns
 /// Estimated MI in nats. Returns 0.0 for degenerate inputs.
-///
-/// # Panics
-/// Panics if `x.len() != y.len()` or `k == 0` or `k >= N`.
 pub fn knn_mutual_information(x: &[f64], y: &[f64], k: usize) -> f64 {
     let n = x.len();
     assert_eq!(n, y.len(), "x and y must have the same length");
@@ -106,26 +236,30 @@ pub fn knn_mutual_information(x: &[f64], y: &[f64], k: usize) -> f64 {
 
     // Pre-sort marginals for binary-search counting.
     let mut x_sorted: Vec<f64> = x.to_vec();
-    x_sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+    x_sorted.sort_unstable_by(|a, b| a.total_cmp(b));
     let mut y_sorted: Vec<f64> = y.to_vec();
-    y_sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+    y_sorted.sort_unstable_by(|a, b| a.total_cmp(b));
 
-    // Find k-th neighbor ε for each point in the joint Chebyshev space.
-    let eps_vec = kth_neighbor_eps(x, y, k);
+    // Pre-compute digamma table: ψ(1), ψ(2), …, ψ(n+1).
+    let psi = digamma_table(n);
 
-    // For each point, count marginal neighbors within the ε-ball.
+    // Build 2D KD-tree for Chebyshev k-NN.
+    let tree = KdTree::build(x, y);
+
+    // For each point, find k-th NN distance and count marginal neighbors.
     let mut sum_psi = 0.0;
-    for (i, &eps) in eps_vec.iter().enumerate() {
-        // n_x = number of points j ≠ i with |x_j - x_i| < eps.
-        // We count from the sorted array and subtract 1 for the point itself.
+    for i in 0..n {
+        let eps = tree.kth_neighbor_chebyshev(x[i], y[i], i, k);
+
         let n_x = count_within_eps(&x_sorted, x[i], eps).saturating_sub(1);
         let n_y = count_within_eps(&y_sorted, y[i], eps).saturating_sub(1);
-        sum_psi += digamma((n_x + 1) as f64) + digamma((n_y + 1) as f64);
+        // Use the lookup table: psi[j] = ψ(j+1), so ψ(n_x+1) = psi[n_x].
+        sum_psi += psi[n_x.min(n)] + psi[n_y.min(n)];
     }
 
     let avg_psi = sum_psi / n as f64;
     let mi = digamma(k as f64) - avg_psi + digamma(n as f64);
-    mi.max(0.0) // MI is non-negative; clamp numerical noise.
+    mi.max(0.0)
 }
 
 #[cfg(test)]
