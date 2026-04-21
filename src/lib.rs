@@ -34,6 +34,8 @@ pub mod core;
 pub mod detection;
 pub mod error;
 pub mod features;
+#[cfg(feature = "forecastability")]
+pub mod forecastability;
 pub mod hierarchy;
 pub mod models;
 pub mod monitor;
