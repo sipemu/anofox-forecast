@@ -29,38 +29,49 @@ pub fn distance_correlation(x: &[f64], y: &[f64]) -> f64 {
     let n_f = n as f64;
     let n2 = (n * n) as f64;
 
-    // Pre-compute row means and grand mean for Y (O(n²) time, O(n) memory).
-    let mut y_row_means = vec![0.0; n];
-    let mut y_grand_sum = 0.0;
-    for i in 0..n {
-        let mut row_sum = 0.0;
-        for j in 0..n {
-            row_sum += (y[i] - y[j]).abs();
-        }
-        y_row_means[i] = row_sum / n_f;
-        y_grand_sum += row_sum;
-    }
-    let y_grand_mean = y_grand_sum / n2;
+    // Pre-sort both x and y for O(n log n) row-mean computation.
+    // For 1D data, the sum of |x_i - x_j| over all j can be computed in
+    // O(n) using the sorted-order trick:
+    //   sum_j |x_i - x_j| = 2 * rank_i * x_i - 2 * prefix_sum[rank_i]
+    //                        + total_sum - 2 * x_i * (n - rank_i)
+    // ... but for simplicity and correctness, we use the straightforward
+    // O(n²) approach since distance_correlation is not called in the hot
+    // fingerprint loop. The O(n²) inner product dominates regardless.
 
-    // Build doubly-centered A (for X) and accumulate all three inner
-    // products in a single pass over the A matrix + on-the-fly B elements.
-    let mut x_row_means = vec![0.0; n];
+    // Compute pairwise distances and row means for both X and Y in a
+    // single fused O(n²) pass. Store X distances in a flat matrix;
+    // Y distances are only used for row means and then recomputed
+    // on the fly in the inner-product pass.
+    let mut a = vec![0.0; n * n]; // X distance matrix
+    let mut x_row_sums = vec![0.0; n];
+    let mut y_row_sums = vec![0.0; n];
     let mut x_grand_sum = 0.0;
-    // First pass: pairwise distances for X, compute row means.
-    let mut a = vec![0.0; n * n];
+    let mut y_grand_sum = 0.0;
+
     for i in 0..n {
         for j in i + 1..n {
-            let dist = (x[i] - x[j]).abs();
-            a[i * n + j] = dist;
-            a[j * n + i] = dist;
+            let dx = (x[i] - x[j]).abs();
+            let dy = (y[i] - y[j]).abs();
+            a[i * n + j] = dx;
+            a[j * n + i] = dx;
+            x_row_sums[i] += dx;
+            x_row_sums[j] += dx;
+            y_row_sums[i] += dy;
+            y_row_sums[j] += dy;
         }
     }
     for i in 0..n {
-        let row_sum: f64 = a[i * n..i * n + n].iter().sum();
-        x_row_means[i] = row_sum / n_f;
-        x_grand_sum += row_sum;
+        x_grand_sum += x_row_sums[i];
+        y_grand_sum += y_row_sums[i];
     }
+
     let x_grand_mean = x_grand_sum / n2;
+    let y_grand_mean = y_grand_sum / n2;
+    // Convert sums to means.
+    for i in 0..n {
+        x_row_sums[i] /= n_f;
+        y_row_sums[i] /= n_f;
+    }
 
     // Double-center A in place and accumulate inner products with B on the fly.
     let mut dcov2 = 0.0;
@@ -68,8 +79,8 @@ pub fn distance_correlation(x: &[f64], y: &[f64]) -> f64 {
     let mut dvar_y = 0.0;
     for i in 0..n {
         for j in 0..n {
-            let aij = a[i * n + j] - x_row_means[i] - x_row_means[j] + x_grand_mean;
-            let bij = (y[i] - y[j]).abs() - y_row_means[i] - y_row_means[j] + y_grand_mean;
+            let aij = a[i * n + j] - x_row_sums[i] - x_row_sums[j] + x_grand_mean;
+            let bij = (y[i] - y[j]).abs() - y_row_sums[i] - y_row_sums[j] + y_grand_mean;
             dcov2 += aij * bij;
             dvar_x += aij * aij;
             dvar_y += bij * bij;

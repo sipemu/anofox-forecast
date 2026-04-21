@@ -113,6 +113,7 @@ fn pami_curve_linear(series: &[f64], max_lag: usize) -> Vec<f64> {
 
         // Build conditioning matrix Z: columns X_{t+1}, …, X_{t+h-1}.
         // Each column j (0-indexed) is series[j+1 .. j+1+usable].
+        // Uses slices via to_vec only where linear_residualize needs owned data.
         let z_cols: Vec<Vec<f64>> = (1..h).map(|j| series[j..j + usable].to_vec()).collect();
 
         let past = &series[..usable];

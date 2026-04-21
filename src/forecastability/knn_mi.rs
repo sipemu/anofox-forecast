@@ -115,16 +115,21 @@ impl KdTree {
 
     /// Find the k nearest neighbors (by Chebyshev L∞ distance) of query point,
     /// excluding the point at `exclude_idx`. Returns the k-th neighbor distance.
+    ///
+    /// Uses a fixed-size max-heap (`worst` = heap[0]) so pruning is O(1).
     fn kth_neighbor_chebyshev(&self, qx: f64, qy: f64, exclude_idx: usize, k: usize) -> f64 {
         let n = self.tree.len();
         if n == 0 {
             return f64::INFINITY;
         }
-        // Max-heap of size k: stores (distance, idx). We want the k smallest.
-        let mut heap: Vec<f64> = Vec::with_capacity(k + 1);
-        self.search_recursive(qx, qy, exclude_idx, k, 0, n, 0, &mut heap);
-        // The largest element in the heap is the k-th nearest distance.
-        heap.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+        // Fixed-size max-heap of k distances. `heap[0]` is always the max
+        // (the current k-th best). Using `std::collections::BinaryHeap` with
+        // ordered floats would work but adds allocation overhead per query.
+        // Instead we use a simple sorted array for k=8: insertion is O(k)
+        // but k is tiny and the array fits in a cache line.
+        let mut heap = KnnHeap::new(k);
+        self.search_recursive(qx, qy, exclude_idx, 0, n, 0, &mut heap);
+        heap.worst()
     }
 
     fn search_recursive(
@@ -132,11 +137,10 @@ impl KdTree {
         qx: f64,
         qy: f64,
         exclude_idx: usize,
-        k: usize,
         start: usize,
         end: usize,
         depth: usize,
-        heap: &mut Vec<f64>,
+        heap: &mut KnnHeap,
     ) {
         if start >= end {
             return;
@@ -148,27 +152,8 @@ impl KdTree {
         let dist = (qx - node.xy[0]).abs().max((qy - node.xy[1]).abs());
 
         if node.idx != exclude_idx {
-            if heap.len() < k {
-                heap.push(dist);
-            } else {
-                // Find max in heap.
-                let max_pos = heap
-                    .iter()
-                    .enumerate()
-                    .max_by(|a, b| a.1.total_cmp(b.1))
-                    .map(|(i, _)| i)
-                    .unwrap();
-                if dist < heap[max_pos] {
-                    heap[max_pos] = dist;
-                }
-            }
+            heap.push(dist);
         }
-
-        let worst = if heap.len() < k {
-            f64::INFINITY
-        } else {
-            heap.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
-        };
 
         let dim = depth % 2;
         let q_dim = if dim == 0 { qx } else { qy };
@@ -182,31 +167,63 @@ impl KdTree {
             (mid + 1, end, start, mid)
         };
 
-        self.search_recursive(
-            qx,
-            qy,
-            exclude_idx,
-            k,
-            first_start,
-            first_end,
-            depth + 1,
-            heap,
-        );
+        self.search_recursive(qx, qy, exclude_idx, first_start, first_end, depth + 1, heap);
 
-        // Prune: only visit the other side if the splitting plane is closer
-        // than the worst distance in the heap. For Chebyshev distance,
-        // the minimum distance to any point on the other side is |diff|.
-        if diff.abs() < worst || heap.len() < k {
+        // Prune: recheck worst AFTER the first subtree visit (it may have
+        // tightened the bound). This is critical for pruning efficiency.
+        if diff.abs() < heap.worst() {
             self.search_recursive(
                 qx,
                 qy,
                 exclude_idx,
-                k,
                 second_start,
                 second_end,
                 depth + 1,
                 heap,
             );
+        }
+    }
+}
+
+/// Fixed-capacity max-heap for k smallest distances.
+///
+/// Maintains a sorted array of up to `k` elements (ascending order).
+/// `worst()` = last element = O(1). Insertion is O(k) via binary search +
+/// shift, but k ≤ 8 so this fits in a cache line and is faster than a
+/// pointer-based BinaryHeap for this size.
+struct KnnHeap {
+    data: Vec<f64>,
+    k: usize,
+}
+
+impl KnnHeap {
+    fn new(k: usize) -> Self {
+        Self {
+            data: Vec::with_capacity(k),
+            k,
+        }
+    }
+
+    #[inline]
+    fn worst(&self) -> f64 {
+        if self.data.len() < self.k {
+            f64::INFINITY
+        } else {
+            self.data[self.k - 1]
+        }
+    }
+
+    #[inline]
+    fn push(&mut self, dist: f64) {
+        if self.data.len() < self.k {
+            // Not full yet: insert in sorted position.
+            let pos = self.data.partition_point(|&d| d < dist);
+            self.data.insert(pos, dist);
+        } else if dist < self.data[self.k - 1] {
+            // Better than worst: replace worst and re-insert in sorted position.
+            self.data.pop();
+            let pos = self.data.partition_point(|&d| d < dist);
+            self.data.insert(pos, dist);
         }
     }
 }
