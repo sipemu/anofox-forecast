@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-04-21
+
+### Changed
+
+- **Forecastability module ~60× faster**: 2D KD-tree for kNN MI (O(n²) → O(n log n)), Kendall tau O(n log n) via merge-sort, fused distance correlation, digamma lookup table, probit cache, streaming surrogates, rayon parallelization of surrogate + lag loops.
+
+### Added
+
+- 19 cross-validation tests against scipy/numpy reference values with tight (±2-3%) tolerances. Covers kNN MI, GCMI, distance correlation, Pearson/Spearman/Kendall, digamma, and the forecastability fingerprint (AR(1), white noise, logistic map).
+
 ## [0.7.0] - 2026-04-21
 
 ### Added
