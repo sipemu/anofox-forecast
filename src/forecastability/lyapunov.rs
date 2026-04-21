@@ -39,36 +39,44 @@ pub fn largest_lyapunov_exponent(
         return None;
     }
 
-    // Step 1: Build delay embedding vectors.
-    // v_i = (series[i], series[i+tau], …, series[i+(m-1)*tau])
-    let embed = |i: usize| -> Vec<f64> { (0..m).map(|k| series[i + k * tau]).collect() };
+    // Step 1: Pre-compute the full embedding matrix (n_embed × m) to avoid
+    // per-access Vec allocations. Flat layout: embedding[i * m + d].
+    let mut embedding = vec![0.0_f64; n_embed * m];
+    for i in 0..n_embed {
+        for d in 0..m {
+            embedding[i * m + d] = series[i + d * tau];
+        }
+    }
+    let emb = |i: usize| &embedding[i * m..(i + 1) * m];
+
+    /// Squared Euclidean distance between two embedding vectors (avoids sqrt).
+    #[inline]
+    fn dist_sq(a: &[f64], b: &[f64]) -> f64 {
+        a.iter().zip(b.iter()).map(|(x, y)| (x - y) * (x - y)).sum()
+    }
 
     // Step 2: Find nearest neighbor for each point (Theiler window).
+    // Compare squared distances to avoid n_embed² sqrt calls.
     let mut nn_idx = vec![0usize; n_embed];
     for i in 0..n_embed {
-        let vi = embed(i);
-        let mut best_dist = f64::INFINITY;
+        let vi = emb(i);
+        let mut best_d2 = f64::INFINITY;
         let mut best_j = 0;
         for j in 0..n_embed {
             if (i as isize - j as isize).unsigned_abs() < theiler {
                 continue;
             }
-            let vj = embed(j);
-            let dist: f64 = vi
-                .iter()
-                .zip(vj.iter())
-                .map(|(a, b)| (a - b).powi(2))
-                .sum::<f64>()
-                .sqrt();
-            if dist < best_dist && dist > 0.0 {
-                best_dist = dist;
+            let d2 = dist_sq(vi, emb(j));
+            if d2 < best_d2 && d2 > 0.0 {
+                best_d2 = d2;
                 best_j = j;
             }
         }
         nn_idx[i] = best_j;
     }
 
-    // Step 3: Track mean log-divergence.
+    // Step 3: Track mean log-divergence (uses actual Euclidean distance
+    // for the log, since log(sqrt(d²)) = 0.5 * log(d²)).
     let mut divergence = vec![0.0_f64; max_iter];
     let mut counts = vec![0usize; max_iter];
 
@@ -77,19 +85,12 @@ pub fn largest_lyapunov_exponent(
         for k in 0..max_iter {
             let i_k = i + k;
             let j_k = j + k;
-            if i_k + (m - 1) * tau >= n || j_k + (m - 1) * tau >= n {
+            if i_k >= n_embed || j_k >= n_embed {
                 break;
             }
-            let vi = embed(i_k);
-            let vj = embed(j_k);
-            let dist: f64 = vi
-                .iter()
-                .zip(vj.iter())
-                .map(|(a, b)| (a - b).powi(2))
-                .sum::<f64>()
-                .sqrt();
-            if dist > 0.0 {
-                divergence[k] += dist.ln();
+            let d2 = dist_sq(emb(i_k), emb(j_k));
+            if d2 > 0.0 {
+                divergence[k] += 0.5 * d2.ln(); // ln(sqrt(d²)) = 0.5 * ln(d²)
                 counts[k] += 1;
             }
         }

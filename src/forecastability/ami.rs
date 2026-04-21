@@ -7,6 +7,9 @@
 use super::gcmi::gcmi;
 use super::knn_mi::knn_mutual_information;
 
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+
 /// Backend for Conditional MI residualization in pAMI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CmiBackend {
@@ -27,17 +30,33 @@ pub fn ami_curve(series: &[f64], max_lag: usize) -> Vec<f64> {
 /// AMI curve with a custom number of neighbors.
 pub fn ami_curve_with_k(series: &[f64], max_lag: usize, k: usize) -> Vec<f64> {
     let n = series.len();
-    let mut result = Vec::with_capacity(max_lag);
-    for h in 1..=max_lag {
-        if n <= h + k {
-            result.push(0.0);
-            continue;
-        }
-        let past = &series[..n - h];
-        let future = &series[h..];
-        result.push(knn_mutual_information(past, future, k));
+
+    #[cfg(feature = "parallel")]
+    {
+        (1..=max_lag)
+            .into_par_iter()
+            .map(|h| {
+                if n <= h + k {
+                    0.0
+                } else {
+                    knn_mutual_information(&series[..n - h], &series[h..], k)
+                }
+            })
+            .collect()
     }
-    result
+
+    #[cfg(not(feature = "parallel"))]
+    {
+        (1..=max_lag)
+            .map(|h| {
+                if n <= h + k {
+                    0.0
+                } else {
+                    knn_mutual_information(&series[..n - h], &series[h..], k)
+                }
+            })
+            .collect()
+    }
 }
 
 /// Compute the GCMI curve: `GCMI(h) = I_gauss(X_t; X_{t+h})` for h = 1..max_lag.

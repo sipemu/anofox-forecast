@@ -48,35 +48,36 @@ fn count_within_eps(sorted: &[f64], center: f64, eps: f64) -> usize {
     right.saturating_sub(left)
 }
 
-/// Compute the k-th nearest neighbor distances in the joint Chebyshev
-/// (L∞) space (X, Y), then return (eps_x, eps_y) per point — the L∞
-/// distance projected onto each marginal.
+/// Compute the k-th nearest neighbor ε (Chebyshev / L∞ distance) for each
+/// point in the joint (X, Y) space.
 ///
-/// Brute-force O(n² k) — fast enough for n < 10 000. For larger n a
-/// KD-tree would be better; this covers the typical forecastability
-/// analysis use case.
-fn kth_neighbor_distances(x: &[f64], y: &[f64], k: usize) -> Vec<(f64, f64)> {
+/// Returns one ε per point. Uses `select_nth_unstable_by` (introselect,
+/// O(n) average) instead of a full sort, and reuses a single distance
+/// buffer across all points to avoid n² small allocations.
+fn kth_neighbor_eps(x: &[f64], y: &[f64], k: usize) -> Vec<f64> {
     let n = x.len();
     let mut result = Vec::with_capacity(n);
+    // Reusable buffer: one entry per point (including self).
+    let mut dists = Vec::with_capacity(n);
 
     for i in 0..n {
-        // Compute L∞ distances to all other points and find the k-th smallest.
-        let mut dists: Vec<(f64, usize)> = (0..n)
-            .filter(|&j| j != i)
-            .map(|j| {
+        dists.clear();
+        for j in 0..n {
+            if j == i {
+                // Self-distance: set to infinity so it's never selected as
+                // a neighbor. Avoids the filter allocation + branch.
+                dists.push(f64::INFINITY);
+            } else {
                 let dx = (x[i] - x[j]).abs();
                 let dy = (y[i] - y[j]).abs();
-                (dx.max(dy), j)
-            })
-            .collect();
-        dists.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-
-        let kth_idx = k - 1; // 0-indexed
-        let eps = dists[kth_idx].0;
-
-        // eps_x and eps_y are the marginal projections of the ε-ball.
-        // In KSG1, both marginals use the *same* ε (the joint L∞ distance).
-        result.push((eps, eps));
+                dists.push(dx.max(dy));
+            }
+        }
+        // Partial selection: O(n) average to place the k-th smallest at
+        // index k-1, without sorting the rest.
+        let kth_idx = k - 1;
+        dists.select_nth_unstable_by(kth_idx, |a, b| a.partial_cmp(b).unwrap());
+        result.push(dists[kth_idx]);
     }
     result
 }
@@ -105,22 +106,21 @@ pub fn knn_mutual_information(x: &[f64], y: &[f64], k: usize) -> f64 {
 
     // Pre-sort marginals for binary-search counting.
     let mut x_sorted: Vec<f64> = x.to_vec();
-    x_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    x_sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
     let mut y_sorted: Vec<f64> = y.to_vec();
-    y_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    y_sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
 
-    // Find k-th neighbor distances in joint space.
-    let eps_pairs = kth_neighbor_distances(x, y, k);
+    // Find k-th neighbor ε for each point in the joint Chebyshev space.
+    let eps_vec = kth_neighbor_eps(x, y, k);
 
     // For each point, count marginal neighbors within the ε-ball.
     let mut sum_psi = 0.0;
-    for (i, &(eps_x, eps_y)) in eps_pairs.iter().enumerate() {
+    for (i, &eps) in eps_vec.iter().enumerate() {
         // n_x = number of points j ≠ i with |x_j - x_i| < eps.
         // We count from the sorted array and subtract 1 for the point itself.
-        let n_x = count_within_eps(&x_sorted, x[i], eps_x).saturating_sub(1);
-        let n_y = count_within_eps(&y_sorted, y[i], eps_y).saturating_sub(1);
+        let n_x = count_within_eps(&x_sorted, x[i], eps).saturating_sub(1);
+        let n_y = count_within_eps(&y_sorted, y[i], eps).saturating_sub(1);
         sum_psi += digamma((n_x + 1) as f64) + digamma((n_y + 1) as f64);
-        let _ = i;
     }
 
     let avg_psi = sum_psi / n as f64;

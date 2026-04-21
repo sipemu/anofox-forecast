@@ -60,25 +60,107 @@ fn kendall_abs(x: &[f64], y: &[f64]) -> f64 {
     if n < 2 {
         return 0.0;
     }
-    let mut concordant: i64 = 0;
-    let mut discordant: i64 = 0;
-    for i in 0..n {
-        for j in i + 1..n {
-            let dx = (x[i] - x[j]).signum();
-            let dy = (y[i] - y[j]).signum();
-            let prod = dx * dy;
-            if prod > 0.0 {
-                concordant += 1;
-            } else if prod < 0.0 {
-                discordant += 1;
-            }
-        }
-    }
-    let denom = (n * (n - 1) / 2) as f64;
-    if denom == 0.0 {
+
+    // O(n log n) Kendall tau via merge-sort inversion count.
+    // Sort pairs by x, then count inversions in the y-order.
+    let mut pairs: Vec<(f64, f64)> = x.iter().copied().zip(y.iter().copied()).collect();
+    pairs.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+
+    let y_vals: Vec<f64> = pairs.iter().map(|p| p.1).collect();
+    let inversions = merge_sort_count_inversions(&y_vals);
+
+    let n_pairs = n * (n - 1) / 2;
+    if n_pairs == 0 {
         return 0.0;
     }
-    ((concordant - discordant) as f64 / denom).abs()
+    let concordant = n_pairs as i64 - 2 * inversions as i64;
+    (concordant as f64 / n_pairs as f64).abs()
+}
+
+/// Count inversions in a slice via merge sort. O(n log n).
+/// An inversion is a pair (i, j) with i < j but a[i] > a[j].
+fn merge_sort_count_inversions(arr: &[f64]) -> usize {
+    let n = arr.len();
+    if n <= 1 {
+        return 0;
+    }
+    let mid = n / 2;
+    let mut left = arr[..mid].to_vec();
+    let mut right = arr[mid..].to_vec();
+
+    let mut count = 0;
+    count += merge_sort_count_mut(&mut left);
+    count += merge_sort_count_mut(&mut right);
+
+    // Merge and count split inversions.
+    let mut i = 0;
+    let mut j = 0;
+    let mut k = 0;
+    let mut merged = vec![0.0; n];
+    while i < left.len() && j < right.len() {
+        if left[i] <= right[j] {
+            merged[k] = left[i];
+            i += 1;
+        } else {
+            merged[k] = right[j];
+            count += left.len() - i; // all remaining left elements are inversions
+            j += 1;
+        }
+        k += 1;
+    }
+    while i < left.len() {
+        merged[k] = left[i];
+        i += 1;
+        k += 1;
+    }
+    while j < right.len() {
+        merged[k] = right[j];
+        j += 1;
+        k += 1;
+    }
+    // Not needed externally but keeps the function self-contained.
+    let _ = merged;
+    count
+}
+
+fn merge_sort_count_mut(arr: &mut [f64]) -> usize {
+    let n = arr.len();
+    if n <= 1 {
+        return 0;
+    }
+    let mid = n / 2;
+    let mut count = 0;
+    count += merge_sort_count_mut(&mut arr[..mid]);
+    count += merge_sort_count_mut(&mut arr[mid..]);
+
+    // Merge in place via temp buffer.
+    let left = arr[..mid].to_vec();
+    let right = arr[mid..].to_vec();
+    let mut i = 0;
+    let mut j = 0;
+    let mut k = 0;
+    while i < left.len() && j < right.len() {
+        if left[i] <= right[j] {
+            arr[k] = left[i];
+            i += 1;
+        } else {
+            arr[k] = right[j];
+            count += left.len() - i;
+            j += 1;
+        }
+        k += 1;
+    }
+    while i < left.len() {
+        arr[k] = left[i];
+        i += 1;
+        k += 1;
+    }
+    while j < right.len() {
+        arr[k] = right[j];
+        j += 1;
+        k += 1;
+    }
+    count
 }
 
 /// Compute fractional ranks (1-based, average ties).
