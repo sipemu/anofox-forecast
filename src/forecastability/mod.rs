@@ -72,6 +72,6 @@ pub use surrogates::{phase_surrogates, significance_bands, SignificanceBands};
 pub use theoretical::ar1_theoretical_ami;
 pub use transfer_entropy::transfer_entropy_curve;
 pub use triage::{
-    run_batch_triage, run_triage, screen_exogenous, BatchTriageResult, ModelFamily, SeriesPattern,
-    TriageConfig, TriageResult,
+    run_batch_triage, run_triage, screen_exogenous, BatchTriageResult, ExogenousScore, ModelFamily,
+    SeriesPattern, TriageConfig, TriageResult,
 };

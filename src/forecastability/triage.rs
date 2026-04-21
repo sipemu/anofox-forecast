@@ -14,6 +14,9 @@ use super::scorers::{score, Scorer};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
+#[cfg(feature = "postprocess")]
+use crate::validation::aid::{AidAnalyzer, AidDemandType};
+
 // ---------------------------------------------------------------------------
 // Enums
 // ---------------------------------------------------------------------------
@@ -39,6 +42,10 @@ pub enum SeriesPattern {
     /// **E — Complex / mixed**: combination of linear and nonlinear
     /// components, or long-range dependence.
     Complex,
+    /// **F — Intermittent demand**: high zero fraction, sparse non-zero
+    /// values. Detected via zero-proportion pre-check (or AID classifier
+    /// when the `postprocess` feature is enabled).
+    Intermittent,
 }
 
 impl std::fmt::Display for SeriesPattern {
@@ -49,6 +56,7 @@ impl std::fmt::Display for SeriesPattern {
             Self::Seasonal => write!(f, "C: Seasonal / periodic"),
             Self::Nonlinear => write!(f, "D: Nonlinear deterministic"),
             Self::Complex => write!(f, "E: Complex / mixed"),
+            Self::Intermittent => write!(f, "F: Intermittent demand"),
         }
     }
 }
@@ -69,6 +77,8 @@ pub enum ModelFamily {
     /// Complex signal → ensemble of linear + nonlinear, or AutoForecast
     /// with full candidate pool.
     Ensemble,
+    /// Intermittent demand → Croston, TSB, ADIDA, IMAPA.
+    Intermittent,
 }
 
 impl std::fmt::Display for ModelFamily {
@@ -79,6 +89,7 @@ impl std::fmt::Display for ModelFamily {
             Self::SeasonalStatistical => write!(f, "SeasonalARIMA / ETS(seasonal) / MSTL"),
             Self::NonlinearML => write!(f, "MFLES / RegressionForecaster / tree-based"),
             Self::Ensemble => write!(f, "AutoForecast / Ensemble"),
+            Self::Intermittent => write!(f, "Croston / TSB / ADIDA / IMAPA"),
         }
     }
 }
@@ -87,19 +98,42 @@ impl std::fmt::Display for ModelFamily {
 // Triage result
 // ---------------------------------------------------------------------------
 
+/// Score for a single exogenous candidate.
+#[derive(Debug, Clone)]
+pub struct ExogenousScore {
+    /// Index of the candidate in the input array.
+    pub index: usize,
+    /// Lag at which transfer entropy is maximized.
+    pub best_lag: usize,
+    /// Transfer entropy at the best lag.
+    pub te_at_best_lag: f64,
+    /// Full TE curve across all tested lags.
+    pub te_curve: Vec<f64>,
+}
+
 /// Result of forecastability triage for a single series.
 #[derive(Debug, Clone)]
 pub struct TriageResult {
-    /// Detected series pattern (A–E).
+    /// Detected series pattern (A–F).
     pub pattern: SeriesPattern,
     /// Recommended model family.
     pub model_family: ModelFamily,
-    /// The underlying fingerprint (full detail).
-    pub fingerprint: ForecastabilityFingerprint,
+    /// The underlying fingerprint (full detail). `None` for intermittent
+    /// series (fingerprint is skipped — zero-dominated series produce
+    /// unreliable MI estimates).
+    pub fingerprint: Option<ForecastabilityFingerprint>,
     /// Permutation entropy (normalized, 0 = regular, 1 = random).
     pub permutation_entropy: f64,
     /// Spectral predictability (1 − spectral entropy).
     pub spectral_predictability: f64,
+    /// Recommended autoregressive lags for `RegressionFeatures::specific_lags()`.
+    /// Derived from the informative horizons in the fingerprint.
+    pub recommended_lags: Vec<usize>,
+    /// Whether the series was classified as intermittent (zero fraction > 0.3).
+    pub is_intermittent: bool,
+    /// AID demand type (Regular or Intermittent), when `postprocess` feature
+    /// is enabled. `None` otherwise.
+    pub aid_demand_type: Option<String>,
 }
 
 /// Result of batch triage across multiple series.
@@ -108,9 +142,9 @@ pub struct BatchTriageResult {
     /// Per-series triage results.
     pub results: Vec<TriageResult>,
     /// Count of series per pattern.
-    pub pattern_counts: [(SeriesPattern, usize); 5],
+    pub pattern_counts: [(SeriesPattern, usize); 6],
     /// Count of series per model family.
-    pub family_counts: [(ModelFamily, usize); 5],
+    pub family_counts: [(ModelFamily, usize); 6],
 }
 
 // ---------------------------------------------------------------------------
@@ -208,6 +242,41 @@ fn recommend_family(pattern: SeriesPattern) -> ModelFamily {
         SeriesPattern::Seasonal => ModelFamily::SeasonalStatistical,
         SeriesPattern::Nonlinear => ModelFamily::NonlinearML,
         SeriesPattern::Complex => ModelFamily::Ensemble,
+        SeriesPattern::Intermittent => ModelFamily::Intermittent,
+    }
+}
+
+/// Check whether the series is intermittent based on zero fraction.
+/// Returns (is_intermittent, aid_demand_type_string).
+fn check_intermittent(series: &[f64]) -> (bool, Option<String>) {
+    let n = series.len();
+    if n == 0 {
+        return (false, None);
+    }
+    let zero_count = series.iter().filter(|&&v| v.abs() < 1e-10).count();
+    let zero_fraction = zero_count as f64 / n as f64;
+
+    if zero_fraction <= 0.3 {
+        return (false, None);
+    }
+
+    // When AID is available, use it for a richer classification.
+    #[cfg(feature = "postprocess")]
+    {
+        let result = AidAnalyzer::new().analyze(series);
+        let summary = result.summary();
+        let demand_type_str = format!("{:?}", summary.demand_type);
+        let is_intermittent = matches!(summary.demand_type, AidDemandType::Intermittent);
+        (
+            is_intermittent || zero_fraction > 0.5,
+            Some(demand_type_str),
+        )
+    }
+
+    // Without AID, use the simple zero-fraction threshold.
+    #[cfg(not(feature = "postprocess"))]
+    {
+        (true, None)
     }
 }
 
@@ -231,6 +300,25 @@ fn recommend_family(pattern: SeriesPattern) -> ModelFamily {
 /// println!("Informative lags: {:?}", result.fingerprint.informative_horizons);
 /// ```
 pub fn run_triage(series: &[f64], config: &TriageConfig) -> TriageResult {
+    let pe = score(series, Scorer::PermutationEntropy);
+    let sp = score(series, Scorer::SpectralPredictability);
+
+    // Step 1: intermittent pre-check (cheap, O(n)).
+    let (is_intermittent, aid_demand_type) = check_intermittent(series);
+    if is_intermittent {
+        return TriageResult {
+            pattern: SeriesPattern::Intermittent,
+            model_family: ModelFamily::Intermittent,
+            fingerprint: None, // skip fingerprint for zero-dominated data
+            permutation_entropy: pe,
+            spectral_predictability: sp,
+            recommended_lags: vec![],
+            is_intermittent: true,
+            aid_demand_type,
+        };
+    }
+
+    // Step 2: full fingerprint-based triage.
     let fp = ForecastabilityFingerprint::compute(
         series,
         config.max_lag,
@@ -238,17 +326,19 @@ pub fn run_triage(series: &[f64], config: &TriageConfig) -> TriageResult {
         config.alpha,
         config.seed,
     );
-    let pe = score(series, Scorer::PermutationEntropy);
-    let sp = score(series, Scorer::SpectralPredictability);
     let pattern = classify_pattern(&fp, pe);
     let model_family = recommend_family(pattern);
+    let recommended_lags = fp.informative_horizons.clone();
 
     TriageResult {
         pattern,
         model_family,
-        fingerprint: fp,
+        fingerprint: Some(fp),
         permutation_entropy: pe,
         spectral_predictability: sp,
+        recommended_lags,
+        is_intermittent: false,
+        aid_demand_type,
     }
 }
 
@@ -285,6 +375,7 @@ pub fn run_batch_triage(all_series: &[Vec<f64>], config: &TriageConfig) -> Batch
         (SeriesPattern::Seasonal, 0),
         (SeriesPattern::Nonlinear, 0),
         (SeriesPattern::Complex, 0),
+        (SeriesPattern::Intermittent, 0),
     ];
     let mut family_counts = [
         (ModelFamily::Skip, 0),
@@ -292,6 +383,7 @@ pub fn run_batch_triage(all_series: &[Vec<f64>], config: &TriageConfig) -> Batch
         (ModelFamily::SeasonalStatistical, 0),
         (ModelFamily::NonlinearML, 0),
         (ModelFamily::Ensemble, 0),
+        (ModelFamily::Intermittent, 0),
     ];
 
     for r in &results {
@@ -315,24 +407,37 @@ pub fn run_batch_triage(all_series: &[Vec<f64>], config: &TriageConfig) -> Batch
 }
 
 /// Screen exogenous candidates: compute transfer entropy from each
-/// candidate to the target and rank by TE at lag 1.
+/// candidate to the target across all lags, find the best lag per
+/// candidate, and rank by peak TE.
 ///
-/// Returns `(candidate_index, te_at_lag1)` sorted descending by TE.
+/// Returns `Vec<ExogenousScore>` sorted descending by `te_at_best_lag`.
+/// The `best_lag` field tells you which lag to use for each candidate
+/// in `RegressionFeatures::specific_lags()`.
 pub fn screen_exogenous(
     target: &[f64],
     candidates: &[Vec<f64>],
     max_lag: usize,
-) -> Vec<(usize, f64)> {
-    let mut scores: Vec<(usize, f64)> = candidates
+) -> Vec<ExogenousScore> {
+    let mut scores: Vec<ExogenousScore> = candidates
         .iter()
         .enumerate()
         .map(|(i, cand)| {
-            let te = super::transfer_entropy::transfer_entropy_curve(cand, target, max_lag);
-            let te_lag1 = te.first().copied().unwrap_or(0.0);
-            (i, te_lag1)
+            let te_curve = super::transfer_entropy::transfer_entropy_curve(cand, target, max_lag);
+            let (best_lag, te_at_best_lag) = te_curve
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                .map(|(lag_idx, &te)| (lag_idx + 1, te)) // 1-based
+                .unwrap_or((1, 0.0));
+            ExogenousScore {
+                index: i,
+                best_lag,
+                te_at_best_lag,
+                te_curve,
+            }
         })
         .collect();
-    scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    scores.sort_by(|a, b| b.te_at_best_lag.partial_cmp(&a.te_at_best_lag).unwrap());
     scores
 }
 
@@ -434,6 +539,43 @@ mod tests {
     }
 
     #[test]
+    fn triage_intermittent_classifies_f() {
+        // 70% zeros — should be classified as intermittent without
+        // running the expensive fingerprint.
+        let mut series = vec![0.0; 70];
+        series.extend(vec![5.0, 0.0, 12.0, 0.0, 0.0, 8.0, 0.0, 3.0, 0.0, 0.0]);
+        series.extend(vec![0.0; 220]);
+        let result = run_triage(&series, &TriageConfig::default().seed(1));
+        assert_eq!(
+            result.pattern,
+            SeriesPattern::Intermittent,
+            "70% zeros should be pattern F, got {}",
+            result.pattern
+        );
+        assert_eq!(result.model_family, ModelFamily::Intermittent);
+        assert!(result.is_intermittent);
+        assert!(
+            result.fingerprint.is_none(),
+            "fingerprint should be skipped for intermittent"
+        );
+    }
+
+    #[test]
+    fn triage_result_has_recommended_lags() {
+        let series = make_logistic(1000);
+        let result = run_triage(&series, &TriageConfig::default().seed(1));
+        // Logistic map should have informative lags → recommended_lags non-empty
+        assert!(
+            !result.recommended_lags.is_empty(),
+            "logistic map should have recommended lags"
+        );
+        // All lags should be 1-based and ≤ max_lag
+        for &lag in &result.recommended_lags {
+            assert!(lag >= 1 && lag <= 20, "lag {} out of range", lag);
+        }
+    }
+
+    #[test]
     fn screen_exogenous_ranks_driver_first() {
         let mut rng = StdRng::seed_from_u64(42);
         let n = 300;
@@ -446,12 +588,18 @@ mod tests {
 
         let scores = screen_exogenous(&target, &[driver, noise], 3);
         // Driver should rank first (higher TE).
-        assert_eq!(scores[0].0, 0, "driver should rank first");
+        assert_eq!(scores[0].index, 0, "driver should rank first");
         assert!(
-            scores[0].1 > scores[1].1,
+            scores[0].te_at_best_lag > scores[1].te_at_best_lag,
             "driver TE ({:.4}) should exceed noise TE ({:.4})",
-            scores[0].1,
-            scores[1].1
+            scores[0].te_at_best_lag,
+            scores[1].te_at_best_lag
+        );
+        // Best lag for the driver should be 1 (since target = 0.7 * driver[t-1])
+        assert_eq!(
+            scores[0].best_lag, 1,
+            "driver best lag should be 1, got {}",
+            scores[0].best_lag
         );
     }
 }
