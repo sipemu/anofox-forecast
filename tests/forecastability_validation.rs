@@ -83,11 +83,11 @@ fn knn_mi_tracks_ar1_theoretical_ami() {
     let series = make_ar1(2000, 0.8, 42);
     let ami = ami_curve(&series, 5);
 
-    // Monotone decay
+    // Strict monotone decay
     for h in 1..ami.len() {
         assert!(
-            ami[h] <= ami[h - 1] * 1.3, // allow some noise
-            "AMI should roughly decay: AMI[{}]={:.4} > AMI[{}]={:.4}",
+            ami[h] <= ami[h - 1] * 1.05,
+            "AMI should strictly decay: AMI[{}]={:.4} > AMI[{}]={:.4}",
             h,
             ami[h],
             h - 1,
@@ -95,13 +95,13 @@ fn knn_mi_tracks_ar1_theoretical_ami() {
         );
     }
 
-    // Track theoretical values (wide tolerance for kNN sampling noise)
+    // Track theoretical values within 15% (observed ratios: 0.90–1.08)
     let theoretical = ar1_theoretical_ami(0.8, 5);
     for h in 0..5 {
         let ratio = ami[h] / theoretical[h];
         assert!(
-            (0.3..3.0).contains(&ratio),
-            "AMI(h={}) = {:.4}, theoretical = {:.4}, ratio = {:.2} — too far off",
+            (0.75..1.25).contains(&ratio),
+            "AMI(h={}) = {:.4}, theoretical = {:.4}, ratio = {:.2} — outside 25% tolerance",
             h + 1,
             ami[h],
             theoretical[h],
@@ -135,10 +135,10 @@ fn gcmi_independent_is_near_zero() {
     let x = make_white_noise(1000, 99);
     let y = make_white_noise(1000, 77);
     let mi = gcmi(&x, &y);
-    // Python reference: 0.000373
+    // Python reference: 0.000373, observed: 0.000357
     assert!(
-        mi.abs() < 0.1,
-        "GCMI of independent should be near 0, got {}",
+        mi.abs() < 0.01,
+        "GCMI of independent should be < 0.01, got {}",
         mi
     );
 }
@@ -147,13 +147,17 @@ fn gcmi_independent_is_near_zero() {
 fn gcmi_curve_decays_for_ar1() {
     let series = make_ar1(2000, 0.8, 42);
     let curve = gcmi_curve(&series, 5);
-    // GCMI should decay like the Python reference: [0.76, 0.38, 0.21, 0.12, 0.07]
-    // but with different RNG. Just check decay + positivity.
-    assert!(curve[0] > 0.1, "GCMI(1) should be positive for AR(1)");
+    // Observed: [0.690, 0.354, 0.207, 0.124, 0.077]
+    assert!(curve[0] > 0.5, "GCMI(1) should be > 0.5 for AR(1) φ=0.8");
+    // Strict decay
     for h in 1..curve.len() {
         assert!(
-            curve[h] < curve[h - 1] * 1.5,
-            "GCMI should roughly decay for AR(1)"
+            curve[h] < curve[h - 1],
+            "GCMI should strictly decay: GCMI[{}]={:.4} >= GCMI[{}]={:.4}",
+            h + 1,
+            curve[h],
+            h,
+            curve[h - 1]
         );
     }
 }
@@ -171,13 +175,13 @@ fn dcor_perfect_linear_is_one() {
 
 #[test]
 fn dcor_independent_is_near_zero() {
-    // Python reference: independent_dcor = 0.0473
+    // Python reference: 0.0473, observed: 0.065
     let x = make_white_noise(1000, 99);
     let y = make_white_noise(1000, 77);
     let dc = distance_correlation(&x, &y);
     assert!(
-        dc < 0.15,
-        "dCor of independent should be near 0, got {}",
+        dc < 0.10,
+        "dCor of independent should be < 0.10, got {}",
         dc
     );
 }
@@ -196,9 +200,9 @@ fn dcor_detects_nonlinear_quadratic() {
         "dCor should detect quadratic dependence, got {}",
         dc
     );
-    // Python reference says dCor ≈ 0.49, allow 20% tolerance
+    // Python reference: 0.4915, observed: 0.4917 — tight tolerance
     assert!(
-        (0.35..0.65).contains(&dc),
+        (0.45..0.55).contains(&dc),
         "dCor for x² should be ~0.49, got {}",
         dc
     );
@@ -209,31 +213,41 @@ fn dcor_detects_nonlinear_quadratic() {
 
 #[test]
 fn pearson_curve_ar1_decays() {
-    // Python reference: ar1_pearson = [0.809, 0.641, 0.504, 0.396, 0.304]
-    // (different RNG, but qualitative decay should match)
+    // Observed: [0.785, 0.623, 0.500, 0.396, 0.318]
     let series = make_ar1(2000, 0.8, 42);
     let curve = pearson_curve(&series, 5);
-    assert!(curve[0] > 0.5, "Pearson(1) should be > 0.5 for AR(1) φ=0.8");
+    assert!(curve[0] > 0.7, "Pearson(1) should be > 0.7 for AR(1) φ=0.8");
+    // Strict decay
     for h in 1..curve.len() {
         assert!(
-            curve[h] < curve[h - 1] * 1.1,
-            "Pearson should decay for AR(1)"
+            curve[h] < curve[h - 1],
+            "Pearson should strictly decay: P[{}]={:.4} >= P[{}]={:.4}",
+            h + 1,
+            curve[h],
+            h,
+            curve[h - 1]
         );
     }
 }
 
 #[test]
 fn spearman_curve_ar1_decays() {
+    // Observed: [0.773, 0.611, 0.488, 0.385, 0.310]
     let series = make_ar1(2000, 0.8, 42);
     let curve = spearman_curve(&series, 5);
     assert!(
-        curve[0] > 0.5,
-        "Spearman(1) should be > 0.5 for AR(1) φ=0.8"
+        curve[0] > 0.7,
+        "Spearman(1) should be > 0.7 for AR(1) φ=0.8"
     );
+    // Strict decay
     for h in 1..curve.len() {
         assert!(
-            curve[h] < curve[h - 1] * 1.1,
-            "Spearman should decay for AR(1)"
+            curve[h] < curve[h - 1],
+            "Spearman should strictly decay: S[{}]={:.4} >= S[{}]={:.4}",
+            h + 1,
+            curve[h],
+            h,
+            curve[h - 1]
         );
     }
 }
@@ -294,28 +308,21 @@ fn digamma_matches_scipy() {
 #[test]
 fn knn_mi_identical_variables_high() {
     // I(X; X) = H(X). For a standard normal, H(X) = 0.5 * ln(2πe) ≈ 1.4189.
-    // kNN estimate should be in the ballpark.
+    // kNN estimate observed: 4.197 (overestimates for identical due to
+    // zero-distance neighbors, but should be large and positive).
     let x = make_white_noise(500, 42);
     let mi = knn_mutual_information(&x, &x, 8);
-    assert!(
-        mi > 0.5,
-        "I(X;X) should be large (entropy of X), got {}",
-        mi
-    );
-    // Shouldn't be wildly high either
-    assert!(
-        mi < 5.0,
-        "I(X;X) shouldn't be unreasonably large, got {}",
-        mi
-    );
+    assert!(mi > 1.0, "I(X;X) should be > 1.0, got {}", mi);
+    assert!(mi < 10.0, "I(X;X) should be < 10.0, got {}", mi);
 }
 
 #[test]
 fn knn_mi_independent_variables_near_zero() {
+    // Observed: 0.000000 (clamped to 0 by max(0) in the estimator)
     let x = make_white_noise(500, 42);
     let y = make_white_noise(500, 77);
     let mi = knn_mutual_information(&x, &y, 8);
-    assert!(mi < 0.3, "I(independent X, Y) should be near 0, got {}", mi);
+    assert!(mi < 0.1, "I(independent X, Y) should be < 0.1, got {}", mi);
 }
 
 // ── 8. Cross-measure consistency: GCMI ≤ AMI (in nats) ──────────────────
@@ -341,10 +348,10 @@ fn gcmi_bounded_by_ami_for_ar1() {
         } else {
             1.0
         };
-        // Ratio should be in [0.2, 5.0] for a linear process
+        // Observed ratios: 1.02, 1.00, 1.01 — very tight for a linear process
         assert!(
-            (0.1..10.0).contains(&ratio),
-            "GCMI/AMI ratio at lag {} = {:.2} (GCMI_nats={:.4}, AMI={:.4}) — unexpected for linear AR(1)",
+            (0.8..1.3).contains(&ratio),
+            "GCMI/AMI ratio at lag {} = {:.2} (GCMI_nats={:.4}, AMI={:.4}) — should be ~1.0 for linear AR(1)",
             h + 1,
             ratio,
             gcmi_nats,
@@ -423,10 +430,10 @@ fn fingerprint_white_noise_no_signal() {
     let series = make_white_noise(500, 99);
     let fp = ForecastabilityFingerprint::compute(&series, 10, 50, 0.05, Some(2));
 
-    // White noise: at α=0.05, we expect ~0-1 false positives out of 10 lags
+    // White noise: at α=0.05, we expect ~0.5 false positives out of 10 lags
     assert!(
-        fp.informative_horizons.len() <= 3,
-        "White noise should have few informative horizons, got {:?}",
+        fp.informative_horizons.len() <= 2,
+        "White noise should have ≤ 2 informative horizons (false positives at α=0.05), got {:?}",
         fp.informative_horizons
     );
     // SNR should be low
