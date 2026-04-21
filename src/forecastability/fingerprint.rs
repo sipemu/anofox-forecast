@@ -11,13 +11,14 @@ use super::surrogates::significance_bands;
 /// Compact forecastability fingerprint.
 #[derive(Debug, Clone)]
 pub struct ForecastabilityFingerprint {
-    /// Sum of AMI values at lags where AMI exceeds the surrogate upper band.
-    /// Higher = more total predictive signal.
+    /// Mean AMI across lags where AMI exceeds the 3σ threshold.
+    /// Normalized by `max_lag` so values are comparable across different
+    /// lag settings. Range: typically 0–5 (0 = no signal).
     pub information_mass: f64,
-    /// Last lag where AMI exceeds the surrogate upper band.
+    /// Last lag where AMI exceeds the 3σ threshold.
     /// Higher = deeper temporal dependence.
     pub information_horizon: usize,
-    /// Entropy of the significant AMI profile (normalized).
+    /// Entropy of the significant AMI profile (normalized to [0, 1]).
     /// Higher = more evenly distributed dependence across lags.
     pub information_structure: f64,
     /// `1 − (sum of significant GCMI) / (sum of significant AMI)`.
@@ -26,19 +27,21 @@ pub struct ForecastabilityFingerprint {
     /// Peak AMI / mean surrogate AMI at the same lag.
     /// Higher = stronger signal relative to noise.
     pub signal_to_noise: f64,
-    /// `AMI(1) / information_mass` — how concentrated the dependence is at
-    /// the first lag vs spread across all lags.
+    /// `AMI(1) / total_significant_ami` — how concentrated the dependence
+    /// is at the first lag vs spread across all lags.
     pub directness_ratio: f64,
-    /// Which lag indices (1-based) have AMI exceeding the surrogate band.
+    /// Which lag indices (1-based) have AMI exceeding the 3σ threshold.
     pub informative_horizons: Vec<usize>,
     /// The raw AMI curve.
     pub ami: Vec<f64>,
     /// The raw GCMI curve.
     pub gcmi: Vec<f64>,
-    /// Surrogate upper band for AMI.
-    pub surrogate_upper: Vec<f64>,
+    /// Surrogate 3σ threshold for AMI (`mean + 3 * std`).
+    pub surrogate_threshold: Vec<f64>,
     /// Surrogate mean for AMI.
     pub surrogate_mean: Vec<f64>,
+    /// Surrogate std for AMI.
+    pub surrogate_std: Vec<f64>,
 }
 
 impl ForecastabilityFingerprint {
@@ -64,23 +67,31 @@ impl ForecastabilityFingerprint {
         // Compute surrogate significance bands for AMI.
         let bands = significance_bands(series, ami_curve, max_lag, n_surrogates, alpha, seed);
 
-        // Identify informative horizons: where AMI > surrogate upper band.
+        // Identify informative horizons: where AMI > 3σ threshold.
+        // The 3σ parametric test (mean + 3*std) is more selective than the
+        // rank-based percentile upper band, matching the Python original.
         let informative_horizons: Vec<usize> = (0..max_lag)
-            .filter(|&i| ami[i] > bands.upper[i])
+            .filter(|&i| ami[i] > bands.threshold_3sigma[i])
             .map(|i| i + 1) // 1-based
             .collect();
 
-        // Information mass: sum of significant AMI.
-        let information_mass: f64 = informative_horizons.iter().map(|&h| ami[h - 1]).sum();
+        // Information mass: mean significant AMI, normalized by max_lag.
+        // This makes the value comparable across different max_lag settings.
+        let total_significant_ami: f64 = informative_horizons.iter().map(|&h| ami[h - 1]).sum();
+        let information_mass = if max_lag > 0 {
+            total_significant_ami / max_lag as f64
+        } else {
+            0.0
+        };
 
         // Information horizon: last significant lag.
         let information_horizon = informative_horizons.last().copied().unwrap_or(0);
 
         // Information structure: entropy of significant AMI profile.
-        let information_structure = if information_mass > 1e-15 {
+        let information_structure = if total_significant_ami > 1e-15 {
             let probs: Vec<f64> = informative_horizons
                 .iter()
-                .map(|&h| ami[h - 1] / information_mass)
+                .map(|&h| ami[h - 1] / total_significant_ami)
                 .collect();
             let k = probs.len() as f64;
             if k <= 1.0 {
@@ -102,8 +113,8 @@ impl ForecastabilityFingerprint {
             .iter()
             .map(|&h| gcmi[h - 1].max(0.0))
             .sum();
-        let nonlinear_share = if information_mass > 1e-15 {
-            (1.0 - gcmi_mass / information_mass).clamp(0.0, 1.0)
+        let nonlinear_share = if total_significant_ami > 1e-15 {
+            (1.0 - gcmi_mass / total_significant_ami).clamp(0.0, 1.0)
         } else {
             0.0
         };
@@ -118,8 +129,8 @@ impl ForecastabilityFingerprint {
         let signal_to_noise = peak_ami / surr_mean_at_peak;
 
         // Directness ratio.
-        let directness_ratio = if information_mass > 1e-15 {
-            ami[0] / information_mass
+        let directness_ratio = if total_significant_ami > 1e-15 {
+            ami[0] / total_significant_ami
         } else {
             0.0
         };
@@ -134,8 +145,9 @@ impl ForecastabilityFingerprint {
             informative_horizons,
             ami,
             gcmi,
-            surrogate_upper: bands.upper,
+            surrogate_threshold: bands.threshold_3sigma,
             surrogate_mean: bands.mean,
+            surrogate_std: bands.std,
         }
     }
 }

@@ -366,8 +366,8 @@ fn fingerprint_ar1_linear_process_correctly_not_significant() {
 
     // AR(1) is a purely linear process. Phase surrogates preserve the power
     // spectrum (and hence the autocorrelation structure), so the surrogate
-    // AMI values match the original. The significance test correctly reports
-    // NO nonlinear structure beyond what the power spectrum explains.
+    // AMI values match the original. With the 3σ threshold (mean + 3*std),
+    // very few or no lags should be flagged as significant.
     let series = make_ar1(1000, 0.9, 42);
     let fp = ForecastabilityFingerprint::compute(&series, 10, 50, 0.05, Some(1));
 
@@ -376,6 +376,13 @@ fn fingerprint_ar1_linear_process_correctly_not_significant() {
         fp.signal_to_noise < 2.0,
         "AR(1) SNR should be ~1.0 (linear process, surrogates match), got {}",
         fp.signal_to_noise
+    );
+
+    // With 3σ threshold, information_mass should be low (normalized by max_lag).
+    assert!(
+        fp.information_mass < 0.5,
+        "AR(1) normalized information_mass should be small with 3σ test, got {}",
+        fp.information_mass
     );
 
     // The raw AMI curve should still be positive and decaying.

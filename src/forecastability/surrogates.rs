@@ -92,6 +92,13 @@ pub struct SignificanceBands {
     pub upper: Vec<f64>,
     /// Mean of the surrogate distribution at each lag.
     pub mean: Vec<f64>,
+    /// Standard deviation of the surrogate distribution at each lag.
+    pub std: Vec<f64>,
+    /// 3σ threshold: `mean + 3 * std` at each lag. This is the recommended
+    /// significance threshold (matches the Python `dependence-forecastability`
+    /// parametric test). More selective than the rank-based percentile upper
+    /// band, especially with few surrogates.
+    pub threshold_3sigma: Vec<f64>,
     /// Number of surrogates used.
     pub n_surrogates: usize,
     /// Significance level used.
@@ -176,12 +183,16 @@ where
     let mut lower = Vec::with_capacity(max_lag);
     let mut upper = Vec::with_capacity(max_lag);
     let mut mean = Vec::with_capacity(max_lag);
+    let mut std = Vec::with_capacity(max_lag);
+    let mut threshold_3sigma = Vec::with_capacity(max_lag);
 
     for vals in &mut lag_values {
         if vals.is_empty() {
             lower.push(0.0);
             upper.push(0.0);
             mean.push(0.0);
+            std.push(0.0);
+            threshold_3sigma.push(0.0);
             continue;
         }
         vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -190,13 +201,23 @@ where
         let hi_idx = ((hi_q * n as f64) as usize).min(n - 1);
         lower.push(vals[lo_idx]);
         upper.push(vals[hi_idx]);
-        mean.push(vals.iter().sum::<f64>() / n as f64);
+        let m = vals.iter().sum::<f64>() / n as f64;
+        let s = if n > 1 {
+            (vals.iter().map(|&v| (v - m) * (v - m)).sum::<f64>() / (n - 1) as f64).sqrt()
+        } else {
+            0.0
+        };
+        mean.push(m);
+        std.push(s);
+        threshold_3sigma.push(m + 3.0 * s);
     }
 
     SignificanceBands {
         lower,
         upper,
         mean,
+        std,
+        threshold_3sigma,
         n_surrogates,
         alpha,
     }
