@@ -57,6 +57,9 @@ pub mod lyapunov;
 pub mod scorers;
 pub mod theoretical;
 
+// Triage pipeline
+pub mod triage;
+
 pub use ami::{ami_curve, gcmi_curve, pami_curve, CmiBackend};
 pub use distance_correlation::distance_correlation;
 pub use fingerprint::ForecastabilityFingerprint;
@@ -68,3 +71,7 @@ pub use scorers::{score, Scorer};
 pub use surrogates::{phase_surrogates, significance_bands, SignificanceBands};
 pub use theoretical::ar1_theoretical_ami;
 pub use transfer_entropy::transfer_entropy_curve;
+pub use triage::{
+    run_batch_triage, run_triage, screen_exogenous, BatchTriageResult, ModelFamily, SeriesPattern,
+    TriageConfig, TriageResult,
+};
