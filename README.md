@@ -12,7 +12,7 @@
 
 Time series forecasting library for Rust.
 
-Provides 50+ forecasting models, 76+ statistical features, automatic model selection, ensemble methods, seasonality decomposition, changepoint detection, anomaly detection, hierarchical reconciliation, and model serialization.
+Provides 50+ forecasting models, 76+ statistical features, automatic model selection, ensemble methods, seasonality decomposition, changepoint detection, anomaly detection, hierarchical reconciliation, forecastability analysis, and model serialization.
 
 ## Use Cases
 
@@ -142,6 +142,21 @@ console.log(forecast.values);
   - `Forecaster` trait integration: `monitor_forecaster()` (in-sample residuals, cheap) and `monitor_forecaster_cv()` (rolling-origin CV residuals, calibrated)
   - Rust port of [`changepoint.forecast`](https://github.com/grundy95/changepoint.forecast) by Thomas Grundy (Lancaster), based on [Fremdt (2014)](https://doi.org/10.1080/02331888.2014.921899)
 
+- **Forecastability Analysis** (`forecastability::` module, feature-gated: `forecastability`)
+  - Pre-modeling triage: determine whether a series has exploitable predictive structure *before* running expensive model search
+  - **kNN Mutual Information** (Kraskov KSG1, 2004) with 2D KD-tree for O(n log n) bulk queries
+  - **AMI curve**: `ami_curve(series, max_lag)` — MI at each horizon lag, revealing how far predictive signal reaches
+  - **pAMI curve**: partial AMI via linear residualization — isolates direct dependence at each lag
+  - **GCMI**: Gaussian Copula MI (Ince 2017) — captures only linear dependence; comparing with AMI reveals nonlinear structure
+  - **Transfer Entropy**: `transfer_entropy_curve(source, target, max_lag)` — directional information flow between two series
+  - **Distance correlation** (Szekely/Rizzo 2007) — detects both linear and nonlinear dependence, unlike Pearson
+  - **Phase-randomized surrogates** with significance bands for any lag-curve metric
+  - **Forecastability fingerprint**: `ForecastabilityFingerprint::compute()` → `information_mass`, `information_horizon`, `information_structure`, `nonlinear_share`, `signal_to_noise`, `directness_ratio`
+  - **Largest Lyapunov exponent** (Rosenstein 1993) — detect chaos via delay-embedding divergence
+  - **10-scorer registry**: Mi, Pearson, Spearman, Kendall, Distance, TransferEntropy, Gcmi, PermutationEntropy, SpectralEntropy, SpectralPredictability
+  - Lag correlation curves: `pearson_curve`, `spearman_curve`, `kendall_curve` (O(n log n) Kendall via merge-sort)
+  - Inspired by [`dependence-forecastability`](https://github.com/AdamKrysztopa/dependence-forecastability) by Adam Krysztopa (MIT)
+
 - **Anomaly Detection & Outlier Handling**
   - Statistical methods (IQR, z-score, modified z-score)
   - Automatic threshold selection
@@ -245,6 +260,12 @@ anofox-forecast = "0.7.1"
 
 ```toml
 [dependencies]
+# Forecastability analysis (MI, GCMI, distance correlation, fingerprint)
+anofox-forecast = { version = "0.7", features = ["forecastability"] }
+
+# Forecastability + parallel (60× faster with rayon)
+anofox-forecast = { version = "0.7", features = ["forecastability", "parallel"] }
+
 # Parallel AutoARIMA (4-8x speedup via rayon, opt-in for embedding contexts like DuckDB)
 anofox-forecast = { version = "0.7", features = ["parallel"] }
 
@@ -257,8 +278,9 @@ anofox-forecast = { version = "0.7", default-features = false }  # to disable
 
 | Feature | Default | Description |
 |---------|---------|-------------|
-| `postprocess` | Yes | Conformal prediction, IDR, QRA, historical simulation |
-| `parallel` | No | Rayon-based parallelism for AutoARIMA, AutoForecast, bootstrap, and cross-validation (not available on WASM) |
+| `postprocess` | No | Conformal prediction, IDR, QRA, historical simulation |
+| `forecastability` | No | kNN MI, GCMI, distance correlation, phase surrogates, fingerprint, Lyapunov exponent, 10-scorer registry |
+| `parallel` | No | Rayon-based parallelism for AutoARIMA, AutoForecast, bootstrap, cross-validation, and forecastability (not available on WASM) |
 | `serde` | No | JSON and bincode serialization/deserialization for models |
 
 ## Quick Start
@@ -515,6 +537,45 @@ if detector.has_detected() {
 }
 ```
 
+### Forecastability Analysis
+
+Pre-modeling triage: determine whether a series has exploitable predictive
+structure before running expensive model search. Inspired by
+[`dependence-forecastability`](https://github.com/AdamKrysztopa/dependence-forecastability)
+by Adam Krysztopa.
+
+```rust
+use anofox_forecast::forecastability::{
+    ForecastabilityFingerprint, ami_curve, gcmi_curve, score, Scorer,
+};
+
+// Quick fingerprint — answers "should I model this series?"
+let fp = ForecastabilityFingerprint::compute(
+    &values,
+    20,       // max_lag: probe 20 lags
+    100,      // n_surrogates: 100 phase surrogates
+    0.05,     // alpha: 5% significance
+    Some(42), // seed for reproducibility
+);
+
+if fp.information_mass < 1e-6 {
+    println!("No signal — use Naive or skip");
+} else if fp.nonlinear_share < 0.2 {
+    println!("Linear signal → ARIMA/ETS");
+} else {
+    println!("Nonlinear signal → MFLES/tree-based regression");
+}
+println!("Signal reaches {} lags deep", fp.information_horizon);
+println!("Informative lags: {:?}", fp.informative_horizons);
+
+// Individual measures
+let ami = ami_curve(&values, 10);     // MI at each horizon lag
+let gcmi = gcmi_curve(&values, 10);   // linear-only MI for comparison
+let mi_score = score(&values, Scorer::Mi);              // kNN MI at lag 1
+let dcor = score(&values, Scorer::Distance);            // distance correlation
+let pe = score(&values, Scorer::PermutationEntropy);    // regularity
+```
+
 ### Spectral Analysis
 
 ```rust
@@ -645,6 +706,25 @@ println!("Upper: {:?}", intervals.upper());
 | `select_features()` | Automated feature selection (variance, correlation, top-K) |
 | `to_json()` / `from_json()` | Serialization for models, `Forecast`, and `TimeSeries` (requires `serde` feature) |
 | `to_bincode()` / `from_bincode()` | Binary serialization (requires `serde` feature) |
+
+### Forecastability Analysis (requires `forecastability` feature)
+
+| Function / Type | Description |
+|-----------------|-------------|
+| `ForecastabilityFingerprint::compute()` | One-call summary: `information_mass`, `information_horizon`, `information_structure`, `nonlinear_share`, `signal_to_noise`, `directness_ratio` |
+| `ami_curve(series, max_lag)` | Average Mutual Information at each lag (kNN MI, Kraskov KSG1) |
+| `gcmi_curve(series, max_lag)` | Gaussian Copula MI at each lag — captures linear dependence only |
+| `pami_curve(series, max_lag, backend)` | Partial AMI — conditions out intermediate lags via residualization |
+| `transfer_entropy_curve(source, target, max_lag)` | Directional information flow: TE(X→Y) as conditional MI |
+| `knn_mutual_information(x, y, k)` | KSG1 MI estimator with 2D KD-tree (O(n log n)) |
+| `gcmi(x, y)` | Gaussian Copula MI: rank → probit → `-0.5 log₂(1-ρ²)` |
+| `distance_correlation(x, y)` | Szekely/Rizzo (2007) — detects nonlinear dependence |
+| `phase_surrogates(series, n, seed)` | FFT phase randomization for significance testing |
+| `significance_bands(series, metric_fn, ...)` | Surrogate-based significance bands for any lag-curve metric |
+| `largest_lyapunov_exponent(series, m, tau, ...)` | Rosenstein (1993) — detect chaos via delay-embedding divergence |
+| `score(series, Scorer::*)` | 10-scorer registry: Mi, Pearson, Spearman, Kendall, Distance, TE, Gcmi, PermutationEntropy, SpectralEntropy, SpectralPredictability |
+| `pearson_curve` / `spearman_curve` / `kendall_curve` | Lag correlation curves (Kendall uses O(n log n) merge-sort) |
+| `ar1_theoretical_ami(phi, max_lag)` | Exact AR(1) AMI formula for validation |
 
 ### Feature Categories
 
