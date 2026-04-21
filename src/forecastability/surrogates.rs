@@ -9,7 +9,39 @@
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+
 use super::fft_complex::{fft, next_pow2, C64};
+
+/// Generate a single phase-randomized surrogate from a pre-computed
+/// amplitude spectrum. Avoids storing all surrogates in memory.
+fn generate_single_surrogate(
+    spectrum: &[C64],
+    amplitudes: &[f64],
+    padded_n: usize,
+    n: usize,
+    base_seed: u64,
+    surrogate_idx: usize,
+) -> Vec<f64> {
+    let mut rng = StdRng::seed_from_u64(base_seed.wrapping_add(surrogate_idx as u64));
+    let mut surr_spectrum: Vec<C64> = Vec::with_capacity(padded_n);
+
+    for k in 0..padded_n {
+        if k == 0 || (padded_n % 2 == 0 && k == padded_n / 2) {
+            surr_spectrum.push(spectrum[k]);
+        } else if k < padded_n.div_ceil(2) {
+            let theta: f64 = rng.gen::<f64>() * 2.0 * std::f64::consts::PI;
+            surr_spectrum.push((amplitudes[k] * theta.cos(), amplitudes[k] * theta.sin()));
+        } else {
+            let conj = surr_spectrum[padded_n - k];
+            surr_spectrum.push((conj.0, -conj.1));
+        }
+    }
+
+    fft(&mut surr_spectrum, true);
+    surr_spectrum[..n].iter().map(|&(re, _)| re).collect()
+}
 
 /// Generate `n_surrogates` phase-randomized surrogate series.
 ///
@@ -31,6 +63,7 @@ pub fn phase_surrogates(series: &[f64], n_surrogates: usize, seed: Option<u64>) 
     }
 
     let padded_n = next_pow2(n);
+    let base_seed = seed.unwrap_or(0x42_43_44_45);
 
     // Forward FFT of the original (zero-padded to power of two).
     let mut spectrum: Vec<C64> = series
@@ -40,43 +73,14 @@ pub fn phase_surrogates(series: &[f64], n_surrogates: usize, seed: Option<u64>) 
         .collect();
     fft(&mut spectrum, false);
 
-    // Compute amplitudes.
     let amplitudes: Vec<f64> = spectrum
         .iter()
         .map(|&(re, im)| (re * re + im * im).sqrt())
         .collect();
 
-    let base_seed = seed.unwrap_or(0x42_43_44_45);
-    let mut results = Vec::with_capacity(n_surrogates);
-
-    for s in 0..n_surrogates {
-        let mut rng = StdRng::seed_from_u64(base_seed.wrapping_add(s as u64));
-        let mut surr_spectrum: Vec<C64> = Vec::with_capacity(padded_n);
-
-        for k in 0..padded_n {
-            if k == 0 || (padded_n % 2 == 0 && k == padded_n / 2) {
-                // DC and Nyquist: preserve phase (real-valued constraints).
-                surr_spectrum.push(spectrum[k]);
-            } else if k < padded_n.div_ceil(2) {
-                // Random phase in [0, 2π).
-                let theta: f64 = rng.gen::<f64>() * 2.0 * std::f64::consts::PI;
-                surr_spectrum.push((amplitudes[k] * theta.cos(), amplitudes[k] * theta.sin()));
-            } else {
-                // Conjugate symmetry: S[N-k] = conj(S[k]) for real output.
-                let conj = surr_spectrum[padded_n - k];
-                surr_spectrum.push((conj.0, -conj.1));
-            }
-        }
-
-        // Inverse FFT.
-        fft(&mut surr_spectrum, true);
-
-        // Take first n real values.
-        let surrogate: Vec<f64> = surr_spectrum[..n].iter().map(|&(re, _)| re).collect();
-        results.push(surrogate);
-    }
-
-    results
+    (0..n_surrogates)
+        .map(|s| generate_single_surrogate(&spectrum, &amplitudes, padded_n, n, base_seed, s))
+        .collect()
 }
 
 /// Significance bands for a metric computed over phase surrogates.
@@ -116,15 +120,49 @@ pub fn significance_bands<F>(
     seed: Option<u64>,
 ) -> SignificanceBands
 where
-    F: Fn(&[f64], usize) -> Vec<f64>,
+    F: Fn(&[f64], usize) -> Vec<f64> + Sync + Send,
 {
-    let surrogates = phase_surrogates(series, n_surrogates, seed);
+    // Generate surrogates one at a time (streaming) to avoid O(m×n) peak
+    // memory from storing all surrogates simultaneously. The FFT amplitude
+    // spectrum is pre-computed once and shared across all surrogates.
+    let n = series.len();
+    let padded_n = next_pow2(n);
+    let base_seed = seed.unwrap_or(0x42_43_44_45);
 
-    // Collect metric values at each lag across all surrogates.
+    // Forward FFT of the original.
+    let mut spectrum: Vec<C64> = series
+        .iter()
+        .map(|&v| (v, 0.0))
+        .chain(std::iter::repeat_n((0.0, 0.0), padded_n - n))
+        .collect();
+    fft(&mut spectrum, false);
+
+    let amplitudes: Vec<f64> = spectrum
+        .iter()
+        .map(|&(re, im)| (re * re + im * im).sqrt())
+        .collect();
+
+    // Compute metric curves for all surrogates.
+    #[cfg(feature = "parallel")]
+    let surrogate_curves: Vec<Vec<f64>> = (0..n_surrogates)
+        .into_par_iter()
+        .map(|s| {
+            let surr = generate_single_surrogate(&spectrum, &amplitudes, padded_n, n, base_seed, s);
+            metric_fn(&surr, max_lag)
+        })
+        .collect();
+
+    #[cfg(not(feature = "parallel"))]
+    let surrogate_curves: Vec<Vec<f64>> = (0..n_surrogates)
+        .map(|s| {
+            let surr = generate_single_surrogate(&spectrum, &amplitudes, padded_n, n, base_seed, s);
+            metric_fn(&surr, max_lag)
+        })
+        .collect();
+
+    // Transpose: collect per-lag values across all surrogates.
     let mut lag_values: Vec<Vec<f64>> = vec![Vec::with_capacity(n_surrogates); max_lag];
-
-    for surr in &surrogates {
-        let curve = metric_fn(surr, max_lag);
+    for curve in &surrogate_curves {
         for (lag_idx, &val) in curve.iter().enumerate() {
             if lag_idx < max_lag {
                 lag_values[lag_idx].push(val);

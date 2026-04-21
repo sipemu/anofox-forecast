@@ -44,36 +44,55 @@ pub fn gcmi(x: &[f64], y: &[f64]) -> f64 {
     -0.5 * (1.0 - rho2).log2()
 }
 
+/// Pre-compute a probit lookup table: probit[k] = Φ⁻¹((k+1) / (n+1)) for
+/// k = 0..n-1. When there are no ties (the common case for continuous data),
+/// ranks are just 1..n and we index directly into this table.
+fn precompute_probit_table(n: usize) -> Vec<f64> {
+    let normal = Normal::new(0.0, 1.0).unwrap();
+    let scale = 1.0 / (n as f64 + 1.0);
+    (0..n)
+        .map(|k| normal.inverse_cdf((k as f64 + 1.0) * scale))
+        .collect()
+}
+
 /// Rank-transform a vector, then map ranks to Gaussian quantiles via the
 /// probit (inverse normal CDF) of `rank / (n + 1)`.
+///
+/// Uses a pre-computed probit table when available; falls back to direct
+/// `inverse_cdf` calls for tied ranks (which produce non-integer rank
+/// values that aren't in the table).
 fn rank_to_probit(values: &[f64]) -> Vec<f64> {
     let n = values.len();
-    let normal = Normal::new(0.0, 1.0).unwrap();
+    let probit_table = precompute_probit_table(n);
 
     // Compute ranks (1-based, average ties).
     let mut indexed: Vec<(f64, usize)> = values.iter().copied().zip(0..).collect();
-    indexed.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    indexed.sort_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
 
-    let mut ranks = vec![0.0; n];
+    let mut result = vec![0.0; n];
     let mut i = 0;
     while i < n {
         let mut j = i + 1;
         while j < n && (indexed[j].0 - indexed[i].0).abs() < 1e-15 {
             j += 1;
         }
-        let avg_rank = (i + j) as f64 / 2.0 + 0.5; // 1-based midrank
-        for item in indexed.iter().take(j).skip(i) {
-            ranks[item.1] = avg_rank;
+        if j == i + 1 {
+            // No ties: rank is i+1 (1-based), index into table is i.
+            result[indexed[i].1] = probit_table[i];
+        } else {
+            // Ties: average rank → not an integer, fall back to direct computation.
+            let normal = Normal::new(0.0, 1.0).unwrap();
+            let avg_rank = (i + j) as f64 / 2.0 + 0.5;
+            let scale = 1.0 / (n as f64 + 1.0);
+            let probit = normal.inverse_cdf(avg_rank * scale);
+            for item in indexed.iter().take(j).skip(i) {
+                result[item.1] = probit;
+            }
         }
         i = j;
     }
 
-    // Probit: Φ⁻¹(rank / (n + 1)).
-    let scale = 1.0 / (n as f64 + 1.0);
-    ranks
-        .iter()
-        .map(|&r| normal.inverse_cdf(r * scale))
-        .collect()
+    result
 }
 
 fn pearson(x: &[f64], y: &[f64]) -> f64 {
