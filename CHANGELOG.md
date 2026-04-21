@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-04-21
+
+### Added
+
+- **Triage pipeline** (`forecastability::triage`) — single-call and batch series classification with model family routing.
+  - `run_triage(series, config)` → `TriageResult` with pattern (A–E) + recommended `ModelFamily`
+  - `run_batch_triage(all_series, config)` → `BatchTriageResult` with pattern/family counts (rayon-parallelized)
+  - `screen_exogenous(target, candidates, max_lag)` → ranked exogenous candidates by transfer entropy
+  - `SeriesPattern` enum: WhiteNoise (A), Linear (B), Seasonal (C), Nonlinear (D), Complex (E)
+  - `ModelFamily` enum: Skip, LinearStatistical, SeasonalStatistical, NonlinearML, Ensemble
+  - `TriageConfig` builder: max_lag, n_surrogates, alpha, seed
+
+### Fixed
+
+- **Fingerprint significance test** (#74): switched from rank-based (max of surrogates) to parametric 3σ (`mean + 3*std`) threshold matching the Python `dependence-forecastability` original. Much more selective, especially with few surrogates.
+- **Normalized `information_mass`**: now divided by `max_lag` for cross-setting comparability.
+- Added `std` and `threshold_3sigma` fields to `SignificanceBands`.
+
 ## [0.7.1] - 2026-04-21
 
 ### Changed
