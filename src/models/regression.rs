@@ -460,16 +460,13 @@ mod ols_impl {
                         .to_string(),
                 ));
             }
-            match kind {
-                RollingStatKind::EwmMean { alpha } | RollingStatKind::EwmStd { alpha } => {
-                    if !(0.0 < alpha && alpha <= 1.0) {
-                        return Err(ForecastError::InvalidParameter(format!(
-                            "RollingFeature: EWM alpha must satisfy 0 < α ≤ 1, got {}",
-                            alpha
-                        )));
-                    }
+            if let RollingStatKind::EwmMean { alpha } | RollingStatKind::EwmStd { alpha } = kind {
+                if !(0.0 < alpha && alpha <= 1.0) {
+                    return Err(ForecastError::InvalidParameter(format!(
+                        "RollingFeature: EWM alpha must satisfy 0 < α ≤ 1, got {}",
+                        alpha
+                    )));
                 }
-                _ => {}
             }
             Ok(Self { window, lag, kind })
         }

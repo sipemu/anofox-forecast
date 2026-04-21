@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-04-21
+
 ### Added
 
 - **Forecastability analysis module** (`forecastability::`, feature-gated behind `forecastability`) — pre-modeling triage via information-theoretic dependence measures. Port inspired by [dependence-forecastability](https://github.com/AdamKrysztopa/dependence-forecastability) (MIT).

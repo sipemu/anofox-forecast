@@ -33,7 +33,7 @@ fn periodogram(signal: &[f64]) -> Vec<(usize, f64)> {
         result.push((period, power));
     }
 
-    result.sort_by(|a, b| b.0.cmp(&a.0));
+    result.sort_by_key(|&(period, _)| std::cmp::Reverse(period));
     result
 }
 
@@ -116,7 +116,7 @@ pub fn welch_periodogram(signal: &[f64], window_size: usize, overlap: f64) -> Ve
         .map(|(period, (sum, count))| (period, sum / count as f64))
         .collect();
 
-    result.sort_by(|a, b| b.0.cmp(&a.0));
+    result.sort_by_key(|&(period, _)| std::cmp::Reverse(period));
     result
 }
 

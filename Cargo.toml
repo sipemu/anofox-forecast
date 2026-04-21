@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "anofox-forecast"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 authors = ["Simon Müller"]
 description = "Time series forecasting library"
@@ -31,7 +31,7 @@ chrono = { version = "0.4", features = ["serde"] }
 trueno = "0.8"
 statrs = "0.18"
 thiserror = "2.0"
-rand = "0.8"
+rand = "0.8.6"
 anofox-regression = { version = "0.5.3", optional = true }
 anofox-statistics = "0.4"
 lbfgs = "0.3"
