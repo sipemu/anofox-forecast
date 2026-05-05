@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Three new conformal prediction methods** (in `postprocess::`, behind the `postprocess` feature):
+  - **CQR** (`CqrPredictor`, `CqrResult`) — Conformalized Quantile Regression (Romano, Patterson & Candès, NeurIPS 2019). Wraps any quantile-regression base learner; conformity score `E_i = max(q_lo - y, y - q_hi)` adjusts the bounds symmetrically. Tighter than absolute-residual conformal under heteroscedasticity.
+  - **EnbPI** (`EnbPiPredictor`, `EnbPiResult`) — Ensemble Bootstrap Prediction Interval (Xu & Xie, ICML 2021). Leave-one-out residuals from a bagged ensemble (no retraining required). Online residual window via `update()` for distribution drift.
+  - **ACI** (`AciPredictor`) — Adaptive Conformal Inference (Gibbs & Candès, NeurIPS 2021). Stateful streaming wrapper that adjusts α_t each step from coverage error: `α_{t+1} = α_t + γ(α_target - err_t)`. Long-run coverage converges to target under arbitrary distribution drift.
+- 22 new tests covering all three predictors, including a stationary-noise CQR coverage test and a drift-response ACI test.
+
 ## [0.7.2] - 2026-04-21
 
 ### Added
