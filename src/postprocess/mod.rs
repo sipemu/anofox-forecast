@@ -27,11 +27,14 @@
 //! let intervals = cp.predict(&forecasts);
 //! ```
 
+mod aci;
 mod backtest;
 mod binned_intervals;
 mod bootstrap;
 mod conformal;
 mod conformalize;
+mod cqr;
+mod enbpi;
 mod historical_sim;
 mod idr;
 mod normal;
@@ -39,6 +42,7 @@ mod processor;
 mod qra;
 mod types;
 
+pub use aci::AciPredictor;
 pub use backtest::{BacktestConfig, BacktestFold, BacktestResult, CalibratedModelByHorizon};
 pub use binned_intervals::{BinnedConformalPredictor, BinnedConformalResult};
 pub use bootstrap::{BootstrapPredictor, BootstrapResult};
@@ -46,6 +50,8 @@ pub use conformal::{ConformalMethod, ConformalPredictor, ConformalResult, PerSte
 pub use conformalize::{
     conformalize, conformalize_with_config, ConformalizeConfig, ConformalizeResult,
 };
+pub use cqr::{CqrPredictor, CqrResult};
+pub use enbpi::{EnbPiPredictor, EnbPiResult};
 pub use historical_sim::{HistoricalSimResult, HistoricalSimulator};
 pub use idr::{IDRPredictor, IDRResult};
 pub use normal::{NormalPredictor, NormalResult};
