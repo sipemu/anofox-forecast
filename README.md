@@ -182,6 +182,9 @@ console.log(forecast.values);
   - Conformal Prediction: Distribution-free intervals with coverage guarantees
   - Per-horizon-step conformal: separate interval widths per forecast step (tighter at h=1, wider at h=12)
   - Binned Conformal Prediction: Heteroscedastic intervals — bins residuals by predicted magnitude for wider intervals where uncertainty is larger
+  - **CQR** (Conformalized Quantile Regression): wraps any quantile-regression base learner with symmetric bound adjustment — tighter than absolute-residual conformal under heteroscedasticity (Romano, Patterson & Candès, NeurIPS 2019)
+  - **EnbPI** (Ensemble Bootstrap Prediction Interval): leave-one-out residuals from a bagged ensemble (no retraining); online window for drift (Xu & Xie, ICML 2021)
+  - **ACI** (Adaptive Conformal Inference): stateful streaming wrapper with α-adaptation — long-run coverage converges to target under arbitrary distribution drift (Gibbs & Candès, NeurIPS 2021)
   - Bootstrap Prediction Intervals: Model-agnostic residual resampling with cumulative error paths (IID and block bootstrap)
   - Historical Simulation: Non-parametric empirical error distribution
   - Normal Predictor: Gaussian error assumption baseline
@@ -253,7 +256,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-anofox-forecast = "0.7.2"
+anofox-forecast = "0.7.3"
 ```
 
 ### Optional Features
@@ -746,6 +749,9 @@ println!("Upper: {:?}", intervals.upper());
 | `PostProcessor` | Unified API for all postprocessing methods |
 | `ConformalPredictor` | Distribution-free prediction intervals |
 | `BinnedConformalPredictor` | Heteroscedastic intervals — bins by predicted magnitude |
+| `CqrPredictor` / `CqrResult` | Conformalized Quantile Regression — wraps quantile base learners |
+| `EnbPiPredictor` / `EnbPiResult` | Ensemble Bootstrap Prediction Interval — bagged LOO residuals with online window |
+| `AciPredictor` | Adaptive Conformal Inference — streaming α-adaptation under drift |
 | `HistoricalSimulator` | Empirical error distribution |
 | `IDRPredictor` | Isotonic Distributional Regression |
 | `QRAPredictor` | Quantile Regression Averaging |
