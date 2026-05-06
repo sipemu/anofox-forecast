@@ -700,7 +700,9 @@ println!("Upper: {:?}", intervals.upper());
 | `StructuralFeature` | Trait for forward-filled features during prediction (changepoints, outlier indicators) |
 | `ChangepointFeature` | Structural feature for regime indicators (StepFunctions, RegimeIndex, CumulativeCount) |
 | `RecursiveFeature` | Trait for features recomputed at every horizon step from the rolling history buffer |
-| `RollingFeature` / `RollingStatKind` | Rolling window statistics (Mean, Std, Var, Min, Max, Median, Sum, EwmMean, EwmStd) as regression features |
+| `RollingFeature` / `RollingStatKind` | Rolling window statistics: Mean, Std, Var, Min, Max, Median, Sum, EwmMean, EwmStd, Quantile, Range, Iqr, Skew, Kurt, Slope, Rank, ZScore, CountAbove, CountBelow |
+| `EventDistanceFeature` / `EventDistanceMode` | Steps-since-last / steps-until-next event (holidays, promos) — `RecursiveFeature` keyed on absolute timestep |
+| `ExogFeatureSpec` | Lag and rolling-window transforms of exog columns; `RegressionFeatures::with_exog_lags()` / `with_exog_rolling()` |
 | `Pipeline` / `PipelineBuilder` | Composable transform → model chains (BoxCox → Difference → Model → inverse) |
 | `Transform` trait | Reversible transforms: `DifferenceTransform`, `SeasonalDifferenceTransform`, `BoxCoxTransform`, `ScaleTransform`, `LogTransform` |
 | `FeatureGenerator` | Deterministic feature generation: `fourier()`, `day_of_week()`, `month_of_year()`, `quarter()`, `holiday()` |
@@ -740,7 +742,7 @@ println!("Upper: {:?}", intervals.upper());
 | Complexity | `c3`, `cid_ce`, `lempel_ziv_complexity` |
 | Trend | `linear_trend`, `adf_test`, `ar_coefficient`, `hp_trend_strength`, `piecewise_n_segments` |
 | Seasonality | `dummy_seasonal_strength`, `seasonal_diff_strength`, `seasonal_diff_variance_reduction` |
-| Selection | `select_features`, `rank_features` |
+| Selection | `select_features`, `rank_features`, `select_features_mi`, `rank_features_mi` (MI-based, requires `forecastability`) |
 
 ### Postprocessing Types
 
