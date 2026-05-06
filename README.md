@@ -702,7 +702,8 @@ println!("Upper: {:?}", intervals.upper());
 | `RecursiveFeature` | Trait for features recomputed at every horizon step from the rolling history buffer |
 | `RollingFeature` / `RollingStatKind` | Rolling window statistics: Mean, Std, Var, Min, Max, Median, Sum, EwmMean, EwmStd, Quantile, Range, Iqr, Skew, Kurt, Slope, Rank, ZScore, CountAbove, CountBelow |
 | `EventDistanceFeature` / `EventDistanceMode` | Steps-since-last / steps-until-next event (holidays, promos) — `RecursiveFeature` keyed on absolute timestep |
-| `ExogFeatureSpec` | Lag, rolling, polynomial, and interaction transforms of exog columns; `RegressionFeatures::with_exog_lags()` / `with_exog_rolling()` / `with_exog_polynomial()` / `with_exog_interaction()` |
+| `ExogFeatureSpec` | Lag, rolling, polynomial, interaction, and categorical transforms of exog columns; `RegressionFeatures::with_exog_lags()` / `with_exog_rolling()` / `with_exog_polynomial()` / `with_exog_interaction()` / `with_categorical()` |
+| `CategoricalStrategy` | `OneHot { drop_first }`, `Ordinal`, `Count`, `Target { smoothing }` — encoding for integer-coded exog with deterministic-shape predeclared categories |
 | `Pipeline` / `PipelineBuilder` | Composable transform → model chains (BoxCox → Difference → Model → inverse) |
 | `Transform` trait | Reversible transforms: `DifferenceTransform`, `SeasonalDifferenceTransform`, `BoxCoxTransform`, `ScaleTransform`, `LogTransform` |
 | `FeatureGenerator` | Deterministic feature generation: `fourier()`, `day_of_week()`, `month_of_year()`, `quarter()`, `holiday()` |
