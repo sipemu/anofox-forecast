@@ -239,6 +239,64 @@ pub fn select_features(
     }
 }
 
+/// Rank features by mutual information with a target series.
+///
+/// Uses the Kraskov-Stögbauer-Grassberger (KSG1) estimator from the
+/// `forecastability` module. Features are scored by `I(feature; target)`
+/// in nats — higher means more predictive of the target.
+///
+/// Only features whose length matches `target.len()` are scored; mismatched
+/// or empty features are skipped.
+///
+/// # Arguments
+/// * `features` — feature name → values
+/// * `target` — target/label series (e.g. the regression target)
+/// * `k` — number of neighbours for the kNN MI estimator (default 4 is sensible)
+///
+/// # Returns
+///
+/// Vector of `FeatureImportance` sorted descending by MI.
+#[cfg(feature = "forecastability")]
+pub fn rank_features_mi(
+    features: &HashMap<String, Vec<f64>>,
+    target: &[f64],
+    k: usize,
+) -> Vec<FeatureImportance> {
+    use crate::forecastability::knn_mutual_information;
+
+    let mut scored: Vec<FeatureImportance> = features
+        .iter()
+        .filter(|(_, v)| v.len() == target.len() && !v.is_empty())
+        .map(|(name, v)| FeatureImportance {
+            name: name.clone(),
+            score: knn_mutual_information(v, target, k).max(0.0),
+        })
+        .collect();
+    scored.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    scored
+}
+
+/// Select the top-`k` features by mutual information with a target.
+///
+/// Wraps [`rank_features_mi`] and returns just the top-`k` names sorted
+/// alphabetically (mirroring [`select_features`] semantics).
+#[cfg(feature = "forecastability")]
+pub fn select_features_mi(
+    features: &HashMap<String, Vec<f64>>,
+    target: &[f64],
+    k_neighbours: usize,
+    top_k: usize,
+) -> Vec<String> {
+    let ranked = rank_features_mi(features, target, k_neighbours);
+    let mut top: Vec<String> = ranked.into_iter().take(top_k).map(|fi| fi.name).collect();
+    top.sort();
+    top
+}
+
 /// Compute the population variance of a slice.
 fn compute_variance(values: &[f64]) -> f64 {
     if values.is_empty() {
@@ -533,5 +591,40 @@ mod tests {
     #[test]
     fn compute_variance_empty() {
         assert_relative_eq!(compute_variance(&[]), 0.0, epsilon = 1e-10);
+    }
+
+    #[cfg(feature = "forecastability")]
+    #[test]
+    fn rank_features_mi_prefers_dependent_feature() {
+        let n = 200;
+        let target: Vec<f64> = (0..n).map(|i| (i as f64 * 0.1).sin()).collect();
+        // dependent: nonlinear function of target → high MI
+        let dep: Vec<f64> = target.iter().map(|y| (y * 2.0).abs() + y.powi(2)).collect();
+        // noisy independent: should have near-zero MI
+        let indep: Vec<f64> = (0..n)
+            .map(|i| {
+                let h = (i as u64).wrapping_mul(2654435761).wrapping_add(7);
+                (h % 1000) as f64 / 1000.0
+            })
+            .collect();
+        let mut feats = HashMap::new();
+        feats.insert("dep".to_string(), dep);
+        feats.insert("indep".to_string(), indep);
+
+        let ranked = rank_features_mi(&feats, &target, 4);
+        assert_eq!(ranked.len(), 2);
+        assert_eq!(
+            ranked[0].name, "dep",
+            "dependent feature should rank first; got {:?}",
+            ranked
+        );
+        assert!(
+            ranked[0].score > ranked[1].score,
+            "dep MI should exceed indep MI; got {:?}",
+            ranked
+        );
+
+        let top = select_features_mi(&feats, &target, 4, 1);
+        assert_eq!(top, vec!["dep"]);
     }
 }

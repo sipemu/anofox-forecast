@@ -273,6 +273,27 @@ mod ols_impl {
         /// value before the observation being forecast. `out.len() == n_columns()`.
         fn compute_predict(&self, recent: &[f64], out: &mut [f64]);
 
+        /// Populate the next prediction row with knowledge of the **absolute**
+        /// horizon step index.
+        ///
+        /// Default impl delegates to [`compute_predict`](Self::compute_predict)
+        /// — most features (e.g. [`RollingFeature`]) only need the rolling
+        /// buffer. Features that depend on the absolute timestep (e.g.
+        /// [`EventDistanceFeature`]) override this to use `step_h + n_train`.
+        ///
+        /// - `step_h`: 0-based offset within the forecast horizon.
+        /// - `n_train`: total length of the training data (so the absolute
+        ///   index of the row being predicted is `n_train + step_h`).
+        fn compute_predict_at(
+            &self,
+            recent: &[f64],
+            _step_h: usize,
+            _n_train: usize,
+            out: &mut [f64],
+        ) {
+            self.compute_predict(recent, out);
+        }
+
         /// Human-readable name for reporting.
         fn name(&self) -> &str;
 
@@ -310,20 +331,62 @@ mod ols_impl {
         ///
         /// Equivalent to `EwmVar` followed by `sqrt`.
         EwmStd { alpha: f64 },
+        /// Empirical τ-quantile (linear interpolation between order statistics).
+        /// `tau ∈ [0, 1]`. NumPy-default behaviour.
+        Quantile { tau: f64 },
+        /// Range = max − min.
+        Range,
+        /// Interquartile range = Q₀.₇₅ − Q₀.₂₅.
+        Iqr,
+        /// Sample skewness (Fisher's, biased moment estimator).
+        ///
+        /// `(1/n) Σ ((x − μ) / σ)³` where σ is the population std (ddof = 0).
+        /// Returns 0 when the window is constant or has fewer than 2 points.
+        Skew,
+        /// Sample excess kurtosis (Fisher's, biased moment estimator).
+        ///
+        /// `(1/n) Σ ((x − μ) / σ)⁴ − 3`. Returns 0 when the window is constant
+        /// or has fewer than 2 points.
+        Kurt,
+        /// Slope of an OLS regression of the window values against
+        /// `t = 0..n` (i.e. how fast the series is moving locally).
+        Slope,
+        /// Fractional rank of the **most recent** value in the window, in
+        /// `[0, 1]`. 0 → smallest in window, 1 → largest. Useful for detecting
+        /// regime extremes without depending on absolute scale.
+        Rank,
+        /// Z-score of the most recent value relative to the rest of the
+        /// window: `(window.last() − mean(window)) / std(window)`. Returns 0
+        /// when the window is constant.
+        ZScore,
+        /// Count of values strictly greater than `threshold`.
+        CountAbove { threshold: f64 },
+        /// Count of values strictly less than `threshold`.
+        CountBelow { threshold: f64 },
     }
 
     impl RollingStatKind {
-        fn short_name(&self) -> &'static str {
+        fn short_name(&self) -> String {
             match self {
-                Self::Mean => "mean",
-                Self::Std => "std",
-                Self::Var => "var",
-                Self::Min => "min",
-                Self::Max => "max",
-                Self::Median => "median",
-                Self::Sum => "sum",
-                Self::EwmMean { .. } => "ewm_mean",
-                Self::EwmStd { .. } => "ewm_std",
+                Self::Mean => "mean".into(),
+                Self::Std => "std".into(),
+                Self::Var => "var".into(),
+                Self::Min => "min".into(),
+                Self::Max => "max".into(),
+                Self::Median => "median".into(),
+                Self::Sum => "sum".into(),
+                Self::EwmMean { .. } => "ewm_mean".into(),
+                Self::EwmStd { .. } => "ewm_std".into(),
+                Self::Quantile { tau } => format!("q{}", tau),
+                Self::Range => "range".into(),
+                Self::Iqr => "iqr".into(),
+                Self::Skew => "skew".into(),
+                Self::Kurt => "kurt".into(),
+                Self::Slope => "slope".into(),
+                Self::Rank => "rank".into(),
+                Self::ZScore => "zscore".into(),
+                Self::CountAbove { threshold } => format!("countabove_{}", threshold),
+                Self::CountBelow { threshold } => format!("countbelow_{}", threshold),
             }
         }
 
@@ -342,6 +405,24 @@ mod ols_impl {
                 Self::Median => median_of(window),
                 Self::EwmMean { alpha } => ewm_mean_of(window, alpha),
                 Self::EwmStd { alpha } => ewm_var_of(window, alpha).sqrt(),
+                Self::Quantile { tau } => quantile_of(window, tau),
+                Self::Range => {
+                    let mn = window.iter().cloned().fold(f64::INFINITY, f64::min);
+                    let mx = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                    mx - mn
+                }
+                Self::Iqr => quantile_of(window, 0.75) - quantile_of(window, 0.25),
+                Self::Skew => skewness_of(window),
+                Self::Kurt => excess_kurtosis_of(window),
+                Self::Slope => ols_slope_of(window),
+                Self::Rank => fractional_rank_of_last(window),
+                Self::ZScore => z_score_of_last(window),
+                Self::CountAbove { threshold } => {
+                    window.iter().filter(|&&x| x > threshold).count() as f64
+                }
+                Self::CountBelow { threshold } => {
+                    window.iter().filter(|&&x| x < threshold).count() as f64
+                }
             }
         }
     }
@@ -382,6 +463,135 @@ mod ols_impl {
             s = alpha * x + (1.0 - alpha) * s;
         }
         s
+    }
+
+    #[inline]
+    fn quantile_of(xs: &[f64], tau: f64) -> f64 {
+        let n = xs.len();
+        if n == 0 {
+            return 0.0;
+        }
+        if n == 1 {
+            return xs[0];
+        }
+        let mut v: Vec<f64> = xs.to_vec();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let pos = tau.clamp(0.0, 1.0) * (n - 1) as f64;
+        let lo = pos.floor() as usize;
+        let hi = pos.ceil() as usize;
+        if lo == hi {
+            v[lo]
+        } else {
+            let frac = pos - lo as f64;
+            v[lo] * (1.0 - frac) + v[hi] * frac
+        }
+    }
+
+    #[inline]
+    fn skewness_of(xs: &[f64]) -> f64 {
+        let n = xs.len();
+        if n < 2 {
+            return 0.0;
+        }
+        let nf = n as f64;
+        let m = xs.iter().sum::<f64>() / nf;
+        let mut m2 = 0.0;
+        let mut m3 = 0.0;
+        for &x in xs {
+            let d = x - m;
+            m2 += d * d;
+            m3 += d * d * d;
+        }
+        m2 /= nf;
+        m3 /= nf;
+        if m2 <= 0.0 {
+            return 0.0;
+        }
+        m3 / m2.powf(1.5)
+    }
+
+    #[inline]
+    fn excess_kurtosis_of(xs: &[f64]) -> f64 {
+        let n = xs.len();
+        if n < 2 {
+            return 0.0;
+        }
+        let nf = n as f64;
+        let m = xs.iter().sum::<f64>() / nf;
+        let mut m2 = 0.0;
+        let mut m4 = 0.0;
+        for &x in xs {
+            let d = x - m;
+            let d2 = d * d;
+            m2 += d2;
+            m4 += d2 * d2;
+        }
+        m2 /= nf;
+        m4 /= nf;
+        if m2 <= 0.0 {
+            return 0.0;
+        }
+        m4 / (m2 * m2) - 3.0
+    }
+
+    #[inline]
+    fn ols_slope_of(xs: &[f64]) -> f64 {
+        let n = xs.len();
+        if n < 2 {
+            return 0.0;
+        }
+        let nf = n as f64;
+        let t_mean = (nf - 1.0) * 0.5;
+        let y_mean = xs.iter().sum::<f64>() / nf;
+        let mut num = 0.0;
+        let mut den = 0.0;
+        for (i, &y) in xs.iter().enumerate() {
+            let dt = i as f64 - t_mean;
+            num += dt * (y - y_mean);
+            den += dt * dt;
+        }
+        if den == 0.0 {
+            0.0
+        } else {
+            num / den
+        }
+    }
+
+    #[inline]
+    fn fractional_rank_of_last(xs: &[f64]) -> f64 {
+        let n = xs.len();
+        if n == 0 {
+            return 0.0;
+        }
+        if n == 1 {
+            return 0.5;
+        }
+        let last = xs[n - 1];
+        let mut less = 0usize;
+        let mut equal = 0usize;
+        for &x in xs {
+            if x < last {
+                less += 1;
+            } else if x == last {
+                equal += 1;
+            }
+        }
+        // Average rank when ties are present, normalised to [0, 1].
+        ((less as f64) + 0.5 * (equal as f64 - 1.0)) / (n - 1) as f64
+    }
+
+    #[inline]
+    fn z_score_of_last(xs: &[f64]) -> f64 {
+        let n = xs.len();
+        if n < 2 {
+            return 0.0;
+        }
+        let m = xs.iter().sum::<f64>() / n as f64;
+        let var = sample_variance_of(xs);
+        if var <= 0.0 {
+            return 0.0;
+        }
+        (xs[n - 1] - m) / var.sqrt()
     }
 
     #[inline]
@@ -468,6 +678,14 @@ mod ols_impl {
                     )));
                 }
             }
+            if let RollingStatKind::Quantile { tau } = kind {
+                if !(0.0..=1.0).contains(&tau) || tau.is_nan() {
+                    return Err(ForecastError::InvalidParameter(format!(
+                        "RollingFeature: Quantile tau must satisfy 0 ≤ τ ≤ 1, got {}",
+                        tau
+                    )));
+                }
+            }
             Ok(Self { window, lag, kind })
         }
 
@@ -531,6 +749,178 @@ mod ols_impl {
 
         fn name(&self) -> &str {
             "RollingFeature"
+        }
+
+        fn clone_box(&self) -> Box<dyn RecursiveFeature> {
+            Box::new(self.clone())
+        }
+    }
+
+    // ── Event distance feature ───────────────────────────────────────
+
+    /// Which event-distance columns to emit.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum EventDistanceMode {
+        /// Steps since the most recent event at index ≤ t.
+        Since,
+        /// Steps until the next event at index > t.
+        Until,
+        /// Both columns: `[since, until]`.
+        Both,
+    }
+
+    /// Distance-to-event feature. Given a sorted list of **absolute** event
+    /// indices (e.g. holidays, promotions, regime changes), emits
+    /// steps-since-last-event and/or steps-until-next-event at each row.
+    ///
+    /// Pass the full event list spanning training **and** forecast horizon —
+    /// at predict step `h`, the distance is computed against `n_train + h`,
+    /// so future events must be declared up front.
+    ///
+    /// When no preceding event exists (or no following event exists), the
+    /// `cap` value is emitted (default `usize::MAX as f64`). Use a smaller
+    /// `cap` to keep features bounded.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use std::sync::Arc;
+    /// use anofox_forecast::models::regression::{
+    ///     EventDistanceFeature, EventDistanceMode, RegressionFeatures,
+    /// };
+    ///
+    /// // Holidays at indices 30, 60, 120 (covering both train and horizon).
+    /// let events = EventDistanceFeature::new(
+    ///     vec![30, 60, 120],
+    ///     EventDistanceMode::Both,
+    /// )
+    /// .with_cap(365);
+    ///
+    /// let features = RegressionFeatures::new()
+    ///     .with_recursive(Arc::new(events));
+    /// ```
+    #[derive(Debug, Clone)]
+    pub struct EventDistanceFeature {
+        events: Vec<usize>,
+        mode: EventDistanceMode,
+        cap: f64,
+    }
+
+    impl EventDistanceFeature {
+        /// Create a new event-distance feature. `events` is sorted ascending
+        /// internally; duplicates are de-duplicated.
+        pub fn new(mut events: Vec<usize>, mode: EventDistanceMode) -> Self {
+            events.sort_unstable();
+            events.dedup();
+            Self {
+                events,
+                mode,
+                cap: f64::from(u32::MAX),
+            }
+        }
+
+        /// Override the cap used when no preceding/following event exists.
+        pub fn with_cap(mut self, cap: usize) -> Self {
+            self.cap = cap as f64;
+            self
+        }
+
+        /// Sorted unique event indices.
+        pub fn events(&self) -> &[usize] {
+            &self.events
+        }
+
+        /// Output mode.
+        pub fn mode(&self) -> EventDistanceMode {
+            self.mode
+        }
+
+        fn since_at(&self, t: usize) -> f64 {
+            // largest event index e such that e ≤ t
+            match self.events.binary_search(&t) {
+                Ok(_) => 0.0,
+                Err(pos) => {
+                    if pos == 0 {
+                        self.cap
+                    } else {
+                        (t - self.events[pos - 1]) as f64
+                    }
+                }
+            }
+        }
+
+        fn until_at(&self, t: usize) -> f64 {
+            // smallest event index e such that e > t
+            let pos = self.events.partition_point(|&e| e <= t);
+            if pos == self.events.len() {
+                self.cap
+            } else {
+                (self.events[pos] - t) as f64
+            }
+        }
+
+        fn fill_row(&self, t: usize, out: &mut [f64]) {
+            match self.mode {
+                EventDistanceMode::Since => {
+                    out[0] = self.since_at(t);
+                }
+                EventDistanceMode::Until => {
+                    out[0] = self.until_at(t);
+                }
+                EventDistanceMode::Both => {
+                    out[0] = self.since_at(t);
+                    out[1] = self.until_at(t);
+                }
+            }
+        }
+    }
+
+    impl RecursiveFeature for EventDistanceFeature {
+        fn column_names(&self) -> Vec<String> {
+            match self.mode {
+                EventDistanceMode::Since => vec!["__event_since".into()],
+                EventDistanceMode::Until => vec!["__event_until".into()],
+                EventDistanceMode::Both => {
+                    vec!["__event_since".into(), "__event_until".into()]
+                }
+            }
+        }
+
+        fn n_columns(&self) -> usize {
+            match self.mode {
+                EventDistanceMode::Since | EventDistanceMode::Until => 1,
+                EventDistanceMode::Both => 2,
+            }
+        }
+
+        fn warmup(&self) -> usize {
+            0
+        }
+
+        fn compute_fit(&self, _values: &[f64], target_idx: usize, out: &mut [f64]) {
+            self.fill_row(target_idx, out);
+        }
+
+        fn compute_predict(&self, recent: &[f64], out: &mut [f64]) {
+            // Without n_train context, fall back to using recent.len() as the
+            // absolute index. This is only correct when the caller passes the
+            // full series as `recent`; the predict-time path uses
+            // `compute_predict_at` instead.
+            self.fill_row(recent.len(), out);
+        }
+
+        fn compute_predict_at(
+            &self,
+            _recent: &[f64],
+            step_h: usize,
+            n_train: usize,
+            out: &mut [f64],
+        ) {
+            self.fill_row(n_train + step_h, out);
+        }
+
+        fn name(&self) -> &str {
+            "EventDistanceFeature"
         }
 
         fn clone_box(&self) -> Box<dyn RecursiveFeature> {
@@ -907,6 +1297,84 @@ mod ols_impl {
         Aic,
     }
 
+    /// Spec for derived exogenous-regressor features.
+    ///
+    /// Allows declaring lagged or rolling-window transforms of exog columns
+    /// without preprocessing the input series. The model materializes the
+    /// columns at fit-time and resolves them at predict-time using the
+    /// stored exog tail plus the user-supplied future regressors.
+    #[derive(Debug, Clone)]
+    pub enum ExogFeatureSpec {
+        /// Lagged values of the named exog column at the given lag offsets.
+        ///
+        /// Each entry in `lags` produces one column `{col}_lag{k}`.
+        Lag {
+            /// Exog column name to lag.
+            col: String,
+            /// Lag offsets (must be ≥ 1; `0` would be the contemporaneous value).
+            lags: Vec<usize>,
+        },
+        /// Rolling-window statistic of the named exog column.
+        ///
+        /// Window ends at `t - lag` (inclusive) and spans `window` observations.
+        /// Produces one column `{col}_roll_{kind}_w{window}_l{lag}`.
+        Rolling {
+            /// Exog column name to roll.
+            col: String,
+            /// Window size (≥ 1).
+            window: usize,
+            /// Lag offset of the window end (≥ 0; `0` includes the
+            /// contemporaneous value, which is fine for *exogenous* signals
+            /// known at time t).
+            lag: usize,
+            /// Statistic kind.
+            kind: RollingStatKind,
+        },
+    }
+
+    impl ExogFeatureSpec {
+        fn col(&self) -> &str {
+            match self {
+                Self::Lag { col, .. } | Self::Rolling { col, .. } => col,
+            }
+        }
+
+        fn warmup(&self) -> usize {
+            match self {
+                Self::Lag { lags, .. } => lags.iter().copied().max().unwrap_or(0),
+                Self::Rolling { window, lag, .. } => lag + window.saturating_sub(1),
+            }
+        }
+
+        #[allow(dead_code)]
+        fn n_columns(&self) -> usize {
+            match self {
+                Self::Lag { lags, .. } => lags.len(),
+                Self::Rolling { .. } => 1,
+            }
+        }
+
+        fn column_names(&self) -> Vec<String> {
+            match self {
+                Self::Lag { col, lags } => {
+                    lags.iter().map(|k| format!("{}_lag{}", col, k)).collect()
+                }
+                Self::Rolling {
+                    col,
+                    window,
+                    lag,
+                    kind,
+                } => vec![format!(
+                    "{}_roll_{}_w{}_l{}",
+                    col,
+                    kind.short_name(),
+                    window,
+                    lag
+                )],
+            }
+        }
+    }
+
     /// Configures which features are built from a [`TimeSeries`] for
     /// the regression model.
     ///
@@ -918,6 +1386,7 @@ mod ols_impl {
     /// 5. Structural feature columns ([`StructuralFeature`])
     /// 6. Recursive feature columns ([`RecursiveFeature`], e.g. [`RollingFeature`])
     /// 7. Exogenous regressors (if `use_exog`)
+    /// 8. Derived exog features ([`ExogFeatureSpec`], lag/rolling)
     #[derive(Debug, Clone)]
     pub struct RegressionFeatures {
         /// Include a linear trend index (0, 1, …, n-1).
@@ -940,6 +1409,9 @@ mod ols_impl {
         /// Recursive features (recomputed from the rolling history buffer at
         /// every horizon step — e.g. [`RollingFeature`]).
         pub recursive_features: Vec<Arc<dyn RecursiveFeature>>,
+        /// Derived exog features (lag / rolling transforms of named exog
+        /// columns). Materialized after the contemporaneous exog block.
+        pub exog_features: Vec<ExogFeatureSpec>,
         /// Regular differencing order (d). Applied before fitting, integrated after predict.
         pub diff_order: usize,
         /// Seasonal differencing specs: Vec of (order D, period s). Applied in order before fitting, integrated in reverse after predict.
@@ -963,6 +1435,7 @@ mod ols_impl {
                 seasonal_components: Vec::new(),
                 structural_features: Vec::new(),
                 recursive_features: Vec::new(),
+                exog_features: Vec::new(),
                 diff_order: 0,
                 seasonal_diffs: Vec::new(),
                 frac_diff_order: None,
@@ -1255,6 +1728,121 @@ mod ols_impl {
             self.with_rolling(window, RollingStatKind::EwmStd { alpha })
         }
 
+        /// Add a rolling τ-quantile feature. `tau ∈ [0, 1]`.
+        pub fn with_rolling_quantile(self, window: usize, tau: f64) -> Result<Self> {
+            self.with_rolling(window, RollingStatKind::Quantile { tau })
+        }
+
+        /// Add a rolling range (max − min) feature.
+        pub fn with_rolling_range(self, window: usize) -> Result<Self> {
+            self.with_rolling(window, RollingStatKind::Range)
+        }
+
+        /// Add a rolling interquartile range (Q₀.₇₅ − Q₀.₂₅) feature.
+        pub fn with_rolling_iqr(self, window: usize) -> Result<Self> {
+            self.with_rolling(window, RollingStatKind::Iqr)
+        }
+
+        /// Add a rolling skewness feature.
+        pub fn with_rolling_skew(self, window: usize) -> Result<Self> {
+            self.with_rolling(window, RollingStatKind::Skew)
+        }
+
+        /// Add a rolling excess-kurtosis feature.
+        pub fn with_rolling_kurt(self, window: usize) -> Result<Self> {
+            self.with_rolling(window, RollingStatKind::Kurt)
+        }
+
+        /// Add a rolling OLS slope feature (local trend coefficient).
+        pub fn with_rolling_slope(self, window: usize) -> Result<Self> {
+            self.with_rolling(window, RollingStatKind::Slope)
+        }
+
+        /// Add a rolling fractional-rank feature for the most recent value.
+        pub fn with_rolling_rank(self, window: usize) -> Result<Self> {
+            self.with_rolling(window, RollingStatKind::Rank)
+        }
+
+        /// Add a rolling z-score feature for the most recent value relative
+        /// to its window predecessors.
+        pub fn with_rolling_zscore(self, window: usize) -> Result<Self> {
+            self.with_rolling(window, RollingStatKind::ZScore)
+        }
+
+        /// Add a rolling count of values strictly greater than `threshold`.
+        pub fn with_rolling_count_above(self, window: usize, threshold: f64) -> Result<Self> {
+            self.with_rolling(window, RollingStatKind::CountAbove { threshold })
+        }
+
+        /// Add a rolling count of values strictly less than `threshold`.
+        pub fn with_rolling_count_below(self, window: usize, threshold: f64) -> Result<Self> {
+            self.with_rolling(window, RollingStatKind::CountBelow { threshold })
+        }
+
+        /// Add an event-distance feature (steps-since-last and/or
+        /// steps-until-next event) — see [`EventDistanceFeature`].
+        ///
+        /// Pass the full event index list spanning training **and** the
+        /// forecast horizon: at predict step `h`, the distance is computed
+        /// against absolute index `n_train + h`.
+        pub fn with_event_distance(self, events: Vec<usize>, mode: EventDistanceMode) -> Self {
+            self.with_recursive(Arc::new(EventDistanceFeature::new(events, mode)))
+        }
+
+        /// Add lagged copies of an exogenous regressor column.
+        ///
+        /// Each entry in `lags` produces one column `{col}_lag{k}`.
+        /// Requires `use_exog = true` for predict-time column lookup.
+        pub fn with_exog_lags(mut self, col: impl Into<String>, lags: &[usize]) -> Self {
+            self.exog_features.push(ExogFeatureSpec::Lag {
+                col: col.into(),
+                lags: lags.to_vec(),
+            });
+            self
+        }
+
+        /// Add a rolling-window statistic over an exogenous regressor column.
+        ///
+        /// Window ends at `t - lag` (inclusive). `lag = 0` is allowed for
+        /// exog signals (unlike target rolling), since exog values at time t
+        /// are observed by definition.
+        pub fn with_exog_rolling(
+            mut self,
+            col: impl Into<String>,
+            window: usize,
+            lag: usize,
+            kind: RollingStatKind,
+        ) -> Result<Self> {
+            if window == 0 {
+                return Err(ForecastError::InvalidParameter(
+                    "exog_rolling: window must be >= 1".into(),
+                ));
+            }
+            if let RollingStatKind::Quantile { tau } = kind {
+                if !(0.0..=1.0).contains(&tau) || tau.is_nan() {
+                    return Err(ForecastError::InvalidParameter(format!(
+                        "exog_rolling: Quantile tau must satisfy 0 ≤ τ ≤ 1, got {}",
+                        tau
+                    )));
+                }
+            }
+            if let RollingStatKind::EwmMean { alpha } | RollingStatKind::EwmStd { alpha } = kind {
+                if !(0.0 < alpha && alpha <= 1.0) {
+                    return Err(ForecastError::InvalidParameter(format!(
+                        "exog_rolling: EWM alpha must satisfy 0 < α ≤ 1, got {}",
+                        alpha
+                    )));
+                }
+            }
+            self.exog_features.push(ExogFeatureSpec::Rolling {
+                col: col.into(),
+                window,
+                lag,
+                kind,
+            });
+            Ok(self)
+        }
+
         /// Apply regular differencing of order `d` before fitting.
         ///
         /// The model automatically integrates (undoes differencing) during predict.
@@ -1299,15 +1887,26 @@ mod ols_impl {
                 .unwrap_or(0)
         }
 
+        /// Maximum warmup required by any derived exog feature.
+        fn max_exog_warmup(&self) -> usize {
+            self.exog_features
+                .iter()
+                .map(|s| s.warmup())
+                .max()
+                .unwrap_or(0)
+        }
+
         /// Number of observations lost to lagging and recursive-feature warmup.
         ///
         /// The design matrix drops the first `lag_offset()` rows.
         fn lag_offset(&self) -> usize {
-            self.max_effective_lag().max(self.max_recursive_warmup())
+            self.max_effective_lag()
+                .max(self.max_recursive_warmup())
+                .max(self.max_exog_warmup())
         }
 
         /// Build feature column names for a given TimeSeries.
-        fn feature_names(&self, exog_names: &[String]) -> Vec<String> {
+        pub fn feature_names(&self, exog_names: &[String]) -> Vec<String> {
             let mut names = Vec::new();
             if self.use_trend {
                 names.push("__trend".to_string());
@@ -1351,6 +1950,9 @@ mod ols_impl {
                 for name in exog_names {
                     names.push(name.clone());
                 }
+            }
+            for spec in &self.exog_features {
+                names.extend(spec.column_names());
             }
             names
         }
@@ -1414,6 +2016,11 @@ mod ols_impl {
             if self.use_exog {
                 for name in exog_names {
                     result.push((name.clone(), FeatureSafety::External));
+                }
+            }
+            for spec in &self.exog_features {
+                for col_name in spec.column_names() {
+                    result.push((col_name, FeatureSafety::External));
                 }
             }
             result
@@ -1640,6 +2247,40 @@ mod ols_impl {
                 }
             }
 
+            // Derived exog features (lags, rolling)
+            if !self.exog_features.is_empty() {
+                let regressors = series.all_regressors();
+                for spec in &self.exog_features {
+                    let reg_values = regressors.get(spec.col()).ok_or_else(|| {
+                        ForecastError::InvalidParameter(format!(
+                            "exog_features: column '{}' not found in series regressors",
+                            spec.col()
+                        ))
+                    })?;
+                    match spec {
+                        ExogFeatureSpec::Lag { lags, .. } => {
+                            for &k in lags {
+                                for i in 0..n_train {
+                                    let src_idx = offset + i - k;
+                                    x[(i, col_idx)] = reg_values[src_idx];
+                                }
+                                col_idx += 1;
+                            }
+                        }
+                        ExogFeatureSpec::Rolling {
+                            window, lag, kind, ..
+                        } => {
+                            for i in 0..n_train {
+                                let end_excl = offset + i + 1 - lag;
+                                let start = end_excl - window;
+                                x[(i, col_idx)] = kind.compute(&reg_values[start..end_excl]);
+                            }
+                            col_idx += 1;
+                        }
+                    }
+                }
+            }
+
             Ok((x, y, n_train, exog_names, fitted_components))
         }
 
@@ -1656,6 +2297,7 @@ mod ols_impl {
             future_regressors: Option<&HashMap<String, Vec<f64>>>,
             exog_names: &[String],
             components: &[FittedComponentState],
+            exog_tails: Option<&HashMap<String, Vec<f64>>>,
         ) -> Result<Mat<f64>> {
             let feature_names = self.feature_names(exog_names);
             let n_features = feature_names.len();
@@ -1720,6 +2362,71 @@ mod ols_impl {
                 }
             }
 
+            // Derived exog features (lags / rolling): resolve against
+            // exog_tails ++ future_regressors as a virtual full sequence.
+            if !self.exog_features.is_empty() {
+                let warmup = self.max_exog_warmup();
+                for spec in &self.exog_features {
+                    let tail = exog_tails
+                        .and_then(|t| t.get(spec.col()))
+                        .map(|v| v.as_slice())
+                        .unwrap_or(&[]);
+                    let future = future_regressors
+                        .and_then(|m| m.get(spec.col()))
+                        .map(|v| v.as_slice())
+                        .unwrap_or(&[]);
+                    let virt = |idx: isize| -> Option<f64> {
+                        let tlen = tail.len() as isize;
+                        if idx < 0 {
+                            None
+                        } else if idx < tlen {
+                            Some(tail[idx as usize])
+                        } else {
+                            let f_idx = (idx - tlen) as usize;
+                            if f_idx < future.len() {
+                                Some(future[f_idx])
+                            } else {
+                                None
+                            }
+                        }
+                    };
+                    match spec {
+                        ExogFeatureSpec::Lag { lags, .. } => {
+                            for &k in lags {
+                                for h in 0..horizon {
+                                    // virtual idx of (n_train + h - k):
+                                    // tail covers [n_train - warmup .. n_train),
+                                    // so virtual_idx = warmup + h - k.
+                                    let v_idx = warmup as isize + h as isize - k as isize;
+                                    if let Some(v) = virt(v_idx) {
+                                        x[(h, col_idx)] = v;
+                                    }
+                                }
+                                col_idx += 1;
+                            }
+                        }
+                        ExogFeatureSpec::Rolling {
+                            window, lag, kind, ..
+                        } => {
+                            for h in 0..horizon {
+                                let end_v = warmup as isize + h as isize - *lag as isize;
+                                let start_v = end_v - *window as isize + 1;
+                                let mut buf = Vec::with_capacity(*window);
+                                for v_idx in start_v..=end_v {
+                                    if let Some(v) = virt(v_idx) {
+                                        buf.push(v);
+                                    }
+                                }
+                                if buf.len() == *window {
+                                    x[(h, col_idx)] = kind.compute(&buf);
+                                }
+                            }
+                            col_idx += 1;
+                        }
+                    }
+                }
+            }
+
             Ok(x)
         }
     }
@@ -1742,6 +2449,11 @@ mod ols_impl {
         residuals: Vec<f64>,
         /// Exogenous regressor names (sorted).
         exog_names: Vec<String>,
+        /// Tail of exogenous regressor values (for resolving lag/rolling
+        /// derived-exog columns at predict time). Keyed by column name; each
+        /// value has length `max_exog_warmup`. Empty when no derived-exog
+        /// features are configured.
+        exog_tails: HashMap<String, Vec<f64>>,
         /// Fitted trend/seasonal components for generating future feature columns.
         components: Vec<FittedComponentState>,
         /// Original series values (stored when differencing is used, for integration).
@@ -2043,6 +2755,7 @@ mod ols_impl {
                 future_regressors,
                 &state.exog_names,
                 &state.components,
+                Some(&state.exog_tails),
             )?;
 
             let eff_lags = state.features.effective_lags();
@@ -2079,7 +2792,7 @@ mod ols_impl {
                 for rf in &state.features.recursive_features {
                     let n_cols = rf.n_columns();
                     let mut scratch = vec![0.0_f64; n_cols];
-                    rf.compute_predict(&recent, &mut scratch);
+                    rf.compute_predict_at(&recent, h, state.n_total, &mut scratch);
                     for (k, &v) in scratch.iter().enumerate() {
                         x_future[(h, rcol + k)] = v;
                     }
@@ -2192,6 +2905,26 @@ mod ols_impl {
             let tail_values =
                 working_values[working_values.len().saturating_sub(tail_len)..].to_vec();
 
+            // Capture exog tails for derived-exog features (lag / rolling)
+            // resolution at predict time. Each tail is the last
+            // `max_exog_warmup` values of the named regressor.
+            let mut exog_tails: HashMap<String, Vec<f64>> = HashMap::new();
+            let exog_warmup = self.features.max_exog_warmup();
+            if exog_warmup > 0 {
+                let regressors = series.all_regressors();
+                let mut seen: std::collections::HashSet<&str> = Default::default();
+                for spec in &self.features.exog_features {
+                    let col = spec.col();
+                    if !seen.insert(col) {
+                        continue;
+                    }
+                    if let Some(vals) = regressors.get(col) {
+                        let start = vals.len().saturating_sub(exog_warmup);
+                        exog_tails.insert(col.to_string(), vals[start..].to_vec());
+                    }
+                }
+            }
+
             self.state = Some(FittedState {
                 model: fitted,
                 features: self.features.clone(),
@@ -2200,6 +2933,7 @@ mod ols_impl {
                 fitted_values,
                 residuals,
                 exog_names,
+                exog_tails,
                 components,
                 original_values,
             });
@@ -2264,6 +2998,7 @@ mod ols_impl {
                 None,
                 &state.exog_names,
                 &state.components,
+                Some(&state.exog_tails),
             )?;
 
             let pred_result =
@@ -2503,6 +3238,87 @@ mod ols_impl {
             future_regs.insert("temperature".to_string(), future_x);
             let forecast = model_exog.predict_with_exog(5, &future_regs).unwrap();
             assert_eq!(forecast.primary().len(), 5);
+        }
+
+        #[test]
+        fn ols_with_exog_lags_recovers_lagged_relationship() {
+            // y_t = 2 * x_{t-3} + noise — model with exog_lags(x, [3]) should fit cleanly.
+            let n = 80;
+            let x_vals: Vec<f64> = (0..n).map(|i| (i as f64 * 0.2).sin()).collect();
+            let mut y = vec![0.0; n];
+            for i in 3..n {
+                let noise = ((i * 7 + 11) % 13) as f64 * 0.001;
+                y[i] = 2.0 * x_vals[i - 3] + noise;
+            }
+            let cal = CalendarAnnotations::new().with_regressor("x".to_string(), x_vals.clone());
+            let ts = TimeSeriesBuilder::new()
+                .timestamps(make_timestamps(n))
+                .values(y)
+                .calendar(cal)
+                .build()
+                .unwrap();
+
+            let mut model = RegressionForecaster::ols(
+                RegressionFeatures::new()
+                    .no_trend()
+                    .no_exog()
+                    .with_exog_lags("x", &[3]),
+            );
+            model.fit(&ts).unwrap();
+
+            // Future exog: continue the same generator.
+            let future_x: Vec<f64> = (n..n + 5).map(|i| (i as f64 * 0.2).sin()).collect();
+            let mut future_regs = HashMap::new();
+            future_regs.insert("x".to_string(), future_x.clone());
+            let forecast = model.predict_with_exog(5, &future_regs).unwrap();
+            assert_eq!(forecast.primary().len(), 5);
+
+            // Step h=0 should ≈ 2 * x_{n-3}; step h=2 should ≈ 2 * x_{n-1};
+            // step h=3 should ≈ 2 * future_x[0].
+            let preds = forecast.primary();
+            assert_relative_eq!(preds[0], 2.0 * x_vals[n - 3], epsilon = 0.05);
+            assert_relative_eq!(preds[2], 2.0 * x_vals[n - 1], epsilon = 0.05);
+            assert_relative_eq!(preds[3], 2.0 * future_x[0], epsilon = 0.05);
+        }
+
+        #[test]
+        fn ols_with_exog_rolling_emits_correct_columns() {
+            // Sanity check that the column appears with the correct name and
+            // that fit/predict produces finite output.
+            let n = 60;
+            let x_vals: Vec<f64> = (0..n).map(|i| i as f64).collect();
+            let y: Vec<f64> = (0..n).map(|i| i as f64 * 0.5 + 1.0).collect();
+            let cal = CalendarAnnotations::new().with_regressor("x".to_string(), x_vals.clone());
+            let ts = TimeSeriesBuilder::new()
+                .timestamps(make_timestamps(n))
+                .values(y)
+                .calendar(cal)
+                .build()
+                .unwrap();
+
+            let mut model = RegressionForecaster::ols(
+                RegressionFeatures::new()
+                    .no_trend()
+                    .no_exog()
+                    .with_exog_rolling("x", 5, 0, RollingStatKind::Mean)
+                    .unwrap(),
+            );
+            model.fit(&ts).unwrap();
+
+            let names = model.features().feature_names(&["x".to_string()]);
+            assert!(
+                names.contains(&"x_roll_mean_w5_l0".to_string()),
+                "expected x_roll_mean_w5_l0 in {:?}",
+                names
+            );
+
+            let future_x: Vec<f64> = (n..n + 3).map(|i| i as f64).collect();
+            let mut future_regs = HashMap::new();
+            future_regs.insert("x".to_string(), future_x);
+            let forecast = model.predict_with_exog(3, &future_regs).unwrap();
+            for &v in forecast.primary() {
+                assert!(v.is_finite());
+            }
         }
 
         #[test]
@@ -4103,6 +4919,133 @@ mod ols_impl {
         }
 
         #[test]
+        fn rolling_quantile_range_iqr() {
+            let values = vec![3.0, 1.0, 4.0, 1.0, 5.0, 9.0];
+            // window of values[0..5] = [3,1,4,1,5] → sorted [1,1,3,4,5]
+            let cases = [
+                (RollingStatKind::Quantile { tau: 0.0 }, 1.0),
+                (RollingStatKind::Quantile { tau: 0.5 }, 3.0),
+                (RollingStatKind::Quantile { tau: 1.0 }, 5.0),
+                (RollingStatKind::Range, 4.0),
+                // Q3 of [1,1,3,4,5]: pos = 0.75 * 4 = 3.0 → 4.0
+                // Q1 of [1,1,3,4,5]: pos = 0.25 * 4 = 1.0 → 1.0
+                (RollingStatKind::Iqr, 3.0),
+            ];
+            for (kind, expected) in cases {
+                let feat = RollingFeature::new(5, kind).unwrap();
+                let mut out = vec![0.0];
+                feat.compute_fit(&values, 5, &mut out);
+                assert_relative_eq!(out[0], expected, epsilon = 1e-12);
+            }
+        }
+
+        #[test]
+        fn rolling_skew_kurt_zero_on_symmetric_window() {
+            let values = vec![-2.0, -1.0, 0.0, 1.0, 2.0, 99.0]; // last is irrelevant; window covers [0..5]
+            let feat = RollingFeature::new(5, RollingStatKind::Skew).unwrap();
+            let mut out = vec![0.0];
+            feat.compute_fit(&values, 5, &mut out);
+            assert_relative_eq!(out[0], 0.0, epsilon = 1e-12);
+
+            let feat = RollingFeature::new(5, RollingStatKind::Kurt).unwrap();
+            feat.compute_fit(&values, 5, &mut out);
+            // Uniform discrete: excess kurtosis ≈ -1.3 for n=5.
+            assert!(
+                out[0] < 0.0,
+                "uniform window should have negative excess kurt"
+            );
+        }
+
+        #[test]
+        fn rolling_slope_recovers_linear_trend() {
+            // values[0..5] = [0, 2, 4, 6, 8] → slope = 2
+            let values = vec![0.0, 2.0, 4.0, 6.0, 8.0, 999.0];
+            let feat = RollingFeature::new(5, RollingStatKind::Slope).unwrap();
+            let mut out = vec![0.0];
+            feat.compute_fit(&values, 5, &mut out);
+            assert_relative_eq!(out[0], 2.0, epsilon = 1e-12);
+        }
+
+        #[test]
+        fn rolling_rank_and_zscore() {
+            // window [1,2,3,4,5] — last value 5 is the max
+            let values = vec![1.0, 2.0, 3.0, 4.0, 5.0, 999.0];
+            let feat = RollingFeature::new(5, RollingStatKind::Rank).unwrap();
+            let mut out = vec![0.0];
+            feat.compute_fit(&values, 5, &mut out);
+            assert_relative_eq!(out[0], 1.0, epsilon = 1e-12); // 4/4 strictly less
+
+            let feat = RollingFeature::new(5, RollingStatKind::ZScore).unwrap();
+            feat.compute_fit(&values, 5, &mut out);
+            // mean = 3, std (ddof=1) = sqrt(2.5) ≈ 1.5811 → z = 2/1.5811 ≈ 1.265
+            assert_relative_eq!(out[0], 2.0 / 2.5_f64.sqrt(), epsilon = 1e-12);
+        }
+
+        #[test]
+        fn rolling_count_above_below() {
+            let values = vec![1.0, 2.0, 3.0, 4.0, 5.0, 999.0];
+            let mut out = vec![0.0];
+
+            let feat =
+                RollingFeature::new(5, RollingStatKind::CountAbove { threshold: 2.5 }).unwrap();
+            feat.compute_fit(&values, 5, &mut out);
+            assert_relative_eq!(out[0], 3.0, epsilon = 1e-12); // 3, 4, 5
+
+            let feat =
+                RollingFeature::new(5, RollingStatKind::CountBelow { threshold: 2.5 }).unwrap();
+            feat.compute_fit(&values, 5, &mut out);
+            assert_relative_eq!(out[0], 2.0, epsilon = 1e-12); // 1, 2
+        }
+
+        #[test]
+        fn rolling_quantile_validates_tau() {
+            assert!(RollingFeature::new(5, RollingStatKind::Quantile { tau: -0.1 }).is_err());
+            assert!(RollingFeature::new(5, RollingStatKind::Quantile { tau: 1.5 }).is_err());
+            assert!(RollingFeature::new(5, RollingStatKind::Quantile { tau: f64::NAN }).is_err());
+        }
+
+        #[test]
+        fn event_distance_fit_since_until() {
+            let feat = EventDistanceFeature::new(vec![5, 12, 30], EventDistanceMode::Both);
+            let mut out = vec![0.0; 2];
+            feat.compute_fit(&[], 7, &mut out);
+            assert_relative_eq!(out[0], 2.0, epsilon = 1e-12); // since: 7 - 5
+            assert_relative_eq!(out[1], 5.0, epsilon = 1e-12); // until: 12 - 7
+
+            // exact event hit → since = 0, until = next event - t
+            feat.compute_fit(&[], 12, &mut out);
+            assert_relative_eq!(out[0], 0.0, epsilon = 1e-12);
+            assert_relative_eq!(out[1], 18.0, epsilon = 1e-12);
+
+            // before any event → since = cap (default = u32::MAX as f64)
+            feat.compute_fit(&[], 0, &mut out);
+            assert_eq!(out[0], f64::from(u32::MAX));
+            assert_relative_eq!(out[1], 5.0, epsilon = 1e-12);
+        }
+
+        #[test]
+        fn event_distance_predict_uses_absolute_index() {
+            let feat =
+                EventDistanceFeature::new(vec![100, 110], EventDistanceMode::Since).with_cap(999);
+            let mut out = vec![0.0];
+            // n_train = 95, h = 4 → t = 99 → since = cap (no prior event)
+            feat.compute_predict_at(&[], 4, 95, &mut out);
+            assert_relative_eq!(out[0], 999.0, epsilon = 1e-12);
+            // n_train = 95, h = 5 → t = 100 → since = 0
+            feat.compute_predict_at(&[], 5, 95, &mut out);
+            assert_relative_eq!(out[0], 0.0, epsilon = 1e-12);
+            // n_train = 95, h = 8 → t = 103 → since = 3
+            feat.compute_predict_at(&[], 8, 95, &mut out);
+            assert_relative_eq!(out[0], 3.0, epsilon = 1e-12);
+        }
+
+        #[test]
+        fn event_distance_dedupes_and_sorts() {
+            let feat = EventDistanceFeature::new(vec![30, 10, 30, 20], EventDistanceMode::Until);
+            assert_eq!(feat.events(), &[10, 20, 30]);
+        }
+
+        #[test]
         fn ewm_mean_converges_on_constant_input() {
             let feat = RollingFeature::new(20, RollingStatKind::EwmMean { alpha: 0.3 }).unwrap();
             let values = vec![7.0; 25];
@@ -4246,9 +5189,10 @@ mod ols_impl {
 
 #[cfg(feature = "postprocess")]
 pub use ols_impl::{
-    ChangepointEncoding, ChangepointFeature, FeatureSafety, LagSelectionCriterion,
-    RecursiveFeature, RegressionBackend, RegressionFeatures, RegressionForecaster, RollingFeature,
-    RollingStatKind, SeasonalSpec, StructuralFeature, TrendType, WeightStrategy,
+    ChangepointEncoding, ChangepointFeature, EventDistanceFeature, EventDistanceMode,
+    ExogFeatureSpec, FeatureSafety, LagSelectionCriterion, RecursiveFeature, RegressionBackend,
+    RegressionFeatures, RegressionForecaster, RollingFeature, RollingStatKind, SeasonalSpec,
+    StructuralFeature, TrendType, WeightStrategy,
 };
 // Re-export InformationCriterion so users can configure Dynamic backend without
 // depending on anofox-regression directly.
