@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`EventDistanceFeature`** — new `RecursiveFeature` impl for *steps-since-last* / *steps-until-next* arbitrary event indices (holidays, promos, regime markers). Added `EventDistanceMode` enum and `RegressionFeatures::with_event_distance(events, mode)` builder. Trait extended with default-impl `compute_predict_at(recent, step_h, n_train, out)` so position-aware features can resolve absolute indices at predict time; existing `RecursiveFeature` impls (incl. `RollingFeature`) are unaffected.
 - **Lag-of-exog and rolling-of-exog** in `RegressionFeatures`: new `ExogFeatureSpec` enum and `with_exog_lags(col, &[k])` / `with_exog_rolling(col, window, lag, kind)` builders. Predict-time resolution combines a stored exog tail with caller-supplied future regressors.
 - **MI-based feature selection** (gated behind `forecastability`): `rank_features_mi(features, target, k)` and `select_features_mi(features, target, k_neighbours, top_k)` in `features::selection` — uses the existing KSG1 estimator from `forecastability::knn_mutual_information`.
+- **Polynomial and interaction exog features** (closes #81): new `ExogFeatureSpec::Polynomial { col, degree }` and `ExogFeatureSpec::Interaction { col_a, col_b }` variants. Builders `RegressionFeatures::with_exog_polynomial(col, degree)` (emits `col^2..col^degree`) and `with_exog_interaction(col_a, col_b)` (emits `col_a * col_b`). Captures nonlinear and multiplicative effects in linear regression backends.
 
 ## [0.7.3] - 2026-05-05
 
