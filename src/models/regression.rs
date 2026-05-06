@@ -1330,12 +1330,35 @@ mod ols_impl {
             /// Statistic kind.
             kind: RollingStatKind,
         },
+        /// Polynomial expansion of the named exog column: emits `col^k` for
+        /// `k = 2..=degree`. Use `degree = 1` for no-op (no columns).
+        ///
+        /// Each emitted column is named `{col}_pow{k}`.
+        Polynomial {
+            /// Exog column name to expand.
+            col: String,
+            /// Maximum power. Must be ≥ 2 to produce any columns.
+            degree: usize,
+        },
+        /// Pairwise interaction `col_a × col_b` between two exog columns.
+        ///
+        /// Produces one column named `{col_a}_x_{col_b}`.
+        Interaction {
+            /// First exog column name.
+            col_a: String,
+            /// Second exog column name.
+            col_b: String,
+        },
     }
 
     impl ExogFeatureSpec {
-        fn col(&self) -> &str {
+        /// All exog column names this spec references (1 or 2).
+        fn referenced_cols(&self) -> Vec<&str> {
             match self {
-                Self::Lag { col, .. } | Self::Rolling { col, .. } => col,
+                Self::Lag { col, .. }
+                | Self::Rolling { col, .. }
+                | Self::Polynomial { col, .. } => vec![col],
+                Self::Interaction { col_a, col_b } => vec![col_a, col_b],
             }
         }
 
@@ -1343,6 +1366,7 @@ mod ols_impl {
             match self {
                 Self::Lag { lags, .. } => lags.iter().copied().max().unwrap_or(0),
                 Self::Rolling { window, lag, .. } => lag + window.saturating_sub(1),
+                Self::Polynomial { .. } | Self::Interaction { .. } => 0,
             }
         }
 
@@ -1350,7 +1374,8 @@ mod ols_impl {
         fn n_columns(&self) -> usize {
             match self {
                 Self::Lag { lags, .. } => lags.len(),
-                Self::Rolling { .. } => 1,
+                Self::Rolling { .. } | Self::Interaction { .. } => 1,
+                Self::Polynomial { degree, .. } => degree.saturating_sub(1),
             }
         }
 
@@ -1371,6 +1396,12 @@ mod ols_impl {
                     window,
                     lag
                 )],
+                Self::Polynomial { col, degree } => {
+                    (2..=*degree).map(|k| format!("{}_pow{}", col, k)).collect()
+                }
+                Self::Interaction { col_a, col_b } => {
+                    vec![format!("{}_x_{}", col_a, col_b)]
+                }
             }
         }
     }
@@ -1843,6 +1874,46 @@ mod ols_impl {
             Ok(self)
         }
 
+        /// Add a polynomial expansion of an exogenous regressor column.
+        ///
+        /// Emits one column per power `k = 2..=degree`, named
+        /// `{col}_pow{k}`. `degree = 1` is a no-op (no columns added);
+        /// `degree = 0` is rejected.
+        ///
+        /// Use to capture nonlinear effects of an exog signal in linear
+        /// regression backends (OLS, Ridge, ElasticNet).
+        pub fn with_exog_polynomial(
+            mut self,
+            col: impl Into<String>,
+            degree: usize,
+        ) -> Result<Self> {
+            if degree == 0 {
+                return Err(ForecastError::InvalidParameter(
+                    "exog_polynomial: degree must be >= 1".into(),
+                ));
+            }
+            self.exog_features.push(ExogFeatureSpec::Polynomial {
+                col: col.into(),
+                degree,
+            });
+            Ok(self)
+        }
+
+        /// Add a pairwise interaction between two exogenous regressor
+        /// columns. Emits one column `{col_a}_x_{col_b}` containing the
+        /// elementwise product.
+        pub fn with_exog_interaction(
+            mut self,
+            col_a: impl Into<String>,
+            col_b: impl Into<String>,
+        ) -> Self {
+            self.exog_features.push(ExogFeatureSpec::Interaction {
+                col_a: col_a.into(),
+                col_b: col_b.into(),
+            });
+            self
+        }
+
         /// Apply regular differencing of order `d` before fitting.
         ///
         /// The model automatically integrates (undoes differencing) during predict.
@@ -2247,18 +2318,21 @@ mod ols_impl {
                 }
             }
 
-            // Derived exog features (lags, rolling)
+            // Derived exog features (lags, rolling, polynomial, interaction)
             if !self.exog_features.is_empty() {
                 let regressors = series.all_regressors();
-                for spec in &self.exog_features {
-                    let reg_values = regressors.get(spec.col()).ok_or_else(|| {
+                let lookup_col = |name: &str| -> Result<&Vec<f64>> {
+                    regressors.get(name).ok_or_else(|| {
                         ForecastError::InvalidParameter(format!(
                             "exog_features: column '{}' not found in series regressors",
-                            spec.col()
+                            name
                         ))
-                    })?;
+                    })
+                };
+                for spec in &self.exog_features {
                     match spec {
-                        ExogFeatureSpec::Lag { lags, .. } => {
+                        ExogFeatureSpec::Lag { col, lags } => {
+                            let reg_values = lookup_col(col)?;
                             for &k in lags {
                                 for i in 0..n_train {
                                     let src_idx = offset + i - k;
@@ -2268,12 +2342,33 @@ mod ols_impl {
                             }
                         }
                         ExogFeatureSpec::Rolling {
-                            window, lag, kind, ..
+                            col,
+                            window,
+                            lag,
+                            kind,
                         } => {
+                            let reg_values = lookup_col(col)?;
                             for i in 0..n_train {
                                 let end_excl = offset + i + 1 - lag;
                                 let start = end_excl - window;
                                 x[(i, col_idx)] = kind.compute(&reg_values[start..end_excl]);
+                            }
+                            col_idx += 1;
+                        }
+                        ExogFeatureSpec::Polynomial { col, degree } => {
+                            let reg_values = lookup_col(col)?;
+                            for k in 2..=*degree {
+                                for i in 0..n_train {
+                                    x[(i, col_idx)] = reg_values[offset + i].powi(k as i32);
+                                }
+                                col_idx += 1;
+                            }
+                        }
+                        ExogFeatureSpec::Interaction { col_a, col_b } => {
+                            let va = lookup_col(col_a)?;
+                            let vb = lookup_col(col_b)?;
+                            for i in 0..n_train {
+                                x[(i, col_idx)] = va[offset + i] * vb[offset + i];
                             }
                             col_idx += 1;
                         }
@@ -2362,43 +2457,44 @@ mod ols_impl {
                 }
             }
 
-            // Derived exog features (lags / rolling): resolve against
-            // exog_tails ++ future_regressors as a virtual full sequence.
+            // Derived exog features: resolve against exog_tails ++
+            // future_regressors as a virtual full sequence (Lag, Rolling) or
+            // pure future_regressors lookups (Polynomial, Interaction).
             if !self.exog_features.is_empty() {
                 let warmup = self.max_exog_warmup();
-                for spec in &self.exog_features {
+                let virt_at = |col: &str, v_idx: isize| -> Option<f64> {
                     let tail = exog_tails
-                        .and_then(|t| t.get(spec.col()))
+                        .and_then(|t| t.get(col))
                         .map(|v| v.as_slice())
                         .unwrap_or(&[]);
                     let future = future_regressors
-                        .and_then(|m| m.get(spec.col()))
+                        .and_then(|m| m.get(col))
                         .map(|v| v.as_slice())
                         .unwrap_or(&[]);
-                    let virt = |idx: isize| -> Option<f64> {
-                        let tlen = tail.len() as isize;
-                        if idx < 0 {
-                            None
-                        } else if idx < tlen {
-                            Some(tail[idx as usize])
-                        } else {
-                            let f_idx = (idx - tlen) as usize;
-                            if f_idx < future.len() {
-                                Some(future[f_idx])
-                            } else {
-                                None
-                            }
-                        }
-                    };
+                    let tlen = tail.len() as isize;
+                    if v_idx < 0 {
+                        None
+                    } else if v_idx < tlen {
+                        Some(tail[v_idx as usize])
+                    } else {
+                        let f_idx = (v_idx - tlen) as usize;
+                        future.get(f_idx).copied()
+                    }
+                };
+                let future_at = |col: &str, h: usize| -> Option<f64> {
+                    future_regressors
+                        .and_then(|m| m.get(col))
+                        .and_then(|v| v.get(h).copied())
+                };
+                for spec in &self.exog_features {
                     match spec {
-                        ExogFeatureSpec::Lag { lags, .. } => {
+                        ExogFeatureSpec::Lag { col, lags } => {
                             for &k in lags {
                                 for h in 0..horizon {
-                                    // virtual idx of (n_train + h - k):
                                     // tail covers [n_train - warmup .. n_train),
                                     // so virtual_idx = warmup + h - k.
                                     let v_idx = warmup as isize + h as isize - k as isize;
-                                    if let Some(v) = virt(v_idx) {
+                                    if let Some(v) = virt_at(col, v_idx) {
                                         x[(h, col_idx)] = v;
                                     }
                                 }
@@ -2406,19 +2502,42 @@ mod ols_impl {
                             }
                         }
                         ExogFeatureSpec::Rolling {
-                            window, lag, kind, ..
+                            col,
+                            window,
+                            lag,
+                            kind,
                         } => {
                             for h in 0..horizon {
                                 let end_v = warmup as isize + h as isize - *lag as isize;
                                 let start_v = end_v - *window as isize + 1;
                                 let mut buf = Vec::with_capacity(*window);
                                 for v_idx in start_v..=end_v {
-                                    if let Some(v) = virt(v_idx) {
+                                    if let Some(v) = virt_at(col, v_idx) {
                                         buf.push(v);
                                     }
                                 }
                                 if buf.len() == *window {
                                     x[(h, col_idx)] = kind.compute(&buf);
+                                }
+                            }
+                            col_idx += 1;
+                        }
+                        ExogFeatureSpec::Polynomial { col, degree } => {
+                            for k in 2..=*degree {
+                                for h in 0..horizon {
+                                    if let Some(v) = future_at(col, h) {
+                                        x[(h, col_idx)] = v.powi(k as i32);
+                                    }
+                                }
+                                col_idx += 1;
+                            }
+                        }
+                        ExogFeatureSpec::Interaction { col_a, col_b } => {
+                            for h in 0..horizon {
+                                if let (Some(va), Some(vb)) =
+                                    (future_at(col_a, h), future_at(col_b, h))
+                                {
+                                    x[(h, col_idx)] = va * vb;
                                 }
                             }
                             col_idx += 1;
@@ -2912,15 +3031,16 @@ mod ols_impl {
             let exog_warmup = self.features.max_exog_warmup();
             if exog_warmup > 0 {
                 let regressors = series.all_regressors();
-                let mut seen: std::collections::HashSet<&str> = Default::default();
+                let mut seen: std::collections::HashSet<String> = Default::default();
                 for spec in &self.features.exog_features {
-                    let col = spec.col();
-                    if !seen.insert(col) {
-                        continue;
-                    }
-                    if let Some(vals) = regressors.get(col) {
-                        let start = vals.len().saturating_sub(exog_warmup);
-                        exog_tails.insert(col.to_string(), vals[start..].to_vec());
+                    for col in spec.referenced_cols() {
+                        if !seen.insert(col.to_string()) {
+                            continue;
+                        }
+                        if let Some(vals) = regressors.get(col) {
+                            let start = vals.len().saturating_sub(exog_warmup);
+                            exog_tails.insert(col.to_string(), vals[start..].to_vec());
+                        }
                     }
                 }
             }
@@ -3319,6 +3439,113 @@ mod ols_impl {
             for &v in forecast.primary() {
                 assert!(v.is_finite());
             }
+        }
+
+        #[test]
+        fn ols_with_exog_polynomial_recovers_quadratic() {
+            // y = 0.5 * x^2 — needs a quadratic feature, not just x.
+            let n = 80;
+            let x_vals: Vec<f64> = (0..n).map(|i| (i as f64 * 0.05) - 2.0).collect();
+            let y: Vec<f64> = x_vals.iter().map(|x| 0.5 * x * x).collect();
+            let cal = CalendarAnnotations::new().with_regressor("x".to_string(), x_vals.clone());
+            let ts = TimeSeriesBuilder::new()
+                .timestamps(make_timestamps(n))
+                .values(y)
+                .calendar(cal)
+                .build()
+                .unwrap();
+
+            let mut model = RegressionForecaster::ols(
+                RegressionFeatures::new()
+                    .no_trend()
+                    .with_exog_polynomial("x", 2)
+                    .unwrap(),
+            );
+            model.fit(&ts).unwrap();
+
+            let names = model.features().feature_names(&["x".to_string()]);
+            assert!(
+                names.contains(&"x_pow2".to_string()),
+                "expected x_pow2 in {:?}",
+                names
+            );
+
+            let future_x: Vec<f64> = (n..n + 5).map(|i| (i as f64 * 0.05) - 2.0).collect();
+            let mut future_regs = HashMap::new();
+            future_regs.insert("x".to_string(), future_x.clone());
+            let forecast = model.predict_with_exog(5, &future_regs).unwrap();
+            // Predictions should track 0.5 * x^2 closely
+            for (h, &p) in forecast.primary().iter().enumerate() {
+                let expected = 0.5 * future_x[h] * future_x[h];
+                assert_relative_eq!(p, expected, epsilon = 0.05);
+            }
+        }
+
+        #[test]
+        fn ols_with_exog_interaction_recovers_product() {
+            // y = 1.5 * a * b — pure interaction term.
+            let n = 80;
+            let a: Vec<f64> = (0..n).map(|i| (i as f64 * 0.1).sin()).collect();
+            let b: Vec<f64> = (0..n).map(|i| (i as f64 * 0.13).cos()).collect();
+            let y: Vec<f64> = (0..n).map(|i| 1.5 * a[i] * b[i]).collect();
+
+            let cal = CalendarAnnotations::new()
+                .with_regressor("a".to_string(), a.clone())
+                .with_regressor("b".to_string(), b.clone());
+            let ts = TimeSeriesBuilder::new()
+                .timestamps(make_timestamps(n))
+                .values(y)
+                .calendar(cal)
+                .build()
+                .unwrap();
+
+            let mut model = RegressionForecaster::ols(
+                RegressionFeatures::new()
+                    .no_trend()
+                    .no_exog()
+                    .with_exog_interaction("a", "b"),
+            );
+            model.fit(&ts).unwrap();
+
+            let names = model.features().feature_names(&[]);
+            assert!(
+                names.contains(&"a_x_b".to_string()),
+                "expected a_x_b in {:?}",
+                names
+            );
+
+            let future_a: Vec<f64> = (n..n + 5).map(|i| (i as f64 * 0.1).sin()).collect();
+            let future_b: Vec<f64> = (n..n + 5).map(|i| (i as f64 * 0.13).cos()).collect();
+            let mut future_regs = HashMap::new();
+            future_regs.insert("a".to_string(), future_a.clone());
+            future_regs.insert("b".to_string(), future_b.clone());
+            let forecast = model.predict_with_exog(5, &future_regs).unwrap();
+            for (h, &p) in forecast.primary().iter().enumerate() {
+                let expected = 1.5 * future_a[h] * future_b[h];
+                assert_relative_eq!(p, expected, epsilon = 0.02);
+            }
+        }
+
+        #[test]
+        fn exog_polynomial_validates_degree_zero() {
+            let f = RegressionFeatures::new().with_exog_polynomial("x", 0);
+            assert!(f.is_err());
+        }
+
+        #[test]
+        fn exog_polynomial_degree_one_emits_no_columns() {
+            let feats = RegressionFeatures::new()
+                .no_trend()
+                .no_exog()
+                .with_exog_polynomial("x", 1)
+                .unwrap();
+            // Only the polynomial spec is added, but degree=1 produces no columns.
+            let names = feats.feature_names(&[]);
+            assert!(
+                names.iter().all(|n| !n.starts_with("x_pow")),
+                "degree=1 should emit no columns; got {:?}",
+                names
+            );
         }
 
         #[test]
