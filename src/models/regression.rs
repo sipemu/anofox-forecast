@@ -1349,6 +1349,71 @@ mod ols_impl {
             /// Second exog column name.
             col_b: String,
         },
+        /// Categorical encoding of an integer-coded exog column.
+        ///
+        /// The exog column carries integer category codes (stored as `f64`,
+        /// rounded at fit/predict to nearest `i64`). Categories not in the
+        /// declared `categories` list are treated as **unknown** at both fit
+        /// and predict time; the unknown handling depends on the strategy:
+        ///
+        /// - `OneHot`: all dummy columns are zero (interpreted as the
+        ///   `drop_first` baseline if dropped).
+        /// - `Ordinal`: encoded as `categories.len()` (the next unused index).
+        /// - `Count`: encoded as `0` (no observations seen).
+        /// - `Target`: encoded as the grand mean of the target.
+        ///
+        /// Predeclaring categories keeps the design-matrix shape deterministic
+        /// across CV folds and prevents leakage from train→test category
+        /// drift.
+        Categorical {
+            /// Exog column name to encode.
+            col: String,
+            /// Declared category codes. Order matters (used by `OneHot` and
+            /// `Ordinal`).
+            categories: Vec<i64>,
+            /// Encoding strategy.
+            strategy: CategoricalStrategy,
+        },
+    }
+
+    /// Fitted categorical encoder for `Count` / `Target` strategies.
+    ///
+    /// Stateless strategies (`OneHot`, `Ordinal`) do not produce one of these
+    /// — their values are reconstructible from the spec alone.
+    #[derive(Debug, Clone)]
+    pub(crate) struct FittedCategoricalEncoder {
+        /// Per-category encoded value (count for Count, mean-with-smoothing for Target).
+        map: HashMap<i64, f64>,
+        /// Value used for unseen categories.
+        fallback: f64,
+    }
+
+    /// Encoding strategy for [`ExogFeatureSpec::Categorical`].
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub enum CategoricalStrategy {
+        /// Dummy / one-hot encoding. With `drop_first = true`, the first
+        /// declared category is omitted (baseline reference).
+        OneHot {
+            /// Drop the first declared category to avoid the dummy-variable
+            /// trap with an intercept term.
+            drop_first: bool,
+        },
+        /// Ordinal — emit the position of the value in `categories`. Unknown
+        /// codes map to `categories.len()`.
+        Ordinal,
+        /// Count encoding — emit the number of fit-time observations of each
+        /// category. Unknown codes map to 0.
+        Count,
+        /// Target (mean) encoding with additive smoothing.
+        ///
+        /// `encoded(c) = (n_c · mean_c + smoothing · grand_mean) / (n_c + smoothing)`
+        ///
+        /// Higher `smoothing` shrinks rare-category encodings toward the
+        /// grand mean. `smoothing = 0` is plain group-mean encoding.
+        Target {
+            /// Additive prior weight (≥ 0). 0 = no smoothing.
+            smoothing: f64,
+        },
     }
 
     impl ExogFeatureSpec {
@@ -1357,7 +1422,8 @@ mod ols_impl {
             match self {
                 Self::Lag { col, .. }
                 | Self::Rolling { col, .. }
-                | Self::Polynomial { col, .. } => vec![col],
+                | Self::Polynomial { col, .. }
+                | Self::Categorical { col, .. } => vec![col],
                 Self::Interaction { col_a, col_b } => vec![col_a, col_b],
             }
         }
@@ -1366,7 +1432,7 @@ mod ols_impl {
             match self {
                 Self::Lag { lags, .. } => lags.iter().copied().max().unwrap_or(0),
                 Self::Rolling { window, lag, .. } => lag + window.saturating_sub(1),
-                Self::Polynomial { .. } | Self::Interaction { .. } => 0,
+                Self::Polynomial { .. } | Self::Interaction { .. } | Self::Categorical { .. } => 0,
             }
         }
 
@@ -1376,6 +1442,22 @@ mod ols_impl {
                 Self::Lag { lags, .. } => lags.len(),
                 Self::Rolling { .. } | Self::Interaction { .. } => 1,
                 Self::Polynomial { degree, .. } => degree.saturating_sub(1),
+                Self::Categorical {
+                    categories,
+                    strategy,
+                    ..
+                } => match strategy {
+                    CategoricalStrategy::OneHot { drop_first } => {
+                        if *drop_first {
+                            categories.len().saturating_sub(1)
+                        } else {
+                            categories.len()
+                        }
+                    }
+                    CategoricalStrategy::Ordinal
+                    | CategoricalStrategy::Count
+                    | CategoricalStrategy::Target { .. } => 1,
+                },
             }
         }
 
@@ -1402,6 +1484,22 @@ mod ols_impl {
                 Self::Interaction { col_a, col_b } => {
                     vec![format!("{}_x_{}", col_a, col_b)]
                 }
+                Self::Categorical {
+                    col,
+                    categories,
+                    strategy,
+                } => match strategy {
+                    CategoricalStrategy::OneHot { drop_first } => {
+                        let start = if *drop_first { 1 } else { 0 };
+                        categories[start..]
+                            .iter()
+                            .map(|cat| format!("{}_eq_{}", col, cat))
+                            .collect()
+                    }
+                    CategoricalStrategy::Ordinal => vec![format!("{}_ord", col)],
+                    CategoricalStrategy::Count => vec![format!("{}_count", col)],
+                    CategoricalStrategy::Target { .. } => vec![format!("{}_target", col)],
+                },
             }
         }
     }
@@ -1583,7 +1681,7 @@ mod ols_impl {
 
                 // Build matrices and fit OLS
                 let result = self.build_matrices(series);
-                let (x, y, n_train, _, _) = match result {
+                let (x, y, n_train, _, _, _) = match result {
                     Ok(v) => v,
                     Err(_) => continue,
                 };
@@ -1914,6 +2012,51 @@ mod ols_impl {
             self
         }
 
+        /// Add a categorical encoding of an integer-coded exog column.
+        ///
+        /// Categories must be declared up front so the design-matrix shape
+        /// is deterministic across CV folds. Values not in `categories` are
+        /// treated as **unknown** (see [`ExogFeatureSpec::Categorical`]).
+        ///
+        /// # Errors
+        ///
+        /// Returns an error if `categories` is empty, contains duplicates,
+        /// or `Target { smoothing }` has `smoothing < 0`.
+        pub fn with_categorical(
+            mut self,
+            col: impl Into<String>,
+            categories: Vec<i64>,
+            strategy: CategoricalStrategy,
+        ) -> Result<Self> {
+            if categories.is_empty() {
+                return Err(ForecastError::InvalidParameter(
+                    "with_categorical: categories must be non-empty".into(),
+                ));
+            }
+            let mut sorted = categories.clone();
+            sorted.sort_unstable();
+            sorted.dedup();
+            if sorted.len() != categories.len() {
+                return Err(ForecastError::InvalidParameter(
+                    "with_categorical: categories must be unique".into(),
+                ));
+            }
+            if let CategoricalStrategy::Target { smoothing } = strategy {
+                if !(smoothing.is_finite() && smoothing >= 0.0) {
+                    return Err(ForecastError::InvalidParameter(format!(
+                        "with_categorical: Target smoothing must be ≥ 0 and finite, got {}",
+                        smoothing
+                    )));
+                }
+            }
+            self.exog_features.push(ExogFeatureSpec::Categorical {
+                col: col.into(),
+                categories,
+                strategy,
+            });
+            Ok(self)
+        }
+
         /// Apply regular differencing of order `d` before fitting.
         ///
         /// The model automatically integrates (undoes differencing) during predict.
@@ -2090,8 +2233,21 @@ mod ols_impl {
                 }
             }
             for spec in &self.exog_features {
+                let safety = match spec {
+                    ExogFeatureSpec::Categorical { strategy, .. } => match strategy {
+                        // Target / Count encodings depend on training data
+                        // (y or category frequencies) — must refit on each CV fold.
+                        CategoricalStrategy::Target { .. } | CategoricalStrategy::Count => {
+                            FeatureSafety::DataDependent
+                        }
+                        CategoricalStrategy::OneHot { .. } | CategoricalStrategy::Ordinal => {
+                            FeatureSafety::External
+                        }
+                    },
+                    _ => FeatureSafety::External,
+                };
                 for col_name in spec.column_names() {
-                    result.push((col_name, FeatureSafety::External));
+                    result.push((col_name, safety));
                 }
             }
             result
@@ -2111,6 +2267,7 @@ mod ols_impl {
             usize,
             Vec<String>,
             Vec<FittedComponentState>,
+            HashMap<usize, FittedCategoricalEncoder>,
         )> {
             let values = series.primary_values();
             let n = values.len();
@@ -2318,7 +2475,8 @@ mod ols_impl {
                 }
             }
 
-            // Derived exog features (lags, rolling, polynomial, interaction)
+            // Derived exog features (lags, rolling, polynomial, interaction, categorical)
+            let mut categorical_encoders: HashMap<usize, FittedCategoricalEncoder> = HashMap::new();
             if !self.exog_features.is_empty() {
                 let regressors = series.all_regressors();
                 let lookup_col = |name: &str| -> Result<&Vec<f64>> {
@@ -2329,7 +2487,7 @@ mod ols_impl {
                         ))
                     })
                 };
-                for spec in &self.exog_features {
+                for (spec_idx, spec) in self.exog_features.iter().enumerate() {
                     match spec {
                         ExogFeatureSpec::Lag { col, lags } => {
                             let reg_values = lookup_col(col)?;
@@ -2372,11 +2530,109 @@ mod ols_impl {
                             }
                             col_idx += 1;
                         }
+                        ExogFeatureSpec::Categorical {
+                            col,
+                            categories,
+                            strategy,
+                        } => {
+                            let reg_values = lookup_col(col)?;
+                            // Pre-fit encoder for Count / Target strategies.
+                            let encoder = match strategy {
+                                CategoricalStrategy::OneHot { .. }
+                                | CategoricalStrategy::Ordinal => None,
+                                CategoricalStrategy::Count => {
+                                    let mut counts: HashMap<i64, f64> = HashMap::new();
+                                    for i in 0..n_train {
+                                        let cat = reg_values[offset + i].round() as i64;
+                                        *counts.entry(cat).or_insert(0.0) += 1.0;
+                                    }
+                                    Some(FittedCategoricalEncoder {
+                                        map: counts,
+                                        fallback: 0.0,
+                                    })
+                                }
+                                CategoricalStrategy::Target { smoothing } => {
+                                    // Per-category sums and counts, then smooth toward grand mean.
+                                    let mut sums: HashMap<i64, f64> = HashMap::new();
+                                    let mut counts: HashMap<i64, f64> = HashMap::new();
+                                    let mut total = 0.0_f64;
+                                    for i in 0..n_train {
+                                        let cat = reg_values[offset + i].round() as i64;
+                                        *sums.entry(cat).or_insert(0.0) += y[i];
+                                        *counts.entry(cat).or_insert(0.0) += 1.0;
+                                        total += y[i];
+                                    }
+                                    let grand_mean = if n_train > 0 {
+                                        total / n_train as f64
+                                    } else {
+                                        0.0
+                                    };
+                                    let map: HashMap<i64, f64> = counts
+                                        .iter()
+                                        .map(|(cat, &n_c)| {
+                                            let mean_c = sums[cat] / n_c;
+                                            (
+                                                *cat,
+                                                (n_c * mean_c + smoothing * grand_mean)
+                                                    / (n_c + smoothing),
+                                            )
+                                        })
+                                        .collect();
+                                    Some(FittedCategoricalEncoder {
+                                        map,
+                                        fallback: grand_mean,
+                                    })
+                                }
+                            };
+                            // Materialize columns for training rows.
+                            match strategy {
+                                CategoricalStrategy::OneHot { drop_first } => {
+                                    let start = if *drop_first { 1 } else { 0 };
+                                    for cat in &categories[start..] {
+                                        for i in 0..n_train {
+                                            let v = reg_values[offset + i].round() as i64;
+                                            x[(i, col_idx)] = if v == *cat { 1.0 } else { 0.0 };
+                                        }
+                                        col_idx += 1;
+                                    }
+                                }
+                                CategoricalStrategy::Ordinal => {
+                                    let unknown = categories.len() as f64;
+                                    for i in 0..n_train {
+                                        let v = reg_values[offset + i].round() as i64;
+                                        x[(i, col_idx)] = categories
+                                            .iter()
+                                            .position(|c| *c == v)
+                                            .map(|p| p as f64)
+                                            .unwrap_or(unknown);
+                                    }
+                                    col_idx += 1;
+                                }
+                                CategoricalStrategy::Count | CategoricalStrategy::Target { .. } => {
+                                    let enc = encoder.as_ref().unwrap();
+                                    for i in 0..n_train {
+                                        let v = reg_values[offset + i].round() as i64;
+                                        x[(i, col_idx)] = *enc.map.get(&v).unwrap_or(&enc.fallback);
+                                    }
+                                    col_idx += 1;
+                                }
+                            }
+                            if let Some(enc) = encoder {
+                                categorical_encoders.insert(spec_idx, enc);
+                            }
+                        }
                     }
                 }
             }
 
-            Ok((x, y, n_train, exog_names, fitted_components))
+            Ok((
+                x,
+                y,
+                n_train,
+                exog_names,
+                fitted_components,
+                categorical_encoders,
+            ))
         }
 
         /// Build a design matrix for the forecast horizon.
@@ -2393,6 +2649,7 @@ mod ols_impl {
             exog_names: &[String],
             components: &[FittedComponentState],
             exog_tails: Option<&HashMap<String, Vec<f64>>>,
+            categorical_encoders: Option<&HashMap<usize, FittedCategoricalEncoder>>,
         ) -> Result<Mat<f64>> {
             let feature_names = self.feature_names(exog_names);
             let n_features = feature_names.len();
@@ -2486,7 +2743,7 @@ mod ols_impl {
                         .and_then(|m| m.get(col))
                         .and_then(|v| v.get(h).copied())
                 };
-                for spec in &self.exog_features {
+                for (spec_idx, spec) in self.exog_features.iter().enumerate() {
                     match spec {
                         ExogFeatureSpec::Lag { col, lags } => {
                             for &k in lags {
@@ -2542,6 +2799,50 @@ mod ols_impl {
                             }
                             col_idx += 1;
                         }
+                        ExogFeatureSpec::Categorical {
+                            col,
+                            categories,
+                            strategy,
+                        } => match strategy {
+                            CategoricalStrategy::OneHot { drop_first } => {
+                                let start = if *drop_first { 1 } else { 0 };
+                                for cat in &categories[start..] {
+                                    for h in 0..horizon {
+                                        if let Some(v) = future_at(col, h) {
+                                            let cv = v.round() as i64;
+                                            x[(h, col_idx)] = if cv == *cat { 1.0 } else { 0.0 };
+                                        }
+                                    }
+                                    col_idx += 1;
+                                }
+                            }
+                            CategoricalStrategy::Ordinal => {
+                                let unknown = categories.len() as f64;
+                                for h in 0..horizon {
+                                    if let Some(v) = future_at(col, h) {
+                                        let cv = v.round() as i64;
+                                        x[(h, col_idx)] = categories
+                                            .iter()
+                                            .position(|c| *c == cv)
+                                            .map(|p| p as f64)
+                                            .unwrap_or(unknown);
+                                    }
+                                }
+                                col_idx += 1;
+                            }
+                            CategoricalStrategy::Count | CategoricalStrategy::Target { .. } => {
+                                let enc = categorical_encoders.and_then(|m| m.get(&spec_idx));
+                                for h in 0..horizon {
+                                    if let Some(v) = future_at(col, h) {
+                                        let cv = v.round() as i64;
+                                        x[(h, col_idx)] = enc
+                                            .map(|e| *e.map.get(&cv).unwrap_or(&e.fallback))
+                                            .unwrap_or(0.0);
+                                    }
+                                }
+                                col_idx += 1;
+                            }
+                        },
                     }
                 }
             }
@@ -2573,6 +2874,9 @@ mod ols_impl {
         /// value has length `max_exog_warmup`. Empty when no derived-exog
         /// features are configured.
         exog_tails: HashMap<String, Vec<f64>>,
+        /// Fitted categorical encoders (Count/Target strategies). Keyed by
+        /// spec index in `features.exog_features`. Empty for OneHot/Ordinal.
+        categorical_encoders: HashMap<usize, FittedCategoricalEncoder>,
         /// Fitted trend/seasonal components for generating future feature columns.
         components: Vec<FittedComponentState>,
         /// Original series values (stored when differencing is used, for integration).
@@ -2875,6 +3179,7 @@ mod ols_impl {
                 &state.exog_names,
                 &state.components,
                 Some(&state.exog_tails),
+                Some(&state.categorical_encoders),
             )?;
 
             let eff_lags = state.features.effective_lags();
@@ -2986,7 +3291,7 @@ mod ols_impl {
             };
 
             let n = fit_series.primary_values().len();
-            let (x, y, n_train, exog_names, components) =
+            let (x, y, n_train, exog_names, components, categorical_encoders) =
                 self.features.build_matrices(&fit_series)?;
 
             // Fit via the configured backend
@@ -3054,6 +3359,7 @@ mod ols_impl {
                 residuals,
                 exog_names,
                 exog_tails,
+                categorical_encoders,
                 components,
                 original_values,
             });
@@ -3119,6 +3425,7 @@ mod ols_impl {
                 &state.exog_names,
                 &state.components,
                 Some(&state.exog_tails),
+                Some(&state.categorical_encoders),
             )?;
 
             let pred_result =
@@ -3546,6 +3853,251 @@ mod ols_impl {
                 "degree=1 should emit no columns; got {:?}",
                 names
             );
+        }
+
+        #[test]
+        fn categorical_one_hot_recovers_per_category_offsets() {
+            // y = baseline + offset[category], with category in {0, 1, 2}
+            let n = 60;
+            let mut cat = Vec::with_capacity(n);
+            let mut y = Vec::with_capacity(n);
+            for i in 0..n {
+                let c = (i % 3) as i64;
+                cat.push(c as f64);
+                y.push(match c {
+                    0 => 1.0,
+                    1 => 5.0,
+                    2 => 9.0,
+                    _ => unreachable!(),
+                });
+            }
+            let cal = CalendarAnnotations::new().with_regressor("region".to_string(), cat.clone());
+            let ts = TimeSeriesBuilder::new()
+                .timestamps(make_timestamps(n))
+                .values(y)
+                .calendar(cal)
+                .build()
+                .unwrap();
+
+            let mut model = RegressionForecaster::ols(
+                RegressionFeatures::new()
+                    .no_trend()
+                    .no_exog()
+                    .with_categorical(
+                        "region",
+                        vec![0, 1, 2],
+                        CategoricalStrategy::OneHot { drop_first: false },
+                    )
+                    .unwrap(),
+            );
+            model.fit(&ts).unwrap();
+
+            let names = model.features().feature_names(&[]);
+            assert!(names.contains(&"region_eq_0".to_string()));
+            assert!(names.contains(&"region_eq_1".to_string()));
+            assert!(names.contains(&"region_eq_2".to_string()));
+
+            // Forecast: cat values 0, 1, 2 → expect 1, 5, 9 (within OLS noise tolerance).
+            let mut fr = HashMap::new();
+            fr.insert("region".to_string(), vec![0.0, 1.0, 2.0]);
+            let forecast = model.predict_with_exog(3, &fr).unwrap();
+            let preds = forecast.primary();
+            assert_relative_eq!(preds[0], 1.0, epsilon = 1e-6);
+            assert_relative_eq!(preds[1], 5.0, epsilon = 1e-6);
+            assert_relative_eq!(preds[2], 9.0, epsilon = 1e-6);
+        }
+
+        #[test]
+        fn categorical_one_hot_drop_first() {
+            let feats = RegressionFeatures::new()
+                .no_trend()
+                .no_exog()
+                .with_categorical(
+                    "c",
+                    vec![10, 20, 30],
+                    CategoricalStrategy::OneHot { drop_first: true },
+                )
+                .unwrap();
+            let names = feats.feature_names(&[]);
+            // First category dropped → only c_eq_20 and c_eq_30
+            assert!(!names.contains(&"c_eq_10".to_string()));
+            assert!(names.contains(&"c_eq_20".to_string()));
+            assert!(names.contains(&"c_eq_30".to_string()));
+        }
+
+        #[test]
+        fn categorical_ordinal_emits_index() {
+            let n = 30;
+            let cat: Vec<f64> = (0..n).map(|i| (i % 3) as f64).collect();
+            let y: Vec<f64> = cat.clone();
+            let cal = CalendarAnnotations::new().with_regressor("c".to_string(), cat.clone());
+            let ts = TimeSeriesBuilder::new()
+                .timestamps(make_timestamps(n))
+                .values(y)
+                .calendar(cal)
+                .build()
+                .unwrap();
+
+            let mut model = RegressionForecaster::ols(
+                RegressionFeatures::new()
+                    .no_trend()
+                    .no_exog()
+                    .with_categorical("c", vec![0, 1, 2], CategoricalStrategy::Ordinal)
+                    .unwrap(),
+            );
+            model.fit(&ts).unwrap();
+            let names = model.features().feature_names(&[]);
+            assert!(names.contains(&"c_ord".to_string()));
+        }
+
+        #[test]
+        fn categorical_target_encoding_uses_per_category_mean() {
+            // Means: cat0 → mean 0.0, cat1 → mean 10.0
+            let n = 40;
+            let mut cat = Vec::with_capacity(n);
+            let mut y = Vec::with_capacity(n);
+            for i in 0..n {
+                let c = (i % 2) as i64;
+                cat.push(c as f64);
+                y.push(if c == 0 { 0.0 } else { 10.0 });
+            }
+            let cal = CalendarAnnotations::new().with_regressor("c".to_string(), cat.clone());
+            let ts = TimeSeriesBuilder::new()
+                .timestamps(make_timestamps(n))
+                .values(y)
+                .calendar(cal)
+                .build()
+                .unwrap();
+
+            let mut model = RegressionForecaster::ols(
+                RegressionFeatures::new()
+                    .no_trend()
+                    .no_exog()
+                    .with_categorical(
+                        "c",
+                        vec![0, 1],
+                        CategoricalStrategy::Target { smoothing: 0.0 },
+                    )
+                    .unwrap(),
+            );
+            model.fit(&ts).unwrap();
+
+            // Target encoding maps cat 0 → 0.0 and cat 1 → 10.0; with no
+            // smoothing the OLS regression on this single feature should
+            // recover y exactly via slope=1, intercept=0.
+            let mut fr = HashMap::new();
+            fr.insert("c".to_string(), vec![0.0, 1.0]);
+            let preds = model.predict_with_exog(2, &fr).unwrap();
+            assert_relative_eq!(preds.primary()[0], 0.0, epsilon = 1e-6);
+            assert_relative_eq!(preds.primary()[1], 10.0, epsilon = 1e-6);
+        }
+
+        #[test]
+        fn categorical_count_encoding() {
+            // 30 obs, cat=0 in 20, cat=1 in 10
+            let n = 30;
+            let mut cat = vec![0.0; 20];
+            cat.extend(vec![1.0; 10]);
+            let y: Vec<f64> = cat.iter().map(|&c| c + 1.0).collect();
+            let cal = CalendarAnnotations::new().with_regressor("c".to_string(), cat.clone());
+            let ts = TimeSeriesBuilder::new()
+                .timestamps(make_timestamps(n))
+                .values(y)
+                .calendar(cal)
+                .build()
+                .unwrap();
+
+            let mut model = RegressionForecaster::ols(
+                RegressionFeatures::new()
+                    .no_trend()
+                    .no_exog()
+                    .with_categorical("c", vec![0, 1], CategoricalStrategy::Count)
+                    .unwrap(),
+            );
+            model.fit(&ts).unwrap();
+            let names = model.features().feature_names(&[]);
+            assert!(names.contains(&"c_count".to_string()));
+
+            // Predict on cat values 0 and 1 — encoded as counts 20 and 10.
+            // Should produce finite forecasts.
+            let mut fr = HashMap::new();
+            fr.insert("c".to_string(), vec![0.0, 1.0]);
+            let preds = model.predict_with_exog(2, &fr).unwrap();
+            for &p in preds.primary() {
+                assert!(p.is_finite());
+            }
+        }
+
+        #[test]
+        fn categorical_unknown_category_handled() {
+            // Train on cat in {0, 1}, predict on unknown cat 99.
+            let n = 20;
+            let cat: Vec<f64> = (0..n).map(|i| (i % 2) as f64).collect();
+            let y: Vec<f64> = cat.clone();
+            let cal = CalendarAnnotations::new().with_regressor("c".to_string(), cat.clone());
+            let ts = TimeSeriesBuilder::new()
+                .timestamps(make_timestamps(n))
+                .values(y)
+                .calendar(cal)
+                .build()
+                .unwrap();
+
+            let mut model = RegressionForecaster::ols(
+                RegressionFeatures::new()
+                    .no_trend()
+                    .no_exog()
+                    .with_categorical(
+                        "c",
+                        vec![0, 1],
+                        CategoricalStrategy::OneHot { drop_first: false },
+                    )
+                    .unwrap(),
+            );
+            model.fit(&ts).unwrap();
+            // Future has cat=99 which is unknown — all dummy columns 0 → predict baseline.
+            let mut fr = HashMap::new();
+            fr.insert("c".to_string(), vec![99.0]);
+            let preds = model.predict_with_exog(1, &fr).unwrap();
+            assert!(preds.primary()[0].is_finite());
+        }
+
+        #[test]
+        fn categorical_validates_inputs() {
+            // empty categories
+            assert!(RegressionFeatures::new()
+                .with_categorical("c", vec![], CategoricalStrategy::Ordinal)
+                .is_err());
+            // duplicate categories
+            assert!(RegressionFeatures::new()
+                .with_categorical("c", vec![1, 1, 2], CategoricalStrategy::Ordinal)
+                .is_err());
+            // negative target smoothing
+            assert!(RegressionFeatures::new()
+                .with_categorical(
+                    "c",
+                    vec![0, 1],
+                    CategoricalStrategy::Target { smoothing: -1.0 }
+                )
+                .is_err());
+        }
+
+        #[test]
+        fn classify_features_marks_target_encoding_data_dependent() {
+            let feats = RegressionFeatures::new()
+                .no_trend()
+                .no_exog()
+                .with_categorical(
+                    "c",
+                    vec![0, 1],
+                    CategoricalStrategy::Target { smoothing: 1.0 },
+                )
+                .unwrap();
+            let classified = feats.classify_features(&[]);
+            let target_safety = classified
+                .iter()
+                .find(|(name, _)| name == "c_target")
+                .map(|(_, s)| *s);
+            assert_eq!(target_safety, Some(FeatureSafety::DataDependent));
         }
 
         #[test]
@@ -5416,10 +5968,10 @@ mod ols_impl {
 
 #[cfg(feature = "postprocess")]
 pub use ols_impl::{
-    ChangepointEncoding, ChangepointFeature, EventDistanceFeature, EventDistanceMode,
-    ExogFeatureSpec, FeatureSafety, LagSelectionCriterion, RecursiveFeature, RegressionBackend,
-    RegressionFeatures, RegressionForecaster, RollingFeature, RollingStatKind, SeasonalSpec,
-    StructuralFeature, TrendType, WeightStrategy,
+    CategoricalStrategy, ChangepointEncoding, ChangepointFeature, EventDistanceFeature,
+    EventDistanceMode, ExogFeatureSpec, FeatureSafety, LagSelectionCriterion, RecursiveFeature,
+    RegressionBackend, RegressionFeatures, RegressionForecaster, RollingFeature, RollingStatKind,
+    SeasonalSpec, StructuralFeature, TrendType, WeightStrategy,
 };
 // Re-export InformationCriterion so users can configure Dynamic backend without
 // depending on anofox-regression directly.
