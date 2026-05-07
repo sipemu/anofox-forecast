@@ -744,6 +744,7 @@ println!("Upper: {:?}", intervals.upper());
 | Trend | `linear_trend`, `adf_test`, `ar_coefficient`, `hp_trend_strength`, `piecewise_n_segments` |
 | Seasonality | `dummy_seasonal_strength`, `seasonal_diff_strength`, `seasonal_diff_variance_reduction` |
 | Selection | `select_features`, `rank_features`, `select_features_mi`, `rank_features_mi` (MI-based, requires `forecastability`) |
+| Cross-series (panel) | `panel_aggregate`, `panel_mean`, `panel_median`, `panel_std`, `panel_rank` — per-timestamp aggregates across N sibling series with optional leave-one-out leakage guard |
 
 ### Postprocessing Types
 

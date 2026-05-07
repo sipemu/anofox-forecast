@@ -29,6 +29,7 @@ pub mod distribution;
 pub mod entropy;
 pub mod factory;
 pub mod generator;
+pub mod panel;
 pub mod selection;
 pub mod trend;
 
