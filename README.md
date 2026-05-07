@@ -672,6 +672,7 @@ println!("Upper: {:?}", intervals.upper());
 | `bootstrap_forecast()` | Bootstrap confidence intervals for any model |
 | `diagnose_residuals()` | Unified residual diagnostics (Ljung-Box, DW, Jarque-Bera) |
 | `ModelDiagnostics` | Comprehensive diagnostics: Ljung-Box, Jarque-Bera, Breusch-Pagan |
+| `variance_inflation_factors` / `condition_number` / `multicollinearity_report` | Pre-fit diagnostic on a regression design matrix — surfaces collinear / redundant columns before Ridge/ElasticNet instability bites |
 | `IntermittentDiagnostics` | Syntetos-Boylan demand classification with model recommendations |
 | `AidAnalyzer` | Automatic Identification of Demand: distribution fitting, anomaly detection |
 | `rmsse()` / `wrmsse()` | Root Mean Squared Scaled Error and Weighted RMSSE (M5 competition metric) |
