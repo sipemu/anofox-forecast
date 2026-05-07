@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-05-07
+
 ### Added
 
 - **Rolling-feature kinds**: `RollingStatKind` gains `Quantile { tau }`, `Range`, `Iqr`, `Skew`, `Kurt`, `Slope` (OLS slope), `Rank` (fractional rank of latest value), `ZScore`, `CountAbove { threshold }`, `CountBelow { threshold }`. Convenience builders on `RegressionFeatures`: `with_rolling_quantile`, `with_rolling_range`, `with_rolling_iqr`, `with_rolling_skew`, `with_rolling_kurt`, `with_rolling_slope`, `with_rolling_rank`, `with_rolling_zscore`, `with_rolling_count_above`, `with_rolling_count_below`.
