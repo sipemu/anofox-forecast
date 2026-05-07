@@ -28,6 +28,7 @@
 pub mod aid;
 pub mod diagnostics;
 pub mod intermittent_diagnostics;
+pub mod multicollinearity;
 pub mod residual_tests;
 pub mod stationarity;
 
@@ -39,6 +40,12 @@ pub use anofox_regression::solvers::{DemandDistribution, DemandType};
 
 // Re-export from diagnostics
 pub use diagnostics::ModelDiagnostics;
+
+// Re-export from multicollinearity
+pub use multicollinearity::{
+    condition_number, multicollinearity_report, multicollinearity_report_with_thresholds,
+    variance_inflation_factors, MulticollinearityReport, Severity, COND_WARN, VIF_FAIL, VIF_WARN,
+};
 
 // Re-export from intermittent_diagnostics
 pub use intermittent_diagnostics::{DemandClassification, IntermittentDiagnostics};
