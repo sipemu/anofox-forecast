@@ -217,7 +217,7 @@ console.log(forecast.values);
 
 - **Data Transformations**
   - `Pipeline`: composable transform chains around any `Forecaster` — `Pipeline::builder().transform(BoxCoxTransform::auto()).transform(DifferenceTransform::new(1)).model(Box::new(Naive::new())).build()`
-  - `Transform` trait: `DifferenceTransform`, `SeasonalDifferenceTransform`, `BoxCoxTransform`, `ScaleTransform`, `LogTransform`
+  - `Transform` trait: `DifferenceTransform`, `SeasonalDifferenceTransform`, `BoxCoxTransform`, `YeoJohnsonTransform` (Box-Cox extension that handles zeros and negatives), `ScaleTransform`, `LogTransform`
   - Scaling: standardization, min-max, robust scaling
   - Box-Cox transformation with automatic lambda selection
   - Window functions: rolling mean, std, min, max, median
@@ -705,7 +705,7 @@ println!("Upper: {:?}", intervals.upper());
 | `ExogFeatureSpec` | Lag, rolling, polynomial, interaction, and categorical transforms of exog columns; `RegressionFeatures::with_exog_lags()` / `with_exog_rolling()` / `with_exog_polynomial()` / `with_exog_interaction()` / `with_categorical()` |
 | `CategoricalStrategy` | `OneHot { drop_first }`, `Ordinal`, `Count`, `Target { smoothing }` — encoding for integer-coded exog with deterministic-shape predeclared categories |
 | `Pipeline` / `PipelineBuilder` | Composable transform → model chains (BoxCox → Difference → Model → inverse) |
-| `Transform` trait | Reversible transforms: `DifferenceTransform`, `SeasonalDifferenceTransform`, `BoxCoxTransform`, `ScaleTransform`, `LogTransform` |
+| `Transform` trait | Reversible transforms: `DifferenceTransform`, `SeasonalDifferenceTransform`, `BoxCoxTransform`, `YeoJohnsonTransform`, `ScaleTransform`, `LogTransform` |
 | `FeatureGenerator` | Deterministic feature generation: `fourier()`, `day_of_week()`, `month_of_year()`, `quarter()`, `holiday()` |
 | `OLSResult` / `exog_coefficients()` | Inspect OLS pre-regression coefficients (intercept, betas, regressor names) |
 | `deseasonalize()` / `seasonal_adjust()` | Remove seasonal component from data or TimeSeries |

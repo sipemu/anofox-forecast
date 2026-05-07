@@ -24,6 +24,7 @@ pub mod pipeline;
 pub mod scale;
 pub mod transforms;
 pub mod window;
+pub mod yeo_johnson;
 
 // Re-export from scale
 pub use scale::{center, normalize, robust_scale, scale_to_range, standardize, ScaleResult};
@@ -40,8 +41,11 @@ pub use pipeline::{InverseMode, Pipeline, PipelineBuilder, Transform};
 // Re-export from transforms
 pub use transforms::{
     BoxCoxTransform, DifferenceTransform, LogTransform, ScaleMethod, ScaleTransform,
-    SeasonalDifferenceTransform,
+    SeasonalDifferenceTransform, YeoJohnsonTransform,
 };
+
+// Re-export from yeo_johnson
+pub use yeo_johnson::{inv_yeo_johnson, yeo_johnson, yeo_johnson_auto, yeo_johnson_lambda};
 
 // Re-export from window
 pub use window::{
