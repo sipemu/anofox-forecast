@@ -274,6 +274,80 @@ impl Transform for BoxCoxTransform {
     }
 }
 
+// ── YeoJohnsonTransform ─────────────────────────────────────────────────────
+
+/// Yeo-Johnson power transform — Box-Cox generalization that handles
+/// non-positive values (zeros and negatives).
+///
+/// Reference: Yeo, I.-K., & Johnson, R. A. (2000). *A new family of power
+/// transformations to improve normality or symmetry.* Biometrika, 87(4),
+/// 954-959.
+#[derive(Debug, Clone)]
+pub struct YeoJohnsonTransform {
+    /// `None` → auto-select; `Some(λ)` → use fixed lambda.
+    requested_lambda: Option<f64>,
+    /// Lambda actually used (set after `fit_transform`).
+    fitted_lambda: Option<f64>,
+}
+
+impl YeoJohnsonTransform {
+    /// Create a Yeo-Johnson transform that automatically selects lambda
+    /// via maximum-likelihood over `[-2, 2]`.
+    pub fn auto() -> Self {
+        Self {
+            requested_lambda: None,
+            fitted_lambda: None,
+        }
+    }
+
+    /// Create a Yeo-Johnson transform with a fixed lambda.
+    pub fn with_lambda(lambda: f64) -> Self {
+        Self {
+            requested_lambda: Some(lambda),
+            fitted_lambda: None,
+        }
+    }
+
+    /// Lambda actually used (after `fit_transform`).
+    pub fn fitted_lambda(&self) -> Option<f64> {
+        self.fitted_lambda
+    }
+}
+
+impl Transform for YeoJohnsonTransform {
+    fn fit_transform(&mut self, values: &[f64]) -> Result<Vec<f64>> {
+        if values.is_empty() {
+            return Err(ForecastError::EmptyData);
+        }
+        let lambda = self
+            .requested_lambda
+            .unwrap_or_else(|| crate::transform::yeo_johnson::yeo_johnson_lambda(values));
+        self.fitted_lambda = Some(lambda);
+        Ok(crate::transform::yeo_johnson::yeo_johnson(values, lambda))
+    }
+
+    fn inverse(&self, values: &[f64], _mode: InverseMode) -> Result<Vec<f64>> {
+        let lambda = self.fitted_lambda.ok_or(ForecastError::FitRequired {
+            model: Some("YeoJohnsonTransform".into()),
+        })?;
+        Ok(crate::transform::yeo_johnson::inv_yeo_johnson(
+            values, lambda,
+        ))
+    }
+
+    fn offset(&self) -> usize {
+        0
+    }
+
+    fn name(&self) -> &str {
+        "YeoJohnson"
+    }
+
+    fn clone_box(&self) -> Box<dyn Transform> {
+        Box::new(self.clone())
+    }
+}
+
 // ── ScaleMethod ─────────────────────────────────────────────────────────────
 
 /// Scaling method for [`ScaleTransform`].
@@ -532,6 +606,50 @@ mod tests {
         let data = vec![-1.0, 0.0, 1.0];
         let mut t = BoxCoxTransform::auto();
         assert!(t.fit_transform(&data).is_err());
+    }
+
+    // ── YeoJohnson ──────────────────────────────────────────────────────
+
+    #[test]
+    fn yeo_johnson_auto_roundtrip_with_negatives() {
+        // BoxCox would error here — Yeo-Johnson handles it.
+        let data = vec![-3.0, -1.0, 0.0, 1.0, 3.0, 5.0];
+        let mut t = YeoJohnsonTransform::auto();
+        let transformed = t.fit_transform(&data).unwrap();
+        let recovered = t.inverse(&transformed, InverseMode::Predict).unwrap();
+        for (a, b) in data.iter().zip(recovered.iter()) {
+            assert_relative_eq!(a, b, epsilon = 1e-8);
+        }
+        assert!(t.fitted_lambda().is_some());
+    }
+
+    #[test]
+    fn yeo_johnson_fixed_lambda() {
+        let data: Vec<f64> = (-5..=5).map(|i| i as f64).collect();
+        let mut t = YeoJohnsonTransform::with_lambda(0.5);
+        let transformed = t.fit_transform(&data).unwrap();
+        let recovered = t.inverse(&transformed, InverseMode::Predict).unwrap();
+        for (a, b) in data.iter().zip(recovered.iter()) {
+            assert_relative_eq!(a, b, epsilon = 1e-10);
+        }
+    }
+
+    #[test]
+    fn yeo_johnson_inverse_before_fit_errors() {
+        let t = YeoJohnsonTransform::auto();
+        assert!(t.inverse(&[1.0], InverseMode::Predict).is_err());
+    }
+
+    #[test]
+    fn yeo_johnson_metadata() {
+        assert_eq!(YeoJohnsonTransform::auto().offset(), 0);
+        assert_eq!(YeoJohnsonTransform::auto().name(), "YeoJohnson");
+    }
+
+    #[test]
+    fn yeo_johnson_empty_input_errors() {
+        let mut t = YeoJohnsonTransform::auto();
+        assert!(t.fit_transform(&[]).is_err());
     }
 
     // ── Scale ───────────────────────────────────────────────────────────
