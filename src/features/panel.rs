@@ -4,7 +4,7 @@
 //! retail dataset, sensors in an IoT fleet), these helpers compute
 //! per-timestamp aggregates across the cross-section. The resulting
 //! `N × T` matrix is suitable for use as an additional regressor on each
-//! per-series forecaster (e.g. via [`RegressionFeatures::with_exog_lags`]
+//! per-series forecaster (e.g. via `RegressionFeatures::with_exog_lags`
 //! or just by appending to the calendar regressors map).
 //!
 //! # Leakage
