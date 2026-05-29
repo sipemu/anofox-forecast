@@ -51,7 +51,10 @@ pub use cost::{
 pub use pelt::{pelt_detect, AutoPeltResult, Pelt, PeltConfig, PeltResult};
 
 // Trait-based detection surface (mirrors ruptures).
-pub use algorithms::PeltDetector;
+pub use algorithms::{
+    BinsegDetector, BottomUpDetector, DynpDetector, KernelCpdDetector, KernelKind, PeltDetector,
+    WindowDetector,
+};
 pub use costs::{
     CostCusum, CostL1, CostL2, CostLinearTrend, CostMeanVariance, CostNormal, CostPoisson,
 };
