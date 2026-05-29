@@ -126,12 +126,14 @@ console.log(forecast.values);
   - Welch's periodogram for reduced variance spectral estimation
   - For comprehensive periodicity detection, see [fdars](https://crates.io/crates/fdars-core)
 
-- **Changepoint Detection**
-  - PELT algorithm with O(n) average complexity
-  - `auto_detect()`: automatic penalty selection via CROPS (Haynes et al. 2017) + elbow detection
-  - `crops()`: explore the penalty landscape (penalty vs n_changepoints curve)
-  - Builder API: `Pelt::new(CostFunction::L2).min_size(5).penalty(5.0).detect(&data)`
-  - Multiple cost functions: L1, L2, Normal, Poisson, LinearTrend, MeanVariance, Cusum
+- **Changepoint Detection** — full [`ruptures`](https://github.com/deepcharles/ruptures) parity
+  - 6 detection algorithms: `PeltDetector` (PELT pruning), `DynpDetector` (exact O(K·n²) dynamic programming), `BinsegDetector` (greedy binary segmentation), `BottomUpDetector` (agglomerative), `WindowDetector` (sliding-window), `KernelCpdDetector` (kernel — Linear / Rbf / Cosine)
+  - 14 cost functions: `CostL1`, `CostL2`, `CostNormal`, `CostLinear` (multivariate OLS), `CostRank`, `CostMahalanobis`, `CostAR`, `CostRbf`, `CostCosine`, `CostCLinear` (= ruptures' 10) plus `CostPoisson`, `CostMeanVariance`, `CostCusum`, `CostLinearTrend` (extras)
+  - 3 evaluation metrics: `precision_recall`, `hausdorff`, `randindex`
+  - Multivariate-aware `Signal` carrier (`(n, d)` row-major); `From<&[f64]>` for univariate ergonomics
+  - Trait-based composition: any `Cost` works with any `Detector`. Three predict modes: `predict_pen(p)`, `predict_n_bkps(K)`, `predict_eps(ε)`
+  - Validated against `ruptures==1.1.9` via `scripts/generate_ruptures_fixtures.py` + `tests/changepoint_ruptures_parity.rs` — 5/5 fixtures match exactly on deterministic detectors
+  - Legacy free-function API (`pelt_detect`, `Pelt::new`, `CostFunction` enum, `auto_detect()`, `crops()`) retained unchanged for backward compat
 
 - **Sequential Monitoring of Forecast Errors** (`monitor::` module)
   - Online changepoint detection on a stream of forecast residuals — flags the moment a fitted model becomes inaccurate
@@ -485,20 +487,41 @@ if let Some(ols) = model.exog_coefficients() {
 
 ### Changepoint Detection
 
+Full [`ruptures`](https://github.com/deepcharles/ruptures) parity — trait-based API where any `Cost` composes with any `Detector`, plus three predict modes:
+
+```rust
+use anofox_forecast::changepoint::{
+    CostL2, CostRbf, Detector, DynpDetector, PeltDetector, Signal,
+};
+
+// Penalty mode (PELT, exact O(n) average via pruning)
+let signal = Signal::univariate(&data);
+let mut pelt = PeltDetector::new(CostL2::new()).min_size(5);
+pelt.fit(&signal)?;
+let r = pelt.predict_pen(3.0)?;
+println!("{} CPs at {:?}", r.n_changepoints(), r.changepoints());
+
+// Fixed number of changepoints (Dynp, exact dynamic programming)
+let mut dynp = DynpDetector::new(CostL2::new()).min_size(5);
+dynp.fit(&signal)?;
+let r = dynp.predict_n_bkps(3)?;
+
+// Kernel cost composes with any detector (Pelt, Dynp, Binseg, …)
+let mut pelt_rbf = PeltDetector::new(CostRbf::auto());
+pelt_rbf.fit(&signal)?;
+let r = pelt_rbf.predict_pen(1.0)?;
+```
+
+Validated against `ruptures==1.1.9`: `scripts/generate_ruptures_fixtures.py` produces JSON fixtures from the canonical library, `tests/changepoint_ruptures_parity.rs` asserts identical breakpoints + total cost.
+
+The legacy free-function API stays for backward compat:
+
 ```rust
 use anofox_forecast::changepoint::{Pelt, CostFunction};
 
-// Automatic penalty selection (recommended)
 let result = Pelt::new(CostFunction::L2)
     .min_size(5)
-    .auto_detect(&data);
-println!("Found {} changepoints at {:?}", result.result.n_changepoints, result.result.changepoints);
-println!("Auto-selected penalty: {:.2}", result.penalty);
-
-// Manual penalty
-let result = Pelt::new(CostFunction::L2)
-    .penalty(10.0)
-    .detect(&data);
+    .auto_detect(&data);                          // CROPS + elbow detection
 ```
 
 ### Sequential Monitoring of Forecast Errors
@@ -790,7 +813,7 @@ cargo run --example postprocess_conformal   # Conformal prediction intervals
 
 ## Acknowledgments
 
-The postprocessing module is a Rust port of [PostForecasts.jl](https://github.com/lipiecki/PostForecasts.jl). The sequential monitoring module (`monitor::`) is a Rust port of [changepoint.forecast](https://github.com/grundy95/changepoint.forecast) by Thomas Grundy (Lancaster University), based on [Fremdt (2014)](https://doi.org/10.1080/02331888.2014.921899). Feature extraction is inspired by [tsfresh](https://github.com/blue-yonder/tsfresh). Forecasting models are validated against [StatsForecast](https://github.com/Nixtla/statsforecast) by Nixtla. See [THIRDPARTY_NOTICE.md](THIRDPARTY_NOTICE.md) for full attribution and references to the research papers that inspired this implementation.
+The postprocessing module is a Rust port of [PostForecasts.jl](https://github.com/lipiecki/PostForecasts.jl). The sequential monitoring module (`monitor::`) is a Rust port of [changepoint.forecast](https://github.com/grundy95/changepoint.forecast) by Thomas Grundy (Lancaster University), based on [Fremdt (2014)](https://doi.org/10.1080/02331888.2014.921899). The trait-based changepoint surface (`changepoint::Detector` + `Cost`) mirrors [`ruptures`](https://github.com/deepcharles/ruptures) by [Charles Truong / Laurent Oudre / Nicolas Vayatis](https://centre-borelli.github.io/ruptures-docs/) and is validated against `ruptures==1.1.9` via the parity fixtures in `tests/data/ruptures_fixtures/`. Feature extraction is inspired by [tsfresh](https://github.com/blue-yonder/tsfresh). Forecasting models are validated against [StatsForecast](https://github.com/Nixtla/statsforecast) by Nixtla. See [THIRDPARTY_NOTICE.md](THIRDPARTY_NOTICE.md) for full attribution and references to the research papers that inspired this implementation.
 
 ## License
 
