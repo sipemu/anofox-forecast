@@ -37,11 +37,29 @@
 //!     .penalty(10.0);
 //! ```
 
+pub mod algorithms;
 pub mod cost;
+pub mod costs;
+pub mod detector;
+pub mod metrics;
 pub mod pelt;
+pub mod signal;
 
 pub use cost::{
     cusum_cost, l1_cost, l2_cost, linear_trend_cost, mean_variance_cost, normal_cost, poisson_cost,
     segment_cost, total_cost, CostFunction,
 };
 pub use pelt::{pelt_detect, AutoPeltResult, Pelt, PeltConfig, PeltResult};
+
+// Trait-based detection surface (mirrors ruptures).
+pub use algorithms::{
+    BinsegDetector, BottomUpDetector, DynpDetector, KernelCpdDetector, KernelKind, PeltDetector,
+    WindowDetector,
+};
+pub use costs::{
+    CostAR, CostCLinear, CostCosine, CostCusum, CostL1, CostL2, CostLinear, CostLinearTrend,
+    CostMahalanobis, CostMeanVariance, CostNormal, CostPoisson, CostRank, CostRbf,
+};
+pub use detector::{Cost, Detector, DetectorResult};
+pub use metrics::{hausdorff, precision_recall, randindex, PrecisionRecall};
+pub use signal::Signal;
