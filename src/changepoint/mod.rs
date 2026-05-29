@@ -56,7 +56,8 @@ pub use algorithms::{
     WindowDetector,
 };
 pub use costs::{
-    CostCusum, CostL1, CostL2, CostLinearTrend, CostMeanVariance, CostNormal, CostPoisson,
+    CostAR, CostCLinear, CostCosine, CostCusum, CostL1, CostL2, CostLinear, CostLinearTrend,
+    CostMahalanobis, CostMeanVariance, CostNormal, CostPoisson, CostRank, CostRbf,
 };
 pub use detector::{Cost, Detector, DetectorResult};
 pub use signal::Signal;
