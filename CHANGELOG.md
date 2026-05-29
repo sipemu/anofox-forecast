@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.5] - 2026-05-13
+
 ### Added
 
 - **Full [`ruptures`](https://github.com/deepcharles/ruptures)-parity changepoint surface** in `src/changepoint/`. New trait-based API lives alongside the existing free-function one (`pelt_detect`, `PeltConfig`, `CostFunction` enum unchanged). Mirrors `ruptures` 1.1.9.
