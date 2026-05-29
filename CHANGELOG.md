@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Full [`ruptures`](https://github.com/deepcharles/ruptures)-parity changepoint surface** in `src/changepoint/`. New trait-based API lives alongside the existing free-function one (`pelt_detect`, `PeltConfig`, `CostFunction` enum unchanged). Mirrors `ruptures` 1.1.9.
+  - **Traits**: `Cost` (`fit` + `error(start, end)` + `min_size` + `name`), `Detector` (`fit` + `predict_pen` / `predict_n_bkps` / `predict_eps`), `DetectorResult` (segments + changepoints + n_changepoints helpers, terminal-`n` included matching ruptures convention).
+  - **`Signal` carrier** for univariate / multivariate (`From<&[f64]>` for univariate ergonomics).
+  - **Detectors** (6 of 6 from ruptures): `PeltDetector<C>` (PELT pruning), `DynpDetector<C>` (exact O(K·n²) dynamic programming), `BinsegDetector<C>` (greedy binary segmentation), `BottomUpDetector<C>` (agglomerative merge), `WindowDetector<C>` (sliding-window discrepancy), `KernelCpdDetector` (kernel changepoints — Linear / Rbf / Cosine, O(n²) gram cumsum).
+  - **Cost functions** (10 of 10 from ruptures + 3 extras): `CostL1`, `CostL2`, `CostNormal`, `CostLinear` (multivariate OLS), `CostRank` (rank-then-L2), `CostMahalanobis` (user-supplied metric matrix), `CostAR` (autoregressive RSS via per-segment Cholesky), `CostRbf` (RBF kernel with median-heuristic γ), `CostCosine` (cosine kernel), `CostCLinear` (continuous piecewise linear); plus `CostPoisson`, `CostMeanVariance`, `CostCusum`, `CostLinearTrend` retained from v0.7.x.
+  - **Metrics** (3 of 3 from `ruptures.metrics`): `precision_recall(truth, pred, margin)`, `hausdorff(a, b)`, `randindex(truth, pred, n)`.
+- **Parity validation against `ruptures==1.1.9`**:
+  - `scripts/generate_ruptures_fixtures.py` — Python script (pinned to ruptures 1.1.9, numpy 2.4.6) emits JSON fixtures recording the input signal, parameters, and ruptures-computed breakpoints + total cost. Version header lets the Rust test refuse on drift.
+  - 5 committed fixtures under `tests/data/ruptures_fixtures/` covering Pelt + Dynp + Binseg + BottomUp + Window with L2 cost.
+  - `tests/changepoint_ruptures_parity.rs` (gated on the `serde` feature): loads each fixture, runs the Rust port with identical parameters, and asserts exact breakpoint match for the deterministic detectors (Pelt, Dynp, Binseg, BottomUp), ±2·jump tolerance for Window, and total cost matching to 1e-6 relative tolerance across all five.
+- 69 new unit tests + 5 parity integration tests; lib suite 2843 → 2912 (+69) under `--all-features`.
+
 ## [0.7.4] - 2026-05-07
 
 ### Added
