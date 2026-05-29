@@ -41,6 +41,7 @@ pub mod algorithms;
 pub mod cost;
 pub mod costs;
 pub mod detector;
+pub mod metrics;
 pub mod pelt;
 pub mod signal;
 
@@ -60,4 +61,5 @@ pub use costs::{
     CostMahalanobis, CostMeanVariance, CostNormal, CostPoisson, CostRank, CostRbf,
 };
 pub use detector::{Cost, Detector, DetectorResult};
+pub use metrics::{hausdorff, precision_recall, randindex, PrecisionRecall};
 pub use signal::Signal;
