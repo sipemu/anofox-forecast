@@ -718,7 +718,8 @@ println!("Upper: {:?}", intervals.upper());
 | `Recency` | Fit on recent data only (Window, Fraction, Full, Auto via PELT) |
 | `BinnedConformalPredictor` | Heteroscedastic prediction intervals binned by predicted magnitude |
 | `RegressionForecaster` | Multi-backend regression: OLS, Ridge, ElasticNet, Quantile, WLS, RLS, Tweedie, Poisson, BLS, Dynamic |
-| `RegressionBackend` | Backend selection enum with convenience constructors (`ridge()`, `quantile()`, `wls_decay()`, etc.) |
+| `RegressionBackend` | Backend selection enum with convenience constructors (`ridge()`, `quantile()`, `wls_decay()`, `wls_logistic()`, etc.) |
+| `WeightStrategy` | WLS weight shape: `Equal`, `ExponentialDecay(decay)`, `Custom(vec)`, or `Logistic { offset }` (sigmoid recency weights centred `offset` steps from the end) |
 | `RegressionFeatures` | Feature builder for regression models (trend, seasonal, lags, structural, recursive, exog) |
 | `FeatureSafety` | Feature leakage classification: Deterministic, DataDependent, Structural, External |
 | `StructuralFeature` | Trait for forward-filled features during prediction (changepoints, outlier indicators) |

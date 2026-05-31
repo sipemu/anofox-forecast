@@ -938,6 +938,21 @@ mod ols_impl {
         ExponentialDecay(f64),
         /// Custom weight vector (must match training row count after lag offset).
         Custom(Vec<f64>),
+        /// Logistic (sigmoid) recency weights centred `offset` steps from
+        /// the end of the series:
+        ///
+        /// `w_i = 1 / (1 + exp(-((i as f64) - (n as f64 - offset))))`
+        ///
+        /// Produces a "use the recent window" effect with smooth boundaries —
+        /// the last ~`offset` observations contribute near 1.0, older ones
+        /// decay through a single inflection point and plateau near 0.
+        /// `offset` is the distance (in observations) from `n` at which the
+        /// sigmoid is centred; typical values are 6–24.
+        Logistic {
+            /// Distance from the end of the series at which the sigmoid is
+            /// centred. Must be finite; negative values invert the sigmoid.
+            offset: f64,
+        },
     }
 
     /// Specifies which regression estimator backs the forecaster.
@@ -1094,6 +1109,21 @@ mod ols_impl {
                             let mut w = Col::zeros(n);
                             for (i, &val) in v.iter().enumerate() {
                                 w[i] = val;
+                            }
+                            w
+                        }
+                        WeightStrategy::Logistic { offset } => {
+                            if !offset.is_finite() {
+                                return Err(format!(
+                                    "WLS Logistic: offset must be finite, got {}",
+                                    offset
+                                ));
+                            }
+                            let mut w = Col::zeros(n);
+                            let centre = n as f64 - *offset;
+                            for i in 0..n {
+                                let z = (i as f64) - centre;
+                                w[i] = 1.0 / (1.0 + (-z).exp());
                             }
                             w
                         }
@@ -2997,6 +3027,21 @@ mod ols_impl {
             )
         }
 
+        /// Create a WLS forecaster with logistic (sigmoid) recency weights
+        /// centred `offset` steps from the end of the training series.
+        ///
+        /// See [`WeightStrategy::Logistic`] for the formula. Typical
+        /// `offset` values are 6–24 — e.g. `wls_logistic(12.0, …)` makes
+        /// the last ~12 observations dominate the fit on a long series.
+        pub fn wls_logistic(offset: f64, features: RegressionFeatures) -> Self {
+            Self::new(
+                RegressionBackend::Wls {
+                    strategy: WeightStrategy::Logistic { offset },
+                },
+                features,
+            )
+        }
+
         /// Create a Recursive Least Squares forecaster (adaptive coefficients).
         ///
         /// `forgetting_factor` controls adaptation speed (0 < λ ≤ 1).
@@ -4815,6 +4860,63 @@ mod ols_impl {
             for &v in forecast.primary() {
                 assert!(v.is_finite());
             }
+        }
+
+        #[test]
+        fn backend_wls_logistic_fit_predict() {
+            let ts = make_linear_ts(60);
+            let mut model = RegressionForecaster::wls_logistic(
+                12.0,
+                RegressionFeatures::new().trend().no_exog(),
+            );
+            model.fit(&ts).unwrap();
+            assert_eq!(model.name(), "WLS");
+            let forecast = model.predict(5).unwrap();
+            assert_eq!(forecast.primary().len(), 5);
+            for &v in forecast.primary() {
+                assert!(v.is_finite());
+            }
+        }
+
+        #[test]
+        fn wls_logistic_weights_sigmoid_centred_at_offset_from_end() {
+            // For n = 36, offset = 12, the sigmoid is centred at i = n - offset = 24.
+            // Weight at i = 24 should be ~0.5; at i = n - 1 = 35 it should be near 1.0;
+            // at i = 0 it should be near 0.0.
+            //
+            // We can only observe weights indirectly via the fit, so use a series whose
+            // tail dominates: y[t] = 0 for t < n/2, y[t] = 100 for t >= n/2.
+            // ExponentialDecay with low decay would also fit; here we just check the
+            // logistic-fit produces a finite, sensible intercept dominated by the tail.
+            let n = 36;
+            let values: Vec<f64> = (0..n)
+                .map(|i| if i < n / 2 { 0.0 } else { 100.0 })
+                .collect();
+            let ts = TimeSeries::univariate(make_timestamps(n), values).unwrap();
+            let mut model = RegressionForecaster::wls_logistic(
+                6.0,
+                RegressionFeatures::new().trend().no_exog(),
+            );
+            model.fit(&ts).unwrap();
+            let forecast = model.predict(3).unwrap();
+            // Tail-weighted fit on a step function ending at 100 should predict near 100.
+            for &v in forecast.primary() {
+                assert!(
+                    (v - 100.0).abs() < 30.0,
+                    "logistic tail-weighted forecast should sit near 100, got {}",
+                    v
+                );
+            }
+        }
+
+        #[test]
+        fn wls_logistic_rejects_non_finite_offset() {
+            let ts = make_linear_ts(30);
+            let mut model = RegressionForecaster::wls_logistic(
+                f64::NAN,
+                RegressionFeatures::new().trend().no_exog(),
+            );
+            assert!(model.fit(&ts).is_err());
         }
 
         #[test]
