@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`WeightStrategy::Logistic { offset }`** (closes #98) — sigmoid recency weights for `RegressionForecaster::wls(…)`. Weight at observation `i` of an `n`-row training set is `1 / (1 + exp(-((i as f64) - (n as f64 - offset))))`, so the last ~`offset` observations contribute near 1.0 and older ones decay through a single inflection point and plateau near 0. Convenience constructor `RegressionForecaster::wls_logistic(offset, features)` mirrors the existing `wls_decay`. Different shape from `ExponentialDecay`: smooth plateaus at both ends with a single inflection, rather than monotonic geometric decay.
+
 ## [0.7.5] - 2026-05-13
 
 ### Added
