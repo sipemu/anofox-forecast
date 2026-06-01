@@ -104,6 +104,10 @@ jobs:
           echo "package.json:"
           cat js/package.json
 
+      # OIDC-only publish. Auth comes from npm's trusted-publisher config
+      # (configured for this repo + workflow on npmjs.com), tied to the
+      # `id-token: write` permission above. The `--provenance` flag emits
+      # the supply-chain attestation alongside the publish.
       - name: Publish to npm (dry run)
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
         working-directory: js
