@@ -1,11 +1,11 @@
 {
-  "name": "anofox-forecast-js",
+  "name": "@sipemu/anofox-forecast",
   "type": "module",
   "collaborators": [
     "Simon M"
   ],
   "description": "WebAssembly bindings for anofox-forecast time series forecasting library",
-  "version": "0.5.1",
+  "version": "0.7.6",
   "license": "MIT",
   "repository": {
     "type": "git",
