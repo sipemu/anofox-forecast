@@ -8,6 +8,7 @@
 
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
+use crate::models::inspect::{Explanation, Inspectable, TbatsExplanation};
 use crate::models::tbats::TBATS;
 use crate::models::{validate_series_complete, Forecaster};
 
@@ -384,6 +385,28 @@ impl Forecaster for AutoTBATS {
 
     fn name(&self) -> &str {
         "AutoTBATS"
+    }
+}
+
+impl Inspectable for AutoTBATS {
+    fn explanation(&self) -> Result<Explanation> {
+        let best = self
+            .best_model
+            .as_ref()
+            .ok_or_else(|| ForecastError::FitRequired {
+                model: Some("AutoTBATS".to_string()),
+            })?;
+        let fitted_values = best.fitted_values().map(|v| v.to_vec()).unwrap_or_default();
+        let residuals = best.residuals().map(|v| v.to_vec()).unwrap_or_default();
+
+        Ok(Explanation::Tbats(TbatsExplanation {
+            seasonal_periods: self.seasonal_periods.clone(),
+            box_cox_lambda: best.lambda(),
+            selected_config: self.selected_config.clone().unwrap_or_default(),
+            aic: self.best_aic,
+            fitted_values,
+            residuals,
+        }))
     }
 }
 

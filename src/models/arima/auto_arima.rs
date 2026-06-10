@@ -4,6 +4,7 @@ use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
 use crate::models::arima::diff::suggest_differencing;
 use crate::models::arima::model::{ARIMA, SARIMA};
+use crate::models::inspect::{ArimaExplanation, Explanation, Inspectable};
 use crate::models::{validate_series_complete, Forecaster};
 use crate::utils::ols::OLSResult;
 
@@ -1087,6 +1088,71 @@ impl Forecaster for AutoARIMA {
             }
             None => Err(ForecastError::FitRequired { model: None }),
         }
+    }
+}
+
+impl Inspectable for AutoARIMA {
+    fn explanation(&self) -> Result<Explanation> {
+        let model = self
+            .selected_model
+            .as_ref()
+            .ok_or_else(|| ForecastError::FitRequired {
+                model: Some("AutoARIMA".to_string()),
+            })?;
+        let order = self
+            .selected_order
+            .ok_or_else(|| ForecastError::FitRequired {
+                model: Some("AutoARIMA".to_string()),
+            })?;
+
+        let (coefficients, aic, bic, fitted_values, residuals) = match model {
+            SelectedModel::ARIMA(m) => {
+                let mut coeffs = Vec::new();
+                coeffs.extend_from_slice(m.ar_coefficients());
+                coeffs.extend_from_slice(m.ma_coefficients());
+                let f = m.fitted_values().map(|v| v.to_vec()).unwrap_or_default();
+                let r = m.residuals().map(|v| v.to_vec()).unwrap_or_default();
+                (
+                    coeffs,
+                    m.aic().unwrap_or(f64::NAN),
+                    m.bic().unwrap_or(f64::NAN),
+                    f,
+                    r,
+                )
+            }
+            SelectedModel::SARIMA(m) => {
+                let mut coeffs = Vec::new();
+                coeffs.extend_from_slice(m.ar_coefficients());
+                coeffs.extend_from_slice(m.ma_coefficients());
+                coeffs.extend_from_slice(m.seasonal_ar_coefficients());
+                coeffs.extend_from_slice(m.seasonal_ma_coefficients());
+                let f = m.fitted_values().map(|v| v.to_vec()).unwrap_or_default();
+                let r = m.residuals().map(|v| v.to_vec()).unwrap_or_default();
+                (
+                    coeffs,
+                    m.aic().unwrap_or(f64::NAN),
+                    m.bic().unwrap_or(f64::NAN),
+                    f,
+                    r,
+                )
+            }
+        };
+
+        let seasonal_order = if order.is_seasonal() {
+            Some((order.cap_p, order.cap_d, order.cap_q, order.s))
+        } else {
+            None
+        };
+
+        Ok(Explanation::Arima(ArimaExplanation {
+            order: (order.p, order.d, order.q),
+            seasonal_order,
+            coefficients,
+            aic,
+            bic,
+            fitted_values,
+            residuals,
+        }))
     }
 }
 

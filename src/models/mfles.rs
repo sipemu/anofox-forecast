@@ -12,6 +12,7 @@
 
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
+use crate::models::inspect::{Explanation, Inspectable, MflesExplanation};
 use crate::models::{validate_series_complete, Forecaster};
 use crate::utils::ols::{ols_fit, ols_residuals, OLSResult};
 use std::collections::HashMap;
@@ -1566,6 +1567,34 @@ impl Forecaster for MFLES {
 
     fn name(&self) -> &str {
         "MFLES"
+    }
+}
+
+impl Inspectable for MFLES {
+    fn explanation(&self) -> Result<Explanation> {
+        let fitted = self
+            .fitted
+            .clone()
+            .ok_or_else(|| ForecastError::FitRequired {
+                model: Some("MFLES".to_string()),
+            })?;
+        let residuals = self
+            .residuals
+            .clone()
+            .ok_or_else(|| ForecastError::FitRequired {
+                model: Some("MFLES".to_string()),
+            })?;
+
+        Ok(Explanation::Mfles(MflesExplanation {
+            seasonal_period: self.season_length,
+            max_rounds: self.max_rounds,
+            multiplicative: self.is_multiplicative,
+            penalty: self.penalty,
+            fitted_values: fitted,
+            trend_component: self.trend_full.clone().unwrap_or_default(),
+            seasonal_component: self.seasonal_full.clone().unwrap_or_default(),
+            residuals,
+        }))
     }
 }
 

@@ -5,6 +5,7 @@
 
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
+use crate::models::inspect::{Explanation, Inspectable, ThetaExplanation};
 use crate::models::theta::{DecompositionType, DynamicTheta, OptimizedTheta, Theta};
 use crate::models::{validate_series_complete, Forecaster};
 use crate::utils::ols::OLSResult;
@@ -432,6 +433,57 @@ impl Forecaster for AutoTheta {
                 m.predict_with_exog_intervals(horizon, future_regressors, level)
             }
         }
+    }
+}
+
+impl Inspectable for AutoTheta {
+    fn explanation(&self) -> Result<Explanation> {
+        let model = self
+            .fitted_model
+            .as_ref()
+            .ok_or_else(|| ForecastError::FitRequired {
+                model: Some("AutoTheta".to_string()),
+            })?;
+
+        let (variant, theta, alpha, fitted_values, residuals) = match model {
+            FittedModel::STM(m) => (
+                "STM".to_string(),
+                m.theta(),
+                m.alpha(),
+                m.fitted_values().map(|v| v.to_vec()).unwrap_or_default(),
+                m.residuals().map(|v| v.to_vec()).unwrap_or_default(),
+            ),
+            FittedModel::OTM(m) => (
+                "OTM".to_string(),
+                m.theta().unwrap_or(2.0),
+                m.alpha(),
+                m.fitted_values().map(|v| v.to_vec()).unwrap_or_default(),
+                m.residuals().map(|v| v.to_vec()).unwrap_or_default(),
+            ),
+            FittedModel::DSTM(m) => (
+                "DSTM".to_string(),
+                m.theta(),
+                Some(m.alpha()),
+                m.fitted_values().map(|v| v.to_vec()).unwrap_or_default(),
+                m.residuals().map(|v| v.to_vec()).unwrap_or_default(),
+            ),
+            FittedModel::DOTM(m) => (
+                "DOTM".to_string(),
+                m.theta(),
+                Some(m.alpha()),
+                m.fitted_values().map(|v| v.to_vec()).unwrap_or_default(),
+                m.residuals().map(|v| v.to_vec()).unwrap_or_default(),
+            ),
+        };
+
+        Ok(Explanation::Theta(ThetaExplanation {
+            variant,
+            theta,
+            alpha,
+            seasonal_period: self.seasonal_period,
+            fitted_values,
+            residuals,
+        }))
     }
 }
 
