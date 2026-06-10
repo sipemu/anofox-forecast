@@ -96,6 +96,61 @@ pub trait Forecaster {
     /// Get the residuals (actual - fitted).
     fn residuals(&self) -> Option<&[f64]>;
 
+    /// Trend component of the in-sample fit.
+    ///
+    /// Same length as [`fitted_values`](Self::fitted_values); `NaN` for any
+    /// rows that don't contribute (e.g. AR warmup). Default impl returns
+    /// `Err` — models that decompose into trend/seasonal override this.
+    fn trend_component(&self) -> Result<&[f64]> {
+        Err(ForecastError::InvalidParameter(format!(
+            "{} does not expose a trend component",
+            self.name()
+        )))
+    }
+
+    /// Seasonal component of the in-sample fit.
+    ///
+    /// Returns `Err` for non-seasonal fits (e.g. AutoETS selecting an ANN
+    /// spec). Callers should treat `Err` as "this fit has no seasonal
+    /// contribution" rather than a hard failure.
+    fn seasonal_component(&self) -> Result<&[f64]> {
+        Err(ForecastError::InvalidParameter(format!(
+            "{} does not expose a seasonal component",
+            self.name()
+        )))
+    }
+
+    /// Residual component: `training_values - fitted_values`.
+    ///
+    /// Default impl derives from [`residuals`](Self::residuals) when
+    /// available. Skipping `NaN` (warmup rows) is the caller's
+    /// responsibility.
+    fn residual_component(&self) -> Result<Vec<f64>> {
+        self.residuals().map(|r| r.to_vec()).ok_or_else(|| {
+            ForecastError::InvalidParameter(format!("{} does not expose residuals", self.name()))
+        })
+    }
+
+    /// The training values the model was fit on. Required for the
+    /// residual-Ridge `predict_with_exog` shim. Default returns `Err`.
+    fn training_values(&self) -> Result<&[f64]> {
+        Err(ForecastError::InvalidParameter(format!(
+            "{} does not retain training values",
+            self.name()
+        )))
+    }
+
+    /// The training-time exogenous regressor map (name → values),
+    /// retained at fit time. Used by the residual-Ridge
+    /// `predict_with_exog` shim to align historical regressor values
+    /// against in-sample residuals.
+    ///
+    /// Default returns `None`; models that participate in the shim
+    /// override this to expose their retained regressor map.
+    fn training_regressors(&self) -> Option<&HashMap<String, Vec<f64>>> {
+        None
+    }
+
     /// Get the model name.
     fn name(&self) -> &str;
 
