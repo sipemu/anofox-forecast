@@ -73,6 +73,10 @@ pub struct DynamicTheta {
     n: usize,
     /// OLS result for exogenous regressors (if any).
     exog_ols: Option<OLSResult>,
+    /// Training input values, retained for issue #106.
+    training_values_store: Option<Vec<f64>>,
+    /// Training-time exogenous regressors, retained for the residual-Ridge shim.
+    training_regressors_store: Option<std::collections::HashMap<String, Vec<f64>>>,
 }
 
 impl DynamicTheta {
@@ -96,6 +100,8 @@ impl DynamicTheta {
             residual_variance: None,
             n: 0,
             exog_ols: None,
+            training_values_store: None,
+            training_regressors_store: None,
         }
     }
 
@@ -119,6 +125,8 @@ impl DynamicTheta {
             residual_variance: None,
             n: 0,
             exog_ols: None,
+            training_values_store: None,
+            training_regressors_store: None,
         }
     }
 
@@ -497,6 +505,8 @@ impl DynamicTheta {
             residual_variance: None,
             n: 0,
             exog_ols: None,
+            training_values_store: None,
+            training_regressors_store: None,
         };
 
         let (mut level, mut meany, mut an, mut bn) = Self::init_state(values);
@@ -788,6 +798,14 @@ impl Forecaster for DynamicTheta {
 
         self.residuals = Some(residuals);
 
+        self.training_values_store = Some(raw_values.to_vec());
+        let regs = series.all_regressors();
+        self.training_regressors_store = if regs.is_empty() {
+            None
+        } else {
+            Some(regs.clone())
+        };
+
         Ok(())
     }
 
@@ -928,6 +946,27 @@ impl Forecaster for DynamicTheta {
 
     fn residuals(&self) -> Option<&[f64]> {
         self.residuals.as_deref()
+    }
+
+    fn training_values(&self) -> Result<&[f64]> {
+        self.training_values_store
+            .as_deref()
+            .ok_or(ForecastError::FitRequired {
+                model: Some("DynamicTheta".into()),
+            })
+    }
+
+    fn training_regressors(&self) -> Option<&std::collections::HashMap<String, Vec<f64>>> {
+        self.training_regressors_store.as_ref()
+    }
+
+    /// DynamicTheta's fitted values capture both the level trajectory and
+    /// the dynamic θ-line; trend_component = fitted_values keeps the issue
+    /// #106 invariant trivial. Per-component decomposition is a follow-up.
+    fn trend_component(&self) -> Result<&[f64]> {
+        self.fitted_values().ok_or(ForecastError::FitRequired {
+            model: Some("DynamicTheta".into()),
+        })
     }
 
     fn name(&self) -> &str {

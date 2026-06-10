@@ -70,6 +70,10 @@ pub struct OptimizedTheta {
     n: usize,
     /// OLS result for exogenous regressors (if any).
     exog_ols: Option<OLSResult>,
+    /// Training input values, retained for issue #106.
+    training_values_store: Option<Vec<f64>>,
+    /// Training-time exogenous regressors, retained for the residual-Ridge shim.
+    training_regressors_store: Option<std::collections::HashMap<String, Vec<f64>>>,
 }
 
 impl OptimizedTheta {
@@ -90,6 +94,8 @@ impl OptimizedTheta {
             residual_variance: None,
             n: 0,
             exog_ols: None,
+            training_values_store: None,
+            training_regressors_store: None,
         }
     }
 
@@ -661,6 +667,14 @@ impl Forecaster for OptimizedTheta {
 
         self.residuals = Some(residuals);
 
+        self.training_values_store = Some(raw_values.to_vec());
+        let regs = series.all_regressors();
+        self.training_regressors_store = if regs.is_empty() {
+            None
+        } else {
+            Some(regs.clone())
+        };
+
         Ok(())
     }
 
@@ -803,6 +817,27 @@ impl Forecaster for OptimizedTheta {
 
     fn residuals(&self) -> Option<&[f64]> {
         self.residuals.as_deref()
+    }
+
+    fn training_values(&self) -> Result<&[f64]> {
+        self.training_values_store
+            .as_deref()
+            .ok_or(ForecastError::FitRequired {
+                model: Some("OptimizedTheta".into()),
+            })
+    }
+
+    fn training_regressors(&self) -> Option<&std::collections::HashMap<String, Vec<f64>>> {
+        self.training_regressors_store.as_ref()
+    }
+
+    /// OptimizedTheta uses the trend = fitted_values approximation for the
+    /// issue #106 invariant; structural θ-line + seasonal split is a
+    /// follow-up.
+    fn trend_component(&self) -> Result<&[f64]> {
+        self.fitted_values().ok_or(ForecastError::FitRequired {
+            model: Some("OptimizedTheta".into()),
+        })
     }
 
     fn name(&self) -> &str {
