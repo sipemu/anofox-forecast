@@ -50,6 +50,10 @@ pub struct AutoTBATS {
     best_aic: f64,
     /// Selected configuration description.
     selected_config: Option<String>,
+    /// Training input values, retained for issue #106.
+    training_values_store: Option<Vec<f64>>,
+    /// Training-time exogenous regressors, retained for the residual-Ridge shim.
+    training_regressors_store: Option<std::collections::HashMap<String, Vec<f64>>>,
 }
 
 impl AutoTBATS {
@@ -64,6 +68,8 @@ impl AutoTBATS {
             best_model: None,
             best_aic: f64::MAX,
             selected_config: None,
+            training_values_store: None,
+            training_regressors_store: None,
         }
     }
 
@@ -315,6 +321,14 @@ impl Forecaster for AutoTBATS {
             ));
         }
 
+        self.training_values_store = Some(values.to_vec());
+        let regs = series.all_regressors();
+        self.training_regressors_store = if regs.is_empty() {
+            None
+        } else {
+            Some(regs.clone())
+        };
+
         Ok(())
     }
 
@@ -344,6 +358,28 @@ impl Forecaster for AutoTBATS {
 
     fn residuals(&self) -> Option<&[f64]> {
         self.best_model.as_ref()?.residuals()
+    }
+
+    fn training_values(&self) -> Result<&[f64]> {
+        self.training_values_store
+            .as_deref()
+            .ok_or(ForecastError::FitRequired {
+                model: Some("AutoTBATS".into()),
+            })
+    }
+
+    fn training_regressors(&self) -> Option<&std::collections::HashMap<String, Vec<f64>>> {
+        self.training_regressors_store.as_ref()
+    }
+
+    /// AutoTBATS uses the trend = fitted_values approximation for the
+    /// issue #106 invariant; per-state structural decomposition (Box-Cox
+    /// inverse-transformed level + trend + trigonometric seasonal + ARMA
+    /// residual) is a follow-up.
+    fn trend_component(&self) -> Result<&[f64]> {
+        self.fitted_values().ok_or(ForecastError::FitRequired {
+            model: Some("AutoTBATS".into()),
+        })
     }
 
     fn name(&self) -> &str {
