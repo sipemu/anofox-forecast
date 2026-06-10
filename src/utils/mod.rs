@@ -3,6 +3,7 @@
 pub mod bootstrap;
 pub mod comparison;
 pub mod cross_validation;
+pub mod exog_shim;
 pub mod metrics;
 pub mod ols;
 pub mod optimization;
@@ -20,6 +21,7 @@ pub use cross_validation::{
     CvFoldGenerator, FillStrategy, Fold, GroupedCVResults, LastValueFill, MeanFill, MedianFill,
     ModeFill, RollingForecastConfig, RollingForecastResult, RollingForecastWindow, ZeroFill,
 };
+pub use exog_shim::{residual_ridge_shim, DEFAULT_RIDGE_LAMBDA};
 pub use metrics::{
     bias, calculate_metrics, coverage, mda, msis, periods_in_stock, rmsse, skill_score, theils_u1,
     theils_u2, wape, wrmsse, AccuracyMetrics, ForecastMetrics,

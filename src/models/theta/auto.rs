@@ -83,6 +83,10 @@ pub struct AutoTheta {
     model_scores: Option<Vec<(ThetaModelType, f64)>>,
     /// Number of observations.
     n: usize,
+    /// Training input values, retained for issue #106.
+    training_values_store: Option<Vec<f64>>,
+    /// Training-time exogenous regressors, retained for the residual-Ridge shim.
+    training_regressors_store: Option<std::collections::HashMap<String, Vec<f64>>>,
 }
 
 impl AutoTheta {
@@ -95,6 +99,8 @@ impl AutoTheta {
             fitted_model: None,
             model_scores: None,
             n: 0,
+            training_values_store: None,
+            training_regressors_store: None,
         }
     }
 
@@ -107,6 +113,8 @@ impl AutoTheta {
             fitted_model: None,
             model_scores: None,
             n: 0,
+            training_values_store: None,
+            training_regressors_store: None,
         }
     }
 
@@ -119,6 +127,8 @@ impl AutoTheta {
             fitted_model: None,
             model_scores: None,
             n: 0,
+            training_values_store: None,
+            training_regressors_store: None,
         }
     }
 
@@ -260,6 +270,14 @@ impl Forecaster for AutoTheta {
         self.fitted_model = Some(best_model);
         self.model_scores = Some(score_summary);
 
+        self.training_values_store = Some(values.to_vec());
+        let regs = series.all_regressors();
+        self.training_regressors_store = if regs.is_empty() {
+            None
+        } else {
+            Some(regs.clone())
+        };
+
         Ok(())
     }
 
@@ -316,6 +334,27 @@ impl Forecaster for AutoTheta {
             FittedModel::DSTM(m) => m.residuals(),
             FittedModel::DOTM(m) => m.residuals(),
         }
+    }
+
+    fn training_values(&self) -> Result<&[f64]> {
+        self.training_values_store
+            .as_deref()
+            .ok_or(ForecastError::FitRequired {
+                model: Some("AutoTheta".into()),
+            })
+    }
+
+    fn training_regressors(&self) -> Option<&std::collections::HashMap<String, Vec<f64>>> {
+        self.training_regressors_store.as_ref()
+    }
+
+    /// AutoTheta delegates to the selected Theta variant. For the issue
+    /// #106 invariant we use trend_component = fitted_values; per-spec
+    /// structural decomposition (drift + θ-line + seasonal) is a follow-up.
+    fn trend_component(&self) -> Result<&[f64]> {
+        self.fitted_values().ok_or(ForecastError::FitRequired {
+            model: Some("AutoTheta".into()),
+        })
     }
 
     fn name(&self) -> &str {

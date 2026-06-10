@@ -138,6 +138,10 @@ pub struct AutoARIMA {
     selected_order: Option<ModelOrder>,
     /// All fitted models and their scores.
     model_scores: Vec<(ModelOrder, f64)>,
+    /// Training input values, retained for the issue #106 decomposition contract.
+    training_values_store: Option<Vec<f64>>,
+    /// Training-time exogenous regressors, retained for the residual-Ridge shim.
+    training_regressors_store: Option<std::collections::HashMap<String, Vec<f64>>>,
 }
 
 impl AutoARIMA {
@@ -148,6 +152,8 @@ impl AutoARIMA {
             selected_model: None,
             selected_order: None,
             model_scores: Vec::new(),
+            training_values_store: None,
+            training_regressors_store: None,
         }
     }
 
@@ -158,6 +164,8 @@ impl AutoARIMA {
             selected_model: None,
             selected_order: None,
             model_scores: Vec::new(),
+            training_values_store: None,
+            training_regressors_store: None,
         }
     }
 
@@ -939,6 +947,15 @@ impl Forecaster for AutoARIMA {
             ));
         }
 
+        // Retain training inputs for the issue #106 decomposition contract.
+        self.training_values_store = Some(values.to_vec());
+        let regs = series.all_regressors();
+        self.training_regressors_store = if regs.is_empty() {
+            None
+        } else {
+            Some(regs.clone())
+        };
+
         Ok(())
     }
 
@@ -977,6 +994,33 @@ impl Forecaster for AutoARIMA {
             SelectedModel::ARIMA(model) => model.residuals(),
             SelectedModel::SARIMA(model) => model.residuals(),
         }
+    }
+
+    fn training_values(&self) -> Result<&[f64]> {
+        self.training_values_store
+            .as_deref()
+            .ok_or(ForecastError::FitRequired {
+                model: Some("AutoARIMA".into()),
+            })
+    }
+
+    fn training_regressors(&self) -> Option<&std::collections::HashMap<String, Vec<f64>>> {
+        self.training_regressors_store.as_ref()
+    }
+
+    /// For AutoARIMA, the "trend" exposed to the issue #106 contract is
+    /// the model's in-sample mean estimate at each timestep (i.e. the
+    /// fitted values). ARIMA isn't a structural-decomposition model —
+    /// there is no separable trend / seasonal in the STL sense — so this
+    /// is the most informative interpretation that keeps the invariant
+    /// `trend + seasonal + residual == training` holding trivially:
+    ///
+    ///   trend = fitted,  seasonal = 0,  residual = training − fitted
+    ///   →  fitted + 0 + (training − fitted) = training ✓
+    fn trend_component(&self) -> Result<&[f64]> {
+        self.fitted_values().ok_or(ForecastError::FitRequired {
+            model: Some("AutoARIMA".into()),
+        })
     }
 
     fn name(&self) -> &str {
@@ -1289,5 +1333,70 @@ mod tests {
 
         let forecast = model.predict(12).unwrap();
         assert_eq!(forecast.horizon(), 12);
+    }
+
+    // ── Issue #106 — Decomposable trait additions ───────────────────────
+
+    #[test]
+    fn auto_arima_training_values_retained() {
+        let timestamps = make_timestamps(60);
+        let values: Vec<f64> = (0..60).map(|i| 10.0 + (i as f64 * 0.3).sin()).collect();
+        let ts = TimeSeries::univariate(timestamps, values.clone()).unwrap();
+        let mut model = AutoARIMA::new();
+        model.fit(&ts).unwrap();
+        let training = model.training_values().unwrap();
+        assert_eq!(training, values.as_slice());
+    }
+
+    #[test]
+    fn auto_arima_training_regressors_none_without_regs() {
+        let timestamps = make_timestamps(60);
+        let values: Vec<f64> = (0..60).map(|i| 10.0 + (i as f64 * 0.3).sin()).collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+        let mut model = AutoARIMA::new();
+        model.fit(&ts).unwrap();
+        assert!(model.training_regressors().is_none());
+    }
+
+    #[test]
+    fn auto_arima_trend_equals_fitted_values() {
+        let timestamps = make_timestamps(80);
+        let values: Vec<f64> = (0..80).map(|i| 10.0 + (i as f64 * 0.3).sin()).collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+        let mut model = AutoARIMA::new();
+        model.fit(&ts).unwrap();
+        let trend = model.trend_component().unwrap();
+        let fitted = model.fitted_values().unwrap();
+        assert_eq!(trend.len(), fitted.len());
+        for (t, f) in trend.iter().zip(fitted.iter()) {
+            // NaN-aware: both NaN at warmup rows, or both equal.
+            assert_eq!(t.is_nan(), f.is_nan(), "NaN-ness must agree");
+            if !t.is_nan() {
+                assert_eq!(t, f);
+            }
+        }
+    }
+
+    #[test]
+    fn auto_arima_seasonal_component_returns_err() {
+        let timestamps = make_timestamps(60);
+        let values: Vec<f64> = (0..60).map(|i| 10.0 + (i as f64 * 0.3).sin()).collect();
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+        let mut model = AutoARIMA::new();
+        model.fit(&ts).unwrap();
+        // ARIMA isn't a structural decomposition model; seasonal returns Err.
+        assert!(matches!(
+            model.seasonal_component(),
+            Err(ForecastError::InvalidParameter(_))
+        ));
+    }
+
+    #[test]
+    fn auto_arima_trend_component_requires_fit() {
+        let model = AutoARIMA::new();
+        assert!(matches!(
+            model.trend_component(),
+            Err(ForecastError::FitRequired { .. })
+        ));
     }
 }

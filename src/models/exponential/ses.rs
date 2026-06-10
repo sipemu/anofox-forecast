@@ -55,6 +55,10 @@ pub struct SimpleExponentialSmoothing {
     n: usize,
     /// Whether to skip optimization when fit() is called (warm-start mode).
     skip_optimization: bool,
+    /// Training input values, retained for issue #106.
+    training_values_store: Option<Vec<f64>>,
+    /// Training-time exogenous regressors, retained for the residual-Ridge shim.
+    training_regressors_store: Option<std::collections::HashMap<String, Vec<f64>>>,
 }
 
 impl SimpleExponentialSmoothing {
@@ -72,6 +76,8 @@ impl SimpleExponentialSmoothing {
             residual_variance: None,
             n: 0,
             skip_optimization: false,
+            training_values_store: None,
+            training_regressors_store: None,
         }
     }
 
@@ -88,6 +94,8 @@ impl SimpleExponentialSmoothing {
             residual_variance: None,
             n: 0,
             skip_optimization: false,
+            training_values_store: None,
+            training_regressors_store: None,
         }
     }
 
@@ -110,6 +118,8 @@ impl SimpleExponentialSmoothing {
             residual_variance: None,
             n: 0,
             skip_optimization: true,
+            training_values_store: None,
+            training_regressors_store: None,
         }
     }
 
@@ -215,6 +225,14 @@ impl Forecaster for SimpleExponentialSmoothing {
 
         self.residuals = Some(residuals);
 
+        self.training_values_store = Some(values.to_vec());
+        let regs = series.all_regressors();
+        self.training_regressors_store = if regs.is_empty() {
+            None
+        } else {
+            Some(regs.clone())
+        };
+
         Ok(())
     }
 
@@ -304,6 +322,27 @@ impl Forecaster for SimpleExponentialSmoothing {
 
     fn residuals(&self) -> Option<&[f64]> {
         self.residuals.as_deref()
+    }
+
+    fn training_values(&self) -> Result<&[f64]> {
+        self.training_values_store
+            .as_deref()
+            .ok_or(ForecastError::FitRequired {
+                model: Some("SimpleExponentialSmoothing".into()),
+            })
+    }
+
+    fn training_regressors(&self) -> Option<&std::collections::HashMap<String, Vec<f64>>> {
+        self.training_regressors_store.as_ref()
+    }
+
+    fn trend_component(&self) -> Result<&[f64]> {
+        // SES is "level only" — the fitted values are the level trajectory,
+        // which is the natural trend for the issue #106 invariant. There
+        // is no separable seasonal component (returns Err by default).
+        self.fitted_values().ok_or(ForecastError::FitRequired {
+            model: Some("SimpleExponentialSmoothing".into()),
+        })
     }
 
     fn name(&self) -> &str {

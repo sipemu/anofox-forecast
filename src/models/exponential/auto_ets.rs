@@ -172,6 +172,10 @@ pub struct AutoETS {
     model_scores: Vec<(ETSSpec, f64)>,
     /// OLS result for exogenous regressors.
     exog_ols: Option<OLSResult>,
+    /// Training input values, retained for issue #106.
+    training_values_store: Option<Vec<f64>>,
+    /// Training-time exogenous regressors, retained for the residual-Ridge shim.
+    training_regressors_store: Option<std::collections::HashMap<String, Vec<f64>>>,
 }
 
 impl AutoETS {
@@ -183,6 +187,8 @@ impl AutoETS {
             selected_spec: None,
             model_scores: Vec::new(),
             exog_ols: None,
+            training_values_store: None,
+            training_regressors_store: None,
         }
     }
 
@@ -194,6 +200,8 @@ impl AutoETS {
             selected_spec: None,
             model_scores: Vec::new(),
             exog_ols: None,
+            training_values_store: None,
+            training_regressors_store: None,
         }
     }
 
@@ -525,6 +533,17 @@ impl Forecaster for AutoETS {
             ));
         }
 
+        // Retain training inputs for the issue #106 decomposition contract.
+        // Store the raw values (before regressor adjustment) so callers see
+        // the same training input they passed in.
+        self.training_values_store = Some(raw_values.to_vec());
+        let regs = series.all_regressors();
+        self.training_regressors_store = if regs.is_empty() {
+            None
+        } else {
+            Some(regs.clone())
+        };
+
         Ok(())
     }
 
@@ -566,6 +585,28 @@ impl Forecaster for AutoETS {
 
     fn residuals(&self) -> Option<&[f64]> {
         self.selected_model.as_ref()?.residuals()
+    }
+
+    fn training_values(&self) -> Result<&[f64]> {
+        self.training_values_store
+            .as_deref()
+            .ok_or(ForecastError::FitRequired {
+                model: Some("AutoETS".into()),
+            })
+    }
+
+    fn training_regressors(&self) -> Option<&std::collections::HashMap<String, Vec<f64>>> {
+        self.training_regressors_store.as_ref()
+    }
+
+    /// AutoETS delegates to the selected ETS spec. For the issue #106
+    /// invariant we use trend_component = fitted_values; per-spec
+    /// structural decomposition (level/trend/seasonal split) is a
+    /// follow-up.
+    fn trend_component(&self) -> Result<&[f64]> {
+        self.fitted_values().ok_or(ForecastError::FitRequired {
+            model: Some("AutoETS".into()),
+        })
     }
 
     fn name(&self) -> &str {

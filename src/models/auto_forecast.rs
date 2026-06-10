@@ -68,7 +68,13 @@ impl AutoForecastConfig {
 }
 
 /// Internal enum holding the selected model. Using an enum keeps Clone and Debug.
+///
+/// Size disparity between variants is acceptable here — `AutoARIMA` retains
+/// training values + regressors for the issue #106 decomposition contract,
+/// and the trade-off is negligible at the call sites (one selected model
+/// per `AutoForecast`).
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 enum SelectedAutoModel {
     ARIMA(AutoARIMA),
     ETS(AutoETS),
