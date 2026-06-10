@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-06-10
+
+### Added
+
+- **`Forecaster` decomposition + training-state accessors** (closes #106) — three new methods on the `Forecaster` trait expose primitive fit state previously only available through model-specific accessors. All three have default impls so existing implementors continue to compile.
+  - `trend_component() -> Result<&[f64]>` — per-row trend (where defined; `Err(InvalidParameter)` otherwise).
+  - `seasonal_component() -> Result<&[f64]>` — per-row seasonal contribution (sum of components for multi-seasonal models like MSTL).
+  - `residual_component() -> Result<&[f64]>` — per-row residual; default delegates to `residuals()`. MSTL overrides to return the STL remainder.
+  - `training_values() -> Result<&[f64]>` — the values the model was fit on.
+  - `training_regressors() -> Option<&HashMap<String, Vec<f64>>>` — exogenous regressors retained at fit time.
+  - Implemented natively on 11 auto-tuned models: `MSTLForecaster`, `MFLES`, `AutoARIMA`, `SimpleExponentialSmoothing`, `HoltLinearTrend`, `HoltWinters`, `SeasonalES`, `AutoETS`, `AutoTheta`, `DynamicTheta`, `OptimizedTheta`, `AutoTBATS`. `predict_with_exog` is also routed through a residual-Ridge shim (`src/utils/exog_shim.rs`, Cholesky-solved closed form) so models that don't natively support regressors can still accept them at fit time.
+  - Cross-cutting conformance test at `tests/issue_106_decomposable_conformance.rs` validates the contract (trend + seasonal + residual ≈ training, with documented exceptions for AutoARIMA differencing).
+
+- **`Inspectable` trait + `Explanation` enum** (closes #107) — typed sibling to the existing `Explainable` (forecast-decomposition) trait. Where `Explainable` decomposes a *forecast*, `Inspectable` packages the *fit*: a per-model snapshot of internal state and interpretable parameters.
+  - `Inspectable::explanation(&self) -> Result<Explanation>` — object-safe, so `Box<dyn Inspectable>` works.
+  - `Explanation` is an owned enum with seven variants: `Regression`, `Ets`, `Arima`, `Mfles`, `Theta`, `Tbats`, `Mstl`. Each carries the universal spine (`fitted_values`, `residuals`) plus model-specific scalars (e.g. ETS spec + α/β/γ/φ, ARIMA order + AIC/BIC + coefficients, Regression R² + feature names + coefficients + intercept, TBATS Box-Cox λ + selected config).
+  - All variants are `Clone + PartialEq + Default`. Behind the `serde` feature: `Serialize + Deserialize` for caching, transport, and UI surfacing.
+  - Implemented on `RegressionForecaster`, `MSTLForecaster`, `MFLES`, `AutoARIMA`, `AutoETS`, `AutoTheta`, `AutoTBATS`. Returns `Err(FitRequired)` before fit.
+  - Cross-cutting conformance test at `tests/issue_107_inspectable_conformance.rs` covers per-model variant matching, spine invariants, object-safety, and serde-JSON serialization across every variant.
+
 ## [0.7.6] - 2026-05-31
 
 ### Added
