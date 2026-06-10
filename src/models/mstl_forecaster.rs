@@ -11,6 +11,7 @@ use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
 use crate::models::explain::{Explainable, ForecastExplanation};
 use crate::models::exponential::{AutoETS, AutoETSConfig, SimpleExponentialSmoothing};
+use crate::models::inspect::{Explanation, Inspectable, MstlExplanation};
 use crate::models::{validate_series_complete, Forecaster};
 use crate::seasonality::{MSTLResult, MSTL};
 use crate::utils::ols::OLSResult;
@@ -683,6 +684,39 @@ impl Forecaster for MSTLForecaster {
             .collect();
 
         Ok(Forecast::from_values(combined))
+    }
+}
+
+impl Inspectable for MSTLForecaster {
+    fn explanation(&self) -> Result<Explanation> {
+        let decomposition =
+            self.decomposition
+                .as_ref()
+                .ok_or_else(|| ForecastError::FitRequired {
+                    model: Some("MSTLForecaster".to_string()),
+                })?;
+        let fitted = self
+            .fitted
+            .clone()
+            .ok_or_else(|| ForecastError::FitRequired {
+                model: Some("MSTLForecaster".to_string()),
+            })?;
+        let residuals = self
+            .residuals
+            .clone()
+            .ok_or_else(|| ForecastError::FitRequired {
+                model: Some("MSTLForecaster".to_string()),
+            })?;
+        let seasonal_component = self.seasonal_sum.clone().unwrap_or_default();
+
+        Ok(Explanation::Mstl(MstlExplanation {
+            seasonal_periods: self.seasonal_periods.clone(),
+            iterations: self.mstl_iterations,
+            fitted_values: fitted,
+            trend_component: decomposition.trend.clone(),
+            seasonal_component,
+            residuals,
+        }))
     }
 }
 

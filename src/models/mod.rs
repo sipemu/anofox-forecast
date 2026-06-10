@@ -1,6 +1,7 @@
 //! Forecasting models.
 
 pub mod explain;
+pub mod inspect;
 mod traits;
 
 pub mod arima;
@@ -22,6 +23,10 @@ pub mod var;
 pub mod var_forecaster;
 
 pub use garch::GARCH;
+pub use inspect::{
+    ArimaExplanation, EtsExplanation, Explanation, Inspectable, MflesExplanation, MstlExplanation,
+    RegressionExplanation, TbatsExplanation, ThetaExplanation,
+};
 pub use kalman_forecaster::KalmanForecaster;
 pub use mfles::MFLES;
 pub use mstl_forecaster::{MSTLForecaster, SeasonalForecastMethod, TrendForecastMethod};

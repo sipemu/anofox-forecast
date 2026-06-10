@@ -3560,6 +3560,35 @@ mod ols_impl {
         }
     }
 
+    impl crate::models::inspect::Inspectable for RegressionForecaster {
+        fn explanation(&self) -> Result<crate::models::inspect::Explanation> {
+            use crate::models::inspect::{Explanation, RegressionExplanation};
+
+            let state = self.state.as_ref().ok_or(ForecastError::FitRequired {
+                model: Some("RegressionForecaster".to_string()),
+            })?;
+
+            let result = state.model.result();
+            let feature_names = state.features.feature_names(&state.exog_names);
+
+            let n_coef = result.coefficients.nrows();
+            let mut coefficients = Vec::with_capacity(n_coef);
+            for i in 0..n_coef {
+                coefficients.push(result.coefficients[i]);
+            }
+
+            Ok(Explanation::Regression(RegressionExplanation {
+                feature_names,
+                coefficients,
+                intercept: result.intercept.unwrap_or(0.0),
+                r_squared: result.r_squared,
+                backend: self.backend.name().to_string(),
+                fitted_values: state.fitted_values.clone(),
+                residuals: state.residuals.clone(),
+            }))
+        }
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -3578,6 +3607,34 @@ mod ols_impl {
                 .map(|i| 2.0 * i as f64 + 10.0 + 0.01 * (i as f64 * 0.7).sin())
                 .collect();
             TimeSeries::univariate(make_timestamps(n), values).unwrap()
+        }
+
+        #[test]
+        fn inspectable_linear_trend_returns_regression_explanation() {
+            use crate::models::inspect::{Explanation, Inspectable};
+
+            let ts = make_linear_ts(40);
+            let mut model = RegressionForecaster::linear_trend();
+            assert!(
+                matches!(model.explanation(), Err(ForecastError::FitRequired { .. })),
+                "explanation() before fit must return FitRequired"
+            );
+
+            model.fit(&ts).unwrap();
+            let Explanation::Regression(e) = model.explanation().unwrap() else {
+                panic!("expected Explanation::Regression");
+            };
+
+            assert_eq!(e.backend, "OLS");
+            assert_eq!(e.coefficients.len(), e.feature_names.len());
+            assert!(e.feature_names.iter().any(|n| n == "__trend"));
+            assert_eq!(e.fitted_values.len(), 40);
+            assert_eq!(e.residuals.len(), 40);
+            // Linear-trend OLS on a nearly-linear series should fit R² ≈ 1.
+            assert!(e.r_squared > 0.99, "R² unexpectedly low: {}", e.r_squared);
+            // The trend slope coefficient should recover ≈ 2.0.
+            let trend_idx = e.feature_names.iter().position(|n| n == "__trend").unwrap();
+            assert_relative_eq!(e.coefficients[trend_idx], 2.0, epsilon = 0.05);
         }
 
         #[test]

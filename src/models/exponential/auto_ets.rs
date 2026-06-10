@@ -6,6 +6,7 @@
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
 use crate::models::exponential::ets::{ETSSpec, ErrorType, SeasonalType, TrendType, ETS};
+use crate::models::inspect::{EtsExplanation, Explanation, Inspectable};
 use crate::models::{validate_series_complete, Forecaster};
 use crate::utils::ols::{ols_fit, ols_residuals, OLSResult};
 use std::borrow::Cow;
@@ -751,6 +752,51 @@ impl Forecaster for AutoETS {
             }
             Ok(base_forecast)
         }
+    }
+}
+
+impl Inspectable for AutoETS {
+    fn explanation(&self) -> Result<Explanation> {
+        let model = self
+            .selected_model
+            .as_ref()
+            .ok_or_else(|| ForecastError::FitRequired {
+                model: Some("AutoETS".to_string()),
+            })?;
+        let spec = self
+            .selected_spec
+            .ok_or_else(|| ForecastError::FitRequired {
+                model: Some("AutoETS".to_string()),
+            })?;
+
+        let fitted_values = model
+            .fitted_values()
+            .map(|v| v.to_vec())
+            .unwrap_or_default();
+        let residuals = model.residuals().map(|v| v.to_vec()).unwrap_or_default();
+        let trend_component = self
+            .trend_component()
+            .ok()
+            .map(|v| v.to_vec())
+            .unwrap_or_default();
+        let seasonal_component = if spec.has_seasonal() {
+            self.seasonal_component().ok().map(|v| v.to_vec())
+        } else {
+            None
+        };
+
+        Ok(Explanation::Ets(EtsExplanation {
+            spec: spec.short_name(),
+            alpha: model.alpha().unwrap_or(f64::NAN),
+            beta: model.beta(),
+            gamma: model.gamma(),
+            phi: model.phi(),
+            seasonal_period: self.config.seasonal_period.unwrap_or(0),
+            fitted_values,
+            trend_component,
+            seasonal_component,
+            residuals,
+        }))
     }
 }
 
