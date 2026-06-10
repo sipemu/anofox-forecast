@@ -77,6 +77,19 @@ pub struct MFLES {
     /// Pre-computed Cholesky factor of X'X for batch processing.
     /// When set, the Fourier OLS skips X'X computation and Cholesky factoring.
     shared_cholesky: Option<Vec<Vec<f64>>>,
+    /// Per-row trend component (original scale), retained for issue #106
+    /// `trend_component()`. Computed as the inverse-transform of
+    /// `median + linear + ses` (everything except the seasonal block).
+    trend_full: Option<Vec<f64>>,
+    /// Per-row seasonal contribution on the original scale, defined as
+    /// `fitted - trend` so that `trend + seasonal + residual == training`
+    /// holds in both additive and multiplicative modes.
+    seasonal_full: Option<Vec<f64>>,
+    /// Training values retained at fit time, for `training_values()`.
+    training_values_store: Option<Vec<f64>>,
+    /// Training-time exogenous regressors, retained for the
+    /// residual-Ridge shim.
+    training_regressors_store: Option<std::collections::HashMap<String, Vec<f64>>>,
 }
 
 /// Builder for constructing an [`MFLES`] model with custom parameters.
@@ -241,6 +254,10 @@ impl MFLES {
             seasonality: None,
             exog_ols: None,
             shared_cholesky: None,
+            trend_full: None,
+            seasonal_full: None,
+            training_values_store: None,
+            training_regressors_store: None,
         }
     }
 
@@ -1291,12 +1308,49 @@ impl Forecaster for MFLES {
             fitted.iter().map(|&f| mean_val + f * std_val).collect()
         };
 
+        // Per-row trend on the original scale: inverse-transform the
+        // non-seasonal accumulators (median + linear + ses). The seasonal
+        // contribution to the original-scale fitted is then defined as
+        // `fitted - trend`, so the decomposition invariant
+        // `trend + seasonal + residual == training` holds in both
+        // additive and multiplicative modes (issue #106).
+        let non_seasonal: Vec<f64> = (0..n)
+            .map(|i| median_component[i] + linear_component[i] + ses_component[i])
+            .collect();
+        let trend_full: Vec<f64> = if use_multiplicative {
+            non_seasonal.iter().map(|&v| v.exp()).collect()
+        } else {
+            let mean_val = self.mean.unwrap_or(0.0);
+            let std_val = self.std.unwrap_or(1.0);
+            non_seasonal
+                .iter()
+                .map(|&v| mean_val + v * std_val)
+                .collect()
+        };
+        let seasonal_full: Vec<f64> = fitted_original
+            .iter()
+            .zip(trend_full.iter())
+            .map(|(f, t)| f - t)
+            .collect();
+
         // Compute residuals
         let residuals: Vec<f64> = values
             .iter()
             .zip(fitted_original.iter())
             .map(|(v, f)| v - f)
             .collect();
+
+        self.training_values_store = Some(values.to_vec());
+        self.training_regressors_store = {
+            let regs = series.all_regressors();
+            if regs.is_empty() {
+                None
+            } else {
+                Some(regs.clone())
+            }
+        };
+        self.trend_full = Some(trend_full);
+        self.seasonal_full = Some(seasonal_full);
 
         self.fitted = Some(fitted_original);
         self.residuals = Some(residuals);
@@ -1475,6 +1529,39 @@ impl Forecaster for MFLES {
 
     fn residuals(&self) -> Option<&[f64]> {
         self.residuals.as_deref()
+    }
+
+    fn trend_component(&self) -> Result<&[f64]> {
+        self.trend_full
+            .as_deref()
+            .ok_or(ForecastError::FitRequired {
+                model: Some("MFLES".into()),
+            })
+    }
+
+    fn seasonal_component(&self) -> Result<&[f64]> {
+        if self.season_length == 0 {
+            return Err(ForecastError::InvalidParameter(
+                "MFLES fit has no seasonal contribution (season_length = 0)".into(),
+            ));
+        }
+        self.seasonal_full
+            .as_deref()
+            .ok_or(ForecastError::FitRequired {
+                model: Some("MFLES".into()),
+            })
+    }
+
+    fn training_values(&self) -> Result<&[f64]> {
+        self.training_values_store
+            .as_deref()
+            .ok_or(ForecastError::FitRequired {
+                model: Some("MFLES".into()),
+            })
+    }
+
+    fn training_regressors(&self) -> Option<&std::collections::HashMap<String, Vec<f64>>> {
+        self.training_regressors_store.as_ref()
     }
 
     fn name(&self) -> &str {
@@ -2191,5 +2278,105 @@ mod tests {
         // Should have fitted values and residuals
         assert!(model.fitted_values().is_some());
         assert!(model.residuals().is_some());
+    }
+
+    // ── Issue #106 — Decomposable trait additions ────────────────────────
+
+    #[test]
+    fn mfles_decomposition_invariant_additive() {
+        // Series long enough for the boosting loop to converge meaningfully.
+        let ts = make_seasonal_series(120, 12);
+        // Force additive mode for a clean L2 invariant check.
+        let mut model = MFLES::builder()
+            .seasonal_period(12)
+            .multiplicative(false)
+            .build();
+        model.fit(&ts).unwrap();
+
+        let trend = model.trend_component().unwrap();
+        let seasonal = model.seasonal_component().unwrap();
+        let residual = model.residual_component().unwrap();
+        let training = model.training_values().unwrap();
+
+        assert_eq!(trend.len(), training.len());
+        assert_eq!(seasonal.len(), training.len());
+        assert_eq!(residual.len(), training.len());
+
+        for i in 0..training.len() {
+            let sum = trend[i] + seasonal[i] + residual[i];
+            assert!(
+                (sum - training[i]).abs() < 1e-6,
+                "decomposition invariant violated at i={}: trend={} + seasonal={} + residual={} = {}, training={}",
+                i,
+                trend[i],
+                seasonal[i],
+                residual[i],
+                sum,
+                training[i]
+            );
+        }
+    }
+
+    #[test]
+    fn mfles_decomposition_invariant_multiplicative() {
+        // Positive series for multiplicative mode.
+        let ts = make_seasonal_series(120, 12);
+        let mut model = MFLES::builder()
+            .seasonal_period(12)
+            .multiplicative(true)
+            .build();
+        model.fit(&ts).unwrap();
+
+        let trend = model.trend_component().unwrap();
+        let seasonal = model.seasonal_component().unwrap();
+        let residual = model.residual_component().unwrap();
+        let training = model.training_values().unwrap();
+
+        for i in 0..training.len() {
+            let sum = trend[i] + seasonal[i] + residual[i];
+            assert!(
+                (sum - training[i]).abs() < 1e-6,
+                "multiplicative decomposition invariant violated at i={}: sum={}, training={}",
+                i,
+                sum,
+                training[i]
+            );
+        }
+    }
+
+    #[test]
+    fn mfles_training_values_retained() {
+        let ts = make_seasonal_series(60, 12);
+        let mut model = MFLES::new(vec![12]);
+        model.fit(&ts).unwrap();
+        assert_eq!(model.training_values().unwrap(), ts.primary_values());
+    }
+
+    #[test]
+    fn mfles_training_regressors_none_without_regs() {
+        let ts = make_seasonal_series(60, 12);
+        let mut model = MFLES::new(vec![12]);
+        model.fit(&ts).unwrap();
+        assert!(model.training_regressors().is_none());
+    }
+
+    #[test]
+    fn mfles_trend_component_requires_fit() {
+        let model = MFLES::new(vec![12]);
+        assert!(matches!(
+            model.trend_component(),
+            Err(ForecastError::FitRequired { .. })
+        ));
+    }
+
+    #[test]
+    fn mfles_seasonal_component_err_when_season_length_zero() {
+        let ts = make_seasonal_series(60, 12);
+        let mut model = MFLES::builder().seasonal_period(0).build();
+        model.fit(&ts).unwrap();
+        assert!(matches!(
+            model.seasonal_component(),
+            Err(ForecastError::InvalidParameter(_))
+        ));
     }
 }
