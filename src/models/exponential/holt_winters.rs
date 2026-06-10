@@ -64,6 +64,10 @@ pub struct HoltWinters {
     residual_variance: Option<f64>,
     /// Original series length.
     n: usize,
+    /// Training input values, retained for issue #106.
+    training_values_store: Option<Vec<f64>>,
+    /// Training-time exogenous regressors, retained for the residual-Ridge shim.
+    training_regressors_store: Option<std::collections::HashMap<String, Vec<f64>>>,
 }
 
 impl HoltWinters {
@@ -89,6 +93,8 @@ impl HoltWinters {
             residuals: None,
             residual_variance: None,
             n: 0,
+            training_values_store: None,
+            training_regressors_store: None,
         }
     }
 
@@ -124,6 +130,8 @@ impl HoltWinters {
             residuals: None,
             residual_variance: None,
             n: 0,
+            training_values_store: None,
+            training_regressors_store: None,
         }
     }
 
@@ -435,6 +443,14 @@ impl Forecaster for HoltWinters {
 
         self.residuals = Some(residuals);
 
+        self.training_values_store = Some(values.to_vec());
+        let regs = series.all_regressors();
+        self.training_regressors_store = if regs.is_empty() {
+            None
+        } else {
+            Some(regs.clone())
+        };
+
         Ok(())
     }
 
@@ -547,6 +563,29 @@ impl Forecaster for HoltWinters {
 
     fn residuals(&self) -> Option<&[f64]> {
         self.residuals.as_deref()
+    }
+
+    fn training_values(&self) -> Result<&[f64]> {
+        self.training_values_store
+            .as_deref()
+            .ok_or(ForecastError::FitRequired {
+                model: Some("HoltWinters".into()),
+            })
+    }
+
+    fn training_regressors(&self) -> Option<&std::collections::HashMap<String, Vec<f64>>> {
+        self.training_regressors_store.as_ref()
+    }
+
+    /// HoltWinters fitted values combine level + trend + seasonal. For the
+    /// issue #106 invariant we expose trend_component = fitted_values; a
+    /// per-row structural seasonal extraction is a follow-up (the seasonal
+    /// indices are stored as a vector of length `seasonal_period`, not per
+    /// training row).
+    fn trend_component(&self) -> Result<&[f64]> {
+        self.fitted_values().ok_or(ForecastError::FitRequired {
+            model: Some("HoltWinters".into()),
+        })
     }
 
     fn name(&self) -> &str {

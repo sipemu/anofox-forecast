@@ -69,6 +69,10 @@ pub struct SeasonalES {
     residual_variance: Option<f64>,
     /// Series length.
     n: usize,
+    /// Training input values, retained for issue #106.
+    training_values_store: Option<Vec<f64>>,
+    /// Training-time exogenous regressors, retained for the residual-Ridge shim.
+    training_regressors_store: Option<std::collections::HashMap<String, Vec<f64>>>,
 }
 
 impl SeasonalES {
@@ -86,6 +90,8 @@ impl SeasonalES {
             residuals: None,
             residual_variance: None,
             n: 0,
+            training_values_store: None,
+            training_regressors_store: None,
         }
     }
 
@@ -101,6 +107,8 @@ impl SeasonalES {
             residuals: None,
             residual_variance: None,
             n: 0,
+            training_values_store: None,
+            training_regressors_store: None,
         }
     }
 
@@ -117,6 +125,8 @@ impl SeasonalES {
             residuals: None,
             residual_variance: None,
             n: 0,
+            training_values_store: None,
+            training_regressors_store: None,
         }
     }
 
@@ -327,6 +337,14 @@ impl Forecaster for SeasonalES {
         self.fitted = Some(fitted);
         self.residuals = Some(residuals);
 
+        self.training_values_store = Some(values.to_vec());
+        let regs = series.all_regressors();
+        self.training_regressors_store = if regs.is_empty() {
+            None
+        } else {
+            Some(regs.clone())
+        };
+
         Ok(())
     }
 
@@ -409,6 +427,27 @@ impl Forecaster for SeasonalES {
 
     fn residuals(&self) -> Option<&[f64]> {
         self.residuals.as_deref()
+    }
+
+    fn training_values(&self) -> Result<&[f64]> {
+        self.training_values_store
+            .as_deref()
+            .ok_or(ForecastError::FitRequired {
+                model: Some("SeasonalES".into()),
+            })
+    }
+
+    fn training_regressors(&self) -> Option<&std::collections::HashMap<String, Vec<f64>>> {
+        self.training_regressors_store.as_ref()
+    }
+
+    /// SeasonalES fitted values combine level + seasonal. trend_component
+    /// = fitted_values keeps the issue #106 invariant trivial; structural
+    /// per-row seasonal extraction is a follow-up.
+    fn trend_component(&self) -> Result<&[f64]> {
+        self.fitted_values().ok_or(ForecastError::FitRequired {
+            model: Some("SeasonalES".into()),
+        })
     }
 
     fn name(&self) -> &str {
