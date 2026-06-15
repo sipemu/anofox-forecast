@@ -65,6 +65,14 @@ pub struct RegressionExplanation {
     pub r_squared: f64,
     /// Backend identifier, e.g. `"ols"`, `"ridge"`, `"wls_logistic"`.
     pub backend: String,
+    /// Per-coefficient standard errors, aligned with `coefficients`.
+    /// Empty when the backend doesn't compute inference (e.g. Poisson,
+    /// Tweedie, BLS, RLS). Nominal under regularised backends (Ridge,
+    /// ElasticNet) and weighted backends (WLS) — useful for display but
+    /// don't read them as exact frequentist SEs.
+    pub coef_std_errors: Vec<f64>,
+    /// Standard error of the intercept. `NaN` when not available.
+    pub intercept_std_error: f64,
     /// In-sample fitted values.
     pub fitted_values: Vec<f64>,
     /// In-sample residuals.
@@ -230,6 +238,8 @@ mod tests {
             intercept: 0.5,
             r_squared: 0.9,
             backend: "ols".into(),
+            coef_std_errors: vec![0.05],
+            intercept_std_error: 0.02,
             fitted_values: vec![1.0, 2.0],
             residuals: vec![0.1, -0.1],
         });
@@ -246,6 +256,8 @@ mod tests {
             intercept: 1.5,
             r_squared: 0.92,
             backend: "ridge".into(),
+            coef_std_errors: vec![0.10, 0.04],
+            intercept_std_error: 0.07,
             fitted_values: vec![1.0, 2.0, 3.0],
             residuals: vec![0.0, 0.1, -0.1],
         };

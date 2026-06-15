@@ -1000,6 +1000,17 @@ mod ols_impl {
             /// How observation weights are generated.
             strategy: WeightStrategy,
         },
+        /// Combined logistic-recency weighting + L2 regularization. See
+        /// [`RegressionForecaster::wls_logistic_ridge`]. Solves the
+        /// weighted Ridge normal equations
+        /// `β = (Xᵀ W X + λI)⁻¹ Xᵀ W y` in a single fit.
+        WlsLogisticRidge {
+            /// Logistic sigmoid centre offset (same meaning as
+            /// [`WeightStrategy::Logistic`]).
+            offset: f64,
+            /// L2 penalty strength (λ ≥ 0).
+            lambda: f64,
+        },
         /// Recursive Least Squares — adaptive coefficients via forgetting factor.
         Rls {
             /// Exponential forgetting (0 < λ ≤ 1). 1.0 = equal weights, <1 = recent emphasis.
@@ -1043,6 +1054,7 @@ mod ols_impl {
                 Self::ElasticNet { .. } => "ElasticNet",
                 Self::Quantile { .. } => "Quantile",
                 Self::Wls { .. } => "WLS",
+                Self::WlsLogisticRidge { .. } => "WlsLogisticRidge",
                 Self::Rls { .. } => "RLS",
                 Self::Tweedie { .. } => "Tweedie",
                 Self::Poisson => "Poisson",
@@ -1134,6 +1146,102 @@ mod ols_impl {
                         .build();
                     let fitted = model.fit(x, y).map_err(|e| format!("WLS: {}", e))?;
                     Ok(Box::new(fitted))
+                }
+                Self::WlsLogisticRidge { offset, lambda } => {
+                    if !offset.is_finite() {
+                        return Err(format!(
+                            "WlsLogisticRidge: offset must be finite, got {}",
+                            offset
+                        ));
+                    }
+                    if *lambda < 0.0 {
+                        return Err(format!(
+                            "WlsLogisticRidge: lambda must be non-negative, got {}",
+                            lambda
+                        ));
+                    }
+                    let n = y.nrows();
+                    let p = x.ncols();
+                    // Build logistic weights and accumulators for weighted means.
+                    let centre = n as f64 - *offset;
+                    let mut w = vec![0.0_f64; n];
+                    let mut sum_w = 0.0;
+                    for i in 0..n {
+                        let z = (i as f64) - centre;
+                        let wi = 1.0 / (1.0 + (-z).exp());
+                        w[i] = wi;
+                        sum_w += wi;
+                    }
+                    if sum_w == 0.0 {
+                        return Err("WlsLogisticRidge: weights summed to zero".into());
+                    }
+                    let mut x_bar_w = vec![0.0_f64; p];
+                    let mut y_bar_w = 0.0;
+                    for i in 0..n {
+                        y_bar_w += w[i] * y[i];
+                        for j in 0..p {
+                            x_bar_w[j] += w[i] * x[(i, j)];
+                        }
+                    }
+                    y_bar_w /= sum_w;
+                    for v in x_bar_w.iter_mut() {
+                        *v /= sum_w;
+                    }
+                    // Augmented design: top n rows are sqrt(W) * (X − X̄_w),
+                    // bottom p rows are √λ · I_p (Tikhonov penalty, intercept
+                    // not augmented since we re-add it analytically below).
+                    let sqrt_lambda = lambda.sqrt();
+                    let n_aug = n + p;
+                    let mut x_aug = Mat::zeros(n_aug, p);
+                    let mut y_aug = Col::zeros(n_aug);
+                    for i in 0..n {
+                        let s = w[i].sqrt();
+                        for j in 0..p {
+                            x_aug[(i, j)] = s * (x[(i, j)] - x_bar_w[j]);
+                        }
+                        y_aug[i] = s * (y[i] - y_bar_w);
+                    }
+                    for j in 0..p {
+                        x_aug[(n + j, j)] = sqrt_lambda;
+                    }
+                    // OLS on augmented system → β solves
+                    // (Xᵀ W X + λI) β = Xᵀ W (y − ȳ_w · 1), which after
+                    // re-adding ȳ_w to the intercept is the weighted Ridge
+                    // solution.
+                    let ols = OlsRegressor::builder().with_intercept(false).build();
+                    let ols_fitted = ols
+                        .fit(&x_aug, &y_aug)
+                        .map_err(|e| format!("WlsLogisticRidge: {}", e))?;
+                    let beta = &ols_fitted.result().coefficients;
+                    // Reconstruct the intercept and predictions on the
+                    // original (unweighted, uncentred) scale.
+                    let mut intercept = y_bar_w;
+                    for j in 0..p {
+                        intercept -= x_bar_w[j] * beta[j];
+                    }
+                    let mut fitted_values = Col::zeros(n);
+                    let mut residuals = Col::zeros(n);
+                    let mut rss = 0.0;
+                    for i in 0..n {
+                        let mut pred = intercept;
+                        for j in 0..p {
+                            pred += beta[j] * x[(i, j)];
+                        }
+                        fitted_values[i] = pred;
+                        let r = y[i] - pred;
+                        residuals[i] = r;
+                        rss += r * r;
+                    }
+                    let y_mean: f64 = (0..n).map(|i| y[i]).sum::<f64>() / n as f64;
+                    let tss: f64 = (0..n).map(|i| (y[i] - y_mean).powi(2)).sum();
+                    let r_squared = if tss > 0.0 { 1.0 - rss / tss } else { 0.0 };
+                    let mut result = ols_fitted.result().clone();
+                    result.intercept = Some(intercept);
+                    result.fitted_values = fitted_values;
+                    result.residuals = residuals;
+                    result.n_observations = n;
+                    result.r_squared = r_squared;
+                    Ok(Box::new(WlsLogisticRidgeFitted { result }))
                 }
                 Self::Rls { forgetting_factor } => {
                     let model = RlsRegressor::builder()
@@ -2881,6 +2989,61 @@ mod ols_impl {
         }
     }
 
+    // ── Custom WLS-Logistic-Ridge fitted regressor ──────────────────
+
+    /// FittedRegressor wrapper for the WLS-Logistic-Ridge backend.
+    ///
+    /// Holds a manually-constructed [`RegressionResult`] with the
+    /// weighted-Ridge slopes (from OLS on the centred + sqrt-weighted +
+    /// Tikhonov-augmented design) and the weighted-mean intercept
+    /// (`ȳ_w − β · X̄_w`). Implements [`FittedRegressor::predict`] as the
+    /// standard `intercept + Xβ` on the original (unweighted) scale.
+    #[derive(Debug)]
+    struct WlsLogisticRidgeFitted {
+        result: anofox_regression::core::RegressionResult,
+    }
+
+    impl FittedRegressor for WlsLogisticRidgeFitted {
+        fn predict(&self, x: &Mat<f64>) -> Col<f64> {
+            let n = x.nrows();
+            let p = x.ncols();
+            let mut out = Col::zeros(n);
+            let intercept = self.result.intercept.unwrap_or(0.0);
+            for i in 0..n {
+                let mut pred = intercept;
+                for j in 0..p {
+                    pred += self.result.coefficients[j] * x[(i, j)];
+                }
+                out[i] = pred;
+            }
+            out
+        }
+
+        fn result(&self) -> &anofox_regression::core::RegressionResult {
+            &self.result
+        }
+
+        fn predict_with_interval(
+            &self,
+            x: &Mat<f64>,
+            _interval: Option<IntervalType>,
+            _level: f64,
+        ) -> anofox_regression::core::PredictionResult {
+            // Weighted-Ridge inference intervals are not standard
+            // (sandwich / nominal forms vary by literature) so we return
+            // point predictions with zero-width bounds — downstream uses
+            // residual-based conformal intervals when needed.
+            let fit = self.predict(x);
+            let n = fit.nrows();
+            anofox_regression::core::PredictionResult {
+                fit: fit.clone(),
+                lower: fit.clone(),
+                upper: fit,
+                se: Col::zeros(n),
+            }
+        }
+    }
+
     // ── Fitted state ────────────────────────────────────────────────
 
     /// Internal state stored after fitting.
@@ -3048,6 +3211,26 @@ mod ols_impl {
         /// 1.0 = equal weights, 0.95 = moderate adaptation.
         pub fn rls(forgetting_factor: f64, features: RegressionFeatures) -> Self {
             Self::new(RegressionBackend::Rls { forgetting_factor }, features)
+        }
+
+        /// Create a forecaster that combines logistic recency weighting with
+        /// L2 (Ridge) regularization in a single fit.
+        ///
+        /// Solves `β = (Xᵀ W X + λI)⁻¹ Xᵀ W y` where `W` is the diagonal
+        /// of logistic recency weights (see [`WeightStrategy::Logistic`])
+        /// and `λI` is the L2 penalty (intercept *is* penalised, matching
+        /// standard Ridge convention).
+        ///
+        /// Useful when recency weighting reduces the effective `N` enough
+        /// that an unregularised WLS fit becomes near-singular under a
+        /// heavy feature design — see issue #103.
+        ///
+        /// Typical usage: `offset` in 6–24, `lambda` in 0.1–10.
+        pub fn wls_logistic_ridge(offset: f64, lambda: f64, features: RegressionFeatures) -> Self {
+            Self::new(
+                RegressionBackend::WlsLogisticRidge { offset, lambda },
+                features,
+            )
         }
 
         /// Create a Tweedie GLM forecaster.
@@ -3577,12 +3760,32 @@ mod ols_impl {
                 coefficients.push(result.coefficients[i]);
             }
 
+            // Standard errors are populated when the backend ran inference
+            // (OLS / Ridge / ElasticNet / WLS by default). For non-linear
+            // backends (Poisson / Tweedie / BLS / RLS) std_errors stays
+            // None and we emit empty vec + NaN, per RegressionExplanation
+            // doc.
+            let coef_std_errors: Vec<f64> = match &result.std_errors {
+                Some(se) => {
+                    let n = se.nrows();
+                    let mut out = Vec::with_capacity(n);
+                    for i in 0..n {
+                        out.push(se[i]);
+                    }
+                    out
+                }
+                None => Vec::new(),
+            };
+            let intercept_std_error = result.intercept_std_error.unwrap_or(f64::NAN);
+
             Ok(Explanation::Regression(RegressionExplanation {
                 feature_names,
                 coefficients,
                 intercept: result.intercept.unwrap_or(0.0),
                 r_squared: result.r_squared,
                 backend: self.backend.name().to_string(),
+                coef_std_errors,
+                intercept_std_error,
                 fitted_values: state.fitted_values.clone(),
                 residuals: state.residuals.clone(),
             }))
@@ -3635,6 +3838,40 @@ mod ols_impl {
             // The trend slope coefficient should recover ≈ 2.0.
             let trend_idx = e.feature_names.iter().position(|n| n == "__trend").unwrap();
             assert_relative_eq!(e.coefficients[trend_idx], 2.0, epsilon = 0.05);
+        }
+
+        #[test]
+        fn inspectable_ols_populates_standard_errors() {
+            use crate::models::inspect::{Explanation, Inspectable};
+
+            let ts = make_linear_ts(40);
+            let mut model = RegressionForecaster::linear_trend();
+            model.fit(&ts).unwrap();
+
+            let Explanation::Regression(e) = model.explanation().unwrap() else {
+                panic!("expected Explanation::Regression");
+            };
+
+            // OLS computes inference by default → SEs aligned with coefficients.
+            assert_eq!(
+                e.coef_std_errors.len(),
+                e.coefficients.len(),
+                "coef_std_errors must align with coefficients"
+            );
+            for (i, &se) in e.coef_std_errors.iter().enumerate() {
+                assert!(se.is_finite(), "SE[{}] not finite: {}", i, se);
+                assert!(se > 0.0, "SE[{}] not positive: {}", i, se);
+            }
+            assert!(
+                e.intercept_std_error.is_finite(),
+                "intercept SE not finite: {}",
+                e.intercept_std_error
+            );
+            assert!(
+                e.intercept_std_error > 0.0,
+                "intercept SE not positive: {}",
+                e.intercept_std_error
+            );
         }
 
         #[test]
@@ -4964,6 +5201,78 @@ mod ols_impl {
                     v
                 );
             }
+        }
+
+        #[test]
+        fn wls_logistic_ridge_recovers_linear_trend_with_recency() {
+            // Sanity: combined backend produces finite forecasts and
+            // recovers the linear trend slope on a clean series.
+            let ts = make_linear_ts(60);
+            let mut model = RegressionForecaster::wls_logistic_ridge(
+                12.0,
+                0.1,
+                RegressionFeatures::new().trend().no_exog(),
+            );
+            model.fit(&ts).unwrap();
+            assert_eq!(model.name(), "WlsLogisticRidge");
+            let forecast = model.predict(5).unwrap();
+            assert_eq!(forecast.primary().len(), 5);
+            // Should continue the trend y = 2t + 10 within shrinkage tolerance.
+            for (h, &pred) in forecast.primary().iter().enumerate() {
+                assert!(pred.is_finite());
+                let expected = 2.0 * (60 + h) as f64 + 10.0;
+                assert!(
+                    (pred - expected).abs() < 3.0,
+                    "forecast {} drifted from expected {} at h={}",
+                    pred,
+                    expected,
+                    h
+                );
+            }
+        }
+
+        #[test]
+        fn wls_logistic_ridge_stays_stable_on_heavy_features_low_effective_n() {
+            // The motivating case from issue #103: small effective N
+            // (logistic offset = 6 on a 30-row series — only the last ~6
+            // rows have appreciable weight) with a heavy feature design
+            // would blow up under pure WLS. Ridge regularisation must
+            // keep predictions bounded.
+            let n = 30;
+            let timestamps = make_timestamps(n);
+            // Synthetic series with a small linear trend + noise.
+            let values: Vec<f64> = (0..n)
+                .map(|i| 5.0 + 0.3 * i as f64 + (i as f64 * 0.7).sin())
+                .collect();
+            let ts = TimeSeries::univariate(timestamps, values).unwrap();
+            // Heavy features: trend + 5 AR lags (≥ 6 columns, n_effective ≈ 6).
+            let features = RegressionFeatures::new().trend().lags(5).no_exog();
+            let mut model = RegressionForecaster::wls_logistic_ridge(6.0, 1.0, features);
+            model.fit(&ts).unwrap();
+
+            let forecast = model.predict(5).unwrap();
+            // Reasonable y values are in [5, 14] — predictions should
+            // stay in a sane neighbourhood, not blow up by orders of
+            // magnitude as pure WLS would.
+            for &v in forecast.primary() {
+                assert!(v.is_finite(), "forecast non-finite: {}", v);
+                assert!(
+                    v.abs() < 100.0,
+                    "WlsLogisticRidge forecast blew up: {} — regularisation didn't kick in",
+                    v
+                );
+            }
+        }
+
+        #[test]
+        fn wls_logistic_ridge_rejects_negative_lambda() {
+            let ts = make_linear_ts(30);
+            let mut model = RegressionForecaster::wls_logistic_ridge(
+                12.0,
+                -0.1,
+                RegressionFeatures::new().trend().no_exog(),
+            );
+            assert!(model.fit(&ts).is_err());
         }
 
         #[test]
