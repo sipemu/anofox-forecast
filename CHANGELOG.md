@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-06-15
+
+### Added
+
+- **Per-coefficient standard errors in `RegressionExplanation`** (closes #111). Two new owned fields on the `Regression` variant of `Explanation`:
+  - `coef_std_errors: Vec<f64>` — aligned with `coefficients`; empty when the backend doesn't compute inference (Poisson, Tweedie, BLS, RLS).
+  - `intercept_std_error: f64` — `NaN` when not available.
+  Populated for the default linear backends (OLS, Ridge, ElasticNet, WLS — `RegressionOptions::compute_inference` is `true` by default). SEs under regularised / weighted backends are nominal (sandwich-style approximation) — fine for display but not exact frequentist intervals. Unblocks downstream coefficient forest plots and `model_params` parquet emission in anofox-orchestration.
+
+- **`RegressionBackend::WlsLogisticRidge { offset, lambda }`** (closes #103). New backend that combines logistic recency weighting with L2 regularization in a single fit, solving the weighted Ridge normal equations `β = (Xᵀ W X + λI)⁻¹ Xᵀ W y` exactly. Convenience constructor `RegressionForecaster::wls_logistic_ridge(offset, lambda, features)`. Implementation: weighted centering by `ȳ_w` / `X̄_w`, sqrt(W) on centred data, Tikhonov `√λ · I_p` augmentation, OLS without intercept, then β + analytical intercept reconstructed on the original scale via a small `WlsLogisticRidgeFitted` wrapper. Fixes the catastrophic-extrapolation problem seen on heavy feature designs with small effective N (5-lag + Fourier + rolling features under `wls_offset: 30` — previously median MAE 669–1249 vs Ridge's 0.483; with combined fit, regularization stabilises the slopes).
+
+- **`AutoForecast` candidate-set extension** (closes #105). Three new opt-in include flags on `AutoForecastConfig` and matching builder methods (`include_tbats`, `include_mfles`, `include_mstl`), defaulting to `false`. Each adds CV-fit cost so users opt in when they suspect their series benefits from complex / multiple seasonality (TBATS), smooth trend + Fourier (MFLES), or STL-style trend-cycle separation (MSTL). TBATS and MSTL silently skip when `seasonal_period` is unset (matches the existing seasonal-only convention).
+
 ## [0.8.0] - 2026-06-10
 
 ### Added
