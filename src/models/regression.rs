@@ -2425,9 +2425,25 @@ mod ols_impl {
 
             let n_train = n - offset;
 
-            // Collect exogenous regressor names (sorted for determinism)
+            // Collect exogenous regressor names (sorted for determinism).
+            // Columns already claimed by an exog_features spec
+            // (Categorical / Lag / Rolling / Polynomial / Interaction)
+            // are excluded from the raw exog block — they're already
+            // represented downstream by the spec's derived columns, so
+            // including them as raw would cause collinearity (clearest
+            // case: Categorical OneHot + raw == singular). Closes #113.
             let exog_names = if self.use_exog && series.has_regressors() {
-                let mut names: Vec<String> = series.all_regressors().keys().cloned().collect();
+                let claimed: std::collections::HashSet<&str> = self
+                    .exog_features
+                    .iter()
+                    .flat_map(|s| s.referenced_cols())
+                    .collect();
+                let mut names: Vec<String> = series
+                    .all_regressors()
+                    .keys()
+                    .filter(|k| !claimed.contains(k.as_str()))
+                    .cloned()
+                    .collect();
                 names.sort();
                 names
             } else {
@@ -3706,13 +3722,26 @@ mod ols_impl {
                 return Ok(Forecast::new());
             }
 
-            // Validate that all required regressors are provided
-            for name in &state.exog_names {
-                match future_regressors.get(name) {
+            // Validate that all required regressors are provided —
+            // both raw exog columns (state.exog_names) AND columns
+            // claimed by exog_features specs (Categorical / Lag /
+            // Rolling / Polynomial / Interaction). The two are
+            // disjoint after the #113 fix; we union them here so a
+            // claimed column being absent still surfaces an error
+            // instead of silently producing zeros.
+            let mut required: std::collections::BTreeSet<&str> =
+                state.exog_names.iter().map(|s| s.as_str()).collect();
+            for spec in &state.features.exog_features {
+                for col in spec.referenced_cols() {
+                    required.insert(col);
+                }
+            }
+            for name in &required {
+                match future_regressors.get(*name) {
                     None => {
                         return Err(ForecastError::InvalidParameter(format!(
                             "Missing future regressor '{}'. Required: {:?}",
-                            name, state.exog_names
+                            name, required
                         )));
                     }
                     Some(vals) if vals.len() < horizon => {
@@ -4244,6 +4273,103 @@ mod ols_impl {
             assert_relative_eq!(preds[0], 1.0, epsilon = 1e-6);
             assert_relative_eq!(preds[1], 5.0, epsilon = 1e-6);
             assert_relative_eq!(preds[2], 9.0, epsilon = 1e-6);
+        }
+
+        #[test]
+        fn issue_113_categorical_excludes_raw_exog_for_same_column() {
+            // Before #113 fix: declaring a column via with_categorical(...)
+            // while keeping .exog() on caused the column to appear BOTH as
+            // raw numeric AND as its one-hot dummies, producing perfect
+            // collinearity. After the fix, the claimed column is excluded
+            // from the raw exog block so the design stays well-conditioned
+            // and a *different* raw regressor can still flow through.
+            let n = 60;
+            let mut cat = Vec::with_capacity(n);
+            let mut promo = Vec::with_capacity(n);
+            let mut y = Vec::with_capacity(n);
+            for i in 0..n {
+                let c = (i % 3) as i64;
+                cat.push(c as f64);
+                // independent binary regressor — bumps y by 2 when on
+                let p = ((i / 4) % 2) as i64;
+                promo.push(p as f64);
+                y.push(
+                    match c {
+                        0 => 1.0,
+                        1 => 5.0,
+                        2 => 9.0,
+                        _ => unreachable!(),
+                    } + 2.0 * p as f64,
+                );
+            }
+            let cal = CalendarAnnotations::new()
+                .with_regressor("is_chp".to_string(), cat)
+                .with_regressor("promo".to_string(), promo);
+            let ts = TimeSeriesBuilder::new()
+                .timestamps(make_timestamps(n))
+                .values(y)
+                .calendar(cal)
+                .build()
+                .unwrap();
+
+            // .exog() ON, plus .with_categorical("is_chp", …)
+            // — the pre-fix path would produce a singular X.
+            let mut model = RegressionForecaster::ols(
+                RegressionFeatures::new()
+                    .no_trend()
+                    .with_categorical(
+                        "is_chp",
+                        vec![0, 1, 2],
+                        CategoricalStrategy::OneHot { drop_first: true },
+                    )
+                    .unwrap(),
+            );
+            model.fit(&ts).unwrap();
+
+            // Feature-name sanity: raw `promo` present, raw `is_chp` absent,
+            // is_chp dummies present.
+            let names = model.features().feature_names(&["promo".to_string()]);
+            assert!(
+                names.contains(&"promo".to_string()),
+                "expected raw 'promo' in feature names, got {:?}",
+                names,
+            );
+            assert!(
+                !names.contains(&"is_chp".to_string()),
+                "raw 'is_chp' must be excluded (claimed by categorical), got {:?}",
+                names,
+            );
+            assert!(
+                names
+                    .iter()
+                    .any(|n| n == "is_chp_eq_1" || n == "is_chp_eq_2"),
+                "expected at least one is_chp dummy in feature names, got {:?}",
+                names,
+            );
+
+            // Forecast: should recover the four expected combos
+            //   (cat, promo) → y: (0,0)→1, (1,1)→7, (2,0)→9, (0,1)→3
+            let mut fr = HashMap::new();
+            fr.insert("is_chp".to_string(), vec![0.0, 1.0, 2.0, 0.0]);
+            fr.insert("promo".to_string(), vec![0.0, 1.0, 0.0, 1.0]);
+            let forecast = model.predict_with_exog(4, &fr).unwrap();
+            let preds = forecast.primary();
+            assert_relative_eq!(preds[0], 1.0, epsilon = 1e-4);
+            assert_relative_eq!(preds[1], 7.0, epsilon = 1e-4);
+            assert_relative_eq!(preds[2], 9.0, epsilon = 1e-4);
+            assert_relative_eq!(preds[3], 3.0, epsilon = 1e-4);
+
+            // Validation: missing a claimed column at predict time must
+            // surface an error (regression test for the extended
+            // predict_with_exog validation in #113).
+            let mut fr_missing = HashMap::new();
+            fr_missing.insert("promo".to_string(), vec![0.0, 1.0, 0.0, 1.0]);
+            // 'is_chp' deliberately absent
+            let err = model.predict_with_exog(4, &fr_missing);
+            assert!(
+                err.is_err(),
+                "predict_with_exog should error when a claimed column ('is_chp') is missing from future regressors",
+            );
         }
 
         #[test]

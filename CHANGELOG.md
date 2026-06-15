@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-06-15
+
+### Fixed
+
+- **`RegressionForecaster`: columns claimed by `exog_features` are now excluded from the raw exog block** (closes #113). Previously, declaring a column via `with_categorical("is_chp", …)` while leaving `.exog()` enabled inserted that column both as a raw numeric column *and* as its one-hot dummies, producing perfect collinearity and a singular design matrix that blew OLS up. The fix excludes any column referenced by an `exog_features` spec (Categorical / Lag / Rolling / Polynomial / Interaction) from the raw exog name list — letting callers declare *some* regressors categorical and others numeric, without the all-or-nothing `.no_exog()` workaround.
+
+### Changed
+
+- **`predict_with_exog` validation now covers all spec-claimed columns**. Columns referenced by `exog_features` entries (which the encoder reads via `future_at` at predict time) are now required in `future_regressors`. A missing claimed column surfaces a clear `InvalidParameter` error instead of silently producing zeros.
+
+### Breaking (narrow)
+
+- A caller who deliberately relied on `.exog().with_exog_lags("foo", &[1])` to produce both raw `foo` *and* `foo_lag1` columns no longer gets the raw column. The motivating Categorical case is the strictly-correct fix; for the lag/rolling cases this is a behaviour change. Workaround: declare derived features on a different column name, or accept the loss of raw column.
+
 ## [0.8.1] - 2026-06-15
 
 ### Added
