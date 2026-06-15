@@ -8,7 +8,7 @@ use crate::error::{ForecastError, Result};
 use crate::models::arima::AutoARIMA;
 use crate::models::exponential::AutoETS;
 use crate::models::theta::AutoTheta;
-use crate::models::{validate_series_complete, Forecaster};
+use crate::models::{validate_series_complete, AutoTBATS, Forecaster, MSTLForecaster, MFLES};
 use std::collections::HashMap;
 use std::fmt;
 
@@ -26,6 +26,17 @@ pub struct AutoForecastConfig {
     pub include_ets: bool,
     /// Include AutoTheta in the candidate set.
     pub include_theta: bool,
+    /// Include AutoTBATS in the candidate set (off by default — TBATS
+    /// is expensive; opt in when complex / multiple seasonality is
+    /// expected). Requires `seasonal_period` to be set.
+    pub include_tbats: bool,
+    /// Include MFLES in the candidate set (off by default). Useful for
+    /// series with smooth trend + Fourier seasonality.
+    pub include_mfles: bool,
+    /// Include MSTLForecaster in the candidate set (off by default).
+    /// Useful for series with multiple seasonalities or strong
+    /// trend-cycle separation. Requires `seasonal_period` to be set.
+    pub include_mstl: bool,
 }
 
 impl Default for AutoForecastConfig {
@@ -35,6 +46,9 @@ impl Default for AutoForecastConfig {
             include_arima: true,
             include_ets: true,
             include_theta: true,
+            include_tbats: false,
+            include_mfles: false,
+            include_mstl: false,
         }
     }
 }
@@ -65,6 +79,24 @@ impl AutoForecastConfig {
         self.include_theta = false;
         self
     }
+
+    /// Enable AutoTBATS in the candidate set.
+    pub fn with_tbats(mut self) -> Self {
+        self.include_tbats = true;
+        self
+    }
+
+    /// Enable MFLES in the candidate set.
+    pub fn with_mfles(mut self) -> Self {
+        self.include_mfles = true;
+        self
+    }
+
+    /// Enable MSTLForecaster in the candidate set.
+    pub fn with_mstl(mut self) -> Self {
+        self.include_mstl = true;
+        self
+    }
 }
 
 /// Internal enum holding the selected model. Using an enum keeps Clone and Debug.
@@ -79,6 +111,9 @@ enum SelectedAutoModel {
     ARIMA(AutoARIMA),
     ETS(AutoETS),
     Theta(AutoTheta),
+    TBATS(AutoTBATS),
+    Mfles(MFLES),
+    Mstl(MSTLForecaster),
 }
 
 /// Unified automatic model selection across ARIMA, ETS, and Theta families.
@@ -126,23 +161,21 @@ pub struct AutoForecast {
 ///     .include_theta(false)
 ///     .build();
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct AutoForecastBuilder {
     seasonal_period: Option<usize>,
     include_arima: Option<bool>,
     include_ets: Option<bool>,
     include_theta: Option<bool>,
+    include_tbats: Option<bool>,
+    include_mfles: Option<bool>,
+    include_mstl: Option<bool>,
 }
 
 impl AutoForecastBuilder {
     /// Create a new builder with all defaults.
     fn new() -> Self {
-        Self {
-            seasonal_period: None,
-            include_arima: None,
-            include_ets: None,
-            include_theta: None,
-        }
+        Self::default()
     }
 
     /// Set the seasonal period.
@@ -169,6 +202,26 @@ impl AutoForecastBuilder {
         self
     }
 
+    /// Include or exclude AutoTBATS from the candidate set
+    /// (off by default — requires `seasonal_period` to be set).
+    pub fn include_tbats(mut self, include: bool) -> Self {
+        self.include_tbats = Some(include);
+        self
+    }
+
+    /// Include or exclude MFLES from the candidate set (off by default).
+    pub fn include_mfles(mut self, include: bool) -> Self {
+        self.include_mfles = Some(include);
+        self
+    }
+
+    /// Include or exclude MSTLForecaster from the candidate set
+    /// (off by default — requires `seasonal_period` to be set).
+    pub fn include_mstl(mut self, include: bool) -> Self {
+        self.include_mstl = Some(include);
+        self
+    }
+
     /// Build the AutoForecast model.
     pub fn build(self) -> AutoForecast {
         let config = AutoForecastConfig {
@@ -176,6 +229,9 @@ impl AutoForecastBuilder {
             include_arima: self.include_arima.unwrap_or(true),
             include_ets: self.include_ets.unwrap_or(true),
             include_theta: self.include_theta.unwrap_or(true),
+            include_tbats: self.include_tbats.unwrap_or(false),
+            include_mfles: self.include_mfles.unwrap_or(false),
+            include_mstl: self.include_mstl.unwrap_or(false),
         };
 
         AutoForecast::with_config(config)
@@ -217,6 +273,9 @@ impl AutoForecast {
             SelectedAutoModel::ARIMA(model) => model.name(),
             SelectedAutoModel::ETS(model) => model.name(),
             SelectedAutoModel::Theta(model) => model.name(),
+            SelectedAutoModel::TBATS(model) => model.name(),
+            SelectedAutoModel::Mfles(model) => model.name(),
+            SelectedAutoModel::Mstl(model) => model.name(),
         })
     }
 
@@ -337,6 +396,74 @@ impl AutoForecast {
             }));
         }
 
+        // TBATS / MSTL need a seasonal period; silently skip when not set
+        // (matches the existing semantics for seasonal-only options).
+        if self.config.include_tbats {
+            if let Some(p) = seasonal_period.filter(|&p| p > 1) {
+                factories.push(Box::new(move |cv_cfg: &CVConfig, ts: &TimeSeries| {
+                    let cv_result = cross_validate(cv_cfg, ts, move || AutoTBATS::new(vec![p]));
+                    if let Ok(results) = cv_result {
+                        if results.n_folds > 0 && results.aggregated.rmse.is_finite() {
+                            let mut model = AutoTBATS::new(vec![p]);
+                            if model.fit(ts).is_ok() {
+                                let name = model.name().to_string();
+                                return Some((
+                                    SelectedAutoModel::TBATS(model),
+                                    name,
+                                    results.aggregated.rmse,
+                                ));
+                            }
+                        }
+                    }
+                    None
+                }));
+            }
+        }
+
+        if self.config.include_mfles {
+            let period = seasonal_period.unwrap_or(1);
+            factories.push(Box::new(move |cv_cfg: &CVConfig, ts: &TimeSeries| {
+                let cv_result = cross_validate(cv_cfg, ts, move || MFLES::new(vec![period]));
+                if let Ok(results) = cv_result {
+                    if results.n_folds > 0 && results.aggregated.rmse.is_finite() {
+                        let mut model = MFLES::new(vec![period]);
+                        if model.fit(ts).is_ok() {
+                            let name = model.name().to_string();
+                            return Some((
+                                SelectedAutoModel::Mfles(model),
+                                name,
+                                results.aggregated.rmse,
+                            ));
+                        }
+                    }
+                }
+                None
+            }));
+        }
+
+        if self.config.include_mstl {
+            if let Some(p) = seasonal_period.filter(|&p| p > 1) {
+                factories.push(Box::new(move |cv_cfg: &CVConfig, ts: &TimeSeries| {
+                    let cv_result =
+                        cross_validate(cv_cfg, ts, move || MSTLForecaster::new(vec![p]));
+                    if let Ok(results) = cv_result {
+                        if results.n_folds > 0 && results.aggregated.rmse.is_finite() {
+                            let mut model = MSTLForecaster::new(vec![p]);
+                            if model.fit(ts).is_ok() {
+                                let name = model.name().to_string();
+                                return Some((
+                                    SelectedAutoModel::Mstl(model),
+                                    name,
+                                    results.aggregated.rmse,
+                                ));
+                            }
+                        }
+                    }
+                    None
+                }));
+            }
+        }
+
         #[cfg(feature = "parallel")]
         let mut cv_scores: Vec<(SelectedAutoModel, String, f64)> = factories
             .par_iter()
@@ -398,6 +525,9 @@ impl Forecaster for AutoForecast {
             Some(SelectedAutoModel::ARIMA(m)) => m.predict(horizon),
             Some(SelectedAutoModel::ETS(m)) => m.predict(horizon),
             Some(SelectedAutoModel::Theta(m)) => m.predict(horizon),
+            Some(SelectedAutoModel::TBATS(m)) => m.predict(horizon),
+            Some(SelectedAutoModel::Mfles(m)) => m.predict(horizon),
+            Some(SelectedAutoModel::Mstl(m)) => m.predict(horizon),
             None => Err(ForecastError::FitRequired { model: None }),
         }
     }
@@ -407,6 +537,9 @@ impl Forecaster for AutoForecast {
             Some(SelectedAutoModel::ARIMA(m)) => m.predict_with_intervals(horizon, level),
             Some(SelectedAutoModel::ETS(m)) => m.predict_with_intervals(horizon, level),
             Some(SelectedAutoModel::Theta(m)) => m.predict_with_intervals(horizon, level),
+            Some(SelectedAutoModel::TBATS(m)) => m.predict_with_intervals(horizon, level),
+            Some(SelectedAutoModel::Mfles(m)) => m.predict_with_intervals(horizon, level),
+            Some(SelectedAutoModel::Mstl(m)) => m.predict_with_intervals(horizon, level),
             None => Err(ForecastError::FitRequired { model: None }),
         }
     }
@@ -416,6 +549,9 @@ impl Forecaster for AutoForecast {
             SelectedAutoModel::ARIMA(m) => m.fitted_values(),
             SelectedAutoModel::ETS(m) => m.fitted_values(),
             SelectedAutoModel::Theta(m) => m.fitted_values(),
+            SelectedAutoModel::TBATS(m) => m.fitted_values(),
+            SelectedAutoModel::Mfles(m) => m.fitted_values(),
+            SelectedAutoModel::Mstl(m) => m.fitted_values(),
         }
     }
 
@@ -424,6 +560,9 @@ impl Forecaster for AutoForecast {
             SelectedAutoModel::ARIMA(m) => m.fitted_values_with_intervals(level),
             SelectedAutoModel::ETS(m) => m.fitted_values_with_intervals(level),
             SelectedAutoModel::Theta(m) => m.fitted_values_with_intervals(level),
+            SelectedAutoModel::TBATS(m) => m.fitted_values_with_intervals(level),
+            SelectedAutoModel::Mfles(m) => m.fitted_values_with_intervals(level),
+            SelectedAutoModel::Mstl(m) => m.fitted_values_with_intervals(level),
         }
     }
 
@@ -432,6 +571,9 @@ impl Forecaster for AutoForecast {
             SelectedAutoModel::ARIMA(m) => m.residuals(),
             SelectedAutoModel::ETS(m) => m.residuals(),
             SelectedAutoModel::Theta(m) => m.residuals(),
+            SelectedAutoModel::TBATS(m) => m.residuals(),
+            SelectedAutoModel::Mfles(m) => m.residuals(),
+            SelectedAutoModel::Mstl(m) => m.residuals(),
         }
     }
 
@@ -448,6 +590,9 @@ impl Forecaster for AutoForecast {
             Some(SelectedAutoModel::ARIMA(m)) => m.has_exog(),
             Some(SelectedAutoModel::ETS(m)) => m.has_exog(),
             Some(SelectedAutoModel::Theta(m)) => m.has_exog(),
+            Some(SelectedAutoModel::TBATS(m)) => m.has_exog(),
+            Some(SelectedAutoModel::Mfles(m)) => m.has_exog(),
+            Some(SelectedAutoModel::Mstl(m)) => m.has_exog(),
             None => false,
         }
     }
@@ -457,6 +602,9 @@ impl Forecaster for AutoForecast {
             SelectedAutoModel::ARIMA(m) => m.exog_names(),
             SelectedAutoModel::ETS(m) => m.exog_names(),
             SelectedAutoModel::Theta(m) => m.exog_names(),
+            SelectedAutoModel::TBATS(m) => m.exog_names(),
+            SelectedAutoModel::Mfles(m) => m.exog_names(),
+            SelectedAutoModel::Mstl(m) => m.exog_names(),
         }
     }
 
@@ -469,6 +617,9 @@ impl Forecaster for AutoForecast {
             Some(SelectedAutoModel::ARIMA(m)) => m.predict_with_exog(horizon, future_regressors),
             Some(SelectedAutoModel::ETS(m)) => m.predict_with_exog(horizon, future_regressors),
             Some(SelectedAutoModel::Theta(m)) => m.predict_with_exog(horizon, future_regressors),
+            Some(SelectedAutoModel::TBATS(m)) => m.predict_with_exog(horizon, future_regressors),
+            Some(SelectedAutoModel::Mfles(m)) => m.predict_with_exog(horizon, future_regressors),
+            Some(SelectedAutoModel::Mstl(m)) => m.predict_with_exog(horizon, future_regressors),
             None => Err(ForecastError::FitRequired { model: None }),
         }
     }
@@ -487,6 +638,15 @@ impl Forecaster for AutoForecast {
                 m.predict_with_exog_intervals(horizon, future_regressors, level)
             }
             Some(SelectedAutoModel::Theta(m)) => {
+                m.predict_with_exog_intervals(horizon, future_regressors, level)
+            }
+            Some(SelectedAutoModel::TBATS(m)) => {
+                m.predict_with_exog_intervals(horizon, future_regressors, level)
+            }
+            Some(SelectedAutoModel::Mfles(m)) => {
+                m.predict_with_exog_intervals(horizon, future_regressors, level)
+            }
+            Some(SelectedAutoModel::Mstl(m)) => {
                 m.predict_with_exog_intervals(horizon, future_regressors, level)
             }
             None => Err(ForecastError::FitRequired { model: None }),
@@ -550,6 +710,76 @@ mod tests {
 
         let forecast = model.predict(5).unwrap();
         assert_eq!(forecast.horizon(), 5);
+    }
+
+    #[test]
+    fn auto_forecast_opt_in_models_extend_candidate_set() {
+        let ts = make_seasonal_series(120, 12);
+        let mut baseline = AutoForecast::seasonal(12);
+        baseline.fit(&ts).unwrap();
+        let baseline_n = baseline.all_scores().len();
+
+        let mut extended = AutoForecast::builder()
+            .seasonal_period(12)
+            .include_tbats(true)
+            .include_mfles(true)
+            .include_mstl(true)
+            .build();
+        extended.fit(&ts).unwrap();
+        let extended_n = extended.all_scores().len();
+
+        assert!(
+            extended_n > baseline_n,
+            "extended fit should include more candidates; baseline={}, extended={}",
+            baseline_n,
+            extended_n,
+        );
+
+        // Each opted-in model should appear by name in at least one score row.
+        let extended_names: Vec<&str> = extended
+            .all_scores()
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect();
+        assert!(
+            extended_names.iter().any(|n| n.contains("TBATS")),
+            "extended scores missing TBATS: {:?}",
+            extended_names
+        );
+        assert!(
+            extended_names.iter().any(|n| *n == "MFLES"),
+            "extended scores missing MFLES: {:?}",
+            extended_names
+        );
+        assert!(
+            extended_names.iter().any(|n| n.contains("MSTL")),
+            "extended scores missing MSTL: {:?}",
+            extended_names
+        );
+
+        let forecast = extended.predict(12).unwrap();
+        assert_eq!(forecast.horizon(), 12);
+    }
+
+    #[test]
+    fn auto_forecast_tbats_mstl_require_seasonal_period() {
+        // Without seasonal_period, TBATS / MSTL silently skip (matches
+        // existing semantics for seasonal-only options).
+        let ts = make_trend_series(80);
+        let mut model = AutoForecast::builder()
+            .include_tbats(true)
+            .include_mstl(true)
+            .build();
+        model.fit(&ts).unwrap();
+        let names: Vec<&str> = model.all_scores().iter().map(|(n, _)| n.as_str()).collect();
+        assert!(
+            !names.iter().any(|n| n.contains("TBATS")),
+            "TBATS should be skipped without seasonal_period"
+        );
+        assert!(
+            !names.iter().any(|n| n.contains("MSTL")),
+            "MSTL should be skipped without seasonal_period"
+        );
     }
 
     #[test]
