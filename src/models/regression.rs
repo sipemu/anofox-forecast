@@ -1235,12 +1235,77 @@ mod ols_impl {
                     let y_mean: f64 = (0..n).map(|i| y[i]).sum::<f64>() / n as f64;
                     let tss: f64 = (0..n).map(|i| (y[i] - y_mean).powi(2)).sum();
                     let r_squared = if tss > 0.0 { 1.0 - rss / tss } else { 0.0 };
+
+                    // Compute standard errors on the original-scale design.
+                    // The augmented OLS that produced β was fitted on a
+                    // centred + √W-scaled + Tikhonov-augmented design, so
+                    // its result.std_errors are in the wrong units and
+                    // must NOT be propagated. Instead, populate from the
+                    // weighted covariance
+                    //   Cov(β̂) = σ̂² · (Xfullᵀ W Xfull + λI_β)⁻¹
+                    //   σ̂² = Σ wᵢ rᵢ² / (Σ wᵢ − (p + 1))
+                    // where Xfull prepends the intercept column and
+                    // λI_β has 0 on the intercept diagonal (intercept is
+                    // unpenalised). This is the "plain weighted Ridge"
+                    // form from issue #115 — gives correct SEs at λ = 0
+                    // and a numerically-stable approximation for λ > 0.
+                    let p_full = p + 1;
+                    let mut xtwx: Mat<f64> = Mat::zeros(p_full, p_full);
+                    let mut sum_w_rsq = 0.0;
+                    for i in 0..n {
+                        let wi = w[i];
+                        sum_w_rsq += wi * residuals[i] * residuals[i];
+                        xtwx[(0, 0)] += wi;
+                        for j in 0..p {
+                            let wij = wi * x[(i, j)];
+                            xtwx[(0, j + 1)] += wij;
+                            xtwx[(j + 1, 0)] += wij;
+                            for k in 0..p {
+                                xtwx[(j + 1, k + 1)] += wij * x[(i, k)];
+                            }
+                        }
+                    }
+                    for j in 0..p {
+                        xtwx[(j + 1, j + 1)] += *lambda;
+                    }
+                    let df_eff = sum_w - p_full as f64;
+                    let sigma_sq = if df_eff > 0.0 {
+                        sum_w_rsq / df_eff
+                    } else {
+                        f64::NAN
+                    };
+                    let (std_errors_opt, intercept_se_opt) = match xtwx.llt(faer::Side::Lower) {
+                        Ok(llt) => {
+                            use faer::linalg::solvers::DenseSolveCore;
+                            let inv: Mat<f64> = llt.inverse();
+                            let mut se_coef = Col::<f64>::zeros(p);
+                            for j in 0..p {
+                                let var = sigma_sq * inv[(j + 1, j + 1)];
+                                se_coef[j] = if var.is_finite() && var >= 0.0 {
+                                    var.sqrt()
+                                } else {
+                                    f64::NAN
+                                };
+                            }
+                            let var_int = sigma_sq * inv[(0, 0)];
+                            let se_int = if var_int.is_finite() && var_int >= 0.0 {
+                                var_int.sqrt()
+                            } else {
+                                f64::NAN
+                            };
+                            (Some(se_coef), Some(se_int))
+                        }
+                        Err(_) => (None, None),
+                    };
+
                     let mut result = ols_fitted.result().clone();
                     result.intercept = Some(intercept);
                     result.fitted_values = fitted_values;
                     result.residuals = residuals;
                     result.n_observations = n;
                     result.r_squared = r_squared;
+                    result.std_errors = std_errors_opt;
+                    result.intercept_std_error = intercept_se_opt;
                     Ok(Box::new(WlsLogisticRidgeFitted { result }))
                 }
                 Self::Rls { forgetting_factor } => {
@@ -5388,6 +5453,53 @@ mod ols_impl {
                     v
                 );
             }
+        }
+
+        #[test]
+        fn wls_logistic_ridge_populates_finite_standard_errors() {
+            // Issue #115: SE on WlsLogisticRidge must come from the
+            // original-scale weighted covariance, not from the cloned
+            // augmented-fit residual. After this fix they must be
+            // finite, positive, and length-aligned with coefficients.
+            use crate::models::inspect::{Explanation, Inspectable};
+
+            let ts = make_linear_ts(50);
+            let mut model = RegressionForecaster::wls_logistic_ridge(
+                12.0,
+                1.0,
+                RegressionFeatures::new().trend().no_exog(),
+            );
+            model.fit(&ts).unwrap();
+
+            let Explanation::Regression(e) = model.explanation().unwrap() else {
+                panic!("expected Explanation::Regression");
+            };
+
+            assert_eq!(
+                e.coef_std_errors.len(),
+                e.coefficients.len(),
+                "coef_std_errors must align with coefficients (got {}, {})",
+                e.coef_std_errors.len(),
+                e.coefficients.len(),
+            );
+            assert!(
+                !e.coef_std_errors.is_empty(),
+                "coef_std_errors must be populated for WlsLogisticRidge",
+            );
+            for (i, &se) in e.coef_std_errors.iter().enumerate() {
+                assert!(se.is_finite(), "SE[{}] not finite: {}", i, se);
+                assert!(se > 0.0, "SE[{}] not positive: {}", i, se);
+            }
+            assert!(
+                e.intercept_std_error.is_finite(),
+                "intercept SE not finite: {}",
+                e.intercept_std_error,
+            );
+            assert!(
+                e.intercept_std_error > 0.0,
+                "intercept SE not positive: {}",
+                e.intercept_std_error,
+            );
         }
 
         #[test]

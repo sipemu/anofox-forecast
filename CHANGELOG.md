@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.3] - 2026-06-16
+
+### Fixed
+
+- **`WlsLogisticRidge`: standard errors are now computed on the original-scale design** (closes #115). The v0.8.1 implementation built `RegressionResult` by cloning the augmented OLS fit's result and overwriting intercept / fitted / residuals / R² on the original scale — but never replaced `std_errors`, so the SE values surfaced via `RegressionExplanation` came from the centred + √W-scaled + Tikhonov-augmented design (wrong units, silently wrong/empty for downstream consumers). The fix recomputes `Cov(β̂) = σ̂² · (Xfullᵀ W Xfull + λI_β)⁻¹` inline using faer Cholesky, populating `result.std_errors` and `result.intercept_std_error` so the Inspectable surface returns finite, positive SEs aligned with the coefficients.
+
 ## [0.8.2] - 2026-06-15
 
 ### Fixed
