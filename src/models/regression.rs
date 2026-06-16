@@ -1236,58 +1236,61 @@ mod ols_impl {
                     let tss: f64 = (0..n).map(|i| (y[i] - y_mean).powi(2)).sum();
                     let r_squared = if tss > 0.0 { 1.0 - rss / tss } else { 0.0 };
 
-                    // Compute standard errors on the original-scale design.
-                    // The augmented OLS that produced β was fitted on a
-                    // centred + √W-scaled + Tikhonov-augmented design, so
-                    // its result.std_errors are in the wrong units and
-                    // must NOT be propagated. Instead, populate from the
-                    // weighted covariance
-                    //   Cov(β̂) = σ̂² · (Xfullᵀ W Xfull + λI_β)⁻¹
-                    //   σ̂² = Σ wᵢ rᵢ² / (Σ wᵢ − (p + 1))
-                    // where Xfull prepends the intercept column and
-                    // λI_β has 0 on the intercept diagonal (intercept is
-                    // unpenalised). This is the "plain weighted Ridge"
-                    // form from issue #115 — gives correct SEs at λ = 0
-                    // and a numerically-stable approximation for λ > 0.
+                    // Compute standard errors on the original-scale design,
+                    // using the ridge-adjusted sandwich covariance
+                    //   A   = Xfullᵀ W Xfull + λI_β
+                    //   Cov = σ̂² · A⁻¹ · (Xfullᵀ W Xfull) · A⁻¹
+                    //   σ̂² = Σ wᵢ rᵢ² / df_eff
+                    // where Xfull prepends the intercept column and λI_β
+                    // has 0 on the intercept diagonal (intercept is
+                    // unpenalised, matching the analytical reconstruction).
+                    //
+                    // The sandwich is the "more correct form when ridge λ>0
+                    // is active" called out in issues #115 / #117. It stays
+                    // finite even when Xfullᵀ W Xfull alone is rank-
+                    // deficient (heavy-feature designs with small effective
+                    // N — many categorical dummies + logistic recency) as
+                    // long as A is positive definite, which holds for any
+                    // λ > 0. df_eff is clamped to ≥ 1 so series with
+                    // Σ wᵢ ≤ p+1 don't produce NaN through a non-positive
+                    // residual variance.
                     let p_full = p + 1;
-                    let mut xtwx: Mat<f64> = Mat::zeros(p_full, p_full);
+                    let mut xtwx_raw: Mat<f64> = Mat::zeros(p_full, p_full);
                     let mut sum_w_rsq = 0.0;
                     for i in 0..n {
                         let wi = w[i];
                         sum_w_rsq += wi * residuals[i] * residuals[i];
-                        xtwx[(0, 0)] += wi;
+                        xtwx_raw[(0, 0)] += wi;
                         for j in 0..p {
                             let wij = wi * x[(i, j)];
-                            xtwx[(0, j + 1)] += wij;
-                            xtwx[(j + 1, 0)] += wij;
+                            xtwx_raw[(0, j + 1)] += wij;
+                            xtwx_raw[(j + 1, 0)] += wij;
                             for k in 0..p {
-                                xtwx[(j + 1, k + 1)] += wij * x[(i, k)];
+                                xtwx_raw[(j + 1, k + 1)] += wij * x[(i, k)];
                             }
                         }
                     }
+                    let mut xtwx_reg = xtwx_raw.clone();
                     for j in 0..p {
-                        xtwx[(j + 1, j + 1)] += *lambda;
+                        xtwx_reg[(j + 1, j + 1)] += *lambda;
                     }
-                    let df_eff = sum_w - p_full as f64;
-                    let sigma_sq = if df_eff > 0.0 {
-                        sum_w_rsq / df_eff
-                    } else {
-                        f64::NAN
-                    };
-                    let (std_errors_opt, intercept_se_opt) = match xtwx.llt(faer::Side::Lower) {
+                    let df_eff = (sum_w - p_full as f64).max(1.0);
+                    let sigma_sq = sum_w_rsq / df_eff;
+                    let (std_errors_opt, intercept_se_opt) = match xtwx_reg.llt(faer::Side::Lower) {
                         Ok(llt) => {
                             use faer::linalg::solvers::DenseSolveCore;
-                            let inv: Mat<f64> = llt.inverse();
+                            let a_inv: Mat<f64> = llt.inverse();
+                            let sandwich: Mat<f64> = &a_inv * &xtwx_raw * &a_inv;
                             let mut se_coef = Col::<f64>::zeros(p);
                             for j in 0..p {
-                                let var = sigma_sq * inv[(j + 1, j + 1)];
+                                let var = sigma_sq * sandwich[(j + 1, j + 1)];
                                 se_coef[j] = if var.is_finite() && var >= 0.0 {
                                     var.sqrt()
                                 } else {
                                     f64::NAN
                                 };
                             }
-                            let var_int = sigma_sq * inv[(0, 0)];
+                            let var_int = sigma_sq * sandwich[(0, 0)];
                             let se_int = if var_int.is_finite() && var_int >= 0.0 {
                                 var_int.sqrt()
                             } else {
@@ -5498,6 +5501,62 @@ mod ols_impl {
             assert!(
                 e.intercept_std_error > 0.0,
                 "intercept SE not positive: {}",
+                e.intercept_std_error,
+            );
+        }
+
+        #[test]
+        fn wls_logistic_ridge_keeps_finite_se_on_heavy_features_low_effective_n() {
+            // Issue #117 reproduces a Kärcher-style failure: ~20 features
+            // with logistic offset = 24 means Σ wᵢ ≈ 24 — barely above
+            // p+1, so the unregularized residual variance df = Σ wᵢ − p − 1
+            // collapses (or goes negative) and the v0.8.3 simple-form
+            // SEs returned NaN for every coefficient. The ridge-adjusted
+            // sandwich + clamped df_eff must surface finite SEs even on
+            // these designs.
+            use crate::models::inspect::{Explanation, Inspectable};
+
+            let n = 60;
+            let timestamps = make_timestamps(n);
+            let values: Vec<f64> = (0..n)
+                .map(|i| 5.0 + 0.3 * i as f64 + (i as f64 * 0.4).sin())
+                .collect();
+            let ts = TimeSeries::univariate(timestamps, values).unwrap();
+            // Heavy design: trend + 5 lags + Fourier order 3 for period 12
+            // (= 6 sin/cos columns). ~12 features total against an
+            // effective N (sum of logistic weights @ offset 12) of ~12.
+            let features = RegressionFeatures::new()
+                .trend()
+                .lags(5)
+                .fourier(12, 3)
+                .no_exog();
+            let mut model = RegressionForecaster::wls_logistic_ridge(12.0, 1.0, features);
+            model.fit(&ts).unwrap();
+
+            let Explanation::Regression(e) = model.explanation().unwrap() else {
+                panic!("expected Explanation::Regression");
+            };
+
+            assert!(
+                !e.coef_std_errors.is_empty(),
+                "SE vector must be populated under ridge-adjusted form",
+            );
+            assert_eq!(
+                e.coef_std_errors.len(),
+                e.coefficients.len(),
+                "coef_std_errors length mismatch",
+            );
+            for (i, &se) in e.coef_std_errors.iter().enumerate() {
+                assert!(
+                    se.is_finite(),
+                    "SE[{}] NaN under heavy-feature/low-effective-N design — regression on #117 fix",
+                    i
+                );
+                assert!(se > 0.0, "SE[{}] not positive: {}", i, se);
+            }
+            assert!(
+                e.intercept_std_error.is_finite() && e.intercept_std_error > 0.0,
+                "intercept SE not finite/positive: {}",
                 e.intercept_std_error,
             );
         }
