@@ -1145,6 +1145,37 @@ mod ols_impl {
                         .weights(weights)
                         .build();
                     let fitted = model.fit(x, y).map_err(|e| format!("WLS: {}", e))?;
+                    // Issue #119: WlsRegressor can return a successful
+                    // result whose coefficients are silent NaN on heavy-
+                    // feature / small-effective-N designs (singular weighted
+                    // normal matrix). Detect that here and surface a clean
+                    // error instead of letting NaN propagate into the
+                    // forecast — silently-NaN forecasts look "successful"
+                    // to downstream consumers and quietly drop the method
+                    // from honest backtests. Aliased columns intentionally
+                    // carry NaN (pivoted-out rank-deficient directions);
+                    // those are fine.
+                    {
+                        let result = fitted.result();
+                        let coefs = &result.coefficients;
+                        for j in 0..coefs.nrows() {
+                            let aliased = result.aliased.get(j).copied().unwrap_or(false);
+                            if !aliased && !coefs[j].is_finite() {
+                                return Err(format!(
+                                    "WLS: non-finite coefficient[{}] (= {}) from a successful solve — likely singular weighted normal matrix on a heavy-feature / small-effective-N design. Consider RegressionForecaster::wls_logistic_ridge with λ > 0 for the same recency weighting plus L2 regularisation.",
+                                    j, coefs[j]
+                                ));
+                            }
+                        }
+                        if let Some(v) = result.intercept {
+                            if !v.is_finite() {
+                                return Err(format!(
+                                    "WLS: non-finite intercept (= {}) from a successful solve — likely singular weighted normal matrix. Consider wls_logistic_ridge with λ > 0.",
+                                    v
+                                ));
+                            }
+                        }
+                    }
                     Ok(Box::new(fitted))
                 }
                 Self::WlsLogisticRidge { offset, lambda } => {
@@ -5570,6 +5601,53 @@ mod ols_impl {
                 RegressionFeatures::new().trend().no_exog(),
             );
             assert!(model.fit(&ts).is_err());
+        }
+
+        #[test]
+        fn wls_logistic_never_returns_silent_nan_forecast() {
+            // Issue #119: wls_logistic on a heavy-feature / small-
+            // effective-N design previously returned a finite-shaped
+            // forecast whose values were all NaN. The contract we
+            // enforce now is "either the fit errors cleanly, or the
+            // forecast is finite" — silent NaN is never acceptable.
+            // Repro shape mirrors the orchestrator config: short
+            // series, ~ p features close to or exceeding the
+            // effective N (sum of logistic weights).
+            let n = 36;
+            // Construct a synthetic series with a trend.
+            let timestamps = make_timestamps(n);
+            let values: Vec<f64> = (0..n)
+                .map(|i| 5.0 + 0.4 * i as f64 + (i as f64 * 0.5).sin())
+                .collect();
+            let ts = TimeSeries::univariate(timestamps, values).unwrap();
+            // Heavy design: trend + 4 lags + Fourier order 6 for
+            // period 12 (12 sin/cos columns) → ~17 features against
+            // an effective N (sum of logistic weights @ offset 6) ≈ 6.
+            let features = RegressionFeatures::new()
+                .trend()
+                .lags(4)
+                .fourier(12, 6)
+                .no_exog();
+            let mut model = RegressionForecaster::wls_logistic(6.0, features);
+            match model.fit(&ts) {
+                Err(_) => {
+                    // Clean error — acceptable per the #119 contract.
+                }
+                Ok(()) => {
+                    // Successful fit must yield a finite forecast — no
+                    // silent NaN.
+                    let forecast = model
+                        .predict(12)
+                        .expect("Ok fit must produce a finite forecast");
+                    for (h, &v) in forecast.primary().iter().enumerate() {
+                        assert!(
+                            v.is_finite(),
+                            "WLS Logistic produced silent NaN forecast at h={}: {} — regression on #119 fix",
+                            h, v
+                        );
+                    }
+                }
+            }
         }
 
         #[test]

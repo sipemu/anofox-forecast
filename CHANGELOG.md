@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.5] - 2026-06-16
+
+### Added
+
+- **`PiecewiseLinearTrend::with_auto_penalty()`** — per-series automatic PELT penalty selection via CROPS + elbow (Haynes et al. 2017). Drop-in replacement for hand-tuning the `penalty` knob: when enabled, `fit_trend` runs `Pelt::auto_detect` over a geometric range and picks the elbow where adding one more knot stops paying for itself. Default remains `auto_penalty = false` so existing callers are unaffected.
+- **`AutoTrend`'s PiecewiseLinear candidate** now uses `.with_auto_penalty()`. Previously it always ran with `penalty = 10`, so PiecewiseLinear could lose to Quadratic on series where a different penalty would have made it the best fit. With per-series penalty selection it competes fairly in the AICc / BIC / Holdout bake-off.
+
+### Fixed
+
+- **Plain WLS backend no longer returns silent-NaN coefficients** (closes #119). On heavy-feature / small-effective-N designs (e.g. `wls_logistic` with `offset = 24` against ~20 categorical dummies on a short window), `WlsRegressor` could return a successful result whose coefficients were `NaN` — the NaN then propagated into fitted values and forecasts, which silently looked "successful" to downstream consumers and quietly dropped the method from honest backtests (orchestrator repro: 151,656 / 151,656 NaN fold rows). The `Wls` fit_to arm now walks `result.coefficients` and `result.intercept` after the solve; any non-finite entry not explained by `result.aliased` surfaces a clean `Err` pointing the caller at `wls_logistic_ridge` with λ > 0 (same recency weighting plus L2 regularisation). The legitimate pivoted-out aliased path is preserved.
+
 ## [0.8.4] - 2026-06-16
 
 ### Fixed
