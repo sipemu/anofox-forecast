@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.4] - 2026-06-16
+
+### Fixed
+
+- **`WlsLogisticRidge` standard errors stay finite under heavy-feature / small-effective-N designs** (closes #117). The v0.8.3 SE block used the simple form `Cov = σ̂² · (XᵀWX + λI)⁻¹` and returned NaN for almost every series on the motivating Kärcher repro (≈20 features, logistic `offset = 24`). Two fixes in the same block:
+  - **Switch to the ridge-adjusted sandwich covariance** `Cov = σ̂² · A⁻¹ · (Xfullᵀ W Xfull) · A⁻¹` where `A = Xfullᵀ W Xfull + λI_β`. This is the "more correct form when ridge λ>0 is active" called out in #115 — accounts for the shrinkage and stays meaningful when `Xfullᵀ W Xfull` alone is rank-deficient.
+  - **Clamp the effective residual degrees of freedom** `df_eff = (Σ wᵢ − (p + 1)).max(1.0)`. The v0.8.3 code set `σ̂² = NaN` whenever `Σ wᵢ ≤ p + 1`, propagating NaN through every coefficient SE — exactly the regime where ridge was needed. Clamping to ≥ 1 produces conservative-but-finite SEs in those cases; no-op when there's headroom.
+
 ## [0.8.3] - 2026-06-16
 
 ### Fixed
