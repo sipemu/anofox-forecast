@@ -49,7 +49,11 @@ pub struct PiecewiseLinearTrend {
     /// Minimum segment length for changepoint detection.
     min_segment_length: usize,
     /// Penalty parameter for PELT (higher = fewer changepoints).
+    /// Ignored when `auto_penalty` is true.
     penalty: f64,
+    /// When true, the penalty is chosen per-series via CROPS + elbow
+    /// (`Pelt::auto_detect`). The manual `penalty` field is ignored.
+    auto_penalty: bool,
     /// Recency window for fitting.
     recency: Recency,
     /// Fitted segments: linear regression per segment.
@@ -63,11 +67,12 @@ pub struct PiecewiseLinearTrend {
 impl PiecewiseLinearTrend {
     /// Create a new piecewise linear trend with default parameters.
     ///
-    /// Defaults: penalty = 10.0, min_segment_length = 5.
+    /// Defaults: penalty = 10.0, min_segment_length = 5, auto_penalty = false.
     pub fn new() -> Self {
         Self {
             min_segment_length: 5,
             penalty: 10.0,
+            auto_penalty: false,
             recency: Recency::Full,
             segments: None,
             fitted: Vec::new(),
@@ -77,8 +82,22 @@ impl PiecewiseLinearTrend {
 
     /// Set the penalty parameter (builder-style). Higher values produce fewer
     /// changepoints.
+    ///
+    /// Has no effect when [`Self::with_auto_penalty`] is also set.
     pub fn with_penalty(mut self, penalty: f64) -> Self {
         self.penalty = penalty;
+        self
+    }
+
+    /// Enable per-series automatic penalty selection (builder-style).
+    ///
+    /// At fit time, runs PELT over a geometric range of penalties via
+    /// CROPS (Haynes et al. 2017) and picks the *elbow* where adding one
+    /// more knot stops paying for itself. Removes the need to hand-tune
+    /// the penalty for varying series shapes — useful for batch / global
+    /// pipelines and as the [`super::auto_trend::AutoTrend`] candidate.
+    pub fn with_auto_penalty(mut self) -> Self {
+        self.auto_penalty = true;
         self
     }
 
@@ -193,11 +212,15 @@ impl TrendComponent for PiecewiseLinearTrend {
         let (rec_start, rec_end) = self.recency.resolve_with_data(values);
         let window = &values[rec_start..rec_end];
 
-        // Run PELT changepoint detection on recency window.
-        let pelt = Pelt::new(CostFunction::LinearTrend)
-            .penalty(self.penalty)
-            .min_size(self.min_segment_length);
-        let result = pelt.detect(window);
+        // Run PELT changepoint detection on the recency window. When
+        // auto_penalty is set, sweep via CROPS + elbow; otherwise use
+        // the configured fixed penalty.
+        let pelt = Pelt::new(CostFunction::LinearTrend).min_size(self.min_segment_length);
+        let result = if self.auto_penalty {
+            pelt.auto_detect(window).result
+        } else {
+            pelt.penalty(self.penalty).detect(window)
+        };
 
         // Fit OLS per segment (indices are relative to window, shift to absolute).
         let segments: Vec<Segment> = result
@@ -689,6 +712,81 @@ mod tests {
 
         let forecast = trend.predict_trend(0);
         assert!(forecast.is_empty());
+    }
+
+    // ── Auto-penalty (CROPS + elbow) ───────────────────────────────────
+
+    #[test]
+    fn auto_penalty_recovers_known_slope_change() {
+        // y = 0.5·i for i in 0..40, then 0.5·40 + 2.0·(i − 40) for
+        // i in 40..80. One slope change at index 40; auto_penalty
+        // should land a knot near 40 and recover both slopes within
+        // tolerance, without us having to guess a penalty.
+        let n_first = 40;
+        let slope_first = 0.5;
+        let n_total = 80;
+        let slope_second = 2.0;
+        let break_at = n_first;
+        let level_at_break = slope_first * n_first as f64;
+        let values: Vec<f64> = (0..n_total)
+            .map(|i| {
+                if i < n_first {
+                    slope_first * i as f64
+                } else {
+                    level_at_break + slope_second * (i - n_first) as f64
+                }
+            })
+            .collect();
+
+        let mut trend = PiecewiseLinearTrend::new().with_auto_penalty();
+        trend.fit_trend(&values).unwrap();
+        let segs = trend.segments().expect("segments after fit");
+
+        assert!(
+            segs.len() >= 2,
+            "auto_penalty should detect at least one knot on a clear slope change; got {} segments",
+            segs.len()
+        );
+
+        // Locate the segment containing the constructed break and
+        // confirm its boundary is within ±3 of `break_at`. (±3 absorbs
+        // the elbow heuristic's small tolerance plus the minimum
+        // segment length.)
+        let knot_at = segs[1].start as isize;
+        assert!(
+            (knot_at - break_at as isize).abs() <= 3,
+            "knot landed at {}, expected near {}",
+            knot_at,
+            break_at,
+        );
+
+        // First and last segment slopes should recover the constructed
+        // values within tolerance (allow some slack for the knot being
+        // a few indices off).
+        let first = &segs[0];
+        let last = segs.last().unwrap();
+        assert!(
+            (first.slope - slope_first).abs() < 0.1,
+            "first slope {} should be near {}",
+            first.slope,
+            slope_first,
+        );
+        assert!(
+            (last.slope - slope_second).abs() < 0.1,
+            "last slope {} should be near {}",
+            last.slope,
+            slope_second,
+        );
+    }
+
+    #[test]
+    fn auto_penalty_default_is_off() {
+        // Backwards compat: a default PiecewiseLinearTrend uses the
+        // manual penalty path; flipping auto_penalty must be explicit.
+        let manual = PiecewiseLinearTrend::new();
+        let auto = PiecewiseLinearTrend::new().with_auto_penalty();
+        assert!(!manual.auto_penalty);
+        assert!(auto.auto_penalty);
     }
 
     // ── Constant data ──────────────────────────────────────────────────

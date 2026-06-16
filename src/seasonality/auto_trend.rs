@@ -310,13 +310,17 @@ impl TrendComponent for AutoTrend {
             ));
         }
 
-        // PiecewiseLinear
+        // PiecewiseLinear — auto-tune the PELT penalty per series so
+        // the candidate competes fairly in the AICc / BIC / Holdout
+        // bake-off instead of running on the hard-coded default.
         {
             let r = recency.clone();
             candidates.push((
                 "PiecewiseLinear".to_string(),
                 Box::new(move || {
-                    let mut c = PiecewiseLinearTrend::new().with_recency(r);
+                    let mut c = PiecewiseLinearTrend::new()
+                        .with_auto_penalty()
+                        .with_recency(r);
                     c.fit_trend(values).ok()?;
                     Some(FittedTrendComponent::PiecewiseLinear(c))
                 }),
