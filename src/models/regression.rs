@@ -48,6 +48,7 @@ mod ols_impl {
     use crate::seasonality::dummy::DummySeasonality;
     use crate::seasonality::exponential_trend::ExponentialTrend;
     use crate::seasonality::fourier::fourier_terms;
+    use crate::seasonality::logistic_trend::LogisticTrend;
     use crate::seasonality::polynomial::PolynomialTrend;
     use crate::seasonality::theilsen::TheilSenTrend;
     use crate::seasonality::traits::{Recency, SeasonalComponent, TrendComponent};
@@ -1424,6 +1425,12 @@ mod ols_impl {
         /// Exponential trend via [`ExponentialTrend`](crate::seasonality::ExponentialTrend).
         /// Requires positive values.
         Exponential,
+        /// Logistic / saturating trend via
+        /// [`LogisticTrend`](crate::seasonality::LogisticTrend). Capacity
+        /// `K` is estimated automatically (`CapacityMode::Auto`) — useful
+        /// for ramp-up products that plateau toward a saturating ceiling
+        /// instead of extrapolating linearly. Closes #121.
+        Logistic,
         /// Theil-Sen robust linear trend via [`TheilSenTrend`](crate::seasonality::TheilSenTrend).
         TheilSen,
     }
@@ -1477,6 +1484,7 @@ mod ols_impl {
     enum FittedComponentState {
         Polynomial(PolynomialTrend),
         Exponential(ExponentialTrend),
+        Logistic(LogisticTrend),
         TheilSen(TheilSenTrend),
         Dummy(DummySeasonality),
         Fourier {
@@ -1494,9 +1502,11 @@ mod ols_impl {
         /// Number of columns this component contributes to the design matrix.
         fn n_columns(&self) -> usize {
             match self {
-                Self::Polynomial(_) | Self::Exponential(_) | Self::TheilSen(_) | Self::Dummy(_) => {
-                    1
-                }
+                Self::Polynomial(_)
+                | Self::Exponential(_)
+                | Self::Logistic(_)
+                | Self::TheilSen(_)
+                | Self::Dummy(_) => 1,
                 Self::Fourier { order, .. } => 2 * order,
                 Self::Structural { fill_values } => fill_values.len(),
             }
@@ -1510,6 +1520,7 @@ mod ols_impl {
             match self {
                 Self::Polynomial(p) => vec![p.predict_trend(horizon)],
                 Self::Exponential(e) => vec![e.predict_trend(horizon)],
+                Self::Logistic(l) => vec![l.predict_trend(horizon)],
                 Self::TheilSen(t) => vec![t.predict_trend(horizon)],
                 Self::Dummy(d) => vec![d.predict_seasonal(horizon)],
                 Self::Fourier { period, order } => {
@@ -2372,6 +2383,7 @@ mod ols_impl {
                     TrendType::Quadratic => names.push("__quadratic_trend".to_string()),
                     TrendType::Cubic => names.push("__cubic_trend".to_string()),
                     TrendType::Exponential => names.push("__exp_trend".to_string()),
+                    TrendType::Logistic => names.push("__logistic_trend".to_string()),
                     TrendType::TheilSen => names.push("__theilsen_trend".to_string()),
                 }
             }
@@ -2425,6 +2437,7 @@ mod ols_impl {
                     TrendType::Quadratic => "__quadratic_trend",
                     TrendType::Cubic => "__cubic_trend",
                     TrendType::Exponential => "__exp_trend",
+                    TrendType::Logistic => "__logistic_trend",
                     TrendType::TheilSen => "__theilsen_trend",
                 };
                 result.push((name.to_string(), trend.safety()));
@@ -2584,6 +2597,11 @@ mod ols_impl {
                         e.fit_trend(values)?;
                         FittedComponentState::Exponential(e)
                     }
+                    TrendType::Logistic => {
+                        let mut l = LogisticTrend::new().with_recency(Recency::Full);
+                        l.fit_trend(values)?;
+                        FittedComponentState::Logistic(l)
+                    }
                     TrendType::TheilSen => {
                         let mut t = TheilSenTrend::new().with_recency(Recency::Full);
                         t.fit_trend(values)?;
@@ -2649,6 +2667,13 @@ mod ols_impl {
                     }
                     FittedComponentState::Exponential(e) => {
                         let fitted = e.fitted_trend();
+                        for i in 0..n_train {
+                            x[(i, col_idx)] = fitted[offset + i];
+                        }
+                        col_idx += 1;
+                    }
+                    FittedComponentState::Logistic(l) => {
+                        let fitted = l.fitted_trend();
                         for i in 0..n_train {
                             x[(i, col_idx)] = fitted[offset + i];
                         }
@@ -4910,6 +4935,71 @@ mod ols_impl {
                 assert!(v.is_finite());
                 assert!(v > 0.0, "exponential trend should predict positive values");
             }
+        }
+
+        #[test]
+        fn ols_logistic_trend_component_saturates() {
+            // Issue #121: TrendType::Logistic uses LogisticTrend (S-curve
+            // to capacity K). On a saturating series the fitted column
+            // should be finite, drive a sensible forecast, and not
+            // explode linearly the way TrendType::Linear would.
+            // Capacity defaults to max(window) * 1.5 — so K ≈ 30 here.
+            let n = 60;
+            let k_true = 20.0;
+            // Logistic of the form K / (1 + exp(-r·(t − t0)))
+            let r = 0.15;
+            let t0 = 30.0;
+            let values: Vec<f64> = (0..n)
+                .map(|i| k_true / (1.0 + (-r * (i as f64 - t0)).exp()))
+                .collect();
+            let ts = TimeSeries::univariate(make_timestamps(n), values).unwrap();
+
+            let features = RegressionFeatures::new()
+                .no_trend()
+                .with_trend_component(TrendType::Logistic)
+                .no_exog();
+
+            // Feature-name sanity.
+            let names = features.feature_names(&[]);
+            assert!(
+                names.contains(&"__logistic_trend".to_string()),
+                "expected __logistic_trend in feature names, got {:?}",
+                names,
+            );
+
+            let mut model = RegressionForecaster::ols(features);
+            model.fit(&ts).unwrap();
+
+            let fitted = model.fitted_values().expect("fitted after fit");
+            for &v in fitted {
+                assert!(v.is_finite(), "fitted value not finite: {}", v);
+            }
+
+            let horizon = 30;
+            let forecast = model.predict(horizon).unwrap();
+            let preds = forecast.primary();
+            // Forecast saturates: every step must stay finite and
+            // bounded by 2·K_true (loose upper to absorb estimation
+            // noise — the key contract is "doesn't extrapolate
+            // linearly off to infinity").
+            let ceiling = 2.0 * k_true;
+            for (h, &v) in preds.iter().enumerate() {
+                assert!(v.is_finite(), "predicted h={} not finite: {}", h, v);
+                assert!(
+                    v.abs() < ceiling,
+                    "logistic-trend forecast h={} = {} exceeded saturation ceiling {} — should plateau, not run away",
+                    h, v, ceiling
+                );
+            }
+            // Far-future increment must be much smaller than the
+            // early-growth increment (saturation property).
+            let mid_growth = (preds[5] - preds[0]).abs();
+            let tail_growth = (preds[horizon - 1] - preds[horizon - 6]).abs();
+            assert!(
+                tail_growth <= mid_growth + 1e-6,
+                "logistic forecast should saturate: tail_growth = {} should not exceed mid_growth = {}",
+                tail_growth, mid_growth
+            );
         }
 
         #[test]
