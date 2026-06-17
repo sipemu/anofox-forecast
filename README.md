@@ -258,7 +258,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-anofox-forecast = "0.8.5"
+anofox-forecast = "0.8.6"
 ```
 
 ### Optional Features
