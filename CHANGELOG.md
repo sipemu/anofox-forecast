@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.6] - 2026-06-17
+
+### Added
+
+- **`TrendType::Logistic`** as a regression-design feature (closes #121). `RegressionFeatures::with_trend_component(TrendType::Logistic)` now fits a `LogisticTrend` (S-curve to capacity `K`) as a `"__logistic_trend"` column in the design matrix. Capacity defaults to `CapacityMode::Auto` (`max(window) × 1.5`), matching the issue's recommendation. Lets `RegressionForecaster` model ramp-up products that plateau — saturating extrapolation rather than runaway linear growth. Mirrors the existing `Exponential` plumbing across `TrendType`, `FittedComponentState`, `feature_names`, `classify_features`, `build_matrices`, and the design-matrix column emission.
+
+- **`LogisticTrend` is now an `AutoTrend` candidate**. The default candidate list grows from `{Linear, Quadratic, Cubic, Exponential, TheilSen, PiecewiseLinear (auto-penalty)}` to also include `Logistic`. Doubles as a **saturating-series detector** — after `AutoTrend::fit_trend`, reading `selection_result().selected == "Logistic"` (or `"Logistic"` ranking ahead of `"Exponential"` in `scores`) flags an S-curve. Composes with the v0.8.5 auto-penalty `PiecewiseLinear` candidate: both are valid saturation detectors and the user gets both signals from one fit.
+
+### Known limitation
+
+- `LogisticTrend::CapacityMode::Auto` uses `K = max(window) × 1.5`. On series that haven't fully saturated, that under-estimates the true ceiling and biases the linearised fit. If you have prior knowledge of the cap, `LogisticTrend::new().with_capacity(K)` recovers the right shape. Joint MLE over `(K, r, t₀)` is a possible future refinement.
+
 ## [0.8.5] - 2026-06-16
 
 ### Added

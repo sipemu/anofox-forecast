@@ -22,6 +22,7 @@
 //! ```
 
 use super::exponential_trend::ExponentialTrend;
+use super::logistic_trend::LogisticTrend;
 use super::piecewise::PiecewiseLinearTrend;
 use super::polynomial::PolynomialTrend;
 use super::theilsen::TheilSenTrend;
@@ -56,6 +57,7 @@ pub struct AutoTrendResult {
 enum FittedTrendComponent {
     Polynomial(PolynomialTrend),
     Exponential(ExponentialTrend),
+    Logistic(LogisticTrend),
     PiecewiseLinear(PiecewiseLinearTrend),
     TheilSen(TheilSenTrend),
 }
@@ -65,6 +67,7 @@ impl FittedTrendComponent {
         match self {
             Self::Polynomial(c) => c.fitted_trend(),
             Self::Exponential(c) => c.fitted_trend(),
+            Self::Logistic(c) => c.fitted_trend(),
             Self::PiecewiseLinear(c) => c.fitted_trend(),
             Self::TheilSen(c) => c.fitted_trend(),
         }
@@ -74,6 +77,7 @@ impl FittedTrendComponent {
         match self {
             Self::Polynomial(c) => c.predict_trend(n_ahead),
             Self::Exponential(c) => c.predict_trend(n_ahead),
+            Self::Logistic(c) => c.predict_trend(n_ahead),
             Self::PiecewiseLinear(c) => c.predict_trend(n_ahead),
             Self::TheilSen(c) => c.predict_trend(n_ahead),
         }
@@ -83,6 +87,7 @@ impl FittedTrendComponent {
         match self {
             Self::Polynomial(c) => c.trend_features(),
             Self::Exponential(c) => c.trend_features(),
+            Self::Logistic(c) => c.trend_features(),
             Self::PiecewiseLinear(c) => c.trend_features(),
             Self::TheilSen(c) => c.trend_features(),
         }
@@ -92,6 +97,7 @@ impl FittedTrendComponent {
         match self {
             Self::Polynomial(c) => c.trend_name(),
             Self::Exponential(c) => c.trend_name(),
+            Self::Logistic(c) => c.trend_name(),
             Self::PiecewiseLinear(c) => c.trend_name(),
             Self::TheilSen(c) => c.trend_name(),
         }
@@ -101,6 +107,7 @@ impl FittedTrendComponent {
         match self {
             Self::Polynomial(c) => c.n_params(),
             Self::Exponential(c) => c.n_params(),
+            Self::Logistic(c) => c.n_params(),
             Self::PiecewiseLinear(c) => c.n_params(),
             Self::TheilSen(c) => c.n_params(),
         }
@@ -113,7 +120,8 @@ impl FittedTrendComponent {
 /// an information criterion (AICc by default).
 ///
 /// Default candidates: Linear (poly1), Quadratic (poly2), Exponential (if data
-/// positive), TheilSen, PiecewiseLinear.
+/// positive), Logistic (S-curve to auto-estimated capacity K), TheilSen,
+/// PiecewiseLinear.
 #[derive(Debug, Clone)]
 pub struct AutoTrend {
     /// Recency specification for all candidates.
@@ -297,6 +305,23 @@ impl TrendComponent for AutoTrend {
             ));
         }
 
+        // Logistic / saturating (S-curve). LogisticTrend estimates its
+        // own capacity K via CapacityMode::Auto, so no precondition on
+        // the data. The candidate doubles as a detector: when the
+        // winning trend is "Logistic", the series exhibits ramp-up +
+        // saturation rather than open-ended linear/exponential growth.
+        {
+            let r = recency.clone();
+            candidates.push((
+                "Logistic".to_string(),
+                Box::new(move || {
+                    let mut c = LogisticTrend::new().with_recency(r);
+                    c.fit_trend(values).ok()?;
+                    Some(FittedTrendComponent::Logistic(c))
+                }),
+            ));
+        }
+
         // TheilSen
         {
             let r = recency.clone();
@@ -462,6 +487,55 @@ mod tests {
             "scores: {:?}",
             result.scores
         );
+    }
+
+    // ── Logistic / saturating data → Logistic candidate available + beats Exponential ───
+
+    #[test]
+    fn logistic_candidate_present_and_beats_exponential_on_saturating_data() {
+        // S-curve to capacity K = 100, inflection at t = 50.
+        //
+        // Two contracts:
+        //   1. The Logistic candidate must appear in the scoreboard — it
+        //      can't silently drop out (= the plumbing is correct).
+        //   2. On a clearly saturating series, Logistic must rank ahead
+        //      of Exponential — the meaningful detection signal vs
+        //      open-ended growth.
+        //
+        // We intentionally don't require "Logistic wins outright":
+        // PiecewiseLinear with auto-penalty (v0.8.5) can piece an S-curve
+        // into short linear segments and win on AICc legitimately. The
+        // user combines these — both are valid detectors of saturation.
+        let k_true = 100.0;
+        let r = 0.12;
+        let t0 = 50.0;
+        let values: Vec<f64> = (0..120)
+            .map(|i| k_true / (1.0 + (-r * (i as f64 - t0)).exp()))
+            .collect();
+        let mut auto = AutoTrend::new().with_recency(Recency::Full);
+        auto.fit_trend(&values).unwrap();
+
+        let result = auto.selection_result().unwrap();
+        let names: Vec<&str> = result.scores.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(
+            names.contains(&"Logistic"),
+            "Logistic candidate missing from scoreboard: {:?}",
+            names,
+        );
+
+        let logistic = result
+            .scores
+            .iter()
+            .find(|(n, _)| n == "Logistic")
+            .unwrap()
+            .1;
+        if let Some(&(_, exponential)) = result.scores.iter().find(|(n, _)| n == "Exponential") {
+            assert!(
+                logistic < exponential,
+                "On a saturating series, Logistic ({}) should rank ahead of Exponential ({}); scores: {:?}",
+                logistic, exponential, result.scores,
+            );
+        }
     }
 
     // ── Quadratic data → should select Quadratic ──────────────────────
