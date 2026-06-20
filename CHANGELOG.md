@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.7] - 2026-06-20
+
+### Added
+
+- **Levenbach STI_Class taxonomy** in `forecastability::sti_class` (closes #93). Classifies a monthly series into one of six categories — `Sit`, `Sti`, `Ist`, `Tsi`, `Its`, `Tis` — by ranking the relative magnitude of Seasonal / Trend / Irregular mean-squares from a two-way ANOVA without replication on a `years × months` grid. Returns `StiClassResult { class, sf_seas, sf_trnd, sif, tif }` with strength factors and F-statistics. Returns `None` on degenerate inputs (too few observations, non-finite values, zero variance, grid dims < 2). Designed for monthly granularity — sub-monthly use cases see ~93% land in a single trend-dominant class. Gated behind the `forecastability` feature. Reference: Levenbach (2025).
+
+- **`RegressionForecaster::predict_with_exog_intervals(horizon, future_regressors, level)`** (closes #123). The trait already declared the method with a points-only default; this commit overrides it on `RegressionForecaster` to surface true OLS / WLS prediction intervals through the exog future-design matrix — mirroring the existing `predict_with_intervals` (no-exog) sibling. Unblocks the orchestrator metalearner that was emitting NaN `forecast_q*` for ~42% of rows on regression-family methods (Kärcher 569k-series cutover). Recursive (lag-using) models fall back to point-only — same contract as `predict_with_intervals`, since direct OLS PIs don't apply to recursive forecasts.
+
 ## [0.8.6] - 2026-06-17
 
 ### Added

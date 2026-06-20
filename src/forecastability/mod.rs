@@ -60,6 +60,11 @@ pub mod theoretical;
 // Triage pipeline
 pub mod triage;
 
+// STI_Class taxonomy (Levenbach 2025) — two-way ANOVA on a years × months
+// grid classifying monthly series by relative Seasonal / Trend / Irregular
+// dominance.
+pub mod sti_class;
+
 pub use ami::{ami_curve, gcmi_curve, pami_curve, CmiBackend};
 pub use distance_correlation::distance_correlation;
 pub use fingerprint::ForecastabilityFingerprint;
@@ -68,6 +73,7 @@ pub use knn_mi::knn_mutual_information;
 pub use lag_correlations::{kendall_curve, pearson_curve, spearman_curve};
 pub use lyapunov::largest_lyapunov_exponent;
 pub use scorers::{score, Scorer};
+pub use sti_class::{sti_class, StiClass, StiClassResult};
 pub use surrogates::{phase_surrogates, significance_bands, SignificanceBands};
 pub use theoretical::ar1_theoretical_ami;
 pub use transfer_entropy::transfer_entropy_curve;
