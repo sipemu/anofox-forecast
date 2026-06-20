@@ -3883,6 +3883,94 @@ mod ols_impl {
             Ok(Forecast::from_values(predictions))
         }
 
+        fn predict_with_exog_intervals(
+            &self,
+            horizon: usize,
+            future_regressors: &HashMap<String, Vec<f64>>,
+            level: f64,
+        ) -> Result<Forecast> {
+            // Issue #123: expose prediction intervals on the exog-fit
+            // path. The math (`anofox_regression::compute_prediction_intervals`)
+            // is invoked by FittedRegressor::predict_with_interval — we
+            // just need to wire it through the exog future-design
+            // matrix the same way predict_with_intervals does for the
+            // no-exog case.
+            //
+            // OLS prediction intervals are only valid for direct
+            // (non-recursive) forecasts. If the model uses lags, the
+            // recursive predict feeds predicted values back as
+            // features and the interval formula doesn't apply — fall
+            // back to point-only predictions, matching the no-exog
+            // sibling.
+            let state = self
+                .state
+                .as_ref()
+                .ok_or(ForecastError::FitRequired { model: None })?;
+
+            if horizon == 0 {
+                return Ok(Forecast::new());
+            }
+            if !state.features.effective_lags().is_empty() {
+                return self.predict_with_exog(horizon, future_regressors);
+            }
+
+            // Validate required future regressors (raw exog + columns
+            // claimed by exog_features specs), matching predict_with_exog.
+            let mut required: std::collections::BTreeSet<&str> =
+                state.exog_names.iter().map(|s| s.as_str()).collect();
+            for spec in &state.features.exog_features {
+                for col in spec.referenced_cols() {
+                    required.insert(col);
+                }
+            }
+            for name in &required {
+                match future_regressors.get(*name) {
+                    None => {
+                        return Err(ForecastError::InvalidParameter(format!(
+                            "Missing future regressor '{}'. Required: {:?}",
+                            name, required
+                        )));
+                    }
+                    Some(vals) if vals.len() < horizon => {
+                        return Err(ForecastError::DimensionMismatch {
+                            expected: horizon,
+                            got: vals.len(),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+
+            let x_future = state.features.build_future_matrix(
+                horizon,
+                state.n_total,
+                &state.tail_values,
+                Some(future_regressors),
+                &state.exog_names,
+                &state.components,
+                Some(&state.exog_tails),
+                Some(&state.categorical_encoders),
+            )?;
+
+            let pred_result =
+                state
+                    .model
+                    .predict_with_interval(&x_future, Some(IntervalType::Prediction), level);
+
+            let values: Vec<f64> = pred_result.fit.iter().copied().collect();
+            let lower: Vec<f64> = pred_result.lower.iter().copied().collect();
+            let upper: Vec<f64> = pred_result.upper.iter().copied().collect();
+
+            // If intervals contain NaN (e.g. xtx_inverse unavailable for
+            // a non-linear backend), return point-only — avoids
+            // misleading callers with phantom CIs.
+            if lower.iter().any(|v| v.is_nan()) || upper.iter().any(|v| v.is_nan()) {
+                return Ok(Forecast::from_values(values));
+            }
+
+            Ok(Forecast::from_values_with_intervals(values, lower, upper))
+        }
+
         fn fitted_values(&self) -> Option<&[f64]> {
             self.state.as_ref().map(|s| s.fitted_values.as_slice())
         }
@@ -4157,6 +4245,107 @@ mod ols_impl {
             future_regs.insert("temperature".to_string(), future_x);
             let forecast = model_exog.predict_with_exog(5, &future_regs).unwrap();
             assert_eq!(forecast.primary().len(), 5);
+        }
+
+        #[test]
+        fn predict_with_exog_intervals_returns_finite_bounds() {
+            // Issue #123: exog-fit OLS models must surface prediction
+            // intervals via predict_with_exog_intervals(). Lag-free
+            // direct forecasts (the only case where OLS PIs are valid)
+            // should return finite lower/upper bounds bracketing the
+            // point estimate.
+            let n = 80;
+            let x_vals: Vec<f64> = (0..n).map(|i| (i as f64 * 0.3).sin()).collect();
+            let values: Vec<f64> = (0..n)
+                .map(|i| 3.0 * x_vals[i] + 5.0 + 0.1 * i as f64)
+                .collect();
+            let cal = CalendarAnnotations::new()
+                .with_regressor("temperature".to_string(), x_vals.clone());
+            let ts = TimeSeriesBuilder::new()
+                .timestamps(make_timestamps(n))
+                .values(values)
+                .calendar(cal)
+                .build()
+                .unwrap();
+
+            // Lag-free OLS regression with one exog column.
+            let mut model = RegressionForecaster::ols(RegressionFeatures::new().trend());
+            model.fit(&ts).unwrap();
+
+            let future_x: Vec<f64> = (n..n + 5).map(|i| (i as f64 * 0.3).sin()).collect();
+            let mut future_regs = HashMap::new();
+            future_regs.insert("temperature".to_string(), future_x);
+
+            let forecast = model
+                .predict_with_exog_intervals(5, &future_regs, 0.95)
+                .unwrap();
+            assert_eq!(forecast.primary().len(), 5);
+
+            let lower = forecast.lower_series(0).expect("lower bound present");
+            let upper = forecast.upper_series(0).expect("upper bound present");
+            let point = forecast.primary();
+
+            for h in 0..5 {
+                assert!(
+                    lower[h].is_finite(),
+                    "lower[{}] not finite: {}",
+                    h,
+                    lower[h]
+                );
+                assert!(
+                    upper[h].is_finite(),
+                    "upper[{}] not finite: {}",
+                    h,
+                    upper[h]
+                );
+                assert!(
+                    point[h].is_finite(),
+                    "point[{}] not finite: {}",
+                    h,
+                    point[h]
+                );
+                assert!(
+                    lower[h] <= point[h] && point[h] <= upper[h],
+                    "point {} not bracketed by [{}, {}] at h={}",
+                    point[h],
+                    lower[h],
+                    upper[h],
+                    h
+                );
+            }
+        }
+
+        #[test]
+        fn predict_with_exog_intervals_falls_back_to_points_on_recursive() {
+            // Models with lags can't use direct OLS PIs — must fall
+            // back to points (same contract as predict_with_intervals
+            // on no-exog recursive models).
+            let n = 80;
+            let x_vals: Vec<f64> = (0..n).map(|i| (i as f64 * 0.3).sin()).collect();
+            let values: Vec<f64> = (0..n).map(|i| 2.0 * x_vals[i] + 0.05 * i as f64).collect();
+            let cal = CalendarAnnotations::new().with_regressor("x".to_string(), x_vals);
+            let ts = TimeSeriesBuilder::new()
+                .timestamps(make_timestamps(n))
+                .values(values)
+                .calendar(cal)
+                .build()
+                .unwrap();
+            let mut model = RegressionForecaster::ols(
+                RegressionFeatures::new().trend().lags(2), // recursive
+            );
+            model.fit(&ts).unwrap();
+
+            let future_x: Vec<f64> = (n..n + 5).map(|i| (i as f64 * 0.3).sin()).collect();
+            let mut future_regs = HashMap::new();
+            future_regs.insert("x".to_string(), future_x);
+
+            let forecast = model
+                .predict_with_exog_intervals(5, &future_regs, 0.95)
+                .unwrap();
+            // Recursive → falls back to points, no lower/upper bounds.
+            assert_eq!(forecast.primary().len(), 5);
+            assert!(forecast.lower().is_none());
+            assert!(forecast.upper().is_none());
         }
 
         #[test]
