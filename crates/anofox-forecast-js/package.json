@@ -1,6 +1,6 @@
 {
   "name": "anofox-forecast-js",
-  "version": "0.8.7",
+  "version": "0.9.0",
   "description": "WebAssembly bindings for anofox-forecast time series forecasting library",
   "license": "MIT",
   "repository": {
