@@ -116,10 +116,16 @@ pub struct StiClassResult {
 /// ```
 /// use anofox_forecast::forecastability::sti_class::{sti_class, StiClass};
 ///
-/// // Pure seasonal sinusoid at period 12.
+/// // Seasonal sinusoid at period 12, with a tiny dither so the
+/// // residual variance isn't perfectly zero (a perfectly periodic
+/// // series returns `None` because the three mean-squares can't be
+/// // ranked when MS(err) = 0).
 /// let n = 60;
 /// let series: Vec<f64> = (0..n)
-///     .map(|i| (2.0 * std::f64::consts::PI * (i % 12) as f64 / 12.0).sin())
+///     .map(|i| {
+///         (2.0 * std::f64::consts::PI * (i % 12) as f64 / 12.0).sin()
+///             + 0.001 * ((i * 7) % 11) as f64
+///     })
 ///     .collect();
 /// let result = sti_class(&series, 12, 5).unwrap();
 /// // Seasonal must rank first.
