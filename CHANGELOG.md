@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-06-20
+
+### Added
+
+- **Grouped / crossed hierarchies via `HierarchyTree::from_summing_matrix`** (closes #124). Supports Hyndman GTS-style hierarchies where each leaf belongs to multiple aggregate dimensions at once — e.g. `(site, part)` leaves rolling up to `site_total`, `material_total`, and `grand_total` simultaneously. Caller supplies the leaf→ancestor row lists directly; the constructor wires the leaf→aggregate parent edges and infers aggregate→aggregate edges via leaf-set containment (a single grand-total root + layered intermediates so `bfs_order` can walk the DAG cleanly). The variance-weighted `MinTraceVariance` and `MinTraceStruct` reconcilers operate on the resulting `sparse_s` directly and produce coherent forecasts where every aggregate (sites, materials, total) equals the sum of leaves under it.
+
+### Changed
+
+- **`Node.parent: Option<usize>` → `parents: Vec<usize>`** (internal). `HierarchyTree::new` no longer rejects multi-parent edges and accepts repeated `(parent, child)` edges naturally. The multiple-roots check remains — every hierarchy still needs exactly one grand-total node. Tree-mode reconcilers (`BottomUp`, `TopDown`, `MiddleOut`, dense `MinTraceOls` / `MinTraceShrink`) continue to work on strict trees; grouped hierarchies should use the variance-weighted MinT path.
+- Four parent-walking sites (dense S construction in `MinTraceOls` / `MinTraceShrink`, sparse S construction in `MinTraceVariance` / `MinTraceStruct`, and `is_descendant_of`) refactored onto a shared `ancestors_of` helper that walks every parent edge transitively. Identical results for strict trees; correct transitive ancestor set for grouped DAGs.
+- `bfs_order` now de-duplicates via a seen-set so each node appears exactly once even when reachable from the root via several paths.
+
 ## [0.8.7] - 2026-06-20
 
 ### Added
