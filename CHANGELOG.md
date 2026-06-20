@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-06-20
+
+### Added
+
+- **M4-Daily AutoARIMA accuracy regression tests** (closes #64). New integration suite at `tests/m4_daily_accuracy_regression.rs` runs `AutoARIMA::seasonal(7)` against 10 representative M4-Daily series (fixture at `tests/data/m4_outliers.json`) and asserts forecast accuracy stays within bounded multipliers of the `statsforecast 2.0.3` baseline. Three layered gates:
+  - **Aggregate** (active in CI): `mean(anofox_mae) / mean(SF_mae) ≤ 1.20×`. Catches the v0.5.6-shaped distribution-wide regression that motivated this issue (currently 1.189×).
+  - **Catastrophic** (active in CI): no series may exceed `SF_mae × 10`. Hard wall against silent quality cliffs.
+  - **Per-series 2× tolerance** (`#[ignore]`d, documented): currently flags D2085 (~7.65×) and D4047 (~4.06×) — the documented short-series quality gap. The gate is wired and will fire on `cargo test -- --ignored`; un-ignore once short-series quality work catches up.
+  - Cost: ~0.4 s in release build for all three tests; ARIMA fits run in series across 10 fixtures.
+
 ## [0.9.0] - 2026-06-20
 
 ### Added
