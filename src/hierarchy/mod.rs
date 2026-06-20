@@ -40,12 +40,19 @@
 use crate::error::{ForecastError, Result};
 use std::collections::HashMap;
 
-/// A node in the hierarchy tree.
+/// A node in the hierarchy tree (or DAG, for grouped / crossed
+/// hierarchies — see [`HierarchyTree::from_summing_matrix`]).
 #[derive(Debug, Clone)]
 struct Node {
     name: String,
     children: Vec<usize>, // indices into HierarchyTree::nodes
-    parent: Option<usize>,
+    /// All immediate parents of this node. In a strict tree this is at
+    /// most one; in a grouped hierarchy (issue #124) a leaf may have
+    /// several parents (one per aggregate dimension it contributes to).
+    parents: Vec<usize>,
+    /// Maximum depth from the root via any path. Used by `max_level`
+    /// and level-based traversal in the tree-mode reconciliation
+    /// methods (BottomUp / TopDown / MiddleOut).
     level: usize,
 }
 
@@ -131,7 +138,7 @@ impl HierarchyTree {
                     nodes.push(Node {
                         name: name.to_string(),
                         children: Vec::new(),
-                        parent: None,
+                        parents: Vec::new(),
                         level: 0,
                     });
                     map.insert(name.to_string(), idx);
@@ -143,22 +150,23 @@ impl HierarchyTree {
             let pidx = ensure_node(parent, &mut nodes, &mut name_to_idx);
             for child in *children {
                 let cidx = ensure_node(child, &mut nodes, &mut name_to_idx);
-                if nodes[cidx].parent.is_some() {
-                    return Err(ForecastError::InvalidParameter(format!(
-                        "node '{}' has multiple parents",
-                        child
-                    )));
+                // Issue #124: a child may carry multiple parents in a
+                // grouped/crossed hierarchy. Record every parent edge
+                // exactly once.
+                if !nodes[cidx].parents.contains(&pidx) {
+                    nodes[cidx].parents.push(pidx);
                 }
-                nodes[cidx].parent = Some(pidx);
-                nodes[pidx].children.push(cidx);
+                if !nodes[pidx].children.contains(&cidx) {
+                    nodes[pidx].children.push(cidx);
+                }
             }
         }
 
-        // Find root (no parent)
+        // Find root(s): nodes with no parents.
         let roots: Vec<usize> = nodes
             .iter()
             .enumerate()
-            .filter(|(_, n)| n.parent.is_none())
+            .filter(|(_, n)| n.parents.is_empty())
             .map(|(i, _)| i)
             .collect();
 
@@ -170,11 +178,225 @@ impl HierarchyTree {
         }
         let root = roots[0];
 
-        // Assign levels via BFS
+        // Assign levels via BFS. In a strict tree the BFS order gives
+        // every node its unique depth; in a grouped DAG a node may be
+        // visited via several paths of differing lengths, so we keep
+        // the *deepest* (longest path from root). That preserves
+        // tree-mode behaviour exactly and gives a well-defined level
+        // for `max_level()` and level-based traversal in grouped mode.
         let mut queue = std::collections::VecDeque::new();
         queue.push_back((root, 0usize));
         while let Some((idx, level)) = queue.pop_front() {
-            nodes[idx].level = level;
+            if level > nodes[idx].level {
+                nodes[idx].level = level;
+            } else if level < nodes[idx].level {
+                // Already reached via a deeper path — don't propagate.
+                continue;
+            }
+            for &c in &nodes[idx].children.clone() {
+                queue.push_back((c, level + 1));
+            }
+        }
+
+        Ok(Self {
+            nodes,
+            name_to_idx,
+            root,
+            actuals: None,
+            residuals: None,
+        })
+    }
+
+    /// Build a hierarchy directly from an explicit summing matrix S,
+    /// supporting grouped / crossed (multi-parent) leaves.
+    ///
+    /// `node_names` lists every node by index (`0..node_names.len()`).
+    /// `leaf_names` lists which of those nodes are *leaves*; the rest
+    /// are aggregates. `leaf_ancestors[i]` is the list of aggregate
+    /// row indices (into `node_names`) that the `i`-th leaf
+    /// contributes to — i.e. row `k` of S has a 1 in column `i` iff
+    /// `leaf_ancestors[i].contains(&k)`. The leaf itself does NOT
+    /// need to appear in its own ancestor list — it's inferred.
+    ///
+    /// This is the entry point for **grouped / crossed Hyndman GTS**:
+    /// each leaf rolls up to multiple aggregate dimensions at once
+    /// (e.g. `(site, part)` → `site_total`, `material_total`,
+    /// `grand_total`). The strict-tree constructor [`Self::new`] only
+    /// accepts a forest with single-parent edges; this one is the
+    /// general case.
+    ///
+    /// Issue #124. The variance-weighted MinT path
+    /// ([`ReconciliationMethod::MinTraceVariance`] and
+    /// [`ReconciliationMethod::MinTraceStruct`]) already operates on
+    /// `sparse_s` directly and handles grouped hierarchies once
+    /// constructed correctly. Tree-only methods (BottomUp / TopDown /
+    /// MiddleOut, dense `MinTraceOls` / `MinTraceShrink`) work best
+    /// on strict trees; on a grouped hierarchy they fall back to
+    /// the first-parent path and may produce non-coherent results.
+    ///
+    /// # Arguments
+    /// * `node_names` — every node name in design order; must be unique.
+    /// * `leaf_names` — subset of `node_names` flagged as leaves.
+    /// * `leaf_ancestors` — same length as `leaf_names`. Each entry
+    ///   is the list of aggregate-node indices (into `node_names`)
+    ///   that the matching leaf contributes to.
+    ///
+    /// # Errors
+    /// Returns `InvalidParameter` if any name is duplicated, any leaf
+    /// name is not in `node_names`, any ancestor index is out of
+    /// range, or more than one node has no parents (multiple roots).
+    pub fn from_summing_matrix(
+        node_names: &[String],
+        leaf_names: &[String],
+        leaf_ancestors: &[Vec<usize>],
+    ) -> Result<Self> {
+        if node_names.is_empty() {
+            return Err(ForecastError::InvalidParameter(
+                "from_summing_matrix: node_names must be non-empty".into(),
+            ));
+        }
+        if leaf_names.len() != leaf_ancestors.len() {
+            return Err(ForecastError::InvalidParameter(format!(
+                "from_summing_matrix: leaf_names ({}) and leaf_ancestors ({}) length mismatch",
+                leaf_names.len(),
+                leaf_ancestors.len(),
+            )));
+        }
+
+        // Build name → index map and uniqueness check.
+        let mut name_to_idx: HashMap<String, usize> = HashMap::with_capacity(node_names.len());
+        for (i, name) in node_names.iter().enumerate() {
+            if name_to_idx.insert(name.clone(), i).is_some() {
+                return Err(ForecastError::InvalidParameter(format!(
+                    "from_summing_matrix: duplicate node name '{}'",
+                    name
+                )));
+            }
+        }
+
+        // Allocate nodes.
+        let mut nodes: Vec<Node> = node_names
+            .iter()
+            .map(|name| Node {
+                name: name.clone(),
+                children: Vec::new(),
+                parents: Vec::new(),
+                level: 0,
+            })
+            .collect();
+
+        // First pass: collect leaves-below(aggregate) by inverting
+        // the (leaf → ancestors) lists. leaves_below[agg_idx] is the
+        // set of leaf indices that have `agg_idx` in their ancestor
+        // list.
+        let mut leaf_indices: Vec<usize> = Vec::with_capacity(leaf_names.len());
+        let mut leaves_below: HashMap<usize, std::collections::BTreeSet<usize>> = HashMap::new();
+        for (i, leaf) in leaf_names.iter().enumerate() {
+            let leaf_idx = name_to_idx.get(leaf).copied().ok_or_else(|| {
+                ForecastError::InvalidParameter(format!(
+                    "from_summing_matrix: leaf '{}' not in node_names",
+                    leaf
+                ))
+            })?;
+            leaf_indices.push(leaf_idx);
+            for &anc in &leaf_ancestors[i] {
+                if anc >= nodes.len() {
+                    return Err(ForecastError::InvalidParameter(format!(
+                        "from_summing_matrix: ancestor index {} out of range (have {} nodes)",
+                        anc,
+                        nodes.len(),
+                    )));
+                }
+                if anc == leaf_idx {
+                    continue;
+                }
+                leaves_below.entry(anc).or_default().insert(leaf_idx);
+            }
+        }
+
+        // Second pass: wire leaf → ancestor parent edges directly.
+        for (i, &leaf_idx) in leaf_indices.iter().enumerate() {
+            for &anc in &leaf_ancestors[i] {
+                if anc == leaf_idx {
+                    continue;
+                }
+                if !nodes[leaf_idx].parents.contains(&anc) {
+                    nodes[leaf_idx].parents.push(anc);
+                }
+                if !nodes[anc].children.contains(&leaf_idx) {
+                    nodes[anc].children.push(leaf_idx);
+                }
+            }
+        }
+
+        // Third pass: aggregate→aggregate edges, inferred from
+        // leaf-set containment. Aggregate B is an immediate parent
+        // of aggregate A iff leaves(A) ⊊ leaves(B) AND no other
+        // aggregate C has leaves(A) ⊊ leaves(C) ⊊ leaves(B). This
+        // gives a single grand-total root (the aggregate over all
+        // leaves) and a layered structure that lets `bfs_order`
+        // visit every node from a single starting point.
+        let agg_indices: Vec<usize> = leaves_below.keys().copied().collect();
+        for &a in &agg_indices {
+            let la = &leaves_below[&a];
+            // Find all strict supersets B of la.
+            let supersets: Vec<usize> = agg_indices
+                .iter()
+                .copied()
+                .filter(|&b| {
+                    b != a && {
+                        let lb = &leaves_below[&b];
+                        la.is_subset(lb) && la.len() < lb.len()
+                    }
+                })
+                .collect();
+            // Direct parents = minimal supersets (no other superset of
+            // `a` strictly contained in it).
+            for &b in &supersets {
+                let lb = &leaves_below[&b];
+                let is_immediate = !supersets.iter().any(|&c| {
+                    if c == b {
+                        return false;
+                    }
+                    let lc = &leaves_below[&c];
+                    la.is_subset(lc) && lc.is_subset(lb) && lc.len() < lb.len()
+                });
+                if is_immediate {
+                    if !nodes[a].parents.contains(&b) {
+                        nodes[a].parents.push(b);
+                    }
+                    if !nodes[b].children.contains(&a) {
+                        nodes[b].children.push(a);
+                    }
+                }
+            }
+        }
+
+        // Find root (single node with no parents).
+        let roots: Vec<usize> = nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| n.parents.is_empty())
+            .map(|(i, _)| i)
+            .collect();
+        if roots.len() != 1 {
+            return Err(ForecastError::InvalidParameter(format!(
+                "from_summing_matrix: must have exactly one root, found {} (a grouped \
+                 hierarchy still needs a single grand-total node that every leaf rolls up to)",
+                roots.len()
+            )));
+        }
+        let root = roots[0];
+
+        // Assign levels: max-depth from root across all parent paths.
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back((root, 0usize));
+        while let Some((idx, level)) = queue.pop_front() {
+            if level > nodes[idx].level {
+                nodes[idx].level = level;
+            } else if level < nodes[idx].level {
+                continue;
+            }
             for &c in &nodes[idx].children.clone() {
                 queue.push_back((c, level + 1));
             }
@@ -439,15 +661,15 @@ impl HierarchyTree {
         let m = leaves.len(); // number of bottom-level series
 
         // Build summing matrix S (n × m):
-        // S[i][j] = 1 if leaf j contributes to node i, else 0
+        // S[i][j] = 1 if leaf j contributes to node i, else 0.
+        // ancestors_of() walks every parent edge transitively so this
+        // works for grouped / crossed hierarchies as well as strict
+        // trees (issue #124).
         let mut s = vec![vec![0.0_f64; m]; n];
         for (j, &leaf) in leaves.iter().enumerate() {
-            // Walk up from leaf to root, marking all ancestors
-            let mut cur = leaf;
-            s[cur][j] = 1.0;
-            while let Some(parent) = self.nodes[cur].parent {
-                s[parent][j] = 1.0;
-                cur = parent;
+            s[leaf][j] = 1.0;
+            for anc in self.ancestors_of(leaf) {
+                s[anc][j] = 1.0;
             }
         }
 
@@ -652,16 +874,33 @@ impl HierarchyTree {
         Ok(self.to_named_output(&reconciled))
     }
 
-    /// Check if `node` is a descendant of `ancestor`.
-    fn is_descendant_of(&self, node: usize, ancestor: usize) -> bool {
-        let mut cur = node;
-        while let Some(parent) = self.nodes[cur].parent {
-            if parent == ancestor {
-                return true;
+    /// Collect all ancestor node indices of `idx`, transitively
+    /// across every parent edge. In a strict tree this is the
+    /// classic parent-walk chain; in a grouped / crossed DAG it
+    /// gathers every aggregate row that the node contributes to.
+    /// Each distinct ancestor appears exactly once. `idx` itself is
+    /// NOT included.
+    fn ancestors_of(&self, idx: usize) -> Vec<usize> {
+        let mut result = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(idx);
+        while let Some(cur) = queue.pop_front() {
+            for &p in &self.nodes[cur].parents {
+                if seen.insert(p) {
+                    result.push(p);
+                    queue.push_back(p);
+                }
             }
-            cur = parent;
         }
-        false
+        result
+    }
+
+    /// Check if `node` is a descendant of `ancestor`. In grouped
+    /// hierarchies the search walks every parent path, so this
+    /// returns `true` if `ancestor` is reachable via any chain.
+    fn is_descendant_of(&self, node: usize, ancestor: usize) -> bool {
+        self.ancestors_of(node).contains(&ancestor)
     }
 
     /// MinT with Ledoit-Wolf shrinkage covariance.
@@ -754,14 +993,13 @@ impl HierarchyTree {
         let sigma_flat: Vec<f64> = sigma.iter().flat_map(|row| row.iter().copied()).collect();
         let l_sigma = cholesky(n, &sigma_flat)?;
 
-        // Build summing matrix S_mat (n x m)
+        // Build summing matrix S_mat (n × m) — grouped-safe via
+        // ancestors_of() (issue #124).
         let mut s_mat = vec![vec![0.0_f64; m]; n];
         for (j, &leaf) in leaves.iter().enumerate() {
-            let mut cur = leaf;
-            s_mat[cur][j] = 1.0;
-            while let Some(parent) = self.nodes[cur].parent {
-                s_mat[parent][j] = 1.0;
-                cur = parent;
+            s_mat[leaf][j] = 1.0;
+            for anc in self.ancestors_of(leaf) {
+                s_mat[anc][j] = 1.0;
             }
         }
 
@@ -882,17 +1120,18 @@ impl HierarchyTree {
         // W_inv diagonal
         let w_inv: Vec<f64> = w_diag.iter().map(|&w| 1.0 / w).collect();
 
-        // Sparse S: for each leaf j, store the list of ancestor node indices.
-        // This replaces the dense N×M summing matrix (~10MB vs 64GB for 100k×80k).
+        // Sparse S: for each leaf j, store the list of ancestor node
+        // indices (self included). Replaces the dense N×M summing
+        // matrix (~10MB vs 64GB for 100k×80k). The walk uses
+        // ancestors_of() so this works for grouped / crossed
+        // hierarchies as well as strict trees — the variance-weighted
+        // CG MinT path is the recommended reconciler for grouped
+        // hierarchies per issue #124.
         let sparse_s: Vec<Vec<usize>> = leaves
             .iter()
             .map(|&leaf| {
                 let mut ancestors = vec![leaf];
-                let mut cur = leaf;
-                while let Some(parent) = self.nodes[cur].parent {
-                    ancestors.push(parent);
-                    cur = parent;
-                }
+                ancestors.extend(self.ancestors_of(leaf));
                 ancestors
             })
             .collect();
@@ -973,15 +1212,21 @@ impl HierarchyTree {
             .sum()
     }
 
-    /// BFS order of node indices.
+    /// BFS order of node indices. Each node appears exactly once
+    /// even in grouped / crossed hierarchies where a leaf is
+    /// reachable from the root via several paths (issue #124).
     fn bfs_order(&self) -> Vec<usize> {
         let mut order = Vec::with_capacity(self.nodes.len());
+        let mut seen = std::collections::HashSet::new();
         let mut queue = std::collections::VecDeque::new();
         queue.push_back(self.root);
+        seen.insert(self.root);
         while let Some(idx) = queue.pop_front() {
             order.push(idx);
             for &c in &self.nodes[idx].children {
-                queue.push_back(c);
+                if seen.insert(c) {
+                    queue.push_back(c);
+                }
             }
         }
         order
@@ -1679,6 +1924,168 @@ mod tests {
 
         approx_eq(total, a + b, 0.01);
         approx_eq(a, a1 + a2, 0.01);
+    }
+
+    #[test]
+    fn from_summing_matrix_grouped_hierarchy_construction() {
+        // Issue #124: a grouped hierarchy with (site, part) leaves
+        // rolling up to site totals, material totals, and grand
+        // total simultaneously. Four leaves, three aggregate
+        // dimensions, one grand-total root.
+        //
+        // Layout (column index → name):
+        //   0: Total (root)
+        //   1: site_SI10
+        //   2: site_SI20
+        //   3: material_P1
+        //   4: material_P2
+        //   5: leaf SI10_P1  (parents 1, 3, 0)
+        //   6: leaf SI10_P2  (parents 1, 4, 0)
+        //   7: leaf SI20_P1  (parents 2, 3, 0)
+        //   8: leaf SI20_P2  (parents 2, 4, 0)
+        let node_names: Vec<String> = vec![
+            "Total".into(),
+            "site_SI10".into(),
+            "site_SI20".into(),
+            "material_P1".into(),
+            "material_P2".into(),
+            "SI10_P1".into(),
+            "SI10_P2".into(),
+            "SI20_P1".into(),
+            "SI20_P2".into(),
+        ];
+        let leaf_names: Vec<String> = vec![
+            "SI10_P1".into(),
+            "SI10_P2".into(),
+            "SI20_P1".into(),
+            "SI20_P2".into(),
+        ];
+        let leaf_ancestors: Vec<Vec<usize>> = vec![
+            vec![0, 1, 3], // SI10_P1 → Total, site_SI10, material_P1
+            vec![0, 1, 4], // SI10_P2 → Total, site_SI10, material_P2
+            vec![0, 2, 3], // SI20_P1 → Total, site_SI20, material_P1
+            vec![0, 2, 4], // SI20_P2 → Total, site_SI20, material_P2
+        ];
+
+        let tree =
+            HierarchyTree::from_summing_matrix(&node_names, &leaf_names, &leaf_ancestors).unwrap();
+
+        // 9 total nodes.
+        assert_eq!(tree.len(), 9);
+
+        // Each site-aggregate must list both of its leaves as
+        // children (children_of works on the public name).
+        let mut site10_children = tree.children_of("site_SI10").unwrap();
+        site10_children.sort();
+        assert_eq!(site10_children, vec!["SI10_P1", "SI10_P2"]);
+        let mut mat1_children = tree.children_of("material_P1").unwrap();
+        mat1_children.sort();
+        assert_eq!(mat1_children, vec!["SI10_P1", "SI20_P1"]);
+        let mut total_children = tree.children_of("Total").unwrap();
+        total_children.sort();
+        // Total is parent of every leaf directly (and of every
+        // intermediate, but the leaves are also listed because the
+        // constructor wires (leaf, ancestor) edges).
+        assert!(total_children.contains(&"SI10_P1"));
+        assert!(total_children.contains(&"SI20_P2"));
+    }
+
+    #[test]
+    fn from_summing_matrix_rejects_duplicate_node_names() {
+        let node_names: Vec<String> = vec!["A".into(), "A".into()];
+        let leaf_names: Vec<String> = vec!["A".into()];
+        let leaf_ancestors: Vec<Vec<usize>> = vec![vec![]];
+        assert!(
+            HierarchyTree::from_summing_matrix(&node_names, &leaf_names, &leaf_ancestors).is_err()
+        );
+    }
+
+    #[test]
+    fn from_summing_matrix_rejects_out_of_range_ancestor() {
+        let node_names: Vec<String> = vec!["Total".into(), "Leaf".into()];
+        let leaf_names: Vec<String> = vec!["Leaf".into()];
+        let leaf_ancestors: Vec<Vec<usize>> = vec![vec![5]]; // out of range
+        assert!(
+            HierarchyTree::from_summing_matrix(&node_names, &leaf_names, &leaf_ancestors).is_err()
+        );
+    }
+
+    #[test]
+    fn from_summing_matrix_rejects_unknown_leaf_name() {
+        let node_names: Vec<String> = vec!["Total".into(), "Leaf".into()];
+        let leaf_names: Vec<String> = vec!["Unknown".into()];
+        let leaf_ancestors: Vec<Vec<usize>> = vec![vec![0]];
+        assert!(
+            HierarchyTree::from_summing_matrix(&node_names, &leaf_names, &leaf_ancestors).is_err()
+        );
+    }
+
+    #[test]
+    fn grouped_hierarchy_min_trace_variance_coherent() {
+        // Real grouped reconciliation: 4 leaves × 2 aggregate
+        // dimensions + grand total. Each aggregate must equal the
+        // sum of leaves under it after MinTraceVariance.
+        let node_names: Vec<String> = vec![
+            "Total".into(),
+            "site_SI10".into(),
+            "site_SI20".into(),
+            "material_P1".into(),
+            "material_P2".into(),
+            "SI10_P1".into(),
+            "SI10_P2".into(),
+            "SI20_P1".into(),
+            "SI20_P2".into(),
+        ];
+        let leaf_names: Vec<String> = vec![
+            "SI10_P1".into(),
+            "SI10_P2".into(),
+            "SI20_P1".into(),
+            "SI20_P2".into(),
+        ];
+        let leaf_ancestors: Vec<Vec<usize>> =
+            vec![vec![0, 1, 3], vec![0, 1, 4], vec![0, 2, 3], vec![0, 2, 4]];
+        let mut tree =
+            HierarchyTree::from_summing_matrix(&node_names, &leaf_names, &leaf_ancestors).unwrap();
+
+        // Slightly-incoherent base forecasts.
+        let base: Vec<(String, Vec<f64>)> = vec![
+            ("Total".into(), vec![100.0]),
+            ("site_SI10".into(), vec![55.0]),
+            ("site_SI20".into(), vec![44.0]),
+            ("material_P1".into(), vec![50.0]),
+            ("material_P2".into(), vec![48.0]),
+            ("SI10_P1".into(), vec![25.0]),
+            ("SI10_P2".into(), vec![28.0]),
+            ("SI20_P1".into(), vec![24.0]),
+            ("SI20_P2".into(), vec![19.0]),
+        ];
+
+        // Equal residual variance per node — uniform weighting.
+        let mut residuals = std::collections::HashMap::new();
+        for n in node_names.iter() {
+            residuals.insert(n.clone(), vec![1.0, -1.0, 0.5, -0.5]);
+        }
+        tree.set_residuals(residuals);
+
+        let reconciled = tree
+            .reconcile(&base, ReconciliationMethod::MinTraceVariance)
+            .unwrap();
+        let map: std::collections::HashMap<String, Vec<f64>> = reconciled.into_iter().collect();
+
+        // Coherence invariants: each aggregate = sum of leaves under it.
+        let p11 = map["SI10_P1"][0];
+        let p12 = map["SI10_P2"][0];
+        let p21 = map["SI20_P1"][0];
+        let p22 = map["SI20_P2"][0];
+
+        // Sites.
+        approx_eq(map["site_SI10"][0], p11 + p12, 0.01);
+        approx_eq(map["site_SI20"][0], p21 + p22, 0.01);
+        // Materials.
+        approx_eq(map["material_P1"][0], p11 + p21, 0.01);
+        approx_eq(map["material_P2"][0], p12 + p22, 0.01);
+        // Grand total.
+        approx_eq(map["Total"][0], p11 + p12 + p21 + p22, 0.01);
     }
 
     #[test]
