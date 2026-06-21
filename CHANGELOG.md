@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-06-21
+
+### Changed
+
+- **Matrix-free MinT solver for grouped hierarchies** (closes #130). The variance-weighted MinT path (`MinTraceVariance` and `MinTraceStruct`) was correct on grouped hierarchies after #124 but materialised the dense `M×M` normal matrix `S'W⁻¹S` — capping practical scale at ~10k leaves before OOM. On the Kärcher 47,640-leaf site×part panel that's a 36 GB peak RSS spike; the 569,389-leaf full panel would need ~2.6 PB for the dense matrix alone.
+
+  `min_trace_diagonal` now auto-switches based on M:
+
+  - **M ≤ 1000** — dense Cholesky path (existing, ~8 MB at the threshold, factor reused across the horizon — fastest for small inputs).
+  - **M > 1000** — conjugate gradient with Jacobi preconditioner, applying `A = S'W⁻¹S` as `Sᵀ·(W⁻¹·(S·p))` via sparse mat-vecs over the existing `sparse_s` ancestor lists. Per-iteration `O(nnz(S)) = O(M · depth)`. Memory `O(M + N + nnz(S))` — well under a GB for million-leaf hierarchies. The diagonal preconditioner reuses the dense path's `sts_diag` and costs nothing extra.
+
+  Both paths produce identical output on small inputs; CG converges in ≤ depth + O(1) iterations under the diagonal preconditioner for the panel scales seen in practice. Tested at 40×40 = 1600 leaves crossing the auto-switch boundary; downstream consumer has the same approach scaling to 569k leaves.
+
+  No API changes — the switch is internal to `min_trace_diagonal`. `MinTraceVariance` and `MinTraceStruct` continue to work exactly as before for small inputs and now handle large grouped panels too.
+
+### Out of scope
+
+- `min_trace_shrink` still builds an N×N sample covariance, and the dense `min_trace_ols` still allocates `M×M`. Both are tree-only methods where the scaling problem is smaller in practice; matrix-free variants are a possible future refinement if a real workload hits the wall.
+
 ## [0.9.3] - 2026-06-21
 
 ### Changed
