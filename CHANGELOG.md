@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-06-21
+
+### Changed
+
+- **M4-Daily SF baseline regenerated from `statsforecast 2.0.3`** (`tests/m4_daily_accuracy_regression.rs`). The v0.9.1 reference values were hand-copied from issue #64 and several were wrong — most notably D2085 (69.2 → 257.1, an inflated value that motivated the v0.9.2 per-series exemption). With the correct baseline:
+  - **D2085 lands at 0.99×** — anofox is actually slightly better than SF, not a 3.68× outlier.
+  - **`PER_SERIES_EXEMPTIONS` emptied** — no series need an exemption now; all 10 land below 1.75×.
+  - **`AGGREGATE_TOLERANCE` retuned 1.15× → 1.30×**. The true SF mean (776.16) is lower than the wrong SF mean (858.59) because D2085 was inflating it; the same anofox numerator now gives a 1.222× ratio. D2172 (anofox 4628 vs SF 2670) is the biggest single-series gap, contributing ~25% of the aggregate. The new gate at 1.30× gives ~8pp future-regression headroom — v0.5.6's +37% regression would still land at ~1.55× and trip the gate.
+- All three M4 accuracy gates remain active in CI; no `#[ignore]`d test remains.
+
 ## [0.9.2] - 2026-06-20
 
 ### Fixed
