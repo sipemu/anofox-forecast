@@ -7,11 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-06-24
+
+### Performance
+
+- **Short-series fast path on `RegressionBackend::Dynamic`** (closes #134). The IC-weighted dynamic fit (`anofox_regression::LmDynamicRegressor`) evaluates `2^p` candidate sub-models with `n × 2^p` per-observation log-likelihood updates. At panel scale (~370k series) the per-series cost (~3.4 ms) dominates base-method CPU. Below `max(60, 4 × (p+1))` observations the time-varying coefficient estimate isn't statistically meaningful anyway, so the backend now drops to a single `OlsRegressor` fit on those series. No API change; long series still take the full dynamic path. Verified by unit tests that short-series Dynamic predictions match OLS bit-for-bit while long-series predictions remain distinct from OLS.
+
 ## [0.10.0] - 2026-06-21
 
 ### Changed
 
-- **Matrix-free MinT solver for grouped hierarchies** (closes #130). The variance-weighted MinT path (`MinTraceVariance` and `MinTraceStruct`) was correct on grouped hierarchies after #124 but materialised the dense `M×M` normal matrix `S'W⁻¹S` — capping practical scale at ~10k leaves before OOM. On the Kärcher 47,640-leaf site×part panel that's a 36 GB peak RSS spike; the 569,389-leaf full panel would need ~2.6 PB for the dense matrix alone.
+- **Matrix-free MinT solver for grouped hierarchies** (closes #130). The variance-weighted MinT path (`MinTraceVariance` and `MinTraceStruct`) was correct on grouped hierarchies after #124 but materialised the dense `M×M` normal matrix `S'W⁻¹S` — capping practical scale at ~10k leaves before OOM. On a 47,640-leaf site×part panel that's a 36 GB peak RSS spike; the corresponding 569,389-leaf full panel would need ~2.6 PB for the dense matrix alone.
 
   `min_trace_diagonal` now auto-switches based on M:
 
@@ -82,7 +88,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Levenbach STI_Class taxonomy** in `forecastability::sti_class` (closes #93). Classifies a monthly series into one of six categories — `Sit`, `Sti`, `Ist`, `Tsi`, `Its`, `Tis` — by ranking the relative magnitude of Seasonal / Trend / Irregular mean-squares from a two-way ANOVA without replication on a `years × months` grid. Returns `StiClassResult { class, sf_seas, sf_trnd, sif, tif }` with strength factors and F-statistics. Returns `None` on degenerate inputs (too few observations, non-finite values, zero variance, grid dims < 2). Designed for monthly granularity — sub-monthly use cases see ~93% land in a single trend-dominant class. Gated behind the `forecastability` feature. Reference: Levenbach (2025).
 
-- **`RegressionForecaster::predict_with_exog_intervals(horizon, future_regressors, level)`** (closes #123). The trait already declared the method with a points-only default; this commit overrides it on `RegressionForecaster` to surface true OLS / WLS prediction intervals through the exog future-design matrix — mirroring the existing `predict_with_intervals` (no-exog) sibling. Unblocks the orchestrator metalearner that was emitting NaN `forecast_q*` for ~42% of rows on regression-family methods (Kärcher 569k-series cutover). Recursive (lag-using) models fall back to point-only — same contract as `predict_with_intervals`, since direct OLS PIs don't apply to recursive forecasts.
+- **`RegressionForecaster::predict_with_exog_intervals(horizon, future_regressors, level)`** (closes #123). The trait already declared the method with a points-only default; this commit overrides it on `RegressionForecaster` to surface true OLS / WLS prediction intervals through the exog future-design matrix — mirroring the existing `predict_with_intervals` (no-exog) sibling. Unblocks orchestrator metalearners that were emitting NaN `forecast_q*` for ~42% of rows on regression-family methods at 569k-series panel scale. Recursive (lag-using) models fall back to point-only — same contract as `predict_with_intervals`, since direct OLS PIs don't apply to recursive forecasts.
 
 ## [0.8.6] - 2026-06-17
 
@@ -111,7 +117,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **`WlsLogisticRidge` standard errors stay finite under heavy-feature / small-effective-N designs** (closes #117). The v0.8.3 SE block used the simple form `Cov = σ̂² · (XᵀWX + λI)⁻¹` and returned NaN for almost every series on the motivating Kärcher repro (≈20 features, logistic `offset = 24`). Two fixes in the same block:
+- **`WlsLogisticRidge` standard errors stay finite under heavy-feature / small-effective-N designs** (closes #117). The v0.8.3 SE block used the simple form `Cov = σ̂² · (XᵀWX + λI)⁻¹` and returned NaN for almost every series on the motivating panel-scale repro (≈20 features, logistic `offset = 24`). Two fixes in the same block:
   - **Switch to the ridge-adjusted sandwich covariance** `Cov = σ̂² · A⁻¹ · (Xfullᵀ W Xfull) · A⁻¹` where `A = Xfullᵀ W Xfull + λI_β`. This is the "more correct form when ridge λ>0 is active" called out in #115 — accounts for the shrinkage and stays meaningful when `Xfullᵀ W Xfull` alone is rank-deficient.
   - **Clamp the effective residual degrees of freedom** `df_eff = (Σ wᵢ − (p + 1)).max(1.0)`. The v0.8.3 code set `σ̂² = NaN` whenever `Σ wᵢ ≤ p + 1`, propagating NaN through every coefficient SE — exactly the regime where ridge was needed. Clamping to ≥ 1 produces conservative-but-finite SEs in those cases; no-op when there's headroom.
 

@@ -53,6 +53,12 @@ mod ols_impl {
     use crate::seasonality::theilsen::TheilSenTrend;
     use crate::seasonality::traits::{Recency, SeasonalComponent, TrendComponent};
 
+    /// Minimum observations for the full `LmDynamic` fit on the
+    /// `RegressionBackend::Dynamic` backend. Below this, the fit
+    /// arm falls back to OLS — see issue #134. Effective gate is
+    /// `max(this, 4 × (p + 1))`.
+    pub const DYNAMIC_FAST_PATH_THRESHOLD: usize = 60;
+
     // ── Feature safety classification ────────────────────────────────
 
     /// Classification of a feature by its data-leakage risk in cross-validation.
@@ -1383,6 +1389,22 @@ mod ols_impl {
                     Ok(Box::new(fitted))
                 }
                 Self::Dynamic { ic, lowess_span } => {
+                    // Short-series fast path (issue #134): the IC-weighted
+                    // dynamic fit evaluates 2^p candidate sub-models and
+                    // dominates base-method CPU at panel scale. Below
+                    // ~4 obs / fitted parameter the time-varying
+                    // coefficient estimate isn't statistically meaningful
+                    // either, so route through plain OLS.
+                    let n = x.nrows();
+                    let p = x.ncols();
+                    let min_for_dynamic = DYNAMIC_FAST_PATH_THRESHOLD.max(4 * (p + 1));
+                    if n < min_for_dynamic {
+                        let model = OlsRegressor::builder().with_intercept(true).build();
+                        let fitted = model
+                            .fit(x, y)
+                            .map_err(|e| format!("Dynamic (OLS fast-path): {}", e))?;
+                        return Ok(Box::new(fitted));
+                    }
                     let mut builder = LmDynamicRegressor::builder().with_intercept(true).ic(*ic);
                     if let Some(span) = lowess_span {
                         builder = builder.lowess_span(*span);
@@ -5817,7 +5839,7 @@ mod ols_impl {
 
         #[test]
         fn wls_logistic_ridge_keeps_finite_se_on_heavy_features_low_effective_n() {
-            // Issue #117 reproduces a Kärcher-style failure: ~20 features
+            // Issue #117 reproduces a panel-scale failure: ~20 features
             // with logistic offset = 24 means Σ wᵢ ≈ 24 — barely above
             // p+1, so the unregularized residual variance df = Σ wᵢ − p − 1
             // collapses (or goes negative) and the v0.8.3 simple-form
@@ -6071,6 +6093,65 @@ mod ols_impl {
             for &v in forecast.primary() {
                 assert!(v.is_finite());
             }
+        }
+
+        #[test]
+        fn backend_dynamic_short_series_matches_ols() {
+            // Issue #134: below DYNAMIC_FAST_PATH_THRESHOLD obs the
+            // Dynamic backend must return a constant-coefficient OLS
+            // fit, so its forecast should agree with `RegressionForecaster::ols`
+            // to within floating-point precision.
+            let n = DYNAMIC_FAST_PATH_THRESHOLD - 5;
+            assert!(n >= 8, "test assumes threshold >= ~13");
+            let ts = make_linear_ts(n);
+
+            let mut dynamic =
+                RegressionForecaster::dynamic(RegressionFeatures::new().trend().no_exog());
+            dynamic.fit(&ts).unwrap();
+            let dyn_fc = dynamic.predict(5).unwrap();
+
+            let mut ols = RegressionForecaster::ols(RegressionFeatures::new().trend().no_exog());
+            ols.fit(&ts).unwrap();
+            let ols_fc = ols.predict(5).unwrap();
+
+            for (a, b) in dyn_fc.primary().iter().zip(ols_fc.primary().iter()) {
+                assert!(
+                    (a - b).abs() < 1e-9,
+                    "short-series Dynamic forecast {} differs from OLS {}",
+                    a,
+                    b
+                );
+            }
+        }
+
+        #[test]
+        fn backend_dynamic_long_series_uses_dynamic_path() {
+            // Above the fast-path threshold the Dynamic backend must
+            // actually do the IC-weighted fit and (in general) diverge
+            // from a plain OLS fit on a non-linear signal.
+            let ts = make_seasonal_ts(200, 7);
+            let features = || RegressionFeatures::new().trend().fourier(7, 2).no_exog();
+
+            let mut dynamic = RegressionForecaster::dynamic(features());
+            dynamic.fit(&ts).unwrap();
+            let dyn_fc = dynamic.predict(14).unwrap();
+
+            let mut ols = RegressionForecaster::ols(features());
+            ols.fit(&ts).unwrap();
+            let ols_fc = ols.predict(14).unwrap();
+
+            let diff_norm: f64 = dyn_fc
+                .primary()
+                .iter()
+                .zip(ols_fc.primary().iter())
+                .map(|(a, b)| (a - b).powi(2))
+                .sum::<f64>()
+                .sqrt();
+            assert!(
+                diff_norm > 1e-6,
+                "long-series Dynamic must not collapse to OLS (got diff_norm = {})",
+                diff_norm
+            );
         }
 
         #[test]

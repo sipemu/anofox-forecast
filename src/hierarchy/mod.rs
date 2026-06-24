@@ -1146,10 +1146,10 @@ impl HierarchyTree {
 
         // Auto-switch: for small M, the dense O(M²) Cholesky path is
         // faster (no per-step CG iterations, factor reused across the
-        // horizon). For large M it's a memory wall (M=47,640 hits 36 GB
-        // → OOM on the Kärcher panel) — use sparse CG instead. The
-        // threshold is tuned so the dense path runs only when it's both
-        // cheap and fits comfortably in RAM (1000² × 8 B ≈ 8 MB).
+        // horizon). For large M it's a memory wall (e.g. M ≈ 50k hits
+        // ~36 GB, OOM-prone) — use sparse CG instead. Threshold tuned
+        // so the dense path runs only when it's both cheap and fits
+        // comfortably in RAM (1000² × 8 B ≈ 8 MB).
         const CG_AUTO_SWITCH: usize = 1000;
         let use_cg = m > CG_AUTO_SWITCH;
 
