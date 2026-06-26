@@ -1031,6 +1031,10 @@ impl Forecaster for AutoARIMA {
         }
     }
 
+    fn explanation(&self) -> Result<Explanation> {
+        <Self as Inspectable>::explanation(self)
+    }
+
     fn supports_exog(&self) -> bool {
         true
     }

@@ -386,6 +386,10 @@ impl Forecaster for AutoTBATS {
     fn name(&self) -> &str {
         "AutoTBATS"
     }
+
+    fn explanation(&self) -> Result<Explanation> {
+        <Self as Inspectable>::explanation(self)
+    }
 }
 
 impl Inspectable for AutoTBATS {
