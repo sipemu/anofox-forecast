@@ -3451,7 +3451,7 @@ mod ols_impl {
         ///
         /// The full IC-weighted fit is used on every series. For the
         /// short-series OLS fast-path (~11× faster but raises delivered
-        /// median |bias|, see issue #137), use [`dynamic_fast`].
+        /// median |bias|, see issue #137), use [`Self::dynamic_fast`].
         pub fn dynamic(features: RegressionFeatures) -> Self {
             Self::new(
                 RegressionBackend::Dynamic {
@@ -3466,7 +3466,7 @@ mod ols_impl {
         /// Create a Dynamic Linear Model with LOWESS-smoothed weights.
         ///
         /// Full IC-weighted fit on every series; opt into the
-        /// short-series OLS fast-path via [`dynamic_smoothed_fast`].
+        /// short-series OLS fast-path via [`Self::dynamic_smoothed_fast`].
         pub fn dynamic_smoothed(lowess_span: f64, features: RegressionFeatures) -> Self {
             Self::new(
                 RegressionBackend::Dynamic {
@@ -3478,7 +3478,7 @@ mod ols_impl {
             )
         }
 
-        /// Like [`dynamic`] but with the short-series OLS fast-path on:
+        /// Like [`Self::dynamic`] but with the short-series OLS fast-path on:
         /// series with `n < max(60, 4·(p+1))` observations are fit
         /// with plain OLS instead of the full IC-weighted procedure.
         ///
@@ -3498,8 +3498,8 @@ mod ols_impl {
             )
         }
 
-        /// Like [`dynamic_smoothed`] but with the short-series OLS
-        /// fast-path on. Same trade-off as [`dynamic_fast`].
+        /// Like [`Self::dynamic_smoothed`] but with the short-series OLS
+        /// fast-path on. Same trade-off as [`Self::dynamic_fast`].
         pub fn dynamic_smoothed_fast(lowess_span: f64, features: RegressionFeatures) -> Self {
             Self::new(
                 RegressionBackend::Dynamic {
