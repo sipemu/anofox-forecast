@@ -7,11 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.2] - 2026-06-24
+
+### Fixed
+
+- **Restore default `RegressionBackend::Dynamic` behaviour; make the v0.10.1 short-series OLS fast-path opt-in** (closes #137). v0.10.1 enabled the fast-path unconditionally and traded a real win — MAE-neutral, ~11× faster — for a downstream-measured **+24% rise in delivered median |bias|** on a 367k-series panel: short-series DynLM was the low-bias method (win-rate 24.8% on v0.10.0), and the fast path silently replaced it with OLS. Point accuracy (MAE) was unchanged, but bias regressed.
+
+  v0.10.2 reverts `RegressionForecaster::dynamic` / `dynamic_smoothed` to the full IC-weighted fit on every series — bit-for-bit the same behaviour as v0.10.0. Callers who measured the perf/bias trade-off and want the fast path can opt in via the new `dynamic_fast` / `dynamic_smoothed_fast` constructors.
+
+  The `RegressionBackend::Dynamic` variant gained a `short_series_ols_fast_path: bool` field (struct-literal callers must initialise it; convenience constructors handle it for you).
+
 ## [0.10.1] - 2026-06-24
 
 ### Performance
 
-- **Short-series fast path on `RegressionBackend::Dynamic`** (closes #134). The IC-weighted dynamic fit (`anofox_regression::LmDynamicRegressor`) evaluates `2^p` candidate sub-models with `n × 2^p` per-observation log-likelihood updates. At panel scale (~370k series) the per-series cost (~3.4 ms) dominates base-method CPU. Below `max(60, 4 × (p+1))` observations the time-varying coefficient estimate isn't statistically meaningful anyway, so the backend now drops to a single `OlsRegressor` fit on those series. No API change; long series still take the full dynamic path. Verified by unit tests that short-series Dynamic predictions match OLS bit-for-bit while long-series predictions remain distinct from OLS.
+- **Short-series fast path on `RegressionBackend::Dynamic`** (closes #134). Below `max(60, 4 × (p+1))` observations the backend drops to a single `OlsRegressor` fit; long series take the full dynamic path. **Superseded by #137 in v0.10.2**: the fast-path is now opt-in via `dynamic_fast` / `dynamic_smoothed_fast` because the default-on behaviour shipped here caused a +24% delivered-bias regression at panel scale.
 
 ## [0.10.0] - 2026-06-21
 

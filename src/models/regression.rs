@@ -1049,6 +1049,15 @@ mod ols_impl {
             ic: InformationCriterion,
             /// LOWESS smoothing span for weights (None = no smoothing).
             lowess_span: Option<f64>,
+            /// If `true`, short series (n < max(60, 4·(p+1))) are fit
+            /// with plain OLS instead of the full IC-weighted dynamic
+            /// procedure. Off by default — see issue #137: the fast
+            /// path makes the backend ~11× faster but drops the
+            /// low-bias behaviour the dynamic fit normally contributes,
+            /// raising delivered median |bias| ~24% on real panels.
+            /// Opt in only when the caller has measured that the perf
+            /// gain is worth the bias trade-off.
+            short_series_ols_fast_path: bool,
         },
     }
 
@@ -1388,22 +1397,33 @@ mod ols_impl {
                     let fitted = model.fit(x, y).map_err(|e| format!("BLS: {}", e))?;
                     Ok(Box::new(fitted))
                 }
-                Self::Dynamic { ic, lowess_span } => {
-                    // Short-series fast path (issue #134): the IC-weighted
-                    // dynamic fit evaluates 2^p candidate sub-models and
-                    // dominates base-method CPU at panel scale. Below
-                    // ~4 obs / fitted parameter the time-varying
-                    // coefficient estimate isn't statistically meaningful
-                    // either, so route through plain OLS.
-                    let n = x.nrows();
-                    let p = x.ncols();
-                    let min_for_dynamic = DYNAMIC_FAST_PATH_THRESHOLD.max(4 * (p + 1));
-                    if n < min_for_dynamic {
-                        let model = OlsRegressor::builder().with_intercept(true).build();
-                        let fitted = model
-                            .fit(x, y)
-                            .map_err(|e| format!("Dynamic (OLS fast-path): {}", e))?;
-                        return Ok(Box::new(fitted));
+                Self::Dynamic {
+                    ic,
+                    lowess_span,
+                    short_series_ols_fast_path,
+                } => {
+                    // Issue #134 / #137: the IC-weighted dynamic fit
+                    // evaluates 2^p candidate sub-models and dominates
+                    // base-method CPU at panel scale. Below ~4 obs /
+                    // fitted parameter the dynamic coefficients aren't
+                    // statistically meaningful either. v0.10.1 shipped
+                    // this fast path on by default — but it drops the
+                    // low-bias behaviour the dynamic fit contributes,
+                    // not just its (already-tied) point accuracy. So
+                    // the path is now opt-in; callers who measured the
+                    // trade-off can enable it via `dynamic_fast()` /
+                    // `dynamic_smoothed_fast()`.
+                    if *short_series_ols_fast_path {
+                        let n = x.nrows();
+                        let p = x.ncols();
+                        let min_for_dynamic = DYNAMIC_FAST_PATH_THRESHOLD.max(4 * (p + 1));
+                        if n < min_for_dynamic {
+                            let model = OlsRegressor::builder().with_intercept(true).build();
+                            let fitted = model
+                                .fit(x, y)
+                                .map_err(|e| format!("Dynamic (OLS fast-path): {}", e))?;
+                            return Ok(Box::new(fitted));
+                        }
                     }
                     let mut builder = LmDynamicRegressor::builder().with_intercept(true).ic(*ic);
                     if let Some(span) = lowess_span {
@@ -3428,22 +3448,64 @@ mod ols_impl {
         /// Automatically generates candidate models from variable subsets and
         /// computes observation-level IC weights. Use `lowess_span` to smooth
         /// the weights over time (e.g., 0.3), or `None` for no smoothing.
+        ///
+        /// The full IC-weighted fit is used on every series. For the
+        /// short-series OLS fast-path (~11× faster but raises delivered
+        /// median |bias|, see issue #137), use [`dynamic_fast`].
         pub fn dynamic(features: RegressionFeatures) -> Self {
             Self::new(
                 RegressionBackend::Dynamic {
                     ic: InformationCriterion::AICc,
                     lowess_span: None,
+                    short_series_ols_fast_path: false,
                 },
                 features,
             )
         }
 
         /// Create a Dynamic Linear Model with LOWESS-smoothed weights.
+        ///
+        /// Full IC-weighted fit on every series; opt into the
+        /// short-series OLS fast-path via [`dynamic_smoothed_fast`].
         pub fn dynamic_smoothed(lowess_span: f64, features: RegressionFeatures) -> Self {
             Self::new(
                 RegressionBackend::Dynamic {
                     ic: InformationCriterion::AICc,
                     lowess_span: Some(lowess_span),
+                    short_series_ols_fast_path: false,
+                },
+                features,
+            )
+        }
+
+        /// Like [`dynamic`] but with the short-series OLS fast-path on:
+        /// series with `n < max(60, 4·(p+1))` observations are fit
+        /// with plain OLS instead of the full IC-weighted procedure.
+        ///
+        /// Roughly 11× faster on panel-scale workloads (see #134), but
+        /// drops the low-bias contribution the dynamic fit normally
+        /// makes on short series — measured at +24% delivered median
+        /// |bias| in panel A/B testing (see #137). Choose this only
+        /// when point accuracy matters more than bias.
+        pub fn dynamic_fast(features: RegressionFeatures) -> Self {
+            Self::new(
+                RegressionBackend::Dynamic {
+                    ic: InformationCriterion::AICc,
+                    lowess_span: None,
+                    short_series_ols_fast_path: true,
+                },
+                features,
+            )
+        }
+
+        /// Like [`dynamic_smoothed`] but with the short-series OLS
+        /// fast-path on. Same trade-off as [`dynamic_fast`].
+        pub fn dynamic_smoothed_fast(lowess_span: f64, features: RegressionFeatures) -> Self {
+            Self::new(
+                RegressionBackend::Dynamic {
+                    ic: InformationCriterion::AICc,
+                    lowess_span: Some(lowess_span),
+                    short_series_ols_fast_path: true,
                 },
                 features,
             )
@@ -6096,17 +6158,18 @@ mod ols_impl {
         }
 
         #[test]
-        fn backend_dynamic_short_series_matches_ols() {
-            // Issue #134: below DYNAMIC_FAST_PATH_THRESHOLD obs the
-            // Dynamic backend must return a constant-coefficient OLS
-            // fit, so its forecast should agree with `RegressionForecaster::ols`
-            // to within floating-point precision.
+        fn backend_dynamic_fast_short_series_matches_ols() {
+            // Issue #134 + #137: when the caller explicitly opts in
+            // via `dynamic_fast`, short series collapse to a constant-
+            // coefficient OLS fit, so the forecast should agree with
+            // `RegressionForecaster::ols` to within floating-point
+            // precision.
             let n = DYNAMIC_FAST_PATH_THRESHOLD - 5;
             assert!(n >= 8, "test assumes threshold >= ~13");
             let ts = make_linear_ts(n);
 
             let mut dynamic =
-                RegressionForecaster::dynamic(RegressionFeatures::new().trend().no_exog());
+                RegressionForecaster::dynamic_fast(RegressionFeatures::new().trend().no_exog());
             dynamic.fit(&ts).unwrap();
             let dyn_fc = dynamic.predict(5).unwrap();
 
@@ -6117,11 +6180,44 @@ mod ols_impl {
             for (a, b) in dyn_fc.primary().iter().zip(ols_fc.primary().iter()) {
                 assert!(
                     (a - b).abs() < 1e-9,
-                    "short-series Dynamic forecast {} differs from OLS {}",
+                    "short-series dynamic_fast forecast {} differs from OLS {}",
                     a,
                     b
                 );
             }
+        }
+
+        #[test]
+        fn backend_dynamic_default_keeps_full_fit_on_short_series() {
+            // Issue #137: the default `dynamic()` constructor must
+            // NOT fall through to OLS on short series — that was the
+            // v0.10.1 regression. Use a noisy seasonal signal where
+            // OLS and the IC-weighted dynamic fit demonstrably diverge.
+            let n = DYNAMIC_FAST_PATH_THRESHOLD - 5;
+            let ts = make_seasonal_ts(n, 7);
+            let features = || RegressionFeatures::new().trend().fourier(7, 2).no_exog();
+
+            let mut dynamic = RegressionForecaster::dynamic(features());
+            dynamic.fit(&ts).unwrap();
+            let dyn_fc = dynamic.predict(7).unwrap();
+
+            let mut ols = RegressionForecaster::ols(features());
+            ols.fit(&ts).unwrap();
+            let ols_fc = ols.predict(7).unwrap();
+
+            let diff_norm: f64 = dyn_fc
+                .primary()
+                .iter()
+                .zip(ols_fc.primary().iter())
+                .map(|(a, b)| (a - b).powi(2))
+                .sum::<f64>()
+                .sqrt();
+            assert!(
+                diff_norm > 1e-6,
+                "default dynamic() on short series must NOT collapse to OLS \
+                 (diff_norm = {} — fast path leaked into the default constructor)",
+                diff_norm
+            );
         }
 
         #[test]
