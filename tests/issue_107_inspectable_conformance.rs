@@ -21,9 +21,7 @@ use anofox_forecast::core::TimeSeries;
 use anofox_forecast::models::arima::AutoARIMA;
 use anofox_forecast::models::exponential::AutoETS;
 use anofox_forecast::models::theta::AutoTheta;
-use anofox_forecast::models::{
-    AutoTBATS, Explanation, Forecaster, Inspectable, MSTLForecaster, MFLES,
-};
+use anofox_forecast::models::{AutoTBATS, Explanation, Forecaster, MSTLForecaster, MFLES};
 
 use chrono::{Duration, TimeZone, Utc};
 
@@ -208,6 +206,8 @@ fn inspectable_is_object_safe() {
     // The trait must be usable behind Box<dyn _> because Explanation
     // is fully owned. This compile-and-call test will fail to link
     // (or panic at fit) if object-safety regresses.
+    use anofox_forecast::models::Inspectable;
+
     let ts = make_seasonal_series(60, 12);
     let mut ets = AutoETS::new();
     ets.fit(&ts).unwrap();
