@@ -4066,6 +4066,10 @@ mod ols_impl {
         fn name(&self) -> &str {
             self.backend.name()
         }
+
+        fn explanation(&self) -> Result<crate::models::inspect::Explanation> {
+            <Self as crate::models::inspect::Inspectable>::explanation(self)
+        }
     }
 
     impl crate::models::inspect::Inspectable for RegressionForecaster {
@@ -4139,7 +4143,7 @@ mod ols_impl {
 
         #[test]
         fn inspectable_linear_trend_returns_regression_explanation() {
-            use crate::models::inspect::{Explanation, Inspectable};
+            use crate::models::inspect::Explanation;
 
             let ts = make_linear_ts(40);
             let mut model = RegressionForecaster::linear_trend();
@@ -4166,8 +4170,59 @@ mod ols_impl {
         }
 
         #[test]
+        fn boxed_forecaster_exposes_explanation_without_refitting() {
+            // Issue #136: callers holding `Box<dyn Forecaster>` can read
+            // the fit's coefficients through `Forecaster::explanation()`
+            // without bounding on `Inspectable` or downcasting — and,
+            // because the override delegates to cached state, repeated
+            // calls do not re-fit.
+            use crate::models::inspect::Explanation;
+            use crate::models::traits::Forecaster;
+
+            let ts = make_linear_ts(40);
+            let mut model: Box<dyn Forecaster> = Box::new(RegressionForecaster::linear_trend());
+
+            assert!(
+                matches!(model.explanation(), Err(ForecastError::FitRequired { .. })),
+                "Box<dyn Forecaster>::explanation() before fit must return FitRequired"
+            );
+
+            model.fit(&ts).unwrap();
+
+            let first = model.explanation().unwrap();
+            let second = model.explanation().unwrap();
+
+            let (Explanation::Regression(a), Explanation::Regression(b)) = (first, second) else {
+                panic!("expected Explanation::Regression");
+            };
+            assert_eq!(
+                a.coefficients, b.coefficients,
+                "repeated explanation() must return identical coefficients \
+                 (would diverge if it silently re-fit on noisy iterative backends)"
+            );
+            assert_eq!(a.r_squared, b.r_squared);
+        }
+
+        #[test]
+        fn boxed_forecaster_explanation_unsupported_default_errs() {
+            // The default impl on Forecaster returns
+            // InvalidParameter for models without an Inspectable
+            // override. Sanity check the trait wiring.
+            use crate::models::baseline::Naive;
+            use crate::models::traits::Forecaster;
+
+            let ts = make_linear_ts(20);
+            let mut naive: Box<dyn Forecaster> = Box::new(Naive::new());
+            naive.fit(&ts).unwrap();
+            assert!(
+                matches!(naive.explanation(), Err(ForecastError::InvalidParameter(_))),
+                "Naive must use the default `explanation()` Err path"
+            );
+        }
+
+        #[test]
         fn inspectable_ols_populates_standard_errors() {
-            use crate::models::inspect::{Explanation, Inspectable};
+            use crate::models::inspect::Explanation;
 
             let ts = make_linear_ts(40);
             let mut model = RegressionForecaster::linear_trend();
@@ -5858,7 +5913,7 @@ mod ols_impl {
             // original-scale weighted covariance, not from the cloned
             // augmented-fit residual. After this fix they must be
             // finite, positive, and length-aligned with coefficients.
-            use crate::models::inspect::{Explanation, Inspectable};
+            use crate::models::inspect::Explanation;
 
             let ts = make_linear_ts(50);
             let mut model = RegressionForecaster::wls_logistic_ridge(
@@ -5908,7 +5963,7 @@ mod ols_impl {
             // SEs returned NaN for every coefficient. The ridge-adjusted
             // sandwich + clamped df_eff must surface finite SEs even on
             // these designs.
-            use crate::models::inspect::{Explanation, Inspectable};
+            use crate::models::inspect::Explanation;
 
             let n = 60;
             let timestamps = make_timestamps(n);

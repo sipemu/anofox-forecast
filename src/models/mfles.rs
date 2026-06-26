@@ -1568,6 +1568,10 @@ impl Forecaster for MFLES {
     fn name(&self) -> &str {
         "MFLES"
     }
+
+    fn explanation(&self) -> Result<Explanation> {
+        <Self as Inspectable>::explanation(self)
+    }
 }
 
 impl Inspectable for MFLES {

@@ -120,6 +120,21 @@ pub trait Forecaster {
         )))
     }
 
+    /// Typed snapshot of the most recent fit (coefficients, in-sample
+    /// fit, model-family metadata). Reads cached state — does not
+    /// re-fit. Returns `Err(FitRequired)` if the model has not been
+    /// fit, or `Err(InvalidParameter)` on models without an
+    /// interpretable structure (baselines, intermittent-demand
+    /// family). Available directly on `Box<dyn Forecaster>` so
+    /// callers no longer have to bound on a second trait or downcast.
+    /// See issue #136.
+    fn explanation(&self) -> Result<crate::models::inspect::Explanation> {
+        Err(ForecastError::InvalidParameter(format!(
+            "{} does not expose an explanation",
+            self.name()
+        )))
+    }
+
     /// Residual component: `training_values - fitted_values`.
     ///
     /// Default impl derives from [`residuals`](Self::residuals) when

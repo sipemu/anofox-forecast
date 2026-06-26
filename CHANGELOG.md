@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-06-26
+
+### Added
+
+- **`Forecaster::explanation()` reads fitted params without re-fitting** (closes #136). The trait gained a default `fn explanation(&self) -> Result<Explanation>` (default returns `Err(InvalidParameter)`). Every model that already implements `Inspectable` now overrides it with a one-line delegate: `RegressionForecaster`, `AutoARIMA`, `AutoETS`, `AutoTheta`, `AutoTBATS`, `MFLES`, `MSTLForecaster`. Callers holding `Box<dyn Forecaster>` can now read `model.explanation()` directly — no second-trait bound, no downcast, no re-fit. Downstream `model_params` extraction was previously paying the entire per-series fit cost a second time (~178 s of a 185 s output stage on a 6,319-series / 7-method panel; projected to ~2.9 h on a 367k-series panel); the extra fit goes away once callers route through the trait method.
+- The standalone `Inspectable` trait is kept as-is — the new `Forecaster::explanation` delegates to it, so existing direct uses continue to work. No deprecation.
+
+### Migration
+
+Additive change, backward-compatible. Existing code that imports `Inspectable` and calls `model.explanation()` on a concrete model may hit `E0034` (multiple methods named `explanation`); drop the `Inspectable` import — `Forecaster::explanation` is in scope wherever the model is fit, and delegates to `Inspectable`.
+
 ## [0.10.2] - 2026-06-24
 
 ### Fixed
