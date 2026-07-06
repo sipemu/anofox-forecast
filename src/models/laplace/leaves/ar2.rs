@@ -83,10 +83,33 @@ impl Ar2Leaf {
         }
         let phi1 = g1 * (g0 - g2) / det;
         let phi2 = (g0 * g2 - g1 * g1) / det;
-        self.phi1 = phi1.clamp(-0.999, 0.999);
-        self.phi2 = phi2.clamp(-0.999, 0.999);
+        let (phi1, phi2) = project_to_stationary(phi1, phi2);
+        self.phi1 = phi1;
+        self.phi2 = phi2;
         true
     }
+}
+
+/// Project `(φ₁, φ₂)` onto the AR(2) stationary triangle with a small
+/// safety margin. The triangle is defined by
+/// `|φ₂| < 1`, `φ₁ + φ₂ < 1`, `φ₂ − φ₁ < 1`. Without this projection, a
+/// near-unit-root AR(2) (common on trending series where MoM autocovariance
+/// estimates push `φ₁ + φ₂ → 1`) produces recursive h-step forecasts that
+/// diverge exponentially — the M4 daily benchmark showed mean MAE of 787
+/// vs. 158 for plain Laplace when the projection was absent.
+fn project_to_stationary(phi1: f64, phi2: f64) -> (f64, f64) {
+    const MARGIN: f64 = 0.02;
+    let phi2 = phi2.clamp(-1.0 + MARGIN, 1.0 - MARGIN);
+    let mut phi1 = phi1;
+    let sum = phi1 + phi2;
+    if sum > 1.0 - MARGIN {
+        phi1 = 1.0 - MARGIN - phi2;
+    }
+    let diff = phi2 - phi1;
+    if diff > 1.0 - MARGIN {
+        phi1 = phi2 - (1.0 - MARGIN);
+    }
+    (phi1.clamp(-2.0 + MARGIN, 2.0 - MARGIN), phi2)
 }
 
 impl Leaf for Ar2Leaf {

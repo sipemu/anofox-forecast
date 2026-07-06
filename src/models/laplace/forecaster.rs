@@ -18,6 +18,97 @@ use crate::transform::yeo_johnson::yeo_johnson_lambda;
 
 use super::ensemble::{blend_horizon, softmax};
 
+/// Series characteristics used by the auto-selector.
+#[derive(Clone, Copy)]
+struct AutoChars {
+    seasonality_strength: f64,
+    acf1: f64,
+    /// R² of a linear fit `y ~ t`. High values (> ~0.5) indicate a
+    /// dominant trend — the auto-selector uses this to avoid enabling
+    /// AR(2) on trending series (its MoM estimator pushes `φ₁ + φ₂ → 1`
+    /// on strong trends, producing recursive h-step blow-ups even with
+    /// the leaf's stationarity projection).
+    trend_strength: f64,
+}
+
+/// Compute (seasonality_strength_R², |ACF(1)|) on the training window.
+/// Same formulas as `examples/skaters_m5_benchmark.rs` so the auto-selector
+/// respects the same slicing evidence.
+fn auto_characteristics(train: &[f64], period: usize) -> AutoChars {
+    let n = train.len();
+    if n < 2 {
+        return AutoChars {
+            seasonality_strength: 0.0,
+            acf1: 0.0,
+            trend_strength: 0.0,
+        };
+    }
+    let mean_y: f64 = train.iter().sum::<f64>() / n as f64;
+    let ss_tot: f64 = train.iter().map(|y| (y - mean_y).powi(2)).sum();
+
+    // Trend strength: R² of the linear fit y ~ t.
+    let t_mean = (n - 1) as f64 / 2.0;
+    let (mut sum_ty, mut sum_tt) = (0.0, 0.0);
+    for (t, y) in train.iter().enumerate() {
+        let dt = t as f64 - t_mean;
+        sum_ty += dt * (y - mean_y);
+        sum_tt += dt * dt;
+    }
+    let slope = if sum_tt > 0.0 { sum_ty / sum_tt } else { 0.0 };
+    let intercept = mean_y - slope * t_mean;
+    let ss_res_trend: f64 = train
+        .iter()
+        .enumerate()
+        .map(|(t, y)| (y - (intercept + slope * t as f64)).powi(2))
+        .sum();
+    let trend_strength = if ss_tot > 0.0 {
+        (1.0 - ss_res_trend / ss_tot).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+
+    // Phase-mean seasonal fit R².
+    let period = period.max(1);
+    let mut phase_sum = vec![0.0f64; period];
+    let mut phase_count = vec![0usize; period];
+    for (i, &y) in train.iter().enumerate() {
+        phase_sum[i % period] += y;
+        phase_count[i % period] += 1;
+    }
+    let phase_mean: Vec<f64> = phase_sum
+        .iter()
+        .zip(phase_count.iter())
+        .map(|(s, &c)| if c > 0 { s / c as f64 } else { mean_y })
+        .collect();
+    let ss_res_season: f64 = train
+        .iter()
+        .enumerate()
+        .map(|(i, y)| (y - phase_mean[i % period]).powi(2))
+        .sum();
+    let seasonality_strength = if ss_tot > 0.0 {
+        (1.0 - ss_res_season / ss_tot).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+
+    // |AR(1)| lag-1 autocorrelation.
+    let mut num = 0.0f64;
+    for i in 1..n {
+        num += (train[i - 1] - mean_y) * (train[i] - mean_y);
+    }
+    let acf1 = if ss_tot > 0.0 {
+        (num / ss_tot).clamp(-1.0, 1.0).abs()
+    } else {
+        0.0
+    };
+
+    AutoChars {
+        seasonality_strength,
+        acf1,
+        trend_strength,
+    }
+}
+
 /// Yeo-Johnson forward transform (scalar).
 #[inline]
 fn yj_forward(x: f64, lambda: f64) -> f64 {
@@ -71,7 +162,10 @@ fn yj_inverse_with_jac(y: f64, lambda: f64) -> (f64, f64) {
     }
 }
 use super::leaf::Leaf;
-use super::leaves::{Ar1Leaf, Ar2Leaf, DriftLeaf, EmaLeaf, HoltLeaf, SeasonalEmaLeaf};
+use super::leaves::{
+    Ar1Leaf, Ar2Leaf, DriftLeaf, EmaLeaf, FractionalDiffLeaf, HoltLeaf, IntermittentLeaf,
+    MultiplicativeSeasonalLeaf, OuLeaf, SeasonalEmaLeaf, YjWrappedLeaf,
+};
 use super::DistributionalForecaster;
 
 /// Distributional forecaster returning a `GaussianMixture` per horizon.
@@ -98,8 +192,19 @@ pub struct LaplaceForecaster {
     holt: Option<(f64, f64, f64)>, // (alpha, beta, phi)
     ar2: Option<f64>,              // mean-EMA alpha
     seasonal_period: Option<usize>,
+    seasonal_periods_multi: Vec<usize>,
     seasonal_alpha: f64,
     calibrate: bool,
+    /// If true, calibration additionally fits per-horizon scale factors
+    /// via periodic in-sample snapshots (α-14). Applied after the shared
+    /// `calibration_scale`. Empty vector when unused.
+    calibrate_per_h: bool,
+    /// Number of horizons over which to fit per-h calibration. Defaults to
+    /// 28 (matches the M5 competition horizon). Callers requesting forecasts
+    /// beyond this horizon get the last saved `λ_h`.
+    per_h_horizon: usize,
+    /// Per-h scale factors fit in `fit()` when `calibrate_per_h` is on.
+    calibration_scale_per_h: Vec<f64>,
     /// User-supplied Yeo-Johnson λ. Overrides `yj_auto` when both are set.
     yj_lambda: Option<f64>,
     /// If true, fit the Yeo-Johnson λ via MLE at the start of `fit()` and
@@ -111,6 +216,50 @@ pub struct LaplaceForecaster {
     /// per series, imitating skaters' "Bayesian ensemble over a large
     /// candidate population" without adding new leaf families.
     use_populations: bool,
+    /// If true, `init_leaves` swaps in a wider 15-leaf population — the α-7
+    /// grid plus additional fast/slow pairs. Larger softmax pool at ~3×
+    /// compute; helps only on panels with strongly heterogeneous dynamics.
+    use_populations_wide: bool,
+    /// Yeo-Johnson coordinate grid. If non-empty, `init_leaves` wraps every
+    /// base leaf with `YjWrappedLeaf(inner, λ)` for each λ in the grid,
+    /// turning the mixture into a `(leaf, λ)` softmax matrix. Skaters'
+    /// original YJ recipe. Mutually exclusive with the single-λ paths
+    /// (`with_yeo_johnson` / `with_yeo_johnson_mle`).
+    yj_grid: Vec<f64>,
+    /// If true, `fit()` inspects the training series' characteristics
+    /// (`trend_strength`, `seasonality_strength`, `acf1`) and configures
+    /// the opt-in toggles from the α-8 residual-slicing evidence: always
+    /// add OU; add AR(2) if `acf1 > 0.4`; add seasonal(7) if
+    /// `seasonality_strength > 0.15`; add fractional-diff if `acf1 > 0.5`.
+    /// Does not enable Holt / populations / Yeo-Johnson (evidence-negative
+    /// on M5). The user-configured toggles are respected — `auto()` only
+    /// adds, never removes.
+    use_auto: bool,
+    /// Seasonal period used by `auto()`. Defaults to 7 (weekly). Set via
+    /// [`Self::auto_with_seasonal_period`] for non-daily panels.
+    auto_seasonal_period: usize,
+    /// `(d, α_mean, α_diff)` for the fractional-differencing leaf. Adds
+    /// a long-memory drift-like leaf.
+    frac_diff: Option<(f64, f64, f64)>,
+    /// `α_mean` for the OU mean-reversion leaf. Adds an explicit
+    /// mean-reverting leaf parameterised by `θ = 1 − φ`.
+    ou: Option<f64>,
+    /// `α` for the Croston-flavored intermittent-demand leaf. Adds a
+    /// demand-per-period leaf that handles zero-inflated series much
+    /// better than level-EMAs (which get dragged toward 0 by the
+    /// zero periods).
+    intermittent: Option<f64>,
+    /// When true, forecast means are clipped to `max(0, μ)` — the cheap
+    /// "no-negative demand forecast" fix. Distribution std is left
+    /// alone (so the 90% interval can still dip below zero — proper
+    /// truncated-Gaussian output is deferred).
+    non_negative: bool,
+    /// `(period, α)` for the multiplicative seasonal-EMA leaf. Complements
+    /// the additive `seasonal_period`; retail seasonality is often
+    /// proportional (peak week = 3× baseline).
+    seasonal_mult: Option<(usize, f64)>,
+    /// Scaffold flag — see [`Self::with_exog_preregression`].
+    exog_scaffold_declared: bool,
 
     leaves: Vec<Box<dyn Leaf + Send>>,
     cum_log_liks: Vec<f64>,
@@ -157,11 +306,25 @@ impl LaplaceForecaster {
             holt: None,
             ar2: None,
             seasonal_period: None,
+            seasonal_periods_multi: Vec::new(),
             seasonal_alpha: 0.15,
             calibrate: false,
+            calibrate_per_h: false,
+            per_h_horizon: 28,
+            calibration_scale_per_h: Vec::new(),
             yj_lambda: None,
             yj_auto: false,
             use_populations: false,
+            use_populations_wide: false,
+            yj_grid: Vec::new(),
+            use_auto: false,
+            auto_seasonal_period: 7,
+            frac_diff: None,
+            ou: None,
+            intermittent: None,
+            non_negative: false,
+            seasonal_mult: None,
+            exog_scaffold_declared: false,
             leaves: Vec::new(),
             cum_log_liks: Vec::new(),
             n_obs: 0,
@@ -197,6 +360,92 @@ impl LaplaceForecaster {
         self
     }
 
+    /// Add a fractional-differencing leaf with fractional order `d ∈
+    /// (0.05, 0.95)`. Captures long-memory persistence that AR(1) / AR(2)
+    /// miss. `alpha_mean` tracks the level; `alpha_diff` tracks the
+    /// running fractional-diff step.
+    pub fn with_fractional_diff(mut self, d: f64, alpha_mean: f64, alpha_diff: f64) -> Self {
+        self.frac_diff = Some((d, alpha_mean, alpha_diff));
+        self
+    }
+
+    /// Fractional-differencing leaf with defaults `d=0.4`, `α_mean=0.1`,
+    /// `α_diff=0.1`.
+    pub fn with_fractional_diff_defaults(self) -> Self {
+        self.with_fractional_diff(0.4, 0.1, 0.1)
+    }
+
+    /// Add an Ornstein-Uhlenbeck mean-reversion leaf with the given
+    /// mean-EMA rate. Behaves better than a mean-shifted AR(1) on
+    /// bounded / mean-reverting series at longer horizons.
+    pub fn with_ou(mut self, alpha_mean: f64) -> Self {
+        self.ou = Some(alpha_mean);
+        self
+    }
+
+    /// OU leaf with the default mean-EMA rate 0.1.
+    pub fn with_ou_defaults(self) -> Self {
+        self.with_ou(0.1)
+    }
+
+    /// Add a Croston-flavored intermittent-demand leaf that tracks demand
+    /// size and inter-demand interval as separate EMAs. Handles
+    /// zero-inflated series (SKU sales with many zero days) much better
+    /// than level-EMAs. `α` clamped to `(0.001, 0.999)`.
+    pub fn with_intermittent(mut self, alpha: f64) -> Self {
+        self.intermittent = Some(alpha);
+        self
+    }
+
+    /// Intermittent leaf with the default rate `α = 0.1` (Croston's classic
+    /// value).
+    pub fn with_intermittent_defaults(self) -> Self {
+        self.with_intermittent(0.1)
+    }
+
+    /// Clip forecast component means to `max(0, μ)` at prediction time.
+    /// The cheap "no-negative demand forecast" fix. Distribution std is
+    /// left alone (the 90% interval can still dip below 0); proper
+    /// truncated-Gaussian output is deferred.
+    pub fn non_negative(mut self) -> Self {
+        self.non_negative = true;
+        self
+    }
+
+    /// Add a **multiplicative** seasonal-EMA leaf with the caller-supplied
+    /// period. Tracks per-phase multipliers on a shared level (retail
+    /// seasonality is often proportional — peak week = 3× baseline, not
+    /// baseline + 5). Composes with the additive
+    /// [`Self::with_seasonal`] — mixture picks whichever fits the data
+    /// better per series. `period < 2` is a no-op.
+    pub fn with_seasonal_multiplicative(mut self, period: usize, alpha: f64) -> Self {
+        if period >= 2 {
+            self.seasonal_mult = Some((period, alpha));
+        }
+        self
+    }
+
+    /// Multiplicative seasonal-EMA with the default rate `α = 0.15`.
+    pub fn with_seasonal_multiplicative_defaults(self, period: usize) -> Self {
+        self.with_seasonal_multiplicative(period, 0.15)
+    }
+
+    /// **Scaffold — not yet implemented.** Declares intent to preregress
+    /// `y` on the [`TimeSeries`]'s calendar regressors via OLS, then feed
+    /// residuals to the leaves. At `predict_with_exog()` time the OLS
+    /// intercept + `β·X_future` would be added back to the leaf mixture.
+    ///
+    /// Calling this builder currently causes `fit()` to return `Err`. The
+    /// API is reserved so downstream code can compile against it; the
+    /// implementation is planned as a follow-up. Until then, callers that
+    /// need exog preregression should use [`RegressionForecaster`](crate::models::regression::RegressionForecaster)
+    /// with its residual-Ridge / dynamic backends, or preregress in
+    /// application code.
+    pub fn with_exog_preregression(mut self) -> Self {
+        self.exog_scaffold_declared = true;
+        self
+    }
+
     /// Replace the 3-leaf default set (one EMA / drift / AR(1) each) with
     /// an expanded 7-leaf population that hyperparameter-sweeps the same
     /// families:
@@ -211,6 +460,54 @@ impl LaplaceForecaster {
     /// Adds compute proportional to the leaf count (roughly 2.3×).
     pub fn with_populations(mut self) -> Self {
         self.use_populations = true;
+        self
+    }
+
+    /// Wider hyperparameter population (15 leaves): EMA at 5 rates, Drift
+    /// at 3, AR(1) at 3, plus explicit "fast/slow two-systems" EMA pairs
+    /// at extreme rates (α=0.02 slow / α=0.60 fast). Same principle as
+    /// [`Self::with_populations`], larger softmax pool at ~3× compute.
+    pub fn with_populations_wide(mut self) -> Self {
+        self.use_populations_wide = true;
+        self
+    }
+
+    /// Yeo-Johnson coordinate grid — wraps every base leaf with each λ
+    /// in `lambdas`, turning the mixture into a `(leaf, λ)` softmax
+    /// matrix. Skaters' original YJ recipe (α-6's single-λ path was a
+    /// simplification). Compute scales linearly with grid size; typical
+    /// grids are `{0.0, 0.5, 1.0, 1.5}` (4×). Mutually exclusive with
+    /// the single-λ paths — passing an empty grid is a no-op.
+    pub fn with_yeo_johnson_grid(mut self, lambdas: &[f64]) -> Self {
+        self.yj_grid = lambdas.iter().copied().filter(|l| l.is_finite()).collect();
+        if !self.yj_grid.is_empty() {
+            self.yj_lambda = None;
+            self.yj_auto = false;
+        }
+        self
+    }
+
+    /// Enable the per-series meta-selector. At `fit()` time, inspect the
+    /// training series' characteristics and add opt-in leaves based on
+    /// the α-8 residual-slicing evidence:
+    ///
+    /// * OU is always added (best single-leaf logpdf across all configs);
+    /// * AR(2) is added when `|acf1| > 0.4` (its best segment);
+    /// * seasonal-EMA at the auto period is added when the phase-mean R² > 0.15;
+    /// * fractional-diff is added when `|acf1| > 0.5`.
+    ///
+    /// Holt / populations / Yeo-Johnson are NOT added (evidence-negative
+    /// on M5). Composes with the explicit `with_*` builders — auto only
+    /// adds leaves, never removes.
+    pub fn auto(mut self) -> Self {
+        self.use_auto = true;
+        self
+    }
+
+    /// Override the seasonal period used by [`Self::auto`] (default 7,
+    /// weekly). Set to 12 for monthly, 24 for hourly-with-daily, etc.
+    pub fn auto_with_seasonal_period(mut self, period: usize) -> Self {
+        self.auto_seasonal_period = period.max(2);
         self
     }
 
@@ -234,6 +531,19 @@ impl LaplaceForecaster {
     /// the current shell.
     pub fn with_calibration(mut self) -> Self {
         self.calibrate = true;
+        self
+    }
+
+    /// Enable per-horizon calibration on top of the shared quantile-match.
+    /// During `fit()`, save the mixture at periodic snapshots; after
+    /// training, fit a per-h scale factor `λ_h` via quantile matching on
+    /// `|residual_h / σ_h|` for each horizon `h ∈ 1..=horizon_max`.
+    /// Applied multiplicatively with the shared scalar at forecast time.
+    /// Requires `with_calibration()` to also be set.
+    pub fn with_per_horizon_calibration(mut self, horizon_max: usize) -> Self {
+        self.calibrate_per_h = true;
+        self.per_h_horizon = horizon_max.max(1);
+        self.calibrate = true; // per-h needs the shared machinery too
         self
     }
 
@@ -272,6 +582,16 @@ impl LaplaceForecaster {
         self
     }
 
+    /// Add multiple seasonal-EMA leaves, one per period in `periods`.
+    /// Composes with [`Self::with_seasonal`] (the single-period leaf) — both
+    /// families can be set simultaneously. Periods `< 2` are silently
+    /// dropped. Useful for panels with multiple periodicities (e.g. daily
+    /// data with weekly + annual seasonality → `&[7, 365]`).
+    pub fn with_seasonal_multi(mut self, periods: &[usize]) -> Self {
+        self.seasonal_periods_multi = periods.iter().copied().filter(|p| *p >= 2).collect();
+        self
+    }
+
     /// Override the smoothing rate for the seasonal-EMA leaf. Only meaningful
     /// after `with_seasonal(period)` has been called. Clamped by the leaf.
     pub fn seasonal_alpha(mut self, alpha: f64) -> Self {
@@ -279,8 +599,24 @@ impl LaplaceForecaster {
         self
     }
 
-    fn init_leaves(&mut self) {
-        let mut leaves: Vec<Box<dyn Leaf + Send>> = if self.use_populations {
+    /// Build a fresh copy of the base leaf set (respecting user toggles).
+    /// Used both for the single-shell path and per-λ in the YJ coord grid.
+    fn build_base_leaves(&self) -> Vec<Box<dyn Leaf + Send>> {
+        let mut leaves: Vec<Box<dyn Leaf + Send>> = if self.use_populations_wide {
+            vec![
+                Box::new(EmaLeaf::new(0.02)),
+                Box::new(EmaLeaf::new(0.10)),
+                Box::new(EmaLeaf::new(0.25)),
+                Box::new(EmaLeaf::new(0.45)),
+                Box::new(EmaLeaf::new(0.60)),
+                Box::new(DriftLeaf::new(0.03)),
+                Box::new(DriftLeaf::new(0.10)),
+                Box::new(DriftLeaf::new(0.25)),
+                Box::new(Ar1Leaf::new(0.03)),
+                Box::new(Ar1Leaf::new(0.10)),
+                Box::new(Ar1Leaf::new(0.25)),
+            ]
+        } else if self.use_populations {
             vec![
                 Box::new(EmaLeaf::new(0.05)),
                 Box::new(EmaLeaf::new(0.20)),
@@ -303,9 +639,48 @@ impl LaplaceForecaster {
         if let Some(a) = self.ar2 {
             leaves.push(Box::new(Ar2Leaf::new(a)));
         }
+        if let Some((d, am, ad)) = self.frac_diff {
+            leaves.push(Box::new(FractionalDiffLeaf::new(d, am, ad)));
+        }
+        if let Some(a) = self.ou {
+            leaves.push(Box::new(OuLeaf::new(a)));
+        }
+        if let Some(a) = self.intermittent {
+            leaves.push(Box::new(IntermittentLeaf::new(a)));
+        }
         if let Some(p) = self.seasonal_period {
             leaves.push(Box::new(SeasonalEmaLeaf::new(p, self.seasonal_alpha)));
         }
+        for &p in &self.seasonal_periods_multi {
+            leaves.push(Box::new(SeasonalEmaLeaf::new(p, self.seasonal_alpha)));
+        }
+        if let Some((p, a)) = self.seasonal_mult {
+            leaves.push(Box::new(MultiplicativeSeasonalLeaf::new(p, a)));
+        }
+        leaves
+    }
+
+    fn init_leaves(&mut self) {
+        let leaves = self.build_base_leaves();
+        let mut leaves = if !self.yj_grid.is_empty() {
+            // Coordinate grid: build one fresh base set per λ, wrap each
+            // element with YjWrappedLeaf(inner, λ). Every (leaf, λ)
+            // becomes its own softmax candidate.
+            let mut wrapped: Vec<Box<dyn Leaf + Send>> =
+                Vec::with_capacity(leaves.len() * self.yj_grid.len());
+            for lam in self.yj_grid.clone() {
+                let per_lambda = self.build_base_leaves();
+                for l in per_lambda {
+                    wrapped.push(Box::new(YjWrappedLeaf::new(l, lam)));
+                }
+            }
+            wrapped
+        } else {
+            leaves
+        };
+        // Clear the old redundant setter path — keep `leaves` mut for
+        // the trailing existing logic (self.cum_log_liks / self.leaves).
+        let _ = &mut leaves;
         self.cum_log_liks = vec![0.0; leaves.len()];
         self.leaves = leaves;
     }
@@ -328,11 +703,43 @@ impl Default for LaplaceForecaster {
 impl Forecaster for LaplaceForecaster {
     fn fit(&mut self, series: &TimeSeries) -> Result<()> {
         validate_series_complete(series)?;
+        if self.exog_scaffold_declared {
+            return Err(ForecastError::InvalidParameter(
+                "LaplaceForecaster::with_exog_preregression() is a reserved scaffold; \
+                 implementation is planned. Use RegressionForecaster in the meantime."
+                    .into(),
+            ));
+        }
         let values = series.primary_values();
         if values.is_empty() {
             return Err(ForecastError::InvalidParameter(
                 "LaplaceForecaster requires at least one observation".into(),
             ));
+        }
+
+        // Auto-selector: inspect series characteristics before initialising
+        // leaves and set the opt-in toggles from residual-slicing evidence.
+        // User-configured toggles are respected — auto only adds.
+        if self.use_auto {
+            let chars = auto_characteristics(values, self.auto_seasonal_period);
+            if self.ou.is_none() {
+                self.ou = Some(0.1);
+            }
+            // Trending-guard: on trending series, `acf1` is inflated because
+            // consecutive samples share the trend. Enabling AR(2) then pushes
+            // its MoM estimator toward the unit-root boundary, and the
+            // recursive h-step forecast diverges (M4-daily benchmark caught
+            // a catastrophic mean-MAE blow-up). Skip AR(2) when trend
+            // dominates.
+            if chars.acf1 > 0.4 && chars.trend_strength < 0.5 && self.ar2.is_none() {
+                self.ar2 = Some(0.1);
+            }
+            if chars.seasonality_strength > 0.15 && self.seasonal_period.is_none() {
+                self.seasonal_period = Some(self.auto_seasonal_period);
+            }
+            if chars.acf1 > 0.5 && chars.trend_strength < 0.5 && self.frac_diff.is_none() {
+                self.frac_diff = Some((0.4, 0.1, 0.1));
+            }
         }
 
         self.init_leaves();
@@ -353,8 +760,12 @@ impl Forecaster for LaplaceForecaster {
         self.n_obs = 0;
 
         // Resolve Yeo-Johnson λ. User-supplied wins over MLE; MLE happens
-        // exactly once at fit start over the full training window.
-        self.fitted_yj_lambda = if let Some(l) = self.yj_lambda {
+        // exactly once at fit start over the full training window. When
+        // the coordinate grid is set, per-leaf `YjWrappedLeaf` handles
+        // the transform — the shell-level path is disabled.
+        self.fitted_yj_lambda = if !self.yj_grid.is_empty() {
+            None
+        } else if let Some(l) = self.yj_lambda {
             Some(l)
         } else if self.yj_auto {
             Some(yeo_johnson_lambda(values))
@@ -380,11 +791,44 @@ impl Forecaster for LaplaceForecaster {
             (lo, hi)
         });
 
-        for &y_orig in values {
+        // Snapshot collection for per-horizon calibration: at periodic
+        // intervals during fit, save the H-horizon mixture-mean/std so that
+        // after fit we can quantile-match per h against known-future values.
+        let snapshot_stride = (values.len() / 30).clamp(1, 200);
+        let per_h_horizon = self.per_h_horizon;
+        let mut per_h_snapshots: Vec<(usize, Vec<(f64, f64)>)> = Vec::new();
+
+        for (step, &y_orig) in values.iter().enumerate() {
             let y = match yj {
                 Some(l) => yj_forward(y_orig, l),
                 None => y_orig,
             };
+
+            // Periodic snapshot: take before observing y at this step. Only
+            // useful when the snapshot's H-step horizon fits inside training.
+            if self.calibrate_per_h
+                && step >= 30
+                && step % snapshot_stride == 0
+                && step + per_h_horizon <= values.len()
+            {
+                let weights_now = self.weights();
+                let per_leaf_h: Vec<Vec<super::dist::Gaussian>> = self
+                    .leaves
+                    .iter()
+                    .map(|l| l.predict(per_h_horizon))
+                    .collect();
+                let mixtures: Vec<(f64, f64)> = (0..per_h_horizon)
+                    .map(|h| {
+                        let m = blend_horizon(&weights_now, &per_leaf_h, h);
+                        if m.is_empty() {
+                            (0.0, 1.0)
+                        } else {
+                            (m.mean(), m.std())
+                        }
+                    })
+                    .collect();
+                per_h_snapshots.push((step, mixtures));
+            }
 
             // 1-step predictions from each leaf, before observing y.
             let per_leaf: Vec<super::dist::Gaussian> =
@@ -465,6 +909,49 @@ impl Forecaster for LaplaceForecaster {
                 let p90 = zabs[idx].max(1e-9);
                 self.calibration_scale = p90 / GAUSSIAN_Z_AT_90;
             }
+        }
+
+        // Per-horizon calibration: for each h, quantile-match |z_h| =
+        // |(y_{t+h} - predicted_mean_h) / predicted_std_h| against a
+        // Gaussian's P90 = 1.645. When there aren't enough snapshots at
+        // some h, fall back to `self.calibration_scale`.
+        if self.calibrate_per_h && !per_h_snapshots.is_empty() {
+            const TARGET_LEVEL: f64 = 0.90;
+            const GAUSSIAN_Z_AT_90: f64 = 1.644_853_626_951_472_7;
+            let mut per_h = Vec::with_capacity(per_h_horizon);
+            for h in 1..=per_h_horizon {
+                let mut zabs: Vec<f64> = per_h_snapshots
+                    .iter()
+                    .filter_map(|(step, mixtures)| {
+                        let (mu_trans, sigma_trans) = mixtures[h - 1];
+                        if !(sigma_trans > 1e-9 && sigma_trans.is_finite()) {
+                            return None;
+                        }
+                        let target_idx = *step + h;
+                        if target_idx >= values.len() {
+                            return None;
+                        }
+                        let y_trans = match yj {
+                            Some(l) => yj_forward(values[target_idx], l),
+                            None => values[target_idx],
+                        };
+                        Some(((y_trans - mu_trans) / sigma_trans).abs())
+                    })
+                    .collect();
+                if zabs.len() < 5 {
+                    // Too few points for a stable per-h estimate; reuse
+                    // the shared scalar so we don't over-fit noise.
+                    per_h.push(self.calibration_scale);
+                    continue;
+                }
+                zabs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                let idx = ((zabs.len() as f64 * TARGET_LEVEL).ceil() as usize)
+                    .saturating_sub(1)
+                    .min(zabs.len() - 1);
+                let p90 = zabs[idx].max(1e-9);
+                per_h.push(p90 / GAUSSIAN_Z_AT_90);
+            }
+            self.calibration_scale_per_h = per_h;
         }
         Ok(())
     }
@@ -573,19 +1060,17 @@ impl DistributionalForecaster for LaplaceForecaster {
         let weights = self.weights();
         let per_leaf = self.per_leaf_horizons(horizon);
         let scale = self.calibration_scale;
+        let per_h = &self.calibration_scale_per_h;
         let yj = self.fitted_yj_lambda;
         let trans_range = self.yj_trans_range;
+        let non_negative = self.non_negative;
         Ok((0..horizon)
             .map(|h| {
                 let m = blend_horizon(&weights, &per_leaf, h);
-                // Apply calibration scale in the leaves' space (transformed
-                // if YJ is active), then YJ inverse via delta method. Clamp
-                // component means to the observed training range in
-                // transformed space to prevent the log-branch Jacobian from
-                // exploding on far-horizon extrapolation.
+                let scale_h = per_h.get(h).copied().unwrap_or(scale);
                 let components = m.components.into_iter().map(|(w, g)| {
-                    let sigma_scaled = g.std * scale;
-                    let (mean_out, sigma_out) = match yj {
+                    let sigma_scaled = g.std * scale_h;
+                    let (mut mean_out, sigma_out) = match yj {
                         Some(l) => {
                             let mean_trans = match trans_range {
                                 Some((lo, hi)) => g.mean.clamp(lo, hi),
@@ -596,6 +1081,9 @@ impl DistributionalForecaster for LaplaceForecaster {
                         }
                         None => (g.mean, sigma_scaled),
                     };
+                    if non_negative && mean_out < 0.0 {
+                        mean_out = 0.0;
+                    }
                     (w, super::dist::Gaussian::new(mean_out, sigma_out))
                 });
                 GaussianMixture::new(components)
@@ -791,6 +1279,83 @@ mod tests {
     }
 
     #[test]
+    fn with_fractional_diff_and_ou_add_leaves_in_expected_order() {
+        let ts = ts_ar1(120, 0.4);
+        let mut f = LaplaceForecaster::new()
+            .with_fractional_diff_defaults()
+            .with_ou_defaults();
+        f.fit(&ts).unwrap();
+        match Inspectable::explanation(&f).unwrap() {
+            Explanation::Laplace(e) => {
+                assert_eq!(e.leaf_names, vec!["ema", "drift", "ar1", "frac_diff", "ou"]);
+                assert_eq!(e.leaf_weights.len(), 5);
+            }
+            other => panic!("expected Explanation::Laplace, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn auto_on_strongly_seasonal_series_adds_seasonal_leaf() {
+        let ts = ts_seasonal(240, 12);
+        let mut f = LaplaceForecaster::new()
+            .auto()
+            .auto_with_seasonal_period(12);
+        f.fit(&ts).unwrap();
+        match Inspectable::explanation(&f).unwrap() {
+            Explanation::Laplace(e) => {
+                // Always OU; strong seasonal → seasonal_ema; likely ar2 (sinusoidal has ACF > 0.4).
+                assert!(
+                    e.leaf_names.iter().any(|n| n == "ou"),
+                    "OU should always be added: {:?}",
+                    e.leaf_names
+                );
+                assert!(
+                    e.leaf_names.iter().any(|n| n == "seasonal_ema"),
+                    "seasonal_ema should be added: {:?}",
+                    e.leaf_names
+                );
+            }
+            other => panic!("expected Explanation::Laplace, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn auto_on_pure_ar1_adds_ar2_and_ou_but_not_seasonal() {
+        let ts = ts_ar1(240, 0.7);
+        let mut f = LaplaceForecaster::new().auto();
+        f.fit(&ts).unwrap();
+        match Inspectable::explanation(&f).unwrap() {
+            Explanation::Laplace(e) => {
+                assert!(
+                    e.leaf_names.iter().any(|n| n == "ar2"),
+                    "AR(2) should be added on high-ACF: {:?}",
+                    e.leaf_names
+                );
+                assert!(
+                    e.leaf_names.iter().any(|n| n == "ou"),
+                    "OU should always be added: {:?}",
+                    e.leaf_names
+                );
+            }
+            other => panic!("expected Explanation::Laplace, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn auto_respects_explicit_user_toggles() {
+        let ts = ts_ar1(200, 0.5);
+        let mut f = LaplaceForecaster::new().auto().with_holt_defaults();
+        f.fit(&ts).unwrap();
+        match Inspectable::explanation(&f).unwrap() {
+            Explanation::Laplace(e) => {
+                // User asked for Holt — auto never removes.
+                assert!(e.leaf_names.iter().any(|n| n == "holt_damped"));
+            }
+            other => panic!("expected Explanation::Laplace, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn with_populations_expands_leaf_count() {
         let ts = ts_ar1(120, 0.4);
         let mut f = LaplaceForecaster::new().with_populations();
@@ -897,6 +1462,39 @@ mod tests {
                 e.leaf_names,
                 vec!["ema", "drift", "ar1", "holt_damped", "seasonal_ema"]
             ),
+            other => panic!("expected Explanation::Laplace, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn with_seasonal_multi_adds_one_leaf_per_period() {
+        let ts = ts_ar1(200, 0.4);
+        let mut f = LaplaceForecaster::new().with_seasonal_multi(&[7, 30, 365]);
+        f.fit(&ts).unwrap();
+        match Inspectable::explanation(&f).unwrap() {
+            Explanation::Laplace(e) => {
+                assert_eq!(e.leaf_names.len(), 6); // 3 base + 3 seasonal
+                assert_eq!(
+                    e.leaf_names
+                        .iter()
+                        .filter(|n| n.as_str() == "seasonal_ema")
+                        .count(),
+                    3
+                );
+            }
+            other => panic!("expected Explanation::Laplace, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn with_seasonal_multi_drops_invalid_periods() {
+        let ts = ts_ar1(100, 0.4);
+        let mut f = LaplaceForecaster::new().with_seasonal_multi(&[0, 1, 7]);
+        f.fit(&ts).unwrap();
+        match Inspectable::explanation(&f).unwrap() {
+            Explanation::Laplace(e) => {
+                assert_eq!(e.leaf_names.len(), 4); // 3 base + 1 valid seasonal
+            }
             other => panic!("expected Explanation::Laplace, got {other:?}"),
         }
     }

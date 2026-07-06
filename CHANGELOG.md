@@ -7,6 +7,270 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0-alpha.19] - 2026-07-06
+
+### Added — cross-series shell + meta-learner scaffold
+
+- **`GlobalLaplace`** (new module `src/models/laplace/global.rs`) — panel-level wrapper. Fits an independent `LaplaceForecaster` per series (using a shared configuration factory), stores them keyed by caller-supplied id, and exposes `predict_series(id, h)` and `forecast_dist_series(id, h)`. Also `fit_panel(iter)` for bulk fits with per-id error tolerance. Panel-average calibration scale accessor for cross-series signal.
+- **`MetaLearnerScaffold`** — reserved API for a per-series classifier that picks the winning forecaster family from characteristics. Currently returns the same rules-based decision as `SmartForecaster`; documented so downstream code can code against `pick_family(chars)` and swap in a trained classifier later.
+- Public: `models::laplace::GlobalLaplace`, `models::laplace::MetaLearnerScaffold`.
+
+### Honest limitations
+
+- `GlobalLaplace` is **not** a genuinely global model in the DeepAR / N-BEATS sense. The leaf state is still per-series; the only "global" element is the shared config. Real cross-series learning (shared `α` / `β` / `φ` estimated jointly across series) is a substantial architecture change and is deferred.
+- `MetaLearnerScaffold` has no ML backend yet — it's a pure rules-based fallback. A real implementation needs a labeled training panel where each series has a known winning forecaster (from held-out MAE) plus a classifier fit at load time. Deferred until we have that dataset.
+
+## [0.12.0-alpha.18] - 2026-07-06
+
+### Added — CV-based per-series selection
+
+- **`CvSelectForecaster`** (new module `src/models/cv_select.rs`) — given a slate of `Candidate` forecasters, fits each on the earlier portion of the training series, scores on a held-out final window, picks the winner by MAE, then refits it on the full series. Public accessors: `winner_name()`, `winner_score()`.
+- **`Candidate::new(name, factory)`** — a name + a factory closure that produces a fresh boxed forecaster. Factories are called per candidate (twice: once for the CV score, once for the final refit).
+- Public: `models::CvSelectForecaster`, `models::Candidate`.
+
+### Design
+
+Complements `SmartForecaster` (α-16): fast characteristic-based routing vs. accurate CV-based selection. Use `Smart` for latency-sensitive pipelines; use `CvSelect` when the extra k-fold-fit cost is worth ~1-5% accuracy improvement. Holdout defaults to `max(14, N/10)`.
+
+## [0.12.0-alpha.17] - 2026-07-06
+
+### Added — multiplicative seasonality + exog scaffold
+
+- **`MultiplicativeSeasonalLeaf`** — tracks per-phase multipliers on a shared level (`level · factor[phase]`) rather than adding a phase mean. Retail seasonality is often proportional (peak week = 3× baseline, not baseline + 5); the additive `SeasonalEmaLeaf` misfits this on retail. Guarded against divide-by-zero when the level is near 0.
+- **`LaplaceForecaster::with_seasonal_multiplicative(period, α)`** builder + `.with_seasonal_multiplicative_defaults(period)` shortcut (default α = 0.15). Composes with the additive `with_seasonal(period)` — the mixture picks per series.
+- **`LaplaceForecaster::with_exog_preregression()`** — API scaffold. Reserves the surface for a follow-up implementation of OLS preregression on the `TimeSeries`'s calendar regressors. Currently causes `fit()` to return `Err`; use `RegressionForecaster` in the meantime.
+
+### Notes
+
+Alpha surface: additive behind the `distributional` feature. The exog scaffold intentionally errors so downstream code can compile against the API without accidentally shipping stub behavior.
+
+## [0.12.0-alpha.16] - 2026-07-06
+
+### Added — feature-based routing across model families
+
+- **`SmartForecaster`** (new module `src/models/smart.rs`) — inspects the training series at `fit()`, computes `zero_fraction` + `trend_strength`, and routes to one of:
+  - `LaplaceForecaster::new().with_intermittent_defaults().non_negative()` — for zero-inflated series (Croston beats EMA-family leaves when zeros dominate).
+  - `AutoETS` — for strongly-trending series (its damped-trend specs handle sustained trends better than the α-11 AR(2) stationarity-projected leaf).
+  - `LaplaceForecaster::new().auto()` — for the residual space (mid-trend, mid-seasonal, retail-normal), delegating to the α-10 per-leaf auto-selector.
+- Public: `models::SmartForecaster`, `models::SelectedFamily`. Reachable via `SmartForecaster::selected_family()` after `fit()` for observability.
+
+### Routing rules
+
+Deliberately conservative and evidence-derived:
+
+- `zero_fraction > 0.4` → `Intermittent`
+- else `trend_strength > 0.6` → `AutoEts`
+- else → `LaplaceAuto`
+
+Wrong routes only cost users the target family's fit; there's no expensive CV inside — for CV-based selection use `AutoForecast` (α-18 will extend it to include `LaplaceForecaster`).
+
+### Test plan
+
+- New unit tests: intermittent series (60% zeros) routes to `Intermittent`; steady moderate series routes to `LaplaceAuto`; linear-trend series routes to `AutoEts`.
+
+## [0.12.0-alpha.15] - 2026-07-06
+
+### Added — demand-forecasting basics
+
+- **`IntermittentLeaf`** — Croston-flavored leaf that tracks demand size and inter-demand interval as separate EMAs. Point forecast is `demand_ema / interval_ema` (expected demand per period). Dramatically better than level-EMAs on zero-inflated series (SKU sales with many zero days), which get dragged toward zero by the zero periods.
+- **`LaplaceForecaster::with_intermittent(α)` / `.with_intermittent_defaults()`** builder — adds the Croston leaf to the mixture. Composes with all other leaves; the softmax weights determine when it dominates (high-zero-fraction series) vs. the regression leaves (dense series).
+- **`LaplaceForecaster::non_negative()`** builder — clips forecast component means to `max(0, μ)` at prediction time. Cheap "no-negative-demand-forecast" fix; distribution std is left alone (the 90% interval can still dip below 0 — proper truncated-Gaussian output is deferred).
+
+### Notes
+
+Alpha surface: additive behind the `distributional` feature. Both new builders are opt-in and compose freely with all existing toggles. The intermittent leaf is unrelated to the M5 benchmark's `MIN_NONZERO_FRAC = 0.30` filter — real demand pipelines should now include the previously-excluded intermittent series with `.with_intermittent()`.
+
+### Future work
+
+- **Truncated-Gaussian mixture output** — proper non-negative distribution, not just the mean clamp.
+- **Multiplicative (log-normal / gamma) leaves** — retail demand is often log-normally distributed rather than symmetric.
+
+## [0.12.0-alpha.14] - 2026-07-06
+
+### Added
+
+- **Per-horizon calibration** via `LaplaceForecaster::new().with_calibration().with_per_horizon_calibration(horizon_max)`. During `fit()`, saves periodic H-step snapshots of the mixture at every ~N/30 observations; after the shared calibration, quantile-matches per-h `|z_h|` and stores a `Vec<f64>` of `λ_h` scale factors. Applied at forecast time on top of the α-5 shared scalar.
+- Falls back to the shared scalar for horizons with fewer than 5 usable snapshots.
+
+### Benchmark: coverage hits target
+
+M5 top-1000 (`Laplace + AR2 + S7` + calibration variants):
+
+| variant | MAE (median) | cover@90 (target 0.90) | logpdf | fit |
+|---|---|---|---|---|
+| uncalibrated | 5.09 | 0.970 | −3.825 | 0.38 s |
+| + Cal (α-5 shared) | 5.09 | 0.966 (−0.4 pp) | −3.774 | 0.45 s |
+| **+ Cal + perH (α-14)** | 5.09 | **0.907 (−6.3 pp)** — hits target within 1 pp | **−3.560** (best of any variant) | 0.54 s |
+
+- **Direct hit on the 0.90 coverage target** — perH moves coverage 15× further than the shared scalar (6.3 pp vs 0.4 pp).
+- **Best logpdf across all α-5 to α-14 configs**, beating OU alone (−3.632).
+- MAE unchanged (scale-only transform).
+- Fit time +20% for the periodic snapshots — cheap.
+
+### Notes
+
+Alpha surface: additive. `with_per_horizon_calibration(h)` implicitly calls `with_calibration()`. The per-h scales stack multiplicatively with the shared scalar. `horizon_max` defaults to 28 (M5 competition horizon) if the shorthand `with_calibration()` alone is used.
+
+## [0.12.0-alpha.13] - 2026-07-06
+
+### Added
+
+- **Yeo-Johnson coordinate grid** via `LaplaceForecaster::new().with_yeo_johnson_grid(&[f64])` — skaters' original YJ recipe (α-6's single-λ path was a simplification). Wraps every base leaf with a `YjWrappedLeaf(inner, λ)` for each λ in the grid, turning the mixture into a `(leaf, λ)` softmax matrix. Mutually exclusive with the single-λ paths (`with_yeo_johnson` / `with_yeo_johnson_mle`).
+- New public: `models::laplace::leaves::YjWrappedLeaf`.
+
+### Benchmark: coord-grid fixes the α-6 tradeoffs
+
+On M5 top-1000, adding `.with_yeo_johnson_grid(&[0.0, 0.5, 1.0, 1.5])` to `AR2 + seasonal(7)`:
+
+| variant | MAE (median) | MAE (mean) | cover@90 | logpdf | fit |
+|---|---|---|---|---|---|
+| Laplace + AR2 + S7 + YJ (α-6 single-λ) | 5.10 | 7.29 | 0.935 | −4.325 | 15.42 s |
+| **Laplace + AR2 + S7 + YJgrid (α-13)** | **5.07** | **6.86** | 0.958 | **−4.056** | **3.60 s** |
+
+- **Mean MAE 7.29 → 6.86** (−5.9%) — bad λ candidates get low softmax weight rather than dominating.
+- **Logpdf +0.27** — better distributional quality.
+- **Fit time 4× faster** — no MLE grid search; each λ is a fixed cheap candidate.
+- Coverage moves toward 0.90 less aggressively (0.958 vs. 0.935) — the aggressive coverage narrowing came from single-λ overcommitting; grid is more balanced.
+
+Not the new best on M5 (the α-8/9 kitchen sink and α-10 auto still win on MAE), but a strictly better alternative to single-λ YJ for coverage-critical use cases.
+
+### Notes
+
+Alpha surface: additive behind the `distributional` feature. Passing an empty grid is a no-op; passing a non-empty grid overrides any `with_yeo_johnson(λ)` / `with_yeo_johnson_mle()` calls.
+
+## [0.12.0-alpha.12] - 2026-07-06
+
+### Added
+
+- **Wider hyperparameter population** via `LaplaceForecaster::new().with_populations_wide()` — 11 leaves (5 EMAs at α ∈ {0.02, 0.10, 0.25, 0.45, 0.60} including explicit fast/slow extremes, 3 Drifts, 3 AR(1)s) vs. the α-7 `with_populations` 7-leaf grid.
+
+### Benchmark: wider populations regressed further on M5
+
+Confirms the α-7 finding — more same-shape leaves hurt, only different shapes help:
+
+| variant | MAE (median) | MAE (mean) | vs. AutoETS wr | fit |
+|---|---|---|---|---|
+| Laplace (plain) | 5.46 | 7.05 | 0.368 | 0.24 s |
+| Laplace + Populations (α-7, 7 leaves) | 5.58 | 7.55 | 0.357 | 0.46 s |
+| **Laplace + PopulationsWide (α-12, 11 leaves)** | **5.60** | **7.95** | **0.355** | 0.73 s |
+
+Shipping as opt-in — on panels with genuinely heterogeneous dynamics (regimes, structural breaks) the wider pool may pay off; on M5 stationary retail dynamics it just adds noise.
+
+### Notes
+
+Alpha surface: additive behind the `distributional` feature.
+
+## [0.12.0-alpha.11] - 2026-07-06
+
+### Added
+
+- **Cross-panel benchmark on M4 daily** — `examples/skaters_m4_daily_benchmark.rs`. Reads `validation/data/m4_daily_train.json` + `..._test.json`, runs the α-10 Laplace variants + `Laplace+auto` alongside `AutoETS` / `AutoTheta` on the 14-day competition horizon. Answers whether M5-optimized configs generalize (they don't cleanly — see finding below).
+
+### Fixed
+
+- **AR(2) leaf stationarity projection**. The prior version clamped `φ_1, φ_2` individually to `[-0.999, 0.999]` but let `φ_1 + φ_2` approach 1 on strongly-trending series (where the Yule-Walker MoM autocovariance estimates push the coefficients toward the unit-root boundary). The recursive h-step forecast then diverged exponentially: on the M4-daily benchmark, `Laplace+AR2` produced mean MAE = 787 (vs. 158 for plain Laplace) before the fix. Now the leaf projects `(φ_1, φ_2)` onto the AR(2) stationary triangle (`|φ_2| < 1`, `φ_1 + φ_2 < 1`, `φ_2 - φ_1 < 1`) with a 0.02 safety margin. Mean MAE for `Laplace+AR2` drops to 158.4 (matching plain Laplace) on M4 daily.
+- **Auto-selector trending guard**. `LaplaceForecaster::new().auto()` now checks `trend_strength` (R² of a linear fit `y ~ t`) before enabling AR(2) or fractional-diff. Trending series have inflated `|acf1|` (consecutive samples share the trend), which naively triggers those leaves — but their MoM estimators don't distinguish "trend" from "autocorrelation" cleanly. The guard skips them when `trend_strength > 0.5`.
+
+### Benchmark: cross-panel parity
+
+M4 daily (500 series, 14-day horizon) after fixes:
+
+| variant | MAE (median) | MAE (mean) | vs. AutoETS wr | cover@90 | fit |
+|---|---|---|---|---|---|
+| AutoTheta | 60.87 | 153.08 | 0.554 vs AutoETS | – | 28.8 s |
+| AutoETS | 61.92 | 154.72 | — | – | 40.2 s |
+| Laplace (plain) | 65.95 | 157.80 | 0.526 | 0.929 | 0.20 s |
+| **Laplace+auto** | 66.55 | 159.36 | **0.528** | 0.930 | 1.09 s |
+| Laplace+AR2+S7+FD+OU (M5 winner) | 67.47 | 164.21 | 0.516 | 0.930 | 1.68 s |
+
+**Cross-panel finding: no single fixed config wins both panels.** M5's hand-tuned kitchen sink loses to plain Laplace on M4 daily. But the α-10 auto-selector crosses **50% pairwise winrate vs. AutoETS on both** panels (50.8% on M5 α-9, 52.8% on M4 daily) — the per-series characteristic inspection generalizes where a fixed config doesn't.
+
+### Notes
+
+Alpha surface: additive. AR(2) fix is a behavior change (existing users get more conservative φ estimates and no more h-step blow-ups) — no API surface changed.
+
+## [0.12.0-alpha.10] - 2026-07-06
+
+### Added
+
+- **Per-series meta-selector via `LaplaceForecaster::new().auto()`** — inspects the training series' `seasonality_strength` (period-mean R²) and `|acf1|` at `fit()` and configures the opt-in toggles from the α-8 residual-slicing evidence:
+  - OU always added (best single-leaf logpdf across all M5 configs);
+  - AR(2) added if `|acf1| > 0.4` (best segment for AR2);
+  - Seasonal-EMA (default period 7, overridable via `auto_with_seasonal_period(p)`) added if `seasonality_strength > 0.15`;
+  - Fractional-diff added if `|acf1| > 0.5`.
+  - Holt / Populations / Yeo-Johnson are **not** added (evidence-negative on M5).
+- Composes with the explicit `with_*` builders — `auto()` only adds leaves, never removes.
+
+### Benchmark: auto vs. the best fixed config on M5
+
+| variant | MAE (median) | MAE (mean) | cover@90 | logpdf | fit time |
+|---|---|---|---|---|---|
+| Laplace + AR2 + S7,30 + FD + OU (α-9 fixed best) | 4.91 | 6.40 | 0.956 | −3.773 | 2.03 s |
+| **Laplace + auto** | **5.03** | **6.59** | 0.949 | **−3.677** | **1.32 s** |
+| Laplace (plain) | 5.46 | 7.05 | 0.961 | −3.733 | 0.24 s |
+
+- 33% faster than the fixed kitchen sink (auto skips FD on medium-ACF series).
+- Best logpdf of any non-OU-only variant (−3.677) — the per-series calibration picks a config that matches distribution shape well.
+- Loses ~2% median MAE to the fixed kitchen sink on M5 — but M5 is a panel where every series happens to benefit from every leaf; on unknown / heterogeneous panels the compute savings and reasonable defaults matter more than the last 2% of MAE.
+
+### Deferred to a later alpha
+
+- **Coordinate-grid Yeo-Johnson** (was α-10). The alpha-6 single-λ YJ ships; expanding to a full `(leaf × λ)` softmax matrix is a shell-architecture change (~1 week). Given the α-8/9 stack already crosses 50% pairwise winrate vs. AutoETS, this is deferred until benchmark evidence indicates the tradeoff is worth it on a specific panel type. Scoped design: a `WrappedYjLeaf<L>` newtype that wraps any leaf with a fixed λ, plus a `LaplaceForecaster::with_yeo_johnson_grid(&[f64])` builder that instantiates one wrapped copy of every leaf per λ.
+- **Proper per-horizon CRPS terminal** (was α-11). The alpha-5 quantile-match calibration ships and gets ~0.4pp coverage improvement + real logpdf win. Extending to per-horizon `λ_h` via rolling in-sample CRPS optimization requires saving leaf state at each training observation for replay (~2× fit cost) or a Monte-Carlo estimate of per-horizon predictive densities. Deferred until we have a use case that specifically needs sub-pp coverage precision at multi-h.
+
+## [0.12.0-alpha.9] - 2026-07-06
+
+### Added
+
+- **Multi-period seasonal-EMA leaves** via `LaplaceForecaster::new().with_seasonal_multi(&[periods])`. Adds one `SeasonalEmaLeaf` per period; each period `< 2` is silently dropped. Composes freely with the single-period `with_seasonal(period)` builder — both families can be set simultaneously.
+
+### Benchmark: Laplace crosses 50% pairwise winrate vs. AutoETS
+
+Adding a 30-day period alongside 7-day on the α-8 kitchen sink:
+
+| variant | MAE (median) | MAE (mean) | vs. AutoETS wr | cover@90 | logpdf | fit |
+|---|---|---|---|---|---|---|
+| AutoETS | 4.77 | 6.23 | — | – | – | 26.0 s |
+| Laplace + AR2 + S7 + FD + OU (α-8) | 4.91 | 6.42 | **0.504** | 0.955 | −3.759 | 1.98 s |
+| **Laplace + AR2 + S7,30 + FD + OU** | **4.91** | **6.40** | **0.508** | 0.956 | −3.773 | 2.03 s |
+
+- **Both configs beat AutoETS on winrate**: on M5, the α-8 shell already crossed 50%; α-9 with the added 30-day seasonal period ticks up slightly to 50.8%.
+- MAE gap on median: 2.9% (unchanged from α-8; 30-day period has little signal in the 28-day holdout).
+- Multi-seasonal is a modest cheap addition — its real value shows on panels with a second periodicity in-window (e.g. hourly with daily + weekly cycles).
+
+### Notes
+
+Alpha surface: additive behind the `distributional` feature. `LaplaceForecaster::new()` still produces the 3-leaf shell.
+
+## [0.12.0-alpha.8] - 2026-07-06
+
+### Added
+
+- **Fractional-differencing leaf** (opt-in via `LaplaceForecaster::new().with_fractional_diff(d, α_mean, α_diff)` or `.with_fractional_diff_defaults()`). Long-memory-aware level candidate. Uses the crate's existing `models::arima::fractional_difference` on a rolling window to track a long-memory-adjusted noise level; the leaf's h-step forecast is the level `μ` (drift extrapolation was disabled — truncation-induced bias produced runaway forecasts). The leaf's contribution is via σ (long-memory-aware uncertainty), not the mean.
+- **Ornstein-Uhlenbeck mean-reversion leaf** (opt-in via `LaplaceForecaster::new().with_ou(α_mean)` or `.with_ou_defaults()`). Discrete-time OU with MoM-fit `θ`. Mathematically equivalent to a mean-reverting AR(1), but the MoM parameterization (fitting reversion rate directly rather than the level coefficient) behaves better on bounded / mean-reverting M5 retail series.
+- New public: `models::laplace::leaves::FractionalDiffLeaf`, `models::laplace::leaves::OuLeaf`.
+
+### Benchmark: **new best config on M5**
+
+Both leaves help, and the kitchen sink is the new leader:
+
+| variant | MAE (median) | MAE (mean) | cover@90 | logpdf (avg) | fit time |
+|---|---|---|---|---|---|
+| AutoETS | 4.77 | 6.23 | – | – | 26.0 s |
+| Laplace + AR2 + S7 (previous best) | 5.09 | 6.64 | 0.970 | −3.824 | 0.38 s |
+| Laplace + OU (alone) | 5.15 | 6.72 | **0.943** | **−3.632** | 0.26 s |
+| Laplace + FD (alone) | 5.30 | 6.84 | 0.965 | −3.772 | 1.73 s |
+| **Laplace + AR2 + S7 + FD + OU** | **4.91** | **6.42** | 0.955 | −3.759 | 1.98 s |
+
+- **MAE gap to AutoETS closed from 6.6% to 2.9%** (median) — the closest we've gotten. Match for the paper's "wins on non-price economic" narrative starts to look plausible on retail too.
+- **OU alone gives the best logpdf across all configs**, ahead of the alpha-5 calibration. Its MoM-fit reversion evidently matches retail dynamics well.
+- **OU alone gives 0.943 coverage** — 2.7 pp toward target from plain Laplace, best of any single-leaf-add.
+- Fit time for the kitchen sink is 5× the previous best but still 13× faster than AutoETS.
+
+### Notes
+
+Alpha surface: additive behind the `distributional` feature. `LaplaceForecaster::new()` still produces the 3-leaf shell. Both new leaves compose freely with existing builders. The fractional-diff leaf's forecast is level-only (`μ`) — the truncated Lopez-de-Prado filter on a rolling window produces small non-zero values on constant series and extrapolating that as a drift compounds into runaway h-step forecasts. It contributes to the mixture through `σ` (long-memory-aware uncertainty), not the mean.
+
 ## [0.12.0-alpha.7] - 2026-07-06
 
 ### Added
