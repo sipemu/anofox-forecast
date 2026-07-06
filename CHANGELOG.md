@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0-alpha.18] - 2026-07-06
+
+### Added — CV-based per-series selection
+
+- **`CvSelectForecaster`** (new module `src/models/cv_select.rs`) — given a slate of `Candidate` forecasters, fits each on the earlier portion of the training series, scores on a held-out final window, picks the winner by MAE, then refits it on the full series. Public accessors: `winner_name()`, `winner_score()`.
+- **`Candidate::new(name, factory)`** — a name + a factory closure that produces a fresh boxed forecaster. Factories are called per candidate (twice: once for the CV score, once for the final refit).
+- Public: `models::CvSelectForecaster`, `models::Candidate`.
+
+### Design
+
+Complements `SmartForecaster` (α-16): fast characteristic-based routing vs. accurate CV-based selection. Use `Smart` for latency-sensitive pipelines; use `CvSelect` when the extra k-fold-fit cost is worth ~1-5% accuracy improvement. Holdout defaults to `max(14, N/10)`.
+
 ## [0.12.0-alpha.17] - 2026-07-06
 
 ### Added — multiplicative seasonality + exog scaffold

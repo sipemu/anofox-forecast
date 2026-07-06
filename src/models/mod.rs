@@ -8,6 +8,7 @@ pub mod arima;
 pub mod auto_forecast;
 pub mod baseline;
 pub mod convenience;
+pub mod cv_select;
 pub mod ensemble;
 pub mod exponential;
 pub mod garch;
@@ -25,6 +26,7 @@ pub mod theta;
 pub mod var;
 pub mod var_forecaster;
 
+pub use cv_select::{Candidate, CvSelectForecaster};
 pub use garch::GARCH;
 #[cfg(feature = "distributional")]
 pub use inspect::LaplaceExplanation;
