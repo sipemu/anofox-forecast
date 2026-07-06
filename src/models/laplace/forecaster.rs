@@ -181,8 +181,9 @@ impl LaplaceForecaster {
     }
 
     /// Fit the Yeo-Johnson λ via MLE at the start of `fit()`. Uses the
-    /// crate's [`transform::yeo_johnson::yeo_johnson_lambda`] estimator
-    /// (grid search over `[-2, 2]` at Δ=0.01, refined at Δ=0.001).
+    /// crate's [`crate::transform::yeo_johnson::yeo_johnson_lambda`]
+    /// estimator (grid search over `[-2, 2]` at Δ=0.01, refined at
+    /// Δ=0.001).
     pub fn with_yeo_johnson_mle(mut self) -> Self {
         self.yj_auto = true;
         self.yj_lambda = None;
