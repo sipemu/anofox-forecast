@@ -1,8 +1,10 @@
 //! Distributional-shell (skaters/laplace-style) accuracy benchmark on M5.
 //!
-//! Runs `LaplaceForecaster` (v0.12 alpha, `distributional` feature) against
-//! the point-forecast stack (`AutoETS`, `AutoTheta`) on the M5 top-1000
-//! retail panel. Reports:
+//! Runs two `LaplaceForecaster` configurations (v0.12 alpha,
+//! `distributional` feature) — the plain 3-leaf shell and the 4-leaf
+//! `with_seasonal(7)` variant that adds a weekly-seasonal-EMA leaf —
+//! against the point-forecast stack (`AutoETS`, `AutoTheta`) on the M5
+//! top-1000 retail panel. Reports:
 //!
 //! * per-series MAE on a 28-day held-out window (median + winrates)
 //! * empirical 90% interval coverage for the distributional model
@@ -112,6 +114,8 @@ fn main() {
     let mut theta_results: Vec<SeriesResult> = Vec::new();
     #[cfg(feature = "distributional")]
     let mut laplace_results: Vec<SeriesResult> = Vec::new();
+    #[cfg(feature = "distributional")]
+    let mut laplace_seasonal_results: Vec<SeriesResult> = Vec::new();
 
     let global_start = Instant::now();
 
@@ -144,10 +148,20 @@ fn main() {
             theta_results.push(r);
         }
 
-        // LaplaceForecaster (distributional-only branch)
+        // LaplaceForecaster (no seasonal leaf) — baseline shell.
         #[cfg(feature = "distributional")]
-        if let Some(r) = run_laplace(&train_ts, test_values) {
+        if let Some(r) = run_laplace(LaplaceForecaster::new(), &train_ts, test_values) {
             laplace_results.push(r);
+        }
+
+        // LaplaceForecaster with weekly-seasonal leaf (M5 has period 7).
+        #[cfg(feature = "distributional")]
+        if let Some(r) = run_laplace(
+            LaplaceForecaster::new().with_seasonal(7),
+            &train_ts,
+            test_values,
+        ) {
+            laplace_seasonal_results.push(r);
         }
     }
 
@@ -162,13 +176,24 @@ fn main() {
         summarize("AutoTheta", &theta_results),
     ];
     #[cfg(feature = "distributional")]
-    summaries.push(summarize("LaplaceForecaster", &laplace_results));
+    {
+        summaries.push(summarize("LaplaceForecaster", &laplace_results));
+        summaries.push(summarize(
+            "LaplaceForecaster+seasonal7",
+            &laplace_seasonal_results,
+        ));
+    }
 
     print_summary(&summaries);
 
     // Win-rate matrix: pairwise, per-series, on the intersection.
     #[cfg(feature = "distributional")]
-    print_pairwise(&ets_results, &theta_results, &laplace_results);
+    print_pairwise(
+        &ets_results,
+        &theta_results,
+        &laplace_results,
+        &laplace_seasonal_results,
+    );
 }
 
 fn run_point<F: Forecaster>(
@@ -196,9 +221,12 @@ fn run_point<F: Forecaster>(
 }
 
 #[cfg(feature = "distributional")]
-fn run_laplace(train: &TimeSeries, test: &[f64]) -> Option<SeriesResult> {
+fn run_laplace(
+    mut model: LaplaceForecaster,
+    train: &TimeSeries,
+    test: &[f64],
+) -> Option<SeriesResult> {
     let t0 = Instant::now();
-    let mut model = LaplaceForecaster::new();
     if model.fit(train).is_err() {
         return None;
     }
@@ -327,8 +355,17 @@ fn print_summary(summaries: &[ModelSummary]) {
 }
 
 #[cfg(feature = "distributional")]
-fn print_pairwise(ets: &[SeriesResult], theta: &[SeriesResult], laplace: &[SeriesResult]) {
-    let n = ets.len().min(theta.len()).min(laplace.len());
+fn print_pairwise(
+    ets: &[SeriesResult],
+    theta: &[SeriesResult],
+    laplace: &[SeriesResult],
+    laplace_seasonal: &[SeriesResult],
+) {
+    let n = ets
+        .len()
+        .min(theta.len())
+        .min(laplace.len())
+        .min(laplace_seasonal.len());
     if n == 0 {
         return;
     }
@@ -345,29 +382,26 @@ fn print_pairwise(ets: &[SeriesResult], theta: &[SeriesResult], laplace: &[Serie
         "\n=== Pairwise MAE win-rate on {} matched series (row beats column) ===",
         n
     );
-    println!(
-        "{:<22}{:>14}{:>14}{:>18}",
-        "", "AutoETS", "AutoTheta", "LaplaceForecaster"
-    );
-    println!(
-        "{:<22}{:>14}{:>14.3}{:>18.3}",
-        "AutoETS",
-        "-",
-        winrate(ets, theta),
-        winrate(ets, laplace)
-    );
-    println!(
-        "{:<22}{:>14.3}{:>14}{:>18.3}",
-        "AutoTheta",
-        winrate(theta, ets),
-        "-",
-        winrate(theta, laplace)
-    );
-    println!(
-        "{:<22}{:>14.3}{:>14.3}{:>18}",
-        "LaplaceForecaster",
-        winrate(laplace, ets),
-        winrate(laplace, theta),
-        "-"
-    );
+    let cols: [(&str, &[SeriesResult]); 4] = [
+        ("AutoETS", ets),
+        ("AutoTheta", theta),
+        ("Laplace", laplace),
+        ("Laplace+seas7", laplace_seasonal),
+    ];
+    print!("{:<22}", "");
+    for (name, _) in cols.iter() {
+        print!("{:>16}", name);
+    }
+    println!();
+    for (row_name, row) in cols.iter() {
+        print!("{:<22}", row_name);
+        for (col_name, col) in cols.iter() {
+            if row_name == col_name {
+                print!("{:>16}", "-");
+            } else {
+                print!("{:>16.3}", winrate(row, col));
+            }
+        }
+        println!();
+    }
 }

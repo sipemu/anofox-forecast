@@ -15,17 +15,21 @@ use crate::models::traits::{validate_series_complete, Forecaster};
 use super::dist::GaussianMixture;
 use super::ensemble::{blend_horizon, softmax};
 use super::leaf::Leaf;
-use super::leaves::{Ar1Leaf, DriftLeaf, EmaLeaf};
+use super::leaves::{Ar1Leaf, DriftLeaf, EmaLeaf, SeasonalEmaLeaf};
 use super::DistributionalForecaster;
 
 /// Distributional forecaster returning a `GaussianMixture` per horizon.
 ///
 /// Wraps three streaming leaves (EMA, drift, AR(1)) and mixes them by
-/// cumulative one-step log-likelihood.
+/// cumulative one-step log-likelihood. Optionally includes a seasonal-EMA
+/// leaf when a period is supplied via [`Self::with_seasonal`] — pass the
+/// period explicitly (no auto-detection).
 pub struct LaplaceForecaster {
     ema_alpha: f64,
     drift_alpha: f64,
     ar_alpha_mean: f64,
+    seasonal_period: Option<usize>,
+    seasonal_alpha: f64,
 
     leaves: Vec<Box<dyn Leaf + Send>>,
     cum_log_liks: Vec<f64>,
@@ -37,7 +41,8 @@ pub struct LaplaceForecaster {
 }
 
 impl LaplaceForecaster {
-    /// Default configuration: EMA α=0.2, drift α=0.1, AR(1) mean α=0.1.
+    /// Default configuration: EMA α=0.2, drift α=0.1, AR(1) mean α=0.1;
+    /// no seasonal leaf.
     pub fn new() -> Self {
         Self::with_alphas(0.2, 0.1, 0.1)
     }
@@ -47,6 +52,8 @@ impl LaplaceForecaster {
             ema_alpha,
             drift_alpha,
             ar_alpha_mean,
+            seasonal_period: None,
+            seasonal_alpha: 0.15,
             leaves: Vec::new(),
             cum_log_liks: Vec::new(),
             n_obs: 0,
@@ -56,13 +63,33 @@ impl LaplaceForecaster {
         }
     }
 
+    /// Add a seasonal-EMA leaf with the caller-supplied period. A period
+    /// of 0 or 1 is treated as "no seasonal leaf" — no runtime error.
+    pub fn with_seasonal(mut self, period: usize) -> Self {
+        if period >= 2 {
+            self.seasonal_period = Some(period);
+        }
+        self
+    }
+
+    /// Override the smoothing rate for the seasonal-EMA leaf. Only meaningful
+    /// after `with_seasonal(period)` has been called. Clamped by the leaf.
+    pub fn seasonal_alpha(mut self, alpha: f64) -> Self {
+        self.seasonal_alpha = alpha;
+        self
+    }
+
     fn init_leaves(&mut self) {
-        self.leaves = vec![
+        let mut leaves: Vec<Box<dyn Leaf + Send>> = vec![
             Box::new(EmaLeaf::new(self.ema_alpha)),
             Box::new(DriftLeaf::new(self.drift_alpha)),
             Box::new(Ar1Leaf::new(self.ar_alpha_mean)),
         ];
-        self.cum_log_liks = vec![0.0; self.leaves.len()];
+        if let Some(p) = self.seasonal_period {
+            leaves.push(Box::new(SeasonalEmaLeaf::new(p, self.seasonal_alpha)));
+        }
+        self.cum_log_liks = vec![0.0; leaves.len()];
+        self.leaves = leaves;
     }
 
     fn weights(&self) -> Vec<f64> {
@@ -319,6 +346,69 @@ mod tests {
                 assert_eq!(e.fitted_values.len(), e.residuals.len());
                 assert_eq!(e.horizon_dists.len(), 8);
             }
+            other => panic!("expected Explanation::Laplace, got {other:?}"),
+        }
+    }
+
+    fn ts_seasonal(n: usize, period: usize) -> TimeSeries {
+        let base = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let vals: Vec<f64> = (0..n)
+            .map(|i| {
+                10.0 * (2.0 * std::f64::consts::PI * (i % period) as f64 / period as f64).sin()
+                    + 50.0
+            })
+            .collect();
+        let stamps: Vec<_> = (0..n).map(|i| base + Duration::hours(i as i64)).collect();
+        TimeSeries::univariate(stamps, vals).unwrap()
+    }
+
+    #[test]
+    fn with_seasonal_adds_seasonal_leaf_and_helps_periodic_series() {
+        let ts = ts_seasonal(240, 12);
+        let mut plain = LaplaceForecaster::new();
+        let mut seasonal = LaplaceForecaster::new().with_seasonal(12);
+        plain.fit(&ts).unwrap();
+        seasonal.fit(&ts).unwrap();
+
+        match Inspectable::explanation(&seasonal).unwrap() {
+            Explanation::Laplace(e) => {
+                assert_eq!(e.leaf_names, vec!["ema", "drift", "ar1", "seasonal_ema"]);
+                assert_eq!(e.leaf_weights.len(), 4);
+            }
+            other => panic!("expected Explanation::Laplace, got {other:?}"),
+        }
+
+        // On a pure periodic series the seasonal fitted residual should be
+        // smaller than the plain fitted residual (mean absolute residual).
+        let plain_mae: f64 = plain
+            .residuals()
+            .unwrap()
+            .iter()
+            .map(|r| r.abs())
+            .sum::<f64>()
+            / plain.residuals().unwrap().len() as f64;
+        let seasonal_mae: f64 = seasonal
+            .residuals()
+            .unwrap()
+            .iter()
+            .map(|r| r.abs())
+            .sum::<f64>()
+            / seasonal.residuals().unwrap().len() as f64;
+        assert!(
+            seasonal_mae < plain_mae,
+            "seasonal MAR ({}) should beat plain MAR ({}) on a pure periodic series",
+            seasonal_mae,
+            plain_mae
+        );
+    }
+
+    #[test]
+    fn with_seasonal_period_lt_2_is_a_no_op() {
+        let ts = ts_ar1(100, 0.4);
+        let mut f = LaplaceForecaster::new().with_seasonal(1);
+        f.fit(&ts).unwrap();
+        match Inspectable::explanation(&f).unwrap() {
+            Explanation::Laplace(e) => assert_eq!(e.leaf_names.len(), 3),
             other => panic!("expected Explanation::Laplace, got {other:?}"),
         }
     }

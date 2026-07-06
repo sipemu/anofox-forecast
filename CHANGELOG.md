@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0-alpha.2] - 2026-07-06
+
+### Added
+
+- **Seasonal-EMA leaf for `LaplaceForecaster`** (opt-in via `LaplaceForecaster::new().with_seasonal(period)`). Maintains one EMA per phase `k ∈ 0..period`; the h-step forecast reads phase `(now + h - 1) mod period`. Unseen phases fall back to a global EMA so short-history fits don't emit `NaN`. Period is caller-supplied (no auto-detection). `with_seasonal(0)` / `with_seasonal(1)` is a no-op.
+- New public: `models::laplace::leaves::SeasonalEmaLeaf`.
+- `LaplaceForecaster::seasonal_alpha(alpha)` builder to override the seasonal leaf's smoothing rate (default 0.15).
+- `examples/skaters_m5_benchmark.rs` (added in [#144](https://github.com/sipemu/anofox-forecast/pull/144)) now runs both the plain and `with_seasonal(7)` configurations.
+
+### Benchmark
+
+On the M5 top-1000 panel (999 non-intermittent series, 28-day horizon, weekly seasonality):
+
+| model | MAE (median) | MAE (mean) | vs. AutoETS winrate | fit time |
+|---|---|---|---|---|
+| Laplace (plain) | 5.46 | 7.05 | 0.368 | 0.24 s |
+| **Laplace+seasonal7** | **5.15** | **6.70** | **0.466** | **0.24 s** |
+| AutoETS | 4.77 | 6.23 | — | 26.1 s |
+
+One additional leaf closed ~40% of the MAE gap and +9.8 pp of winrate against AutoETS at zero fit-time cost. Laplace+seasonal7 beats plain Laplace on 91% of series — the leaf is doing real work.
+
+### Notes
+
+Alpha surface — additive behind the `distributional` feature. `LaplaceForecaster::new()` still produces the 3-leaf shell; the seasonal leaf must be requested explicitly.
+
 ## [0.12.0-alpha.1] - 2026-07-06
 
 ### Added
