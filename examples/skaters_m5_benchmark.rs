@@ -125,7 +125,7 @@ fn main() {
     //   5=Laplace+S7, 6=Laplace+AR2+S7, 7=+Cal, 8=+YJ, 9=+YJ+Cal,
     //   10=Laplace+Pops, 11=Laplace+Pops+AR2+S7,
     //   12=Laplace+FracDiff, 13=Laplace+OU, 14=Laplace+AR2+S7+FracDiff+OU.
-    const N_MODELS: usize = 17;
+    const N_MODELS: usize = 18;
     let labels: [&str; N_MODELS] = [
         "AutoETS",
         "AutoTheta",
@@ -144,6 +144,7 @@ fn main() {
         "Laplace+AR2+S7+FD+OU",
         "Laplace+AR2+S7,30+FD+OU",
         "Laplace+auto",
+        "Laplace+PopsWide",
     ];
     let mut results: Vec<Vec<SeriesResult>> = (0..N_MODELS).map(|_| Vec::new()).collect();
     let mut characteristics: Vec<Characteristics> = Vec::new();
@@ -184,7 +185,7 @@ fn main() {
 
         #[cfg(feature = "distributional")]
         {
-            let cfgs: [(usize, LaplaceForecaster); 15] = [
+            let cfgs: [(usize, LaplaceForecaster); 16] = [
                 (2, LaplaceForecaster::new()),
                 (3, LaplaceForecaster::new().with_holt_defaults()),
                 (4, LaplaceForecaster::new().with_ar2_defaults()),
@@ -244,6 +245,7 @@ fn main() {
                         .with_ou_defaults(),
                 ),
                 (16, LaplaceForecaster::new().auto()),
+                (17, LaplaceForecaster::new().with_populations_wide()),
             ];
             for (slot, model) in cfgs {
                 if let Some(r) = run_laplace(model, &train_ts, test_values) {

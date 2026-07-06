@@ -205,6 +205,10 @@ pub struct LaplaceForecaster {
     /// per series, imitating skaters' "Bayesian ensemble over a large
     /// candidate population" without adding new leaf families.
     use_populations: bool,
+    /// If true, `init_leaves` swaps in a wider 15-leaf population — the α-7
+    /// grid plus additional fast/slow pairs. Larger softmax pool at ~3×
+    /// compute; helps only on panels with strongly heterogeneous dynamics.
+    use_populations_wide: bool,
     /// If true, `fit()` inspects the training series' characteristics
     /// (`trend_strength`, `seasonality_strength`, `acf1`) and configures
     /// the opt-in toggles from the α-8 residual-slicing evidence: always
@@ -275,6 +279,7 @@ impl LaplaceForecaster {
             yj_lambda: None,
             yj_auto: false,
             use_populations: false,
+            use_populations_wide: false,
             use_auto: false,
             auto_seasonal_period: 7,
             frac_diff: None,
@@ -356,6 +361,15 @@ impl LaplaceForecaster {
     /// Adds compute proportional to the leaf count (roughly 2.3×).
     pub fn with_populations(mut self) -> Self {
         self.use_populations = true;
+        self
+    }
+
+    /// Wider hyperparameter population (15 leaves): EMA at 5 rates, Drift
+    /// at 3, AR(1) at 3, plus explicit "fast/slow two-systems" EMA pairs
+    /// at extreme rates (α=0.02 slow / α=0.60 fast). Same principle as
+    /// [`Self::with_populations`], larger softmax pool at ~3× compute.
+    pub fn with_populations_wide(mut self) -> Self {
+        self.use_populations_wide = true;
         self
     }
 
@@ -459,7 +473,23 @@ impl LaplaceForecaster {
     }
 
     fn init_leaves(&mut self) {
-        let mut leaves: Vec<Box<dyn Leaf + Send>> = if self.use_populations {
+        let mut leaves: Vec<Box<dyn Leaf + Send>> = if self.use_populations_wide {
+            // Wide population: 5 EMA rates (incl. fast/slow extremes at
+            // 0.02 and 0.60), 3 Drifts, 3 AR(1)s. Total 11 base leaves.
+            vec![
+                Box::new(EmaLeaf::new(0.02)),
+                Box::new(EmaLeaf::new(0.10)),
+                Box::new(EmaLeaf::new(0.25)),
+                Box::new(EmaLeaf::new(0.45)),
+                Box::new(EmaLeaf::new(0.60)),
+                Box::new(DriftLeaf::new(0.03)),
+                Box::new(DriftLeaf::new(0.10)),
+                Box::new(DriftLeaf::new(0.25)),
+                Box::new(Ar1Leaf::new(0.03)),
+                Box::new(Ar1Leaf::new(0.10)),
+                Box::new(Ar1Leaf::new(0.25)),
+            ]
+        } else if self.use_populations {
             vec![
                 Box::new(EmaLeaf::new(0.05)),
                 Box::new(EmaLeaf::new(0.20)),

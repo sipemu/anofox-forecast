@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0-alpha.12] - 2026-07-06
+
+### Added
+
+- **Wider hyperparameter population** via `LaplaceForecaster::new().with_populations_wide()` — 11 leaves (5 EMAs at α ∈ {0.02, 0.10, 0.25, 0.45, 0.60} including explicit fast/slow extremes, 3 Drifts, 3 AR(1)s) vs. the α-7 `with_populations` 7-leaf grid.
+
+### Benchmark: wider populations regressed further on M5
+
+Confirms the α-7 finding — more same-shape leaves hurt, only different shapes help:
+
+| variant | MAE (median) | MAE (mean) | vs. AutoETS wr | fit |
+|---|---|---|---|---|
+| Laplace (plain) | 5.46 | 7.05 | 0.368 | 0.24 s |
+| Laplace + Populations (α-7, 7 leaves) | 5.58 | 7.55 | 0.357 | 0.46 s |
+| **Laplace + PopulationsWide (α-12, 11 leaves)** | **5.60** | **7.95** | **0.355** | 0.73 s |
+
+Shipping as opt-in — on panels with genuinely heterogeneous dynamics (regimes, structural breaks) the wider pool may pay off; on M5 stationary retail dynamics it just adds noise.
+
+### Notes
+
+Alpha surface: additive behind the `distributional` feature.
+
 ## [0.12.0-alpha.11] - 2026-07-06
 
 ### Added
