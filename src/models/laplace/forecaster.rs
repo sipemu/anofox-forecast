@@ -164,6 +164,7 @@ fn yj_inverse_with_jac(y: f64, lambda: f64) -> (f64, f64) {
 use super::leaf::Leaf;
 use super::leaves::{
     Ar1Leaf, Ar2Leaf, DriftLeaf, EmaLeaf, FractionalDiffLeaf, HoltLeaf, OuLeaf, SeasonalEmaLeaf,
+    YjWrappedLeaf,
 };
 use super::DistributionalForecaster;
 
@@ -209,6 +210,12 @@ pub struct LaplaceForecaster {
     /// grid plus additional fast/slow pairs. Larger softmax pool at ~3×
     /// compute; helps only on panels with strongly heterogeneous dynamics.
     use_populations_wide: bool,
+    /// Yeo-Johnson coordinate grid. If non-empty, `init_leaves` wraps every
+    /// base leaf with `YjWrappedLeaf(inner, λ)` for each λ in the grid,
+    /// turning the mixture into a `(leaf, λ)` softmax matrix. Skaters'
+    /// original YJ recipe. Mutually exclusive with the single-λ paths
+    /// (`with_yeo_johnson` / `with_yeo_johnson_mle`).
+    yj_grid: Vec<f64>,
     /// If true, `fit()` inspects the training series' characteristics
     /// (`trend_strength`, `seasonality_strength`, `acf1`) and configures
     /// the opt-in toggles from the α-8 residual-slicing evidence: always
@@ -280,6 +287,7 @@ impl LaplaceForecaster {
             yj_auto: false,
             use_populations: false,
             use_populations_wide: false,
+            yj_grid: Vec::new(),
             use_auto: false,
             auto_seasonal_period: 7,
             frac_diff: None,
@@ -370,6 +378,21 @@ impl LaplaceForecaster {
     /// [`Self::with_populations`], larger softmax pool at ~3× compute.
     pub fn with_populations_wide(mut self) -> Self {
         self.use_populations_wide = true;
+        self
+    }
+
+    /// Yeo-Johnson coordinate grid — wraps every base leaf with each λ
+    /// in `lambdas`, turning the mixture into a `(leaf, λ)` softmax
+    /// matrix. Skaters' original YJ recipe (α-6's single-λ path was a
+    /// simplification). Compute scales linearly with grid size; typical
+    /// grids are `{0.0, 0.5, 1.0, 1.5}` (4×). Mutually exclusive with
+    /// the single-λ paths — passing an empty grid is a no-op.
+    pub fn with_yeo_johnson_grid(mut self, lambdas: &[f64]) -> Self {
+        self.yj_grid = lambdas.iter().copied().filter(|l| l.is_finite()).collect();
+        if !self.yj_grid.is_empty() {
+            self.yj_lambda = None;
+            self.yj_auto = false;
+        }
         self
     }
 
@@ -472,10 +495,10 @@ impl LaplaceForecaster {
         self
     }
 
-    fn init_leaves(&mut self) {
+    /// Build a fresh copy of the base leaf set (respecting user toggles).
+    /// Used both for the single-shell path and per-λ in the YJ coord grid.
+    fn build_base_leaves(&self) -> Vec<Box<dyn Leaf + Send>> {
         let mut leaves: Vec<Box<dyn Leaf + Send>> = if self.use_populations_wide {
-            // Wide population: 5 EMA rates (incl. fast/slow extremes at
-            // 0.02 and 0.60), 3 Drifts, 3 AR(1)s. Total 11 base leaves.
             vec![
                 Box::new(EmaLeaf::new(0.02)),
                 Box::new(EmaLeaf::new(0.10)),
@@ -524,6 +547,30 @@ impl LaplaceForecaster {
         for &p in &self.seasonal_periods_multi {
             leaves.push(Box::new(SeasonalEmaLeaf::new(p, self.seasonal_alpha)));
         }
+        leaves
+    }
+
+    fn init_leaves(&mut self) {
+        let leaves = self.build_base_leaves();
+        let mut leaves = if !self.yj_grid.is_empty() {
+            // Coordinate grid: build one fresh base set per λ, wrap each
+            // element with YjWrappedLeaf(inner, λ). Every (leaf, λ)
+            // becomes its own softmax candidate.
+            let mut wrapped: Vec<Box<dyn Leaf + Send>> =
+                Vec::with_capacity(leaves.len() * self.yj_grid.len());
+            for lam in self.yj_grid.clone() {
+                let per_lambda = self.build_base_leaves();
+                for l in per_lambda {
+                    wrapped.push(Box::new(YjWrappedLeaf::new(l, lam)));
+                }
+            }
+            wrapped
+        } else {
+            leaves
+        };
+        // Clear the old redundant setter path — keep `leaves` mut for
+        // the trailing existing logic (self.cum_log_liks / self.leaves).
+        let _ = &mut leaves;
         self.cum_log_liks = vec![0.0; leaves.len()];
         self.leaves = leaves;
     }
@@ -596,8 +643,12 @@ impl Forecaster for LaplaceForecaster {
         self.n_obs = 0;
 
         // Resolve Yeo-Johnson λ. User-supplied wins over MLE; MLE happens
-        // exactly once at fit start over the full training window.
-        self.fitted_yj_lambda = if let Some(l) = self.yj_lambda {
+        // exactly once at fit start over the full training window. When
+        // the coordinate grid is set, per-leaf `YjWrappedLeaf` handles
+        // the transform — the shell-level path is disabled.
+        self.fitted_yj_lambda = if !self.yj_grid.is_empty() {
+            None
+        } else if let Some(l) = self.yj_lambda {
             Some(l)
         } else if self.yj_auto {
             Some(yeo_johnson_lambda(values))

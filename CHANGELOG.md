@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0-alpha.13] - 2026-07-06
+
+### Added
+
+- **Yeo-Johnson coordinate grid** via `LaplaceForecaster::new().with_yeo_johnson_grid(&[f64])` — skaters' original YJ recipe (α-6's single-λ path was a simplification). Wraps every base leaf with a `YjWrappedLeaf(inner, λ)` for each λ in the grid, turning the mixture into a `(leaf, λ)` softmax matrix. Mutually exclusive with the single-λ paths (`with_yeo_johnson` / `with_yeo_johnson_mle`).
+- New public: `models::laplace::leaves::YjWrappedLeaf`.
+
+### Benchmark: coord-grid fixes the α-6 tradeoffs
+
+On M5 top-1000, adding `.with_yeo_johnson_grid(&[0.0, 0.5, 1.0, 1.5])` to `AR2 + seasonal(7)`:
+
+| variant | MAE (median) | MAE (mean) | cover@90 | logpdf | fit |
+|---|---|---|---|---|---|
+| Laplace + AR2 + S7 + YJ (α-6 single-λ) | 5.10 | 7.29 | 0.935 | −4.325 | 15.42 s |
+| **Laplace + AR2 + S7 + YJgrid (α-13)** | **5.07** | **6.86** | 0.958 | **−4.056** | **3.60 s** |
+
+- **Mean MAE 7.29 → 6.86** (−5.9%) — bad λ candidates get low softmax weight rather than dominating.
+- **Logpdf +0.27** — better distributional quality.
+- **Fit time 4× faster** — no MLE grid search; each λ is a fixed cheap candidate.
+- Coverage moves toward 0.90 less aggressively (0.958 vs. 0.935) — the aggressive coverage narrowing came from single-λ overcommitting; grid is more balanced.
+
+Not the new best on M5 (the α-8/9 kitchen sink and α-10 auto still win on MAE), but a strictly better alternative to single-λ YJ for coverage-critical use cases.
+
+### Notes
+
+Alpha surface: additive behind the `distributional` feature. Passing an empty grid is a no-op; passing a non-empty grid overrides any `with_yeo_johnson(λ)` / `with_yeo_johnson_mle()` calls.
+
 ## [0.12.0-alpha.12] - 2026-07-06
 
 ### Added
