@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Deferred to a later alpha
+
+- **Coordinate-grid Yeo-Johnson** (was α-10). The alpha-6 single-λ YJ ships; expanding to a full `(leaf × λ)` softmax matrix is a shell-architecture change (~1 week). Given the α-8/9 stack already crosses 50% pairwise winrate vs. AutoETS, this is deferred until benchmark evidence indicates the tradeoff is worth it on a specific panel type. Scoped design: a `WrappedYjLeaf<L>` newtype that wraps any leaf with a fixed λ, plus a `LaplaceForecaster::with_yeo_johnson_grid(&[f64])` builder that instantiates one wrapped copy of every leaf per λ.
+- **Proper per-horizon CRPS terminal** (was α-11). The alpha-5 quantile-match calibration ships and gets ~0.4pp coverage improvement + real logpdf win. Extending to per-horizon `λ_h` via rolling in-sample CRPS optimization requires saving leaf state at each training observation for replay (~2× fit cost) or a Monte-Carlo estimate of per-horizon predictive densities. Deferred until we have a use case that specifically needs sub-pp coverage precision at multi-h.
+
 ## [0.12.0-alpha.9] - 2026-07-06
 
 ### Added
