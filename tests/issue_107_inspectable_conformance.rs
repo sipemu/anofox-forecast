@@ -84,6 +84,20 @@ fn assert_finite_scalars(label: &str, e: &Explanation) {
             );
             assert!(m.iterations > 0, "{label}: iterations must be > 0");
         }
+        #[cfg(feature = "distributional")]
+        Explanation::Laplace(l) => {
+            assert!(!l.leaf_names.is_empty(), "{label}: leaf_names empty");
+            assert_eq!(
+                l.leaf_names.len(),
+                l.leaf_weights.len(),
+                "{label}: leaf_names/weights length mismatch"
+            );
+            let ws: f64 = l.leaf_weights.iter().sum();
+            assert!(
+                (ws - 1.0).abs() < 1e-9,
+                "{label}: leaf_weights don't sum to 1"
+            );
+        }
     }
 }
 
@@ -96,6 +110,8 @@ fn assert_spine(label: &str, e: &Explanation) {
         Explanation::Theta(x) => (&x.fitted_values, &x.residuals),
         Explanation::Tbats(x) => (&x.fitted_values, &x.residuals),
         Explanation::Mstl(x) => (&x.fitted_values, &x.residuals),
+        #[cfg(feature = "distributional")]
+        Explanation::Laplace(x) => (&x.fitted_values, &x.residuals),
     };
     assert!(!fitted.is_empty(), "{label}: fitted_values empty");
     assert_eq!(
@@ -199,6 +215,41 @@ fn regression_forecaster_inspectable_contract() {
     );
     assert_finite_scalars("RegressionForecaster", &e);
     assert_spine("RegressionForecaster", &e);
+}
+
+#[cfg(feature = "distributional")]
+#[test]
+fn laplace_inspectable_contract() {
+    use anofox_forecast::models::LaplaceForecaster;
+
+    let ts = make_seasonal_series(120, 12);
+    let mut model = LaplaceForecaster::new();
+    assert!(model.explanation().is_err());
+    model.fit(&ts).unwrap();
+    let e = model.explanation().unwrap();
+    match &e {
+        Explanation::Laplace(x) => {
+            assert!(!x.leaf_names.is_empty(), "Laplace: leaf_names empty");
+            assert_eq!(
+                x.leaf_names.len(),
+                x.leaf_weights.len(),
+                "Laplace: leaf_names/weights length mismatch"
+            );
+            assert!(!x.horizon_dists.is_empty(), "Laplace: horizon_dists empty");
+            assert!(!x.fitted_values.is_empty(), "Laplace: fitted_values empty");
+            assert_eq!(
+                x.fitted_values.len(),
+                x.residuals.len(),
+                "Laplace: fitted/residuals length mismatch"
+            );
+            let ws: f64 = x.leaf_weights.iter().sum();
+            assert!(
+                (ws - 1.0).abs() < 1e-9,
+                "Laplace: leaf_weights don't sum to 1"
+            );
+        }
+        other => panic!("expected Explanation::Laplace, got {other:?}"),
+    }
 }
 
 #[test]

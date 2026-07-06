@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0-alpha.1] - 2026-07-06
+
+### Added
+
+- **`LaplaceForecaster` — distributional forecasting shell (alpha, `distributional` feature).** Streaming, likelihood-weighted mixture over three cheap leaves (EMA, drift, AR(1)); emits a `GaussianMixture` per horizon rather than a point forecast. Inspired by the shell design in [`microprediction/skaters`](https://github.com/microprediction/skaters); the full skaters ensemble (Holt, fractional-differencing, seasonal, Yeo-Johnson, OU mean-reversion, CRPS-tuned terminal leaf) is intentionally deferred. New public surface:
+  - `models::laplace::{Gaussian, GaussianMixture}` — distribution primitives with `mean`/`std`/`quantile`/`logpdf`/`cdf`.
+  - `models::laplace::Leaf` — streaming per-horizon predictor unit.
+  - `models::laplace::LaplaceForecaster` — implements `Forecaster` (point = mixture mean), `Inspectable` (`Explanation::Laplace(_)`), and the new `DistributionalForecaster` trait.
+  - `models::laplace::DistributionalForecaster: Forecaster` — object-safe sibling trait exposing `forecast_dist(&self, horizon) -> Result<Vec<GaussianMixture>>`. Point forecasters remain on `Forecaster` alone; distributional forecasters implement both.
+  - `models::LaplaceExplanation` — payload with `horizon_dists`, `leaf_weights`, `leaf_names`, `fitted_values`, `residuals`.
+- The `Explanation` enum gained a `#[cfg(feature = "distributional")] Laplace(LaplaceExplanation)` variant. The #107 conformance suite covers it.
+
+### Notes
+
+- Alpha surface: the leaf set and mixing scheme may change before the stable `0.12.0`. No downstream code is broken by default builds — the module and enum variant only compile when `distributional` is enabled.
+- Not recommended for price/return series (the empirical wins in the skaters paper are on non-price economic series).
+
 ## [0.11.0] - 2026-06-26
 
 ### Added
