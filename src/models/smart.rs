@@ -140,9 +140,9 @@ impl Forecaster for SmartForecaster {
             {
                 SelectedFamily::AutoEts
             }
-        } else if chars.mean_y < 3.0 && chars.zero_fraction > 0.2 && chars.zero_fraction <= 0.6 {
-            SelectedFamily::AutoEts
-        } else if chars.trend_strength > 0.6 {
+        } else if (chars.mean_y < 3.0 && chars.zero_fraction > 0.2 && chars.zero_fraction <= 0.6)
+            || chars.trend_strength > 0.6
+        {
             SelectedFamily::AutoEts
         } else {
             #[cfg(feature = "distributional")]
