@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0-alpha.17] - 2026-07-06
+
+### Added — multiplicative seasonality + exog scaffold
+
+- **`MultiplicativeSeasonalLeaf`** — tracks per-phase multipliers on a shared level (`level · factor[phase]`) rather than adding a phase mean. Retail seasonality is often proportional (peak week = 3× baseline, not baseline + 5); the additive `SeasonalEmaLeaf` misfits this on retail. Guarded against divide-by-zero when the level is near 0.
+- **`LaplaceForecaster::with_seasonal_multiplicative(period, α)`** builder + `.with_seasonal_multiplicative_defaults(period)` shortcut (default α = 0.15). Composes with the additive `with_seasonal(period)` — the mixture picks per series.
+- **`LaplaceForecaster::with_exog_preregression()`** — API scaffold. Reserves the surface for a follow-up implementation of OLS preregression on the `TimeSeries`'s calendar regressors. Currently causes `fit()` to return `Err`; use `RegressionForecaster` in the meantime.
+
+### Notes
+
+Alpha surface: additive behind the `distributional` feature. The exog scaffold intentionally errors so downstream code can compile against the API without accidentally shipping stub behavior.
+
 ## [0.12.0-alpha.16] - 2026-07-06
 
 ### Added — feature-based routing across model families

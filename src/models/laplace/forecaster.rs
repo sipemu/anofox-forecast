@@ -163,8 +163,8 @@ fn yj_inverse_with_jac(y: f64, lambda: f64) -> (f64, f64) {
 }
 use super::leaf::Leaf;
 use super::leaves::{
-    Ar1Leaf, Ar2Leaf, DriftLeaf, EmaLeaf, FractionalDiffLeaf, HoltLeaf, IntermittentLeaf, OuLeaf,
-    SeasonalEmaLeaf, YjWrappedLeaf,
+    Ar1Leaf, Ar2Leaf, DriftLeaf, EmaLeaf, FractionalDiffLeaf, HoltLeaf, IntermittentLeaf,
+    MultiplicativeSeasonalLeaf, OuLeaf, SeasonalEmaLeaf, YjWrappedLeaf,
 };
 use super::DistributionalForecaster;
 
@@ -254,6 +254,12 @@ pub struct LaplaceForecaster {
     /// alone (so the 90% interval can still dip below zero — proper
     /// truncated-Gaussian output is deferred).
     non_negative: bool,
+    /// `(period, α)` for the multiplicative seasonal-EMA leaf. Complements
+    /// the additive `seasonal_period`; retail seasonality is often
+    /// proportional (peak week = 3× baseline).
+    seasonal_mult: Option<(usize, f64)>,
+    /// Scaffold flag — see [`Self::with_exog_preregression`].
+    exog_scaffold_declared: bool,
 
     leaves: Vec<Box<dyn Leaf + Send>>,
     cum_log_liks: Vec<f64>,
@@ -317,6 +323,8 @@ impl LaplaceForecaster {
             ou: None,
             intermittent: None,
             non_negative: false,
+            seasonal_mult: None,
+            exog_scaffold_declared: false,
             leaves: Vec::new(),
             cum_log_liks: Vec::new(),
             n_obs: 0,
@@ -401,6 +409,40 @@ impl LaplaceForecaster {
     /// truncated-Gaussian output is deferred.
     pub fn non_negative(mut self) -> Self {
         self.non_negative = true;
+        self
+    }
+
+    /// Add a **multiplicative** seasonal-EMA leaf with the caller-supplied
+    /// period. Tracks per-phase multipliers on a shared level (retail
+    /// seasonality is often proportional — peak week = 3× baseline, not
+    /// baseline + 5). Composes with the additive
+    /// [`Self::with_seasonal`] — mixture picks whichever fits the data
+    /// better per series. `period < 2` is a no-op.
+    pub fn with_seasonal_multiplicative(mut self, period: usize, alpha: f64) -> Self {
+        if period >= 2 {
+            self.seasonal_mult = Some((period, alpha));
+        }
+        self
+    }
+
+    /// Multiplicative seasonal-EMA with the default rate `α = 0.15`.
+    pub fn with_seasonal_multiplicative_defaults(self, period: usize) -> Self {
+        self.with_seasonal_multiplicative(period, 0.15)
+    }
+
+    /// **Scaffold — not yet implemented.** Declares intent to preregress
+    /// `y` on the [`TimeSeries`]'s calendar regressors via OLS, then feed
+    /// residuals to the leaves. At `predict_with_exog()` time the OLS
+    /// intercept + `β·X_future` would be added back to the leaf mixture.
+    ///
+    /// Calling this builder currently causes `fit()` to return `Err`. The
+    /// API is reserved so downstream code can compile against it; the
+    /// implementation is planned as a follow-up. Until then, callers that
+    /// need exog preregression should use [`RegressionForecaster`](crate::models::regression::RegressionForecaster)
+    /// with its residual-Ridge / dynamic backends, or preregress in
+    /// application code.
+    pub fn with_exog_preregression(mut self) -> Self {
+        self.exog_scaffold_declared = true;
         self
     }
 
@@ -612,6 +654,9 @@ impl LaplaceForecaster {
         for &p in &self.seasonal_periods_multi {
             leaves.push(Box::new(SeasonalEmaLeaf::new(p, self.seasonal_alpha)));
         }
+        if let Some((p, a)) = self.seasonal_mult {
+            leaves.push(Box::new(MultiplicativeSeasonalLeaf::new(p, a)));
+        }
         leaves
     }
 
@@ -658,6 +703,13 @@ impl Default for LaplaceForecaster {
 impl Forecaster for LaplaceForecaster {
     fn fit(&mut self, series: &TimeSeries) -> Result<()> {
         validate_series_complete(series)?;
+        if self.exog_scaffold_declared {
+            return Err(ForecastError::InvalidParameter(
+                "LaplaceForecaster::with_exog_preregression() is a reserved scaffold; \
+                 implementation is planned. Use RegressionForecaster in the meantime."
+                    .into(),
+            ));
+        }
         let values = series.primary_values();
         if values.is_empty() {
             return Err(ForecastError::InvalidParameter(
