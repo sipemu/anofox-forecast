@@ -123,8 +123,9 @@ fn main() {
     // Slot layout stable so the pairwise matrix and summary lines match:
     //   0=AutoETS, 1=AutoTheta, 2=Laplace, 3=Laplace+H, 4=Laplace+AR2,
     //   5=Laplace+S7, 6=Laplace+AR2+S7, 7=+Cal, 8=+YJ, 9=+YJ+Cal,
-    //   10=Laplace+Pops, 11=Laplace+Pops+AR2+S7.
-    const N_MODELS: usize = 12;
+    //   10=Laplace+Pops, 11=Laplace+Pops+AR2+S7,
+    //   12=Laplace+FracDiff, 13=Laplace+OU, 14=Laplace+AR2+S7+FracDiff+OU.
+    const N_MODELS: usize = 15;
     let labels: [&str; N_MODELS] = [
         "AutoETS",
         "AutoTheta",
@@ -138,6 +139,9 @@ fn main() {
         "Laplace+AR2+S7+YJ+Cal",
         "Laplace+Pops",
         "Laplace+Pops+AR2+S7",
+        "Laplace+FD",
+        "Laplace+OU",
+        "Laplace+AR2+S7+FD+OU",
     ];
     let mut results: Vec<Vec<SeriesResult>> = (0..N_MODELS).map(|_| Vec::new()).collect();
     let mut characteristics: Vec<Characteristics> = Vec::new();
@@ -178,7 +182,7 @@ fn main() {
 
         #[cfg(feature = "distributional")]
         {
-            let cfgs: [(usize, LaplaceForecaster); 10] = [
+            let cfgs: [(usize, LaplaceForecaster); 13] = [
                 (2, LaplaceForecaster::new()),
                 (3, LaplaceForecaster::new().with_holt_defaults()),
                 (4, LaplaceForecaster::new().with_ar2_defaults()),
@@ -218,6 +222,16 @@ fn main() {
                         .with_populations()
                         .with_ar2_defaults()
                         .with_seasonal(7),
+                ),
+                (12, LaplaceForecaster::new().with_fractional_diff_defaults()),
+                (13, LaplaceForecaster::new().with_ou_defaults()),
+                (
+                    14,
+                    LaplaceForecaster::new()
+                        .with_ar2_defaults()
+                        .with_seasonal(7)
+                        .with_fractional_diff_defaults()
+                        .with_ou_defaults(),
                 ),
             ];
             for (slot, model) in cfgs {

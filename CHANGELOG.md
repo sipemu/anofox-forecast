@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0-alpha.8] - 2026-07-06
+
+### Added
+
+- **Fractional-differencing leaf** (opt-in via `LaplaceForecaster::new().with_fractional_diff(d, α_mean, α_diff)` or `.with_fractional_diff_defaults()`). Long-memory-aware level candidate. Uses the crate's existing `models::arima::fractional_difference` on a rolling window to track a long-memory-adjusted noise level; the leaf's h-step forecast is the level `μ` (drift extrapolation was disabled — truncation-induced bias produced runaway forecasts). The leaf's contribution is via σ (long-memory-aware uncertainty), not the mean.
+- **Ornstein-Uhlenbeck mean-reversion leaf** (opt-in via `LaplaceForecaster::new().with_ou(α_mean)` or `.with_ou_defaults()`). Discrete-time OU with MoM-fit `θ`. Mathematically equivalent to a mean-reverting AR(1), but the MoM parameterization (fitting reversion rate directly rather than the level coefficient) behaves better on bounded / mean-reverting M5 retail series.
+- New public: `models::laplace::leaves::FractionalDiffLeaf`, `models::laplace::leaves::OuLeaf`.
+
+### Benchmark: **new best config on M5**
+
+Both leaves help, and the kitchen sink is the new leader:
+
+| variant | MAE (median) | MAE (mean) | cover@90 | logpdf (avg) | fit time |
+|---|---|---|---|---|---|
+| AutoETS | 4.77 | 6.23 | – | – | 26.0 s |
+| Laplace + AR2 + S7 (previous best) | 5.09 | 6.64 | 0.970 | −3.824 | 0.38 s |
+| Laplace + OU (alone) | 5.15 | 6.72 | **0.943** | **−3.632** | 0.26 s |
+| Laplace + FD (alone) | 5.30 | 6.84 | 0.965 | −3.772 | 1.73 s |
+| **Laplace + AR2 + S7 + FD + OU** | **4.91** | **6.42** | 0.955 | −3.759 | 1.98 s |
+
+- **MAE gap to AutoETS closed from 6.6% to 2.9%** (median) — the closest we've gotten. Match for the paper's "wins on non-price economic" narrative starts to look plausible on retail too.
+- **OU alone gives the best logpdf across all configs**, ahead of the alpha-5 calibration. Its MoM-fit reversion evidently matches retail dynamics well.
+- **OU alone gives 0.943 coverage** — 2.7 pp toward target from plain Laplace, best of any single-leaf-add.
+- Fit time for the kitchen sink is 5× the previous best but still 13× faster than AutoETS.
+
+### Notes
+
+Alpha surface: additive behind the `distributional` feature. `LaplaceForecaster::new()` still produces the 3-leaf shell. Both new leaves compose freely with existing builders. The fractional-diff leaf's forecast is level-only (`μ`) — the truncated Lopez-de-Prado filter on a rolling window produces small non-zero values on constant series and extrapolating that as a drift compounds into runaway h-step forecasts. It contributes to the mixture through `σ` (long-memory-aware uncertainty), not the mean.
+
 ## [0.12.0-alpha.7] - 2026-07-06
 
 ### Added
