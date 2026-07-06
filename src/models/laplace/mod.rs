@@ -2,9 +2,11 @@
 //!
 //! Inspired by [`microprediction/skaters`](https://github.com/microprediction/skaters):
 //! streaming leaves, per-observation likelihood-weighted mixture, per-horizon
-//! [`GaussianMixture`] output. Only the shell and three cheap leaves
-//! (EMA, drift, AR(1)) are wired up here — the full skaters ensemble
-//! (seasonal, OU, fractional-differencing, Yeo-Johnson) is deferred.
+//! [`GaussianMixture`] output. Default leaf set: EMA, drift, AR(1), and
+//! a damped-Holt (level+trend+damping); [`LaplaceForecaster::with_seasonal`]
+//! adds a per-phase seasonal-EMA. The full skaters ensemble (OU,
+//! fractional-differencing, Yeo-Johnson, CRPS-tuned terminal leaf) is
+//! deferred.
 //!
 //! # Example
 //! ```ignore
