@@ -49,6 +49,9 @@ pub enum Explanation {
     Tbats(TbatsExplanation),
     /// MSTL (`MSTLForecaster`).
     Mstl(MstlExplanation),
+    /// Laplace distributional shell (`LaplaceForecaster`, `distributional` feature).
+    #[cfg(feature = "distributional")]
+    Laplace(LaplaceExplanation),
 }
 
 /// Interpretable state for regression-backed forecasters.
@@ -202,6 +205,27 @@ pub struct MstlExplanation {
     /// Per-row sum of all seasonal components.
     pub seasonal_component: Vec<f64>,
     /// Per-row STL remainder.
+    pub residuals: Vec<f64>,
+}
+
+/// Interpretable state for the laplace distributional shell.
+///
+/// The shell fits a fixed set of streaming leaves and blends them by
+/// likelihood; this payload captures the terminal state after `fit()`
+/// replays the training series.
+#[cfg(feature = "distributional")]
+#[derive(Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct LaplaceExplanation {
+    /// Predictive gaussian mixture at each horizon `1..=h`.
+    pub horizon_dists: Vec<crate::models::laplace::GaussianMixture>,
+    /// Softmax weight per leaf, aligned with `leaf_names`.
+    pub leaf_weights: Vec<f64>,
+    /// Human-readable leaf identifiers.
+    pub leaf_names: Vec<String>,
+    /// In-sample one-step-ahead mixture means.
+    pub fitted_values: Vec<f64>,
+    /// `training - fitted_values`.
     pub residuals: Vec<f64>,
 }
 
