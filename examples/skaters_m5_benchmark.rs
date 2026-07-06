@@ -121,16 +121,17 @@ fn main() {
     let base_date = timestamps[0];
 
     // Slot layout: 0=AutoETS, 1=AutoTheta, 2=Laplace, 3=Laplace+H,
-    // 4=Laplace+S7, 5=Laplace+H+S7. Keeping this stable so the pairwise
-    // matrix and summary lines match.
-    const N_MODELS: usize = 6;
+    // 4=Laplace+AR2, 5=Laplace+S7, 6=Laplace+AR2+S7. Keeping this stable
+    // so the pairwise matrix and summary lines match.
+    const N_MODELS: usize = 7;
     let labels: [&str; N_MODELS] = [
         "AutoETS",
         "AutoTheta",
         "Laplace",
         "Laplace+H",
+        "Laplace+AR2",
         "Laplace+S7",
-        "Laplace+H+S7",
+        "Laplace+AR2+S7",
     ];
     let mut results: Vec<Vec<SeriesResult>> = (0..N_MODELS).map(|_| Vec::new()).collect();
     let mut characteristics: Vec<Characteristics> = Vec::new();
@@ -171,14 +172,15 @@ fn main() {
 
         #[cfg(feature = "distributional")]
         {
-            let cfgs: [(usize, LaplaceForecaster); 4] = [
+            let cfgs: [(usize, LaplaceForecaster); 5] = [
                 (2, LaplaceForecaster::new()),
                 (3, LaplaceForecaster::new().with_holt_defaults()),
-                (4, LaplaceForecaster::new().with_seasonal(7)),
+                (4, LaplaceForecaster::new().with_ar2_defaults()),
+                (5, LaplaceForecaster::new().with_seasonal(7)),
                 (
-                    5,
+                    6,
                     LaplaceForecaster::new()
-                        .with_holt_defaults()
+                        .with_ar2_defaults()
                         .with_seasonal(7),
                 ),
             ];

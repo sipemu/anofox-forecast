@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0-alpha.4] - 2026-07-06
+
+### Added
+
+- **AR(2) leaf for `LaplaceForecaster`** (opt-in via `LaplaceForecaster::new().with_ar2(alpha_mean)` or `with_ar2_defaults()`). Uses **Yule-Walker over EMA-based autocovariance estimates** (`γ₀`, `γ₁`, `γ₂`) — more numerically stable than running centred products, and standard for streaming AR estimation. h-step forecast is recursive substitution into the AR(2) recursion.
+- New public: `models::laplace::leaves::Ar2Leaf`.
+- **Residual-slicing analysis in `examples/skaters_m5_benchmark.rs`** — computes per-series characteristics (`trend_strength`, `seasonality_strength`, `acf1`) and reports median MAE + Laplace-variant winrate in tercile buckets. Answers "where does leaf X help?" per characteristic. Landed in [#148](https://github.com/sipemu/anofox-forecast/pull/148); the benchmark now includes AR(2) variants (`Laplace+AR2`, `Laplace+AR2+S7`).
+- **`THIRD_PARTY_NOTICES.md`** documenting `skaters` (MIT) attribution. Module doc-comment for `models::laplace` now points to it.
+
+### Benchmark: AR(2) is a real improvement
+
+Guided by the alpha-3 residual slicing (Laplace's MAE climbs 4.84 → 6.51 as ACF grows — AR(1) is under-fitting the longer-memory tail):
+
+| variant | MAE (median) | MAE (mean) | vs. AutoETS wr | vs. plain wr | AR2-only vs. plain (high-ACF bucket) |
+|---|---|---|---|---|---|
+| Laplace (plain, 3 leaves) | 5.46 | 7.05 | 0.368 | – | – |
+| Laplace + Holt | 5.54 | 7.20 | 0.334 | plain wins 82.5% | Holt wins 27.0% |
+| **Laplace + AR2** | **5.37** | **6.90** | **0.385** | **AR2 wins 26.7%** | **AR2 wins 42.3%** |
+| Laplace + seasonal7 | 5.15 | 6.70 | 0.466 | – | – |
+| **Laplace + AR2 + seasonal7** | **5.09** | **6.64** | **0.477** | AR2+S7 wins ~90% | AR2+S7 wins 46.5% |
+
+- AR2 improves median AND mean MAE aggregate — unlike Holt (which regressed both).
+- On the high-ACF tercile (the alpha's biggest empirical weak spot), AR2 wins on 42% of series against plain — **1.6× Holt's helpfulness on the same segment**.
+- `Laplace+AR2+S7` is the new best config: 47.7% winrate vs. AutoETS (up from 46.6% for S7-alone), median MAE 5.09 (5% below S7-alone).
+
+### Attribution
+
+The `LaplaceForecaster` design is inspired by [`microprediction/skaters`](https://github.com/microprediction/skaters) (MIT, Peter Cotton). See `THIRD_PARTY_NOTICES.md` for the full notice and license text. Empirical defaults (which leaves are on by default; leaf hyperparameters) are anofox-forecast's own — chosen from the M5 benchmark and may materially differ from skaters'.
+
+### Notes
+
+Alpha surface: additive behind the `distributional` feature. `LaplaceForecaster::new()` still produces the 3-leaf shell; Holt, AR(2), and seasonal are each an opt-in builder call.
+
 ## [0.12.0-alpha.3] - 2026-07-06
 
 ### Added
