@@ -100,6 +100,7 @@ pub struct LaplaceForecaster {
     holt: Option<(f64, f64, f64)>, // (alpha, beta, phi)
     ar2: Option<f64>,              // mean-EMA alpha
     seasonal_period: Option<usize>,
+    seasonal_periods_multi: Vec<usize>,
     seasonal_alpha: f64,
     calibrate: bool,
     /// User-supplied Yeo-Johnson λ. Overrides `yj_auto` when both are set.
@@ -165,6 +166,7 @@ impl LaplaceForecaster {
             holt: None,
             ar2: None,
             seasonal_period: None,
+            seasonal_periods_multi: Vec::new(),
             seasonal_alpha: 0.15,
             calibrate: false,
             yj_lambda: None,
@@ -310,6 +312,16 @@ impl LaplaceForecaster {
         self
     }
 
+    /// Add multiple seasonal-EMA leaves, one per period in `periods`.
+    /// Composes with [`Self::with_seasonal`] (the single-period leaf) — both
+    /// families can be set simultaneously. Periods `< 2` are silently
+    /// dropped. Useful for panels with multiple periodicities (e.g. daily
+    /// data with weekly + annual seasonality → `&[7, 365]`).
+    pub fn with_seasonal_multi(mut self, periods: &[usize]) -> Self {
+        self.seasonal_periods_multi = periods.iter().copied().filter(|p| *p >= 2).collect();
+        self
+    }
+
     /// Override the smoothing rate for the seasonal-EMA leaf. Only meaningful
     /// after `with_seasonal(period)` has been called. Clamped by the leaf.
     pub fn seasonal_alpha(mut self, alpha: f64) -> Self {
@@ -348,6 +360,9 @@ impl LaplaceForecaster {
             leaves.push(Box::new(OuLeaf::new(a)));
         }
         if let Some(p) = self.seasonal_period {
+            leaves.push(Box::new(SeasonalEmaLeaf::new(p, self.seasonal_alpha)));
+        }
+        for &p in &self.seasonal_periods_multi {
             leaves.push(Box::new(SeasonalEmaLeaf::new(p, self.seasonal_alpha)));
         }
         self.cum_log_liks = vec![0.0; leaves.len()];
@@ -957,6 +972,39 @@ mod tests {
                 e.leaf_names,
                 vec!["ema", "drift", "ar1", "holt_damped", "seasonal_ema"]
             ),
+            other => panic!("expected Explanation::Laplace, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn with_seasonal_multi_adds_one_leaf_per_period() {
+        let ts = ts_ar1(200, 0.4);
+        let mut f = LaplaceForecaster::new().with_seasonal_multi(&[7, 30, 365]);
+        f.fit(&ts).unwrap();
+        match Inspectable::explanation(&f).unwrap() {
+            Explanation::Laplace(e) => {
+                assert_eq!(e.leaf_names.len(), 6); // 3 base + 3 seasonal
+                assert_eq!(
+                    e.leaf_names
+                        .iter()
+                        .filter(|n| n.as_str() == "seasonal_ema")
+                        .count(),
+                    3
+                );
+            }
+            other => panic!("expected Explanation::Laplace, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn with_seasonal_multi_drops_invalid_periods() {
+        let ts = ts_ar1(100, 0.4);
+        let mut f = LaplaceForecaster::new().with_seasonal_multi(&[0, 1, 7]);
+        f.fit(&ts).unwrap();
+        match Inspectable::explanation(&f).unwrap() {
+            Explanation::Laplace(e) => {
+                assert_eq!(e.leaf_names.len(), 4); // 3 base + 1 valid seasonal
+            }
             other => panic!("expected Explanation::Laplace, got {other:?}"),
         }
     }

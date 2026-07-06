@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0-alpha.9] - 2026-07-06
+
+### Added
+
+- **Multi-period seasonal-EMA leaves** via `LaplaceForecaster::new().with_seasonal_multi(&[periods])`. Adds one `SeasonalEmaLeaf` per period; each period `< 2` is silently dropped. Composes freely with the single-period `with_seasonal(period)` builder — both families can be set simultaneously.
+
+### Benchmark: Laplace crosses 50% pairwise winrate vs. AutoETS
+
+Adding a 30-day period alongside 7-day on the α-8 kitchen sink:
+
+| variant | MAE (median) | MAE (mean) | vs. AutoETS wr | cover@90 | logpdf | fit |
+|---|---|---|---|---|---|---|
+| AutoETS | 4.77 | 6.23 | — | – | – | 26.0 s |
+| Laplace + AR2 + S7 + FD + OU (α-8) | 4.91 | 6.42 | **0.504** | 0.955 | −3.759 | 1.98 s |
+| **Laplace + AR2 + S7,30 + FD + OU** | **4.91** | **6.40** | **0.508** | 0.956 | −3.773 | 2.03 s |
+
+- **Both configs beat AutoETS on winrate**: on M5, the α-8 shell already crossed 50%; α-9 with the added 30-day seasonal period ticks up slightly to 50.8%.
+- MAE gap on median: 2.9% (unchanged from α-8; 30-day period has little signal in the 28-day holdout).
+- Multi-seasonal is a modest cheap addition — its real value shows on panels with a second periodicity in-window (e.g. hourly with daily + weekly cycles).
+
+### Notes
+
+Alpha surface: additive behind the `distributional` feature. `LaplaceForecaster::new()` still produces the 3-leaf shell.
+
 ## [0.12.0-alpha.8] - 2026-07-06
 
 ### Added

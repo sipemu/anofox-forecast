@@ -125,7 +125,7 @@ fn main() {
     //   5=Laplace+S7, 6=Laplace+AR2+S7, 7=+Cal, 8=+YJ, 9=+YJ+Cal,
     //   10=Laplace+Pops, 11=Laplace+Pops+AR2+S7,
     //   12=Laplace+FracDiff, 13=Laplace+OU, 14=Laplace+AR2+S7+FracDiff+OU.
-    const N_MODELS: usize = 15;
+    const N_MODELS: usize = 16;
     let labels: [&str; N_MODELS] = [
         "AutoETS",
         "AutoTheta",
@@ -142,6 +142,7 @@ fn main() {
         "Laplace+FD",
         "Laplace+OU",
         "Laplace+AR2+S7+FD+OU",
+        "Laplace+AR2+S7,30+FD+OU",
     ];
     let mut results: Vec<Vec<SeriesResult>> = (0..N_MODELS).map(|_| Vec::new()).collect();
     let mut characteristics: Vec<Characteristics> = Vec::new();
@@ -182,7 +183,7 @@ fn main() {
 
         #[cfg(feature = "distributional")]
         {
-            let cfgs: [(usize, LaplaceForecaster); 13] = [
+            let cfgs: [(usize, LaplaceForecaster); 14] = [
                 (2, LaplaceForecaster::new()),
                 (3, LaplaceForecaster::new().with_holt_defaults()),
                 (4, LaplaceForecaster::new().with_ar2_defaults()),
@@ -230,6 +231,14 @@ fn main() {
                     LaplaceForecaster::new()
                         .with_ar2_defaults()
                         .with_seasonal(7)
+                        .with_fractional_diff_defaults()
+                        .with_ou_defaults(),
+                ),
+                (
+                    15,
+                    LaplaceForecaster::new()
+                        .with_ar2_defaults()
+                        .with_seasonal_multi(&[7, 30])
                         .with_fractional_diff_defaults()
                         .with_ou_defaults(),
                 ),
