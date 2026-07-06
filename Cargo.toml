@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "anofox-forecast"
-version = "0.12.0-alpha.10"
+version = "0.12.0-alpha.11"
 edition = "2021"
 authors = ["Simon Müller"]
 description = "Time series forecasting library"
@@ -313,5 +313,10 @@ path = "examples/m5_ets_benchmark.rs"
 [[example]]
 name = "skaters_m5_benchmark"
 path = "examples/skaters_m5_benchmark.rs"
+required-features = ["distributional"]
+
+[[example]]
+name = "skaters_m4_daily_benchmark"
+path = "examples/skaters_m4_daily_benchmark.rs"
 required-features = ["distributional"]
 

@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0-alpha.11] - 2026-07-06
+
+### Added
+
+- **Cross-panel benchmark on M4 daily** — `examples/skaters_m4_daily_benchmark.rs`. Reads `validation/data/m4_daily_train.json` + `..._test.json`, runs the α-10 Laplace variants + `Laplace+auto` alongside `AutoETS` / `AutoTheta` on the 14-day competition horizon. Answers whether M5-optimized configs generalize (they don't cleanly — see finding below).
+
+### Fixed
+
+- **AR(2) leaf stationarity projection**. The prior version clamped `φ_1, φ_2` individually to `[-0.999, 0.999]` but let `φ_1 + φ_2` approach 1 on strongly-trending series (where the Yule-Walker MoM autocovariance estimates push the coefficients toward the unit-root boundary). The recursive h-step forecast then diverged exponentially: on the M4-daily benchmark, `Laplace+AR2` produced mean MAE = 787 (vs. 158 for plain Laplace) before the fix. Now the leaf projects `(φ_1, φ_2)` onto the AR(2) stationary triangle (`|φ_2| < 1`, `φ_1 + φ_2 < 1`, `φ_2 - φ_1 < 1`) with a 0.02 safety margin. Mean MAE for `Laplace+AR2` drops to 158.4 (matching plain Laplace) on M4 daily.
+- **Auto-selector trending guard**. `LaplaceForecaster::new().auto()` now checks `trend_strength` (R² of a linear fit `y ~ t`) before enabling AR(2) or fractional-diff. Trending series have inflated `|acf1|` (consecutive samples share the trend), which naively triggers those leaves — but their MoM estimators don't distinguish "trend" from "autocorrelation" cleanly. The guard skips them when `trend_strength > 0.5`.
+
+### Benchmark: cross-panel parity
+
+M4 daily (500 series, 14-day horizon) after fixes:
+
+| variant | MAE (median) | MAE (mean) | vs. AutoETS wr | cover@90 | fit |
+|---|---|---|---|---|---|
+| AutoTheta | 60.87 | 153.08 | 0.554 vs AutoETS | – | 28.8 s |
+| AutoETS | 61.92 | 154.72 | — | – | 40.2 s |
+| Laplace (plain) | 65.95 | 157.80 | 0.526 | 0.929 | 0.20 s |
+| **Laplace+auto** | 66.55 | 159.36 | **0.528** | 0.930 | 1.09 s |
+| Laplace+AR2+S7+FD+OU (M5 winner) | 67.47 | 164.21 | 0.516 | 0.930 | 1.68 s |
+
+**Cross-panel finding: no single fixed config wins both panels.** M5's hand-tuned kitchen sink loses to plain Laplace on M4 daily. But the α-10 auto-selector crosses **50% pairwise winrate vs. AutoETS on both** panels (50.8% on M5 α-9, 52.8% on M4 daily) — the per-series characteristic inspection generalizes where a fixed config doesn't.
+
+### Notes
+
+Alpha surface: additive. AR(2) fix is a behavior change (existing users get more conservative φ estimates and no more h-step blow-ups) — no API surface changed.
+
 ## [0.12.0-alpha.10] - 2026-07-06
 
 ### Added

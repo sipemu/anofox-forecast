@@ -23,6 +23,12 @@ use super::ensemble::{blend_horizon, softmax};
 struct AutoChars {
     seasonality_strength: f64,
     acf1: f64,
+    /// R² of a linear fit `y ~ t`. High values (> ~0.5) indicate a
+    /// dominant trend — the auto-selector uses this to avoid enabling
+    /// AR(2) on trending series (its MoM estimator pushes `φ₁ + φ₂ → 1`
+    /// on strong trends, producing recursive h-step blow-ups even with
+    /// the leaf's stationarity projection).
+    trend_strength: f64,
 }
 
 /// Compute (seasonality_strength_R², |ACF(1)|) on the training window.
@@ -34,10 +40,32 @@ fn auto_characteristics(train: &[f64], period: usize) -> AutoChars {
         return AutoChars {
             seasonality_strength: 0.0,
             acf1: 0.0,
+            trend_strength: 0.0,
         };
     }
     let mean_y: f64 = train.iter().sum::<f64>() / n as f64;
     let ss_tot: f64 = train.iter().map(|y| (y - mean_y).powi(2)).sum();
+
+    // Trend strength: R² of the linear fit y ~ t.
+    let t_mean = (n - 1) as f64 / 2.0;
+    let (mut sum_ty, mut sum_tt) = (0.0, 0.0);
+    for (t, y) in train.iter().enumerate() {
+        let dt = t as f64 - t_mean;
+        sum_ty += dt * (y - mean_y);
+        sum_tt += dt * dt;
+    }
+    let slope = if sum_tt > 0.0 { sum_ty / sum_tt } else { 0.0 };
+    let intercept = mean_y - slope * t_mean;
+    let ss_res_trend: f64 = train
+        .iter()
+        .enumerate()
+        .map(|(t, y)| (y - (intercept + slope * t as f64)).powi(2))
+        .sum();
+    let trend_strength = if ss_tot > 0.0 {
+        (1.0 - ss_res_trend / ss_tot).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
 
     // Phase-mean seasonal fit R².
     let period = period.max(1);
@@ -77,6 +105,7 @@ fn auto_characteristics(train: &[f64], period: usize) -> AutoChars {
     AutoChars {
         seasonality_strength,
         acf1,
+        trend_strength,
     }
 }
 
@@ -495,20 +524,26 @@ impl Forecaster for LaplaceForecaster {
         }
 
         // Auto-selector: inspect series characteristics before initialising
-        // leaves and set the opt-in toggles from the α-8 slicing evidence.
+        // leaves and set the opt-in toggles from residual-slicing evidence.
         // User-configured toggles are respected — auto only adds.
         if self.use_auto {
             let chars = auto_characteristics(values, self.auto_seasonal_period);
             if self.ou.is_none() {
                 self.ou = Some(0.1);
             }
-            if chars.acf1 > 0.4 && self.ar2.is_none() {
+            // Trending-guard: on trending series, `acf1` is inflated because
+            // consecutive samples share the trend. Enabling AR(2) then pushes
+            // its MoM estimator toward the unit-root boundary, and the
+            // recursive h-step forecast diverges (M4-daily benchmark caught
+            // a catastrophic mean-MAE blow-up). Skip AR(2) when trend
+            // dominates.
+            if chars.acf1 > 0.4 && chars.trend_strength < 0.5 && self.ar2.is_none() {
                 self.ar2 = Some(0.1);
             }
             if chars.seasonality_strength > 0.15 && self.seasonal_period.is_none() {
                 self.seasonal_period = Some(self.auto_seasonal_period);
             }
-            if chars.acf1 > 0.5 && self.frac_diff.is_none() {
+            if chars.acf1 > 0.5 && chars.trend_strength < 0.5 && self.frac_diff.is_none() {
                 self.frac_diff = Some((0.4, 0.1, 0.1));
             }
         }
