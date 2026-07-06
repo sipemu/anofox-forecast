@@ -71,7 +71,9 @@ fn yj_inverse_with_jac(y: f64, lambda: f64) -> (f64, f64) {
     }
 }
 use super::leaf::Leaf;
-use super::leaves::{Ar1Leaf, Ar2Leaf, DriftLeaf, EmaLeaf, HoltLeaf, SeasonalEmaLeaf};
+use super::leaves::{
+    Ar1Leaf, Ar2Leaf, DriftLeaf, EmaLeaf, FractionalDiffLeaf, HoltLeaf, OuLeaf, SeasonalEmaLeaf,
+};
 use super::DistributionalForecaster;
 
 /// Distributional forecaster returning a `GaussianMixture` per horizon.
@@ -111,6 +113,12 @@ pub struct LaplaceForecaster {
     /// per series, imitating skaters' "Bayesian ensemble over a large
     /// candidate population" without adding new leaf families.
     use_populations: bool,
+    /// `(d, α_mean, α_diff)` for the fractional-differencing leaf. Adds
+    /// a long-memory drift-like leaf.
+    frac_diff: Option<(f64, f64, f64)>,
+    /// `α_mean` for the OU mean-reversion leaf. Adds an explicit
+    /// mean-reverting leaf parameterised by `θ = 1 − φ`.
+    ou: Option<f64>,
 
     leaves: Vec<Box<dyn Leaf + Send>>,
     cum_log_liks: Vec<f64>,
@@ -162,6 +170,8 @@ impl LaplaceForecaster {
             yj_lambda: None,
             yj_auto: false,
             use_populations: false,
+            frac_diff: None,
+            ou: None,
             leaves: Vec::new(),
             cum_log_liks: Vec::new(),
             n_obs: 0,
@@ -195,6 +205,34 @@ impl LaplaceForecaster {
         self.yj_auto = true;
         self.yj_lambda = None;
         self
+    }
+
+    /// Add a fractional-differencing leaf with fractional order `d ∈
+    /// (0.05, 0.95)`. Captures long-memory persistence that AR(1) / AR(2)
+    /// miss. `alpha_mean` tracks the level; `alpha_diff` tracks the
+    /// running fractional-diff step.
+    pub fn with_fractional_diff(mut self, d: f64, alpha_mean: f64, alpha_diff: f64) -> Self {
+        self.frac_diff = Some((d, alpha_mean, alpha_diff));
+        self
+    }
+
+    /// Fractional-differencing leaf with defaults `d=0.4`, `α_mean=0.1`,
+    /// `α_diff=0.1`.
+    pub fn with_fractional_diff_defaults(self) -> Self {
+        self.with_fractional_diff(0.4, 0.1, 0.1)
+    }
+
+    /// Add an Ornstein-Uhlenbeck mean-reversion leaf with the given
+    /// mean-EMA rate. Behaves better than a mean-shifted AR(1) on
+    /// bounded / mean-reverting series at longer horizons.
+    pub fn with_ou(mut self, alpha_mean: f64) -> Self {
+        self.ou = Some(alpha_mean);
+        self
+    }
+
+    /// OU leaf with the default mean-EMA rate 0.1.
+    pub fn with_ou_defaults(self) -> Self {
+        self.with_ou(0.1)
     }
 
     /// Replace the 3-leaf default set (one EMA / drift / AR(1) each) with
@@ -302,6 +340,12 @@ impl LaplaceForecaster {
         }
         if let Some(a) = self.ar2 {
             leaves.push(Box::new(Ar2Leaf::new(a)));
+        }
+        if let Some((d, am, ad)) = self.frac_diff {
+            leaves.push(Box::new(FractionalDiffLeaf::new(d, am, ad)));
+        }
+        if let Some(a) = self.ou {
+            leaves.push(Box::new(OuLeaf::new(a)));
         }
         if let Some(p) = self.seasonal_period {
             leaves.push(Box::new(SeasonalEmaLeaf::new(p, self.seasonal_alpha)));
@@ -788,6 +832,22 @@ mod tests {
         let mut f = LaplaceForecaster::new().with_yeo_johnson(0.5);
         f.fit(&ts).unwrap();
         assert_eq!(f.yeo_johnson_lambda(), Some(0.5));
+    }
+
+    #[test]
+    fn with_fractional_diff_and_ou_add_leaves_in_expected_order() {
+        let ts = ts_ar1(120, 0.4);
+        let mut f = LaplaceForecaster::new()
+            .with_fractional_diff_defaults()
+            .with_ou_defaults();
+        f.fit(&ts).unwrap();
+        match Inspectable::explanation(&f).unwrap() {
+            Explanation::Laplace(e) => {
+                assert_eq!(e.leaf_names, vec!["ema", "drift", "ar1", "frac_diff", "ou"]);
+                assert_eq!(e.leaf_weights.len(), 5);
+            }
+            other => panic!("expected Explanation::Laplace, got {other:?}"),
+        }
     }
 
     #[test]
