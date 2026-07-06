@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0-alpha.19] - 2026-07-06
+
+### Added — cross-series shell + meta-learner scaffold
+
+- **`GlobalLaplace`** (new module `src/models/laplace/global.rs`) — panel-level wrapper. Fits an independent `LaplaceForecaster` per series (using a shared configuration factory), stores them keyed by caller-supplied id, and exposes `predict_series(id, h)` and `forecast_dist_series(id, h)`. Also `fit_panel(iter)` for bulk fits with per-id error tolerance. Panel-average calibration scale accessor for cross-series signal.
+- **`MetaLearnerScaffold`** — reserved API for a per-series classifier that picks the winning forecaster family from characteristics. Currently returns the same rules-based decision as `SmartForecaster`; documented so downstream code can code against `pick_family(chars)` and swap in a trained classifier later.
+- Public: `models::laplace::GlobalLaplace`, `models::laplace::MetaLearnerScaffold`.
+
+### Honest limitations
+
+- `GlobalLaplace` is **not** a genuinely global model in the DeepAR / N-BEATS sense. The leaf state is still per-series; the only "global" element is the shared config. Real cross-series learning (shared `α` / `β` / `φ` estimated jointly across series) is a substantial architecture change and is deferred.
+- `MetaLearnerScaffold` has no ML backend yet — it's a pure rules-based fallback. A real implementation needs a labeled training panel where each series has a known winning forecaster (from held-out MAE) plus a classifier fit at load time. Deferred until we have that dataset.
+
 ## [0.12.0-alpha.18] - 2026-07-06
 
 ### Added — CV-based per-series selection

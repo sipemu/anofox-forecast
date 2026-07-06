@@ -30,11 +30,13 @@
 pub mod dist;
 pub mod ensemble;
 pub mod forecaster;
+pub mod global;
 pub mod leaf;
 pub mod leaves;
 
 pub use dist::{Gaussian, GaussianMixture};
 pub use forecaster::LaplaceForecaster;
+pub use global::{GlobalLaplace, MetaLearnerScaffold};
 pub use leaf::Leaf;
 
 use crate::error::Result;
