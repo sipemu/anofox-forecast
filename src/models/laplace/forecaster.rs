@@ -1,11 +1,12 @@
-//! `LaplaceForecaster` — online distributional shell over EMA / drift / AR(1).
+//! `LaplaceForecaster` — online distributional shell over EMA / drift /
+//! AR(1) / damped-Holt, plus optional seasonal-EMA.
 //!
 //! Alpha surface (behind the `distributional` feature). Inspired by
 //! [`microprediction/skaters`](https://github.com/microprediction/skaters):
 //! streaming leaves, likelihood-weighted mixture, per-horizon
 //! [`GaussianMixture`] output. Only the shell
-//! and three cheap leaves are implemented — no CRPS terminal, no
-//! seasonal / OU / fractional-differencing / Yeo-Johnson leaves.
+//! and a small leaf set is implemented — no CRPS terminal, no
+//! OU / fractional-differencing / Yeo-Johnson leaves.
 
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
@@ -15,19 +16,28 @@ use crate::models::traits::{validate_series_complete, Forecaster};
 use super::dist::GaussianMixture;
 use super::ensemble::{blend_horizon, softmax};
 use super::leaf::Leaf;
-use super::leaves::{Ar1Leaf, DriftLeaf, EmaLeaf, SeasonalEmaLeaf};
+use super::leaves::{Ar1Leaf, DriftLeaf, EmaLeaf, HoltLeaf, SeasonalEmaLeaf};
 use super::DistributionalForecaster;
 
 /// Distributional forecaster returning a `GaussianMixture` per horizon.
 ///
 /// Wraps three streaming leaves (EMA, drift, AR(1)) and mixes them by
-/// cumulative one-step log-likelihood. Optionally includes a seasonal-EMA
-/// leaf when a period is supplied via [`Self::with_seasonal`] — pass the
-/// period explicitly (no auto-detection).
+/// cumulative one-step log-likelihood. Optionally adds:
+///
+/// * a damped-Holt (level + trend + damping) leaf via [`Self::with_holt`];
+/// * a seasonal-EMA leaf via [`Self::with_seasonal`] — pass the period
+///   explicitly (no auto-detection).
+///
+/// Holt and seasonal are opt-in because M5 retail data (a bake-off panel)
+/// showed the mature Holt formulation actively *hurting* the mixture when
+/// enabled by default — series with weak or no trend let Holt's noisy
+/// trend estimate steal likelihood weight from the other leaves. Turn it
+/// on for panels where you know the series have sustained trend.
 pub struct LaplaceForecaster {
     ema_alpha: f64,
     drift_alpha: f64,
     ar_alpha_mean: f64,
+    holt: Option<(f64, f64, f64)>, // (alpha, beta, phi)
     seasonal_period: Option<usize>,
     seasonal_alpha: f64,
 
@@ -41,8 +51,8 @@ pub struct LaplaceForecaster {
 }
 
 impl LaplaceForecaster {
-    /// Default configuration: EMA α=0.2, drift α=0.1, AR(1) mean α=0.1;
-    /// no seasonal leaf.
+    /// Default 3-leaf shell: EMA α=0.2, drift α=0.1, AR(1) mean α=0.1;
+    /// no Holt, no seasonal leaf.
     pub fn new() -> Self {
         Self::with_alphas(0.2, 0.1, 0.1)
     }
@@ -52,6 +62,7 @@ impl LaplaceForecaster {
             ema_alpha,
             drift_alpha,
             ar_alpha_mean,
+            holt: None,
             seasonal_period: None,
             seasonal_alpha: 0.15,
             leaves: Vec::new(),
@@ -61,6 +72,19 @@ impl LaplaceForecaster {
             residuals: Vec::new(),
             training_values: Vec::new(),
         }
+    }
+
+    /// Add a damped-Holt (level + trend + damping) leaf. Sensible defaults
+    /// via [`Self::with_holt_defaults`]. `phi = 1.0` gives pure Holt;
+    /// `phi ∈ (0.5, 1.0)` damps the trend. All params clamped by the leaf.
+    pub fn with_holt(mut self, alpha: f64, beta: f64, phi: f64) -> Self {
+        self.holt = Some((alpha, beta, phi));
+        self
+    }
+
+    /// Add a damped-Holt leaf with defaults α=0.3 β=0.1 φ=0.98.
+    pub fn with_holt_defaults(self) -> Self {
+        self.with_holt(0.3, 0.1, 0.98)
     }
 
     /// Add a seasonal-EMA leaf with the caller-supplied period. A period
@@ -85,6 +109,9 @@ impl LaplaceForecaster {
             Box::new(DriftLeaf::new(self.drift_alpha)),
             Box::new(Ar1Leaf::new(self.ar_alpha_mean)),
         ];
+        if let Some((a, b, phi)) = self.holt {
+            leaves.push(Box::new(HoltLeaf::new(a, b, phi)));
+        }
         if let Some(p) = self.seasonal_period {
             leaves.push(Box::new(SeasonalEmaLeaf::new(p, self.seasonal_alpha)));
         }
@@ -400,6 +427,36 @@ mod tests {
             seasonal_mae,
             plain_mae
         );
+    }
+
+    #[test]
+    fn with_holt_adds_holt_leaf() {
+        let ts = ts_ar1(80, 0.5);
+        let mut f = LaplaceForecaster::new().with_holt_defaults();
+        f.fit(&ts).unwrap();
+        match Inspectable::explanation(&f).unwrap() {
+            Explanation::Laplace(e) => {
+                assert_eq!(e.leaf_names, vec!["ema", "drift", "ar1", "holt_damped"]);
+                assert_eq!(e.leaf_weights.len(), 4);
+            }
+            other => panic!("expected Explanation::Laplace, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn with_holt_and_seasonal_stack_in_expected_order() {
+        let ts = ts_seasonal(240, 12);
+        let mut f = LaplaceForecaster::new()
+            .with_holt_defaults()
+            .with_seasonal(12);
+        f.fit(&ts).unwrap();
+        match Inspectable::explanation(&f).unwrap() {
+            Explanation::Laplace(e) => assert_eq!(
+                e.leaf_names,
+                vec!["ema", "drift", "ar1", "holt_damped", "seasonal_ema"]
+            ),
+            other => panic!("expected Explanation::Laplace, got {other:?}"),
+        }
     }
 
     #[test]

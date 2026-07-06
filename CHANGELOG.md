@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0-alpha.3] - 2026-07-06
+
+### Added
+
+- **Damped-Holt leaf for `LaplaceForecaster`** (opt-in via `LaplaceForecaster::new().with_holt(alpha, beta, phi)` or the defaults shortcut `with_holt_defaults()`). Standard damped-trend recursion; `phi = 1.0` gives pure Holt, `phi ∈ (0.5, 1.0)` damps the trend. Sensible defaults: α=0.3, β=0.1, φ=0.98.
+- New public: `models::laplace::leaves::HoltLeaf`.
+- `examples/skaters_m5_benchmark.rs` extended to run all four Laplace variants: plain / +Holt / +seasonal7 / +Holt+seasonal7.
+
+### Benchmark: Holt is opt-in because it *hurts* on M5 retail
+
+The alpha-loop paid off exactly the way it's supposed to. Adding Holt to the default set (as the paper's leaf list suggests) regressed the mixture on M5 top-1000:
+
+| variant | MAE (median) | MAE (mean) | vs. AutoETS wr | vs. plain wr |
+|---|---|---|---|---|
+| Laplace (plain, 3 leaves) | 5.46 | 7.05 | 0.368 | – |
+| Laplace + Holt | 5.54 | 7.20 | 0.334 | plain wins 82.5% |
+| Laplace + seasonal7 | 5.15 | 6.70 | 0.466 | – |
+| Laplace + Holt + seasonal7 | 5.22 | 6.86 | 0.432 | seasonal-only wins 87.3% |
+
+Retail sales series are mostly bounded / mean-reverting; Holt's noisy trend estimate steals softmax weight from the other leaves and drags the mixture down. On panels with genuine sustained trend the finding may reverse — hence the opt-in default.
+
+**Decision rule.** Enable Holt when your series have persistent trend; leave it off for retail-style panels. The next PR will slice residuals by series characteristic (magnitude, autocorrelation, trend strength, seasonality strength) so this call gets made from data, not priors.
+
+### Notes
+
+Alpha surface: additive behind the `distributional` feature. `LaplaceForecaster::new()` still produces the 3-leaf shell; both Holt and seasonal are opt-in.
+
 ## [0.12.0-alpha.2] - 2026-07-06
 
 ### Added

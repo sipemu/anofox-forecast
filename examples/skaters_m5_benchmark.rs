@@ -1,10 +1,9 @@
 //! Distributional-shell (skaters/laplace-style) accuracy benchmark on M5.
 //!
-//! Runs two `LaplaceForecaster` configurations (v0.12 alpha,
-//! `distributional` feature) — the plain 3-leaf shell and the 4-leaf
-//! `with_seasonal(7)` variant that adds a weekly-seasonal-EMA leaf —
-//! against the point-forecast stack (`AutoETS`, `AutoTheta`) on the M5
-//! top-1000 retail panel. Reports:
+//! Runs four `LaplaceForecaster` configurations (v0.12 alpha,
+//! `distributional` feature) — plain 3-leaf, +Holt, +seasonal7,
+//! +Holt+seasonal7 — against the point-forecast stack (`AutoETS`,
+//! `AutoTheta`) on the M5 top-1000 retail panel. Reports:
 //!
 //! * per-series MAE on a 28-day held-out window (median + winrates)
 //! * empirical 90% interval coverage for the distributional model
@@ -110,12 +109,20 @@ fn main() {
     eprintln!("Running benchmark on {} series", kept.len());
 
     let base_date = timestamps[0];
-    let mut ets_results: Vec<SeriesResult> = Vec::new();
-    let mut theta_results: Vec<SeriesResult> = Vec::new();
-    #[cfg(feature = "distributional")]
-    let mut laplace_results: Vec<SeriesResult> = Vec::new();
-    #[cfg(feature = "distributional")]
-    let mut laplace_seasonal_results: Vec<SeriesResult> = Vec::new();
+
+    // Slot layout: 0=AutoETS, 1=AutoTheta, 2=Laplace, 3=Laplace+H,
+    // 4=Laplace+S7, 5=Laplace+H+S7. Keeping this stable so the pairwise
+    // matrix and summary lines match.
+    const N_MODELS: usize = 6;
+    let labels: [&str; N_MODELS] = [
+        "AutoETS",
+        "AutoTheta",
+        "Laplace",
+        "Laplace+H",
+        "Laplace+S7",
+        "Laplace+H+S7",
+    ];
+    let mut results: Vec<Vec<SeriesResult>> = (0..N_MODELS).map(|_| Vec::new()).collect();
 
     let global_start = Instant::now();
 
@@ -138,30 +145,31 @@ fn main() {
             Err(_) => continue,
         };
 
-        // AutoETS
         if let Some(r) = run_point(&mut AutoETS::new(), &train_ts, test_values) {
-            ets_results.push(r);
+            results[0].push(r);
         }
-
-        // AutoTheta
         if let Some(r) = run_point(&mut AutoTheta::new(), &train_ts, test_values) {
-            theta_results.push(r);
+            results[1].push(r);
         }
 
-        // LaplaceForecaster (no seasonal leaf) — baseline shell.
         #[cfg(feature = "distributional")]
-        if let Some(r) = run_laplace(LaplaceForecaster::new(), &train_ts, test_values) {
-            laplace_results.push(r);
-        }
-
-        // LaplaceForecaster with weekly-seasonal leaf (M5 has period 7).
-        #[cfg(feature = "distributional")]
-        if let Some(r) = run_laplace(
-            LaplaceForecaster::new().with_seasonal(7),
-            &train_ts,
-            test_values,
-        ) {
-            laplace_seasonal_results.push(r);
+        {
+            let cfgs: [(usize, LaplaceForecaster); 4] = [
+                (2, LaplaceForecaster::new()),
+                (3, LaplaceForecaster::new().with_holt_defaults()),
+                (4, LaplaceForecaster::new().with_seasonal(7)),
+                (
+                    5,
+                    LaplaceForecaster::new()
+                        .with_holt_defaults()
+                        .with_seasonal(7),
+                ),
+            ];
+            for (slot, model) in cfgs {
+                if let Some(r) = run_laplace(model, &train_ts, test_values) {
+                    results[slot].push(r);
+                }
+            }
         }
     }
 
@@ -171,29 +179,14 @@ fn main() {
         total_wall.as_secs_f64()
     );
 
-    let mut summaries = vec![
-        summarize("AutoETS", &ets_results),
-        summarize("AutoTheta", &theta_results),
-    ];
-    #[cfg(feature = "distributional")]
-    {
-        summaries.push(summarize("LaplaceForecaster", &laplace_results));
-        summaries.push(summarize(
-            "LaplaceForecaster+seasonal7",
-            &laplace_seasonal_results,
-        ));
-    }
+    let summaries: Vec<ModelSummary> = labels
+        .iter()
+        .zip(results.iter())
+        .map(|(name, r)| summarize(*name, r))
+        .collect();
 
     print_summary(&summaries);
-
-    // Win-rate matrix: pairwise, per-series, on the intersection.
-    #[cfg(feature = "distributional")]
-    print_pairwise(
-        &ets_results,
-        &theta_results,
-        &laplace_results,
-        &laplace_seasonal_results,
-    );
+    print_pairwise(&labels, &results);
 }
 
 fn run_point<F: Forecaster>(
@@ -354,52 +347,31 @@ fn print_summary(summaries: &[ModelSummary]) {
     }
 }
 
-#[cfg(feature = "distributional")]
-fn print_pairwise(
-    ets: &[SeriesResult],
-    theta: &[SeriesResult],
-    laplace: &[SeriesResult],
-    laplace_seasonal: &[SeriesResult],
-) {
-    let n = ets
-        .len()
-        .min(theta.len())
-        .min(laplace.len())
-        .min(laplace_seasonal.len());
+fn print_pairwise(labels: &[&str], results: &[Vec<SeriesResult>]) {
+    let n = results.iter().map(|r| r.len()).min().unwrap_or(0);
     if n == 0 {
         return;
     }
     let winrate = |a: &[SeriesResult], b: &[SeriesResult]| -> f64 {
-        let mut wins = 0usize;
-        for i in 0..n {
-            if a[i].mae < b[i].mae {
-                wins += 1;
-            }
-        }
+        let wins = (0..n).filter(|&i| a[i].mae < b[i].mae).count();
         wins as f64 / n as f64
     };
     println!(
         "\n=== Pairwise MAE win-rate on {} matched series (row beats column) ===",
         n
     );
-    let cols: [(&str, &[SeriesResult]); 4] = [
-        ("AutoETS", ets),
-        ("AutoTheta", theta),
-        ("Laplace", laplace),
-        ("Laplace+seas7", laplace_seasonal),
-    ];
-    print!("{:<22}", "");
-    for (name, _) in cols.iter() {
-        print!("{:>16}", name);
+    print!("{:<16}", "");
+    for name in labels {
+        print!("{:>14}", name);
     }
     println!();
-    for (row_name, row) in cols.iter() {
-        print!("{:<22}", row_name);
-        for (col_name, col) in cols.iter() {
-            if row_name == col_name {
-                print!("{:>16}", "-");
+    for (i, row_name) in labels.iter().enumerate() {
+        print!("{:<16}", row_name);
+        for (j, _) in labels.iter().enumerate() {
+            if i == j {
+                print!("{:>14}", "-");
             } else {
-                print!("{:>16.3}", winrate(row, col));
+                print!("{:>14.3}", winrate(&results[i], &results[j]));
             }
         }
         println!();
