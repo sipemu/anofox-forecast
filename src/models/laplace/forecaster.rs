@@ -16,7 +16,7 @@ use crate::models::traits::{validate_series_complete, Forecaster};
 use super::dist::GaussianMixture;
 use super::ensemble::{blend_horizon, softmax};
 use super::leaf::Leaf;
-use super::leaves::{Ar1Leaf, DriftLeaf, EmaLeaf, HoltLeaf, SeasonalEmaLeaf};
+use super::leaves::{Ar1Leaf, Ar2Leaf, DriftLeaf, EmaLeaf, HoltLeaf, SeasonalEmaLeaf};
 use super::DistributionalForecaster;
 
 /// Distributional forecaster returning a `GaussianMixture` per horizon.
@@ -25,19 +25,23 @@ use super::DistributionalForecaster;
 /// cumulative one-step log-likelihood. Optionally adds:
 ///
 /// * a damped-Holt (level + trend + damping) leaf via [`Self::with_holt`];
+/// * an AR(2) leaf via [`Self::with_ar2`] — catches longer-memory
+///   autocorrelation that AR(1) misses;
 /// * a seasonal-EMA leaf via [`Self::with_seasonal`] — pass the period
 ///   explicitly (no auto-detection).
 ///
-/// Holt and seasonal are opt-in because M5 retail data (a bake-off panel)
-/// showed the mature Holt formulation actively *hurting* the mixture when
-/// enabled by default — series with weak or no trend let Holt's noisy
-/// trend estimate steal likelihood weight from the other leaves. Turn it
-/// on for panels where you know the series have sustained trend.
+/// All three are opt-in. Empirical M5-retail benchmarking showed the
+/// mature Holt formulation actively *hurting* the mixture by default
+/// (Holt's noisy trend estimate steals softmax weight from other leaves
+/// on series with weak or no trend). Seasonal and AR(2) are cheap wins
+/// on the panels where they apply, but the shell keeps them opt-in for
+/// symmetry with Holt and to preserve the alpha-2 3-leaf default.
 pub struct LaplaceForecaster {
     ema_alpha: f64,
     drift_alpha: f64,
     ar_alpha_mean: f64,
     holt: Option<(f64, f64, f64)>, // (alpha, beta, phi)
+    ar2: Option<f64>,              // mean-EMA alpha
     seasonal_period: Option<usize>,
     seasonal_alpha: f64,
 
@@ -63,6 +67,7 @@ impl LaplaceForecaster {
             drift_alpha,
             ar_alpha_mean,
             holt: None,
+            ar2: None,
             seasonal_period: None,
             seasonal_alpha: 0.15,
             leaves: Vec::new(),
@@ -85,6 +90,19 @@ impl LaplaceForecaster {
     /// Add a damped-Holt leaf with defaults α=0.3 β=0.1 φ=0.98.
     pub fn with_holt_defaults(self) -> Self {
         self.with_holt(0.3, 0.1, 0.98)
+    }
+
+    /// Add an AR(2) leaf that solves the 2×2 normal equations online.
+    /// `alpha_mean` is the EMA rate for the tracking mean (defaults via
+    /// [`Self::with_ar2_defaults`]).
+    pub fn with_ar2(mut self, alpha_mean: f64) -> Self {
+        self.ar2 = Some(alpha_mean);
+        self
+    }
+
+    /// Add an AR(2) leaf with the default mean-EMA rate 0.1.
+    pub fn with_ar2_defaults(self) -> Self {
+        self.with_ar2(0.1)
     }
 
     /// Add a seasonal-EMA leaf with the caller-supplied period. A period
@@ -111,6 +129,9 @@ impl LaplaceForecaster {
         ];
         if let Some((a, b, phi)) = self.holt {
             leaves.push(Box::new(HoltLeaf::new(a, b, phi)));
+        }
+        if let Some(a) = self.ar2 {
+            leaves.push(Box::new(Ar2Leaf::new(a)));
         }
         if let Some(p) = self.seasonal_period {
             leaves.push(Box::new(SeasonalEmaLeaf::new(p, self.seasonal_alpha)));
@@ -427,6 +448,20 @@ mod tests {
             seasonal_mae,
             plain_mae
         );
+    }
+
+    #[test]
+    fn with_ar2_adds_ar2_leaf() {
+        let ts = ts_ar1(80, 0.5);
+        let mut f = LaplaceForecaster::new().with_ar2_defaults();
+        f.fit(&ts).unwrap();
+        match Inspectable::explanation(&f).unwrap() {
+            Explanation::Laplace(e) => {
+                assert_eq!(e.leaf_names, vec!["ema", "drift", "ar1", "ar2"]);
+                assert_eq!(e.leaf_weights.len(), 4);
+            }
+            other => panic!("expected Explanation::Laplace, got {other:?}"),
+        }
     }
 
     #[test]
