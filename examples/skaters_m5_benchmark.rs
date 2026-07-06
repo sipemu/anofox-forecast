@@ -120,10 +120,10 @@ fn main() {
 
     let base_date = timestamps[0];
 
-    // Slot layout: 0=AutoETS, 1=AutoTheta, 2=Laplace, 3=Laplace+H,
-    // 4=Laplace+AR2, 5=Laplace+S7, 6=Laplace+AR2+S7, 7=Laplace+AR2+S7+Cal.
-    // Keeping this stable so the pairwise matrix and summary lines match.
-    const N_MODELS: usize = 8;
+    // Slot layout stable so the pairwise matrix and summary lines match:
+    //   0=AutoETS, 1=AutoTheta, 2=Laplace, 3=Laplace+H, 4=Laplace+AR2,
+    //   5=Laplace+S7, 6=Laplace+AR2+S7, 7=+Cal, 8=+YJ, 9=+YJ+Cal.
+    const N_MODELS: usize = 10;
     let labels: [&str; N_MODELS] = [
         "AutoETS",
         "AutoTheta",
@@ -133,6 +133,8 @@ fn main() {
         "Laplace+S7",
         "Laplace+AR2+S7",
         "Laplace+AR2+S7+Cal",
+        "Laplace+AR2+S7+YJ",
+        "Laplace+AR2+S7+YJ+Cal",
     ];
     let mut results: Vec<Vec<SeriesResult>> = (0..N_MODELS).map(|_| Vec::new()).collect();
     let mut characteristics: Vec<Characteristics> = Vec::new();
@@ -173,7 +175,7 @@ fn main() {
 
         #[cfg(feature = "distributional")]
         {
-            let cfgs: [(usize, LaplaceForecaster); 6] = [
+            let cfgs: [(usize, LaplaceForecaster); 8] = [
                 (2, LaplaceForecaster::new()),
                 (3, LaplaceForecaster::new().with_holt_defaults()),
                 (4, LaplaceForecaster::new().with_ar2_defaults()),
@@ -189,6 +191,21 @@ fn main() {
                     LaplaceForecaster::new()
                         .with_ar2_defaults()
                         .with_seasonal(7)
+                        .with_calibration(),
+                ),
+                (
+                    8,
+                    LaplaceForecaster::new()
+                        .with_ar2_defaults()
+                        .with_seasonal(7)
+                        .with_yeo_johnson_mle(),
+                ),
+                (
+                    9,
+                    LaplaceForecaster::new()
+                        .with_ar2_defaults()
+                        .with_seasonal(7)
+                        .with_yeo_johnson_mle()
                         .with_calibration(),
                 ),
             ];

@@ -14,7 +14,62 @@ use crate::models::inspect::{Explanation, Inspectable, LaplaceExplanation};
 use crate::models::traits::{validate_series_complete, Forecaster};
 
 use super::dist::GaussianMixture;
+use crate::transform::yeo_johnson::yeo_johnson_lambda;
+
 use super::ensemble::{blend_horizon, softmax};
+
+/// Yeo-Johnson forward transform (scalar).
+#[inline]
+fn yj_forward(x: f64, lambda: f64) -> f64 {
+    if x >= 0.0 {
+        if lambda.abs() < 1e-12 {
+            (x + 1.0).ln()
+        } else {
+            ((x + 1.0).powf(lambda) - 1.0) / lambda
+        }
+    } else if (lambda - 2.0).abs() < 1e-12 {
+        -(-x + 1.0).ln()
+    } else {
+        -(((-x + 1.0).powf(2.0 - lambda)) - 1.0) / (2.0 - lambda)
+    }
+}
+
+/// Yeo-Johnson inverse (scalar). Returns `(x, |dx/dy|)` for delta-method
+/// std propagation. Saturates to the domain boundary and Jacobian = 0
+/// when the requested inverse is outside the definition (e.g. `λ · y + 1
+/// ≤ 0` on the positive branch).
+#[inline]
+fn yj_inverse_with_jac(y: f64, lambda: f64) -> (f64, f64) {
+    if y >= 0.0 {
+        if lambda.abs() < 1e-12 {
+            let ey = y.exp();
+            (ey - 1.0, ey)
+        } else {
+            let base = lambda * y + 1.0;
+            if base <= 0.0 {
+                (0.0, 0.0)
+            } else {
+                let inv_lambda = 1.0 / lambda;
+                let x = base.powf(inv_lambda) - 1.0;
+                let dxdy = base.powf(inv_lambda - 1.0);
+                (x, dxdy)
+            }
+        }
+    } else if (lambda - 2.0).abs() < 1e-12 {
+        let emy = (-y).exp();
+        (1.0 - emy, emy)
+    } else {
+        let base = 1.0 - (2.0 - lambda) * y;
+        if base <= 0.0 {
+            (1.0, 0.0)
+        } else {
+            let inv_c = 1.0 / (2.0 - lambda);
+            let x = 1.0 - base.powf(inv_c);
+            let dxdy = base.powf(inv_c - 1.0);
+            (x, dxdy)
+        }
+    }
+}
 use super::leaf::Leaf;
 use super::leaves::{Ar1Leaf, Ar2Leaf, DriftLeaf, EmaLeaf, HoltLeaf, SeasonalEmaLeaf};
 use super::DistributionalForecaster;
@@ -45,6 +100,11 @@ pub struct LaplaceForecaster {
     seasonal_period: Option<usize>,
     seasonal_alpha: f64,
     calibrate: bool,
+    /// User-supplied Yeo-Johnson λ. Overrides `yj_auto` when both are set.
+    yj_lambda: Option<f64>,
+    /// If true, fit the Yeo-Johnson λ via MLE at the start of `fit()` and
+    /// store it in `fitted_yj_lambda`.
+    yj_auto: bool,
 
     leaves: Vec<Box<dyn Leaf + Send>>,
     cum_log_liks: Vec<f64>,
@@ -53,12 +113,27 @@ pub struct LaplaceForecaster {
     fitted_values: Vec<f64>,
     residuals: Vec<f64>,
     training_values: Vec<f64>,
-    /// 1-step mixture std at each training step (for calibration).
+    /// 1-step mixture std at each training step (transformed space if YJ
+    /// is enabled, else original space). Used by [`Self::with_calibration`].
     predictive_stds: Vec<f64>,
-    /// Terminal scale factor: `1.0` when uncalibrated, else the empirical
-    /// residual std divided by the average 1-step mixture std. Applied to
-    /// every `GaussianMixture` component's std at forecast time.
+    /// 1-step residuals `y_trans - mixture_mean_trans` in the space the
+    /// leaves operate in. Kept alongside `predictive_stds` so the
+    /// calibration quantile-match uses matched-space `|z|`.
+    predictive_residuals_trans: Vec<f64>,
+    /// Terminal scale factor: `1.0` when uncalibrated. Applied to every
+    /// `GaussianMixture` component's std at forecast time — in transformed
+    /// space (before Yeo-Johnson inverse-transform).
     calibration_scale: f64,
+    /// The Yeo-Johnson λ actually used for this fit. `None` if YJ was
+    /// disabled. Populated even when the user supplied a fixed λ, so
+    /// downstream callers can inspect the transform.
+    fitted_yj_lambda: Option<f64>,
+    /// Observed range of training values in transformed space. Used to
+    /// clamp forecast-time transformed-space means before applying the
+    /// YJ inverse — the inverse's Jacobian explodes exponentially in the
+    /// log branch when a leaf's h-step forecast extrapolates far beyond
+    /// the training window. Empty when YJ is disabled.
+    yj_trans_range: Option<(f64, f64)>,
 }
 
 impl LaplaceForecaster {
@@ -78,6 +153,8 @@ impl LaplaceForecaster {
             seasonal_period: None,
             seasonal_alpha: 0.15,
             calibrate: false,
+            yj_lambda: None,
+            yj_auto: false,
             leaves: Vec::new(),
             cum_log_liks: Vec::new(),
             n_obs: 0,
@@ -85,8 +162,38 @@ impl LaplaceForecaster {
             residuals: Vec::new(),
             training_values: Vec::new(),
             predictive_stds: Vec::new(),
+            predictive_residuals_trans: Vec::new(),
             calibration_scale: 1.0,
+            fitted_yj_lambda: None,
+            yj_trans_range: None,
         }
+    }
+
+    /// Apply a Yeo-Johnson power transform with fixed λ before feeding
+    /// observations to the leaves. Predictions are delta-method
+    /// inverse-transformed back to original space at forecast time.
+    /// Variance-stabilizes retail-style panels where the residual scale
+    /// is proportional to level.
+    pub fn with_yeo_johnson(mut self, lambda: f64) -> Self {
+        self.yj_lambda = Some(lambda);
+        self.yj_auto = false;
+        self
+    }
+
+    /// Fit the Yeo-Johnson λ via MLE at the start of `fit()`. Uses the
+    /// crate's [`crate::transform::yeo_johnson::yeo_johnson_lambda`]
+    /// estimator (grid search over `[-2, 2]` at Δ=0.01, refined at
+    /// Δ=0.001).
+    pub fn with_yeo_johnson_mle(mut self) -> Self {
+        self.yj_auto = true;
+        self.yj_lambda = None;
+        self
+    }
+
+    /// The Yeo-Johnson λ actually used for this fit — `None` if YJ was
+    /// disabled or the model hasn't been fit yet.
+    pub fn yeo_johnson_lambda(&self) -> Option<f64> {
+        self.fitted_yj_lambda
     }
 
     /// Enable the terminal calibration step. After leaf-training, a single
@@ -201,10 +308,48 @@ impl Forecaster for LaplaceForecaster {
         } else {
             Vec::new()
         };
+        self.predictive_residuals_trans = if self.calibrate {
+            Vec::with_capacity(values.len())
+        } else {
+            Vec::new()
+        };
         self.calibration_scale = 1.0;
         self.n_obs = 0;
 
-        for &y in values {
+        // Resolve Yeo-Johnson λ. User-supplied wins over MLE; MLE happens
+        // exactly once at fit start over the full training window.
+        self.fitted_yj_lambda = if let Some(l) = self.yj_lambda {
+            Some(l)
+        } else if self.yj_auto {
+            Some(yeo_johnson_lambda(values))
+        } else {
+            None
+        };
+        let yj = self.fitted_yj_lambda;
+        // Cache the observed range of training values in transformed
+        // space — used to clamp forecast-time means before the inverse.
+        // Clamp to exact training range in transformed space. Any padding
+        // lets the inverse extrapolate; on the log-branch (λ near 0) even
+        // small extrapolation produces astronomical values.
+        self.yj_trans_range = yj.map(|l| {
+            let mut lo = f64::INFINITY;
+            let mut hi = f64::NEG_INFINITY;
+            for &v in values {
+                let t = yj_forward(v, l);
+                if t.is_finite() {
+                    lo = lo.min(t);
+                    hi = hi.max(t);
+                }
+            }
+            (lo, hi)
+        });
+
+        for &y_orig in values {
+            let y = match yj {
+                Some(l) => yj_forward(y_orig, l),
+                None => y_orig,
+            };
+
             // 1-step predictions from each leaf, before observing y.
             let per_leaf: Vec<super::dist::Gaussian> =
                 self.leaves.iter().map(|l| l.predict(1)[0]).collect();
@@ -212,19 +357,32 @@ impl Forecaster for LaplaceForecaster {
 
             let mixture =
                 GaussianMixture::new(weights.iter().zip(per_leaf.iter()).map(|(w, g)| (*w, *g)));
-            let fitted = if mixture.is_empty() {
-                y
+            // Fitted / residuals: expose in ORIGINAL space so downstream
+            // consumers (Explanation, tests, callers computing MAE) see
+            // the same scale as the training values.
+            let fitted_orig = if mixture.is_empty() {
+                y_orig
             } else {
-                mixture.mean()
+                let m_trans = mixture.mean();
+                match yj {
+                    Some(l) => yj_inverse_with_jac(m_trans, l).0,
+                    None => m_trans,
+                }
             };
-            self.fitted_values.push(fitted);
-            self.residuals.push(y - fitted);
+            self.fitted_values.push(fitted_orig);
+            self.residuals.push(y_orig - fitted_orig);
             if self.calibrate {
-                self.predictive_stds.push(if mixture.is_empty() {
-                    1.0
+                // Calibration operates on transformed-space residuals (the
+                // leaves' Gaussian assumption lives there); stash both the
+                // transformed-space 1-step σ and the transformed-space
+                // residual so quantile-match sees matched-space `|z|`.
+                let (mu_trans, sigma_trans) = if mixture.is_empty() {
+                    (y, 1.0)
                 } else {
-                    mixture.std()
-                });
+                    (mixture.mean(), mixture.std())
+                };
+                self.predictive_stds.push(sigma_trans);
+                self.predictive_residuals_trans.push(y - mu_trans);
             }
 
             // Score each leaf on this y, then absorb.
@@ -245,11 +403,14 @@ impl Forecaster for LaplaceForecaster {
         // metric (unlike a MoM variance match, which is fooled by bounded
         // or heavy-tailed panels where variance already matches but the
         // tail shape doesn't).
-        if self.calibrate && !self.residuals.is_empty() && !self.predictive_stds.is_empty() {
+        if self.calibrate
+            && !self.predictive_residuals_trans.is_empty()
+            && !self.predictive_stds.is_empty()
+        {
             const TARGET_LEVEL: f64 = 0.90;
             const GAUSSIAN_Z_AT_90: f64 = 1.644_853_626_951_472_7; // Φ⁻¹(0.95)
             let mut zabs: Vec<f64> = self
-                .residuals
+                .predictive_residuals_trans
                 .iter()
                 .zip(self.predictive_stds.iter())
                 .filter_map(|(r, s)| {
@@ -376,18 +537,32 @@ impl DistributionalForecaster for LaplaceForecaster {
         let weights = self.weights();
         let per_leaf = self.per_leaf_horizons(horizon);
         let scale = self.calibration_scale;
+        let yj = self.fitted_yj_lambda;
+        let trans_range = self.yj_trans_range;
         Ok((0..horizon)
             .map(|h| {
                 let m = blend_horizon(&weights, &per_leaf, h);
-                if (scale - 1.0).abs() < 1e-12 {
-                    m
-                } else {
-                    GaussianMixture::new(
-                        m.components
-                            .into_iter()
-                            .map(|(w, g)| (w, super::dist::Gaussian::new(g.mean, g.std * scale))),
-                    )
-                }
+                // Apply calibration scale in the leaves' space (transformed
+                // if YJ is active), then YJ inverse via delta method. Clamp
+                // component means to the observed training range in
+                // transformed space to prevent the log-branch Jacobian from
+                // exploding on far-horizon extrapolation.
+                let components = m.components.into_iter().map(|(w, g)| {
+                    let sigma_scaled = g.std * scale;
+                    let (mean_out, sigma_out) = match yj {
+                        Some(l) => {
+                            let mean_trans = match trans_range {
+                                Some((lo, hi)) => g.mean.clamp(lo, hi),
+                                None => g.mean,
+                            };
+                            let (m_orig, jac) = yj_inverse_with_jac(mean_trans, l);
+                            (m_orig, (sigma_scaled * jac.abs()).max(1e-9))
+                        }
+                        None => (g.mean, sigma_scaled),
+                    };
+                    (w, super::dist::Gaussian::new(mean_out, sigma_out))
+                });
+                GaussianMixture::new(components)
             })
             .collect())
     }
@@ -531,6 +706,52 @@ mod tests {
             seasonal_mae,
             plain_mae
         );
+    }
+
+    fn ts_positive_multiplicative(n: usize) -> TimeSeries {
+        // A positive series whose noise scales with level — the setting
+        // Yeo-Johnson is designed to help.
+        let base = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let mut vals = Vec::with_capacity(n);
+        for i in 0..n {
+            let level = 50.0 + 0.1 * i as f64;
+            let noise = ((i as f64 * 12.9898).sin() * 43758.5453).fract() - 0.5;
+            vals.push(level * (1.0 + 0.3 * noise));
+        }
+        let stamps: Vec<_> = (0..n).map(|i| base + Duration::hours(i as i64)).collect();
+        TimeSeries::univariate(stamps, vals).unwrap()
+    }
+
+    #[test]
+    fn with_yeo_johnson_mle_finds_a_lambda_and_returns_original_scale() {
+        let ts = ts_positive_multiplicative(300);
+        let mut f = LaplaceForecaster::new().with_yeo_johnson_mle();
+        f.fit(&ts).unwrap();
+        let lambda = f.yeo_johnson_lambda().expect("YJ MLE should populate λ");
+        assert!(
+            lambda.is_finite() && (-2.0..=2.0).contains(&lambda),
+            "λ out of expected range: {}",
+            lambda
+        );
+        // Forecasts should come back in original scale (roughly around the
+        // series' level, not the transformed sub-unit region).
+        let dists = f.forecast_dist(3).unwrap();
+        for d in &dists {
+            let m = d.mean();
+            assert!(
+                m.is_finite() && m > 5.0,
+                "point forecast {} out of original scale",
+                m
+            );
+        }
+    }
+
+    #[test]
+    fn with_yeo_johnson_fixed_lambda_is_recorded() {
+        let ts = ts_ar1(200, 0.5);
+        let mut f = LaplaceForecaster::new().with_yeo_johnson(0.5);
+        f.fit(&ts).unwrap();
+        assert_eq!(f.yeo_johnson_lambda(), Some(0.5));
     }
 
     #[test]

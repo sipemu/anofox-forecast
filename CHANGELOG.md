@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0-alpha.6] - 2026-07-06
+
+### Added
+
+- **Yeo-Johnson power transform on `LaplaceForecaster`** — opt-in via `LaplaceForecaster::new().with_yeo_johnson(lambda)` (user λ) or `.with_yeo_johnson_mle()` (MLE at fit start, uses the crate's existing `transform::yeo_johnson::yeo_johnson_lambda`). All leaves see transformed values; forecasts inverse-transformed via the delta method (`mean_orig = yj_inverse(mean_trans, λ)`, `σ_orig = σ_trans · |dy/dz|`). Component means are clamped to the observed training range in transformed space before inversion — the log-branch Jacobian explodes exponentially on extrapolation and even one runaway series destroys mean MAE.
+- New public: `LaplaceForecaster::with_yeo_johnson`, `.with_yeo_johnson_mle`, `.yeo_johnson_lambda()`.
+
+### Benchmark: coverage wins big, MAE/logpdf regress
+
+M5 top-1000 (adding YJ to the best `Laplace+AR2+S7` config):
+
+| variant | MAE (median) | MAE (mean) | cover@90 (target 0.90) | logpdf (avg) | fit time |
+|---|---|---|---|---|---|
+| Laplace + AR2 + S7 | 5.09 | 6.64 | 0.970 | −3.824 | 0.38 s |
+| Laplace + AR2 + S7 + Cal | 5.09 | 6.64 | 0.966 | −3.773 | 0.46 s |
+| **Laplace + AR2 + S7 + YJ** | 5.10 | 7.29 | **0.935** | −4.325 | 15.3 s |
+| Laplace + AR2 + S7 + YJ + Cal | 5.10 | 7.29 | 0.936 | −4.343 | 15.4 s |
+
+- **Coverage moved 3.5 pp toward target** (0.970 → 0.935) — the variance-stabilization the transform is designed for, and 8× larger than what alpha-5 calibration alone could do (0.4 pp).
+- **Mean MAE regressed 10%** (6.64 → 7.29) even with the training-range clamp — the delta-method inverse skews component means for horizons where leaves extrapolate.
+- **Logpdf regressed 0.5** — the delta-method Gaussian mixture in original space is a coarser approximation of the true (skewed) inverse-transformed distribution. For proper logpdf we'd need to evaluate density in transformed space and add the `log|dz/dy|` Jacobian correction; deferred.
+- **Fit time 40× slower** (0.38 s → 15.3 s) — the MLE grid searches 401 λ values × O(n) transforms per fit. Fixed-λ (`with_yeo_johnson(λ)`) skips this and matches the base fit time.
+- Median MAE essentially unchanged (5.09 → 5.10).
+
+### Notes
+
+Ship-worthy as an opt-in tool for coverage-critical use cases (safety-stock sizing, threshold anomaly detection) — but not the default and not a universal MAE win. Combining YJ with alpha-5 calibration is a small net regression, not composition: coverage stays at 0.936 (barely above YJ alone), logpdf gets slightly worse. Recommend YJ alone or Cal alone, not both, for now.
+
+### Future work (deferred to a later alpha)
+
+**Coordinate-grid ensemble** — instead of one λ from MLE, run each leaf against a small λ grid (`{-1, 0, 0.5, 1, 1.5}`) and let the softmax weight each (leaf, λ) candidate. Skaters' actual design. Likely fixes both the MAE regression (bad λ candidates get low weight) and the fit-time cost (per-fit λ MLE avoided). Larger shell-level change; not this alpha.
+
 ## [0.12.0-alpha.5] - 2026-07-06
 
 ### Added
