@@ -113,10 +113,24 @@ jobs:
         working-directory: js
         run: npm publish --access public --dry-run
 
+      # Derive the dist-tag from the release tag name (e.g. v0.12.0-alpha.1 →
+      # `alpha`; v0.12.0-beta.3 → `beta`; v1.0.0 → `latest`). npm 11 requires
+      # `--tag` on prerelease versions, and defaulting to `latest` on stable
+      # releases keeps installs on `npm install @sipemu/anofox-forecast`
+      # tracking the newest GA.
       - name: Publish to npm
         if: ${{ github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && !inputs.dry_run) }}
         working-directory: js
-        run: npm publish --access public --provenance
+        run: |
+          ref="${GITHUB_REF_NAME:-}"
+          case "$ref" in
+            *-alpha*) tag=alpha ;;
+            *-beta*)  tag=beta  ;;
+            *-rc*)    tag=rc    ;;
+            *)        tag=latest ;;
+          esac
+          echo "Publishing with npm dist-tag: $tag (from ref '$ref')"
+          npm publish --access public --provenance --tag "$tag"
 
   test-wasm:
     name: Test WASM
