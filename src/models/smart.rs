@@ -31,6 +31,7 @@ use crate::models::laplace::LaplaceForecaster;
 /// Family that `SmartForecaster` routed to.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SelectedFamily {
+    #[cfg(feature = "distributional")]
     Intermittent,
     AutoEts,
     #[cfg(feature = "distributional")]
