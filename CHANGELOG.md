@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0-alpha.5] - 2026-07-06
+
+### Added
+
+- **Terminal calibration ("model first, conform last") for `LaplaceForecaster`** — opt-in via `LaplaceForecaster::new().with_calibration()`. After leaf-training, computes a single scalar `λ` from **quantile matching** on in-sample standardised residuals: `λ = P90(|residual / mixture_std|) / Φ⁻¹(0.95)`. Applied uniformly to every returned mixture's component std at forecast time.
+- Why quantile-matching (not MoM). An earlier MoM version (`λ = std(residuals) / mean(mixture_std)`) matched variance but didn't move coverage on M5 — retail residuals have the right variance but wrong tail shape (bounded below by 0, Gaussian tails overshoot). Quantile matching directly targets the 90% interval metric and is fooled less by shape mismatch.
+
+### Benchmark impact (M5 top-1000, 999 series, 28-day horizon)
+
+Adding the terminal calibration on top of the best config (Laplace+AR2+seasonal7):
+
+| variant | MAE (median) | MAE (mean) | cover@90 (target 0.90) | logpdf (avg) | fit time |
+|---|---|---|---|---|---|
+| Laplace + AR2 + S7 | 5.09 | 6.64 | 0.970 | −3.824 | 0.37 s |
+| **Laplace + AR2 + S7 + Cal** | 5.09 | 6.64 | **0.966** | **−3.773** | 0.43 s |
+
+- Coverage moved 0.4 pp toward target — right direction, but modest. Root cause: on M5 retail the h=1 in-sample residuals are close to Gaussian, so quantile-matching only trims ~4%. The remaining coverage gap is train/test distribution mismatch (28-day held-out has different residual statistics than the 1942-obs training window).
+- **Logpdf improved 0.051** — a real distributional-quality win, the payoff MoM couldn't get.
+- MAE unchanged (calibration is a spread-only transform; the mixture mean is preserved).
+
+Future work (deferred to a later alpha): **per-horizon calibration** — collect predictive std across `h ∈ 1..=H` during a rolling in-sample pass and fit `λ_h` separately. Would close more of the remaining coverage gap at ~2× fit cost.
+
+### Notes
+
+Alpha surface: additive behind the `distributional` feature. All existing configurations behave identically; calibration must be explicitly requested. Composes freely with Holt / AR(2) / seasonal builders.
+
 ## [0.12.0-alpha.4] - 2026-07-06
 
 ### Added
