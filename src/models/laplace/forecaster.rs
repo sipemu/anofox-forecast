@@ -18,6 +18,68 @@ use crate::transform::yeo_johnson::yeo_johnson_lambda;
 
 use super::ensemble::{blend_horizon, softmax};
 
+/// Series characteristics used by the auto-selector.
+#[derive(Clone, Copy)]
+struct AutoChars {
+    seasonality_strength: f64,
+    acf1: f64,
+}
+
+/// Compute (seasonality_strength_R², |ACF(1)|) on the training window.
+/// Same formulas as `examples/skaters_m5_benchmark.rs` so the auto-selector
+/// respects the same slicing evidence.
+fn auto_characteristics(train: &[f64], period: usize) -> AutoChars {
+    let n = train.len();
+    if n < 2 {
+        return AutoChars {
+            seasonality_strength: 0.0,
+            acf1: 0.0,
+        };
+    }
+    let mean_y: f64 = train.iter().sum::<f64>() / n as f64;
+    let ss_tot: f64 = train.iter().map(|y| (y - mean_y).powi(2)).sum();
+
+    // Phase-mean seasonal fit R².
+    let period = period.max(1);
+    let mut phase_sum = vec![0.0f64; period];
+    let mut phase_count = vec![0usize; period];
+    for (i, &y) in train.iter().enumerate() {
+        phase_sum[i % period] += y;
+        phase_count[i % period] += 1;
+    }
+    let phase_mean: Vec<f64> = phase_sum
+        .iter()
+        .zip(phase_count.iter())
+        .map(|(s, &c)| if c > 0 { s / c as f64 } else { mean_y })
+        .collect();
+    let ss_res_season: f64 = train
+        .iter()
+        .enumerate()
+        .map(|(i, y)| (y - phase_mean[i % period]).powi(2))
+        .sum();
+    let seasonality_strength = if ss_tot > 0.0 {
+        (1.0 - ss_res_season / ss_tot).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+
+    // |AR(1)| lag-1 autocorrelation.
+    let mut num = 0.0f64;
+    for i in 1..n {
+        num += (train[i - 1] - mean_y) * (train[i] - mean_y);
+    }
+    let acf1 = if ss_tot > 0.0 {
+        (num / ss_tot).clamp(-1.0, 1.0).abs()
+    } else {
+        0.0
+    };
+
+    AutoChars {
+        seasonality_strength,
+        acf1,
+    }
+}
+
 /// Yeo-Johnson forward transform (scalar).
 #[inline]
 fn yj_forward(x: f64, lambda: f64) -> f64 {
@@ -114,6 +176,18 @@ pub struct LaplaceForecaster {
     /// per series, imitating skaters' "Bayesian ensemble over a large
     /// candidate population" without adding new leaf families.
     use_populations: bool,
+    /// If true, `fit()` inspects the training series' characteristics
+    /// (`trend_strength`, `seasonality_strength`, `acf1`) and configures
+    /// the opt-in toggles from the α-8 residual-slicing evidence: always
+    /// add OU; add AR(2) if `acf1 > 0.4`; add seasonal(7) if
+    /// `seasonality_strength > 0.15`; add fractional-diff if `acf1 > 0.5`.
+    /// Does not enable Holt / populations / Yeo-Johnson (evidence-negative
+    /// on M5). The user-configured toggles are respected — `auto()` only
+    /// adds, never removes.
+    use_auto: bool,
+    /// Seasonal period used by `auto()`. Defaults to 7 (weekly). Set via
+    /// [`Self::auto_with_seasonal_period`] for non-daily panels.
+    auto_seasonal_period: usize,
     /// `(d, α_mean, α_diff)` for the fractional-differencing leaf. Adds
     /// a long-memory drift-like leaf.
     frac_diff: Option<(f64, f64, f64)>,
@@ -172,6 +246,8 @@ impl LaplaceForecaster {
             yj_lambda: None,
             yj_auto: false,
             use_populations: false,
+            use_auto: false,
+            auto_seasonal_period: 7,
             frac_diff: None,
             ou: None,
             leaves: Vec::new(),
@@ -251,6 +327,30 @@ impl LaplaceForecaster {
     /// Adds compute proportional to the leaf count (roughly 2.3×).
     pub fn with_populations(mut self) -> Self {
         self.use_populations = true;
+        self
+    }
+
+    /// Enable the per-series meta-selector. At `fit()` time, inspect the
+    /// training series' characteristics and add opt-in leaves based on
+    /// the α-8 residual-slicing evidence:
+    ///
+    /// * OU is always added (best single-leaf logpdf across all configs);
+    /// * AR(2) is added when `|acf1| > 0.4` (its best segment);
+    /// * seasonal-EMA at the auto period is added when the phase-mean R² > 0.15;
+    /// * fractional-diff is added when `|acf1| > 0.5`.
+    ///
+    /// Holt / populations / Yeo-Johnson are NOT added (evidence-negative
+    /// on M5). Composes with the explicit `with_*` builders — auto only
+    /// adds leaves, never removes.
+    pub fn auto(mut self) -> Self {
+        self.use_auto = true;
+        self
+    }
+
+    /// Override the seasonal period used by [`Self::auto`] (default 7,
+    /// weekly). Set to 12 for monthly, 24 for hourly-with-daily, etc.
+    pub fn auto_with_seasonal_period(mut self, period: usize) -> Self {
+        self.auto_seasonal_period = period.max(2);
         self
     }
 
@@ -392,6 +492,25 @@ impl Forecaster for LaplaceForecaster {
             return Err(ForecastError::InvalidParameter(
                 "LaplaceForecaster requires at least one observation".into(),
             ));
+        }
+
+        // Auto-selector: inspect series characteristics before initialising
+        // leaves and set the opt-in toggles from the α-8 slicing evidence.
+        // User-configured toggles are respected — auto only adds.
+        if self.use_auto {
+            let chars = auto_characteristics(values, self.auto_seasonal_period);
+            if self.ou.is_none() {
+                self.ou = Some(0.1);
+            }
+            if chars.acf1 > 0.4 && self.ar2.is_none() {
+                self.ar2 = Some(0.1);
+            }
+            if chars.seasonality_strength > 0.15 && self.seasonal_period.is_none() {
+                self.seasonal_period = Some(self.auto_seasonal_period);
+            }
+            if chars.acf1 > 0.5 && self.frac_diff.is_none() {
+                self.frac_diff = Some((0.4, 0.1, 0.1));
+            }
         }
 
         self.init_leaves();
@@ -860,6 +979,67 @@ mod tests {
             Explanation::Laplace(e) => {
                 assert_eq!(e.leaf_names, vec!["ema", "drift", "ar1", "frac_diff", "ou"]);
                 assert_eq!(e.leaf_weights.len(), 5);
+            }
+            other => panic!("expected Explanation::Laplace, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn auto_on_strongly_seasonal_series_adds_seasonal_leaf() {
+        let ts = ts_seasonal(240, 12);
+        let mut f = LaplaceForecaster::new()
+            .auto()
+            .auto_with_seasonal_period(12);
+        f.fit(&ts).unwrap();
+        match Inspectable::explanation(&f).unwrap() {
+            Explanation::Laplace(e) => {
+                // Always OU; strong seasonal → seasonal_ema; likely ar2 (sinusoidal has ACF > 0.4).
+                assert!(
+                    e.leaf_names.iter().any(|n| n == "ou"),
+                    "OU should always be added: {:?}",
+                    e.leaf_names
+                );
+                assert!(
+                    e.leaf_names.iter().any(|n| n == "seasonal_ema"),
+                    "seasonal_ema should be added: {:?}",
+                    e.leaf_names
+                );
+            }
+            other => panic!("expected Explanation::Laplace, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn auto_on_pure_ar1_adds_ar2_and_ou_but_not_seasonal() {
+        let ts = ts_ar1(240, 0.7);
+        let mut f = LaplaceForecaster::new().auto();
+        f.fit(&ts).unwrap();
+        match Inspectable::explanation(&f).unwrap() {
+            Explanation::Laplace(e) => {
+                assert!(
+                    e.leaf_names.iter().any(|n| n == "ar2"),
+                    "AR(2) should be added on high-ACF: {:?}",
+                    e.leaf_names
+                );
+                assert!(
+                    e.leaf_names.iter().any(|n| n == "ou"),
+                    "OU should always be added: {:?}",
+                    e.leaf_names
+                );
+            }
+            other => panic!("expected Explanation::Laplace, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn auto_respects_explicit_user_toggles() {
+        let ts = ts_ar1(200, 0.5);
+        let mut f = LaplaceForecaster::new().auto().with_holt_defaults();
+        f.fit(&ts).unwrap();
+        match Inspectable::explanation(&f).unwrap() {
+            Explanation::Laplace(e) => {
+                // User asked for Holt — auto never removes.
+                assert!(e.leaf_names.iter().any(|n| n == "holt_damped"));
             }
             other => panic!("expected Explanation::Laplace, got {other:?}"),
         }

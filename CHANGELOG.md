@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0-alpha.10] - 2026-07-06
+
+### Added
+
+- **Per-series meta-selector via `LaplaceForecaster::new().auto()`** — inspects the training series' `seasonality_strength` (period-mean R²) and `|acf1|` at `fit()` and configures the opt-in toggles from the α-8 residual-slicing evidence:
+  - OU always added (best single-leaf logpdf across all M5 configs);
+  - AR(2) added if `|acf1| > 0.4` (best segment for AR2);
+  - Seasonal-EMA (default period 7, overridable via `auto_with_seasonal_period(p)`) added if `seasonality_strength > 0.15`;
+  - Fractional-diff added if `|acf1| > 0.5`.
+  - Holt / Populations / Yeo-Johnson are **not** added (evidence-negative on M5).
+- Composes with the explicit `with_*` builders — `auto()` only adds leaves, never removes.
+
+### Benchmark: auto vs. the best fixed config on M5
+
+| variant | MAE (median) | MAE (mean) | cover@90 | logpdf | fit time |
+|---|---|---|---|---|---|
+| Laplace + AR2 + S7,30 + FD + OU (α-9 fixed best) | 4.91 | 6.40 | 0.956 | −3.773 | 2.03 s |
+| **Laplace + auto** | **5.03** | **6.59** | 0.949 | **−3.677** | **1.32 s** |
+| Laplace (plain) | 5.46 | 7.05 | 0.961 | −3.733 | 0.24 s |
+
+- 33% faster than the fixed kitchen sink (auto skips FD on medium-ACF series).
+- Best logpdf of any non-OU-only variant (−3.677) — the per-series calibration picks a config that matches distribution shape well.
+- Loses ~2% median MAE to the fixed kitchen sink on M5 — but M5 is a panel where every series happens to benefit from every leaf; on unknown / heterogeneous panels the compute savings and reasonable defaults matter more than the last 2% of MAE.
+
 ### Deferred to a later alpha
 
 - **Coordinate-grid Yeo-Johnson** (was α-10). The alpha-6 single-λ YJ ships; expanding to a full `(leaf × λ)` softmax matrix is a shell-architecture change (~1 week). Given the α-8/9 stack already crosses 50% pairwise winrate vs. AutoETS, this is deferred until benchmark evidence indicates the tradeoff is worth it on a specific panel type. Scoped design: a `WrappedYjLeaf<L>` newtype that wraps any leaf with a fixed λ, plus a `LaplaceForecaster::with_yeo_johnson_grid(&[f64])` builder that instantiates one wrapped copy of every leaf per λ.
