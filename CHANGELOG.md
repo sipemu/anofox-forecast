@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0-alpha.14] - 2026-07-06
+
+### Added
+
+- **Per-horizon calibration** via `LaplaceForecaster::new().with_calibration().with_per_horizon_calibration(horizon_max)`. During `fit()`, saves periodic H-step snapshots of the mixture at every ~N/30 observations; after the shared calibration, quantile-matches per-h `|z_h|` and stores a `Vec<f64>` of `λ_h` scale factors. Applied at forecast time on top of the α-5 shared scalar.
+- Falls back to the shared scalar for horizons with fewer than 5 usable snapshots.
+
+### Benchmark: coverage hits target
+
+M5 top-1000 (`Laplace + AR2 + S7` + calibration variants):
+
+| variant | MAE (median) | cover@90 (target 0.90) | logpdf | fit |
+|---|---|---|---|---|
+| uncalibrated | 5.09 | 0.970 | −3.825 | 0.38 s |
+| + Cal (α-5 shared) | 5.09 | 0.966 (−0.4 pp) | −3.774 | 0.45 s |
+| **+ Cal + perH (α-14)** | 5.09 | **0.907 (−6.3 pp)** — hits target within 1 pp | **−3.560** (best of any variant) | 0.54 s |
+
+- **Direct hit on the 0.90 coverage target** — perH moves coverage 15× further than the shared scalar (6.3 pp vs 0.4 pp).
+- **Best logpdf across all α-5 to α-14 configs**, beating OU alone (−3.632).
+- MAE unchanged (scale-only transform).
+- Fit time +20% for the periodic snapshots — cheap.
+
+### Notes
+
+Alpha surface: additive. `with_per_horizon_calibration(h)` implicitly calls `with_calibration()`. The per-h scales stack multiplicatively with the shared scalar. `horizon_max` defaults to 28 (M5 competition horizon) if the shorthand `with_calibration()` alone is used.
+
 ## [0.12.0-alpha.13] - 2026-07-06
 
 ### Added

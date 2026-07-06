@@ -195,6 +195,16 @@ pub struct LaplaceForecaster {
     seasonal_periods_multi: Vec<usize>,
     seasonal_alpha: f64,
     calibrate: bool,
+    /// If true, calibration additionally fits per-horizon scale factors
+    /// via periodic in-sample snapshots (α-14). Applied after the shared
+    /// `calibration_scale`. Empty vector when unused.
+    calibrate_per_h: bool,
+    /// Number of horizons over which to fit per-h calibration. Defaults to
+    /// 28 (matches the M5 competition horizon). Callers requesting forecasts
+    /// beyond this horizon get the last saved `λ_h`.
+    per_h_horizon: usize,
+    /// Per-h scale factors fit in `fit()` when `calibrate_per_h` is on.
+    calibration_scale_per_h: Vec<f64>,
     /// User-supplied Yeo-Johnson λ. Overrides `yj_auto` when both are set.
     yj_lambda: Option<f64>,
     /// If true, fit the Yeo-Johnson λ via MLE at the start of `fit()` and
@@ -283,6 +293,9 @@ impl LaplaceForecaster {
             seasonal_periods_multi: Vec::new(),
             seasonal_alpha: 0.15,
             calibrate: false,
+            calibrate_per_h: false,
+            per_h_horizon: 28,
+            calibration_scale_per_h: Vec::new(),
             yj_lambda: None,
             yj_auto: false,
             use_populations: false,
@@ -440,6 +453,19 @@ impl LaplaceForecaster {
     /// the current shell.
     pub fn with_calibration(mut self) -> Self {
         self.calibrate = true;
+        self
+    }
+
+    /// Enable per-horizon calibration on top of the shared quantile-match.
+    /// During `fit()`, save the mixture at periodic snapshots; after
+    /// training, fit a per-h scale factor `λ_h` via quantile matching on
+    /// `|residual_h / σ_h|` for each horizon `h ∈ 1..=horizon_max`.
+    /// Applied multiplicatively with the shared scalar at forecast time.
+    /// Requires `with_calibration()` to also be set.
+    pub fn with_per_horizon_calibration(mut self, horizon_max: usize) -> Self {
+        self.calibrate_per_h = true;
+        self.per_h_horizon = horizon_max.max(1);
+        self.calibrate = true; // per-h needs the shared machinery too
         self
     }
 
@@ -674,11 +700,44 @@ impl Forecaster for LaplaceForecaster {
             (lo, hi)
         });
 
-        for &y_orig in values {
+        // Snapshot collection for per-horizon calibration: at periodic
+        // intervals during fit, save the H-horizon mixture-mean/std so that
+        // after fit we can quantile-match per h against known-future values.
+        let snapshot_stride = (values.len() / 30).clamp(1, 200);
+        let per_h_horizon = self.per_h_horizon;
+        let mut per_h_snapshots: Vec<(usize, Vec<(f64, f64)>)> = Vec::new();
+
+        for (step, &y_orig) in values.iter().enumerate() {
             let y = match yj {
                 Some(l) => yj_forward(y_orig, l),
                 None => y_orig,
             };
+
+            // Periodic snapshot: take before observing y at this step. Only
+            // useful when the snapshot's H-step horizon fits inside training.
+            if self.calibrate_per_h
+                && step >= 30
+                && step % snapshot_stride == 0
+                && step + per_h_horizon <= values.len()
+            {
+                let weights_now = self.weights();
+                let per_leaf_h: Vec<Vec<super::dist::Gaussian>> = self
+                    .leaves
+                    .iter()
+                    .map(|l| l.predict(per_h_horizon))
+                    .collect();
+                let mixtures: Vec<(f64, f64)> = (0..per_h_horizon)
+                    .map(|h| {
+                        let m = blend_horizon(&weights_now, &per_leaf_h, h);
+                        if m.is_empty() {
+                            (0.0, 1.0)
+                        } else {
+                            (m.mean(), m.std())
+                        }
+                    })
+                    .collect();
+                per_h_snapshots.push((step, mixtures));
+            }
 
             // 1-step predictions from each leaf, before observing y.
             let per_leaf: Vec<super::dist::Gaussian> =
@@ -759,6 +818,49 @@ impl Forecaster for LaplaceForecaster {
                 let p90 = zabs[idx].max(1e-9);
                 self.calibration_scale = p90 / GAUSSIAN_Z_AT_90;
             }
+        }
+
+        // Per-horizon calibration: for each h, quantile-match |z_h| =
+        // |(y_{t+h} - predicted_mean_h) / predicted_std_h| against a
+        // Gaussian's P90 = 1.645. When there aren't enough snapshots at
+        // some h, fall back to `self.calibration_scale`.
+        if self.calibrate_per_h && !per_h_snapshots.is_empty() {
+            const TARGET_LEVEL: f64 = 0.90;
+            const GAUSSIAN_Z_AT_90: f64 = 1.644_853_626_951_472_7;
+            let mut per_h = Vec::with_capacity(per_h_horizon);
+            for h in 1..=per_h_horizon {
+                let mut zabs: Vec<f64> = per_h_snapshots
+                    .iter()
+                    .filter_map(|(step, mixtures)| {
+                        let (mu_trans, sigma_trans) = mixtures[h - 1];
+                        if !(sigma_trans > 1e-9 && sigma_trans.is_finite()) {
+                            return None;
+                        }
+                        let target_idx = *step + h;
+                        if target_idx >= values.len() {
+                            return None;
+                        }
+                        let y_trans = match yj {
+                            Some(l) => yj_forward(values[target_idx], l),
+                            None => values[target_idx],
+                        };
+                        Some(((y_trans - mu_trans) / sigma_trans).abs())
+                    })
+                    .collect();
+                if zabs.len() < 5 {
+                    // Too few points for a stable per-h estimate; reuse
+                    // the shared scalar so we don't over-fit noise.
+                    per_h.push(self.calibration_scale);
+                    continue;
+                }
+                zabs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                let idx = ((zabs.len() as f64 * TARGET_LEVEL).ceil() as usize)
+                    .saturating_sub(1)
+                    .min(zabs.len() - 1);
+                let p90 = zabs[idx].max(1e-9);
+                per_h.push(p90 / GAUSSIAN_Z_AT_90);
+            }
+            self.calibration_scale_per_h = per_h;
         }
         Ok(())
     }
@@ -867,18 +969,17 @@ impl DistributionalForecaster for LaplaceForecaster {
         let weights = self.weights();
         let per_leaf = self.per_leaf_horizons(horizon);
         let scale = self.calibration_scale;
+        let per_h = &self.calibration_scale_per_h;
         let yj = self.fitted_yj_lambda;
         let trans_range = self.yj_trans_range;
         Ok((0..horizon)
             .map(|h| {
                 let m = blend_horizon(&weights, &per_leaf, h);
-                // Apply calibration scale in the leaves' space (transformed
-                // if YJ is active), then YJ inverse via delta method. Clamp
-                // component means to the observed training range in
-                // transformed space to prevent the log-branch Jacobian from
-                // exploding on far-horizon extrapolation.
+                // Apply per-h scale factor when available (fall back to the
+                // shared scalar). Applied in leaves' space, before YJ inverse.
+                let scale_h = per_h.get(h).copied().unwrap_or(scale);
                 let components = m.components.into_iter().map(|(w, g)| {
-                    let sigma_scaled = g.std * scale;
+                    let sigma_scaled = g.std * scale_h;
                     let (mean_out, sigma_out) = match yj {
                         Some(l) => {
                             let mean_trans = match trans_range {
