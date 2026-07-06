@@ -105,6 +105,12 @@ pub struct LaplaceForecaster {
     /// If true, fit the Yeo-Johnson λ via MLE at the start of `fit()` and
     /// store it in `fitted_yj_lambda`.
     yj_auto: bool,
+    /// If true, [`Self::init_leaves`] replaces the 3-leaf default with an
+    /// expanded 7-leaf population — EMA at 3 rates, drift at 2, AR(1)
+    /// mean-EMA at 2. The likelihood weighting picks the effective rate
+    /// per series, imitating skaters' "Bayesian ensemble over a large
+    /// candidate population" without adding new leaf families.
+    use_populations: bool,
 
     leaves: Vec<Box<dyn Leaf + Send>>,
     cum_log_liks: Vec<f64>,
@@ -155,6 +161,7 @@ impl LaplaceForecaster {
             calibrate: false,
             yj_lambda: None,
             yj_auto: false,
+            use_populations: false,
             leaves: Vec::new(),
             cum_log_liks: Vec::new(),
             n_obs: 0,
@@ -187,6 +194,23 @@ impl LaplaceForecaster {
     pub fn with_yeo_johnson_mle(mut self) -> Self {
         self.yj_auto = true;
         self.yj_lambda = None;
+        self
+    }
+
+    /// Replace the 3-leaf default set (one EMA / drift / AR(1) each) with
+    /// an expanded 7-leaf population that hyperparameter-sweeps the same
+    /// families:
+    ///
+    /// * `EMA` at α ∈ {0.05, 0.2, 0.5} (slow / medium / fast level tracking)
+    /// * `Drift` at α ∈ {0.05, 0.15}
+    /// * `AR(1)` mean-EMA at α ∈ {0.05, 0.15}
+    ///
+    /// The softmax-over-cumulative-log-lik weighting picks the effective
+    /// rate per series. Composes freely with `with_holt` / `with_ar2` /
+    /// `with_seasonal` — those still add their own opt-in leaves on top.
+    /// Adds compute proportional to the leaf count (roughly 2.3×).
+    pub fn with_populations(mut self) -> Self {
+        self.use_populations = true;
         self
     }
 
@@ -256,11 +280,23 @@ impl LaplaceForecaster {
     }
 
     fn init_leaves(&mut self) {
-        let mut leaves: Vec<Box<dyn Leaf + Send>> = vec![
-            Box::new(EmaLeaf::new(self.ema_alpha)),
-            Box::new(DriftLeaf::new(self.drift_alpha)),
-            Box::new(Ar1Leaf::new(self.ar_alpha_mean)),
-        ];
+        let mut leaves: Vec<Box<dyn Leaf + Send>> = if self.use_populations {
+            vec![
+                Box::new(EmaLeaf::new(0.05)),
+                Box::new(EmaLeaf::new(0.20)),
+                Box::new(EmaLeaf::new(0.50)),
+                Box::new(DriftLeaf::new(0.05)),
+                Box::new(DriftLeaf::new(0.15)),
+                Box::new(Ar1Leaf::new(0.05)),
+                Box::new(Ar1Leaf::new(0.15)),
+            ]
+        } else {
+            vec![
+                Box::new(EmaLeaf::new(self.ema_alpha)),
+                Box::new(DriftLeaf::new(self.drift_alpha)),
+                Box::new(Ar1Leaf::new(self.ar_alpha_mean)),
+            ]
+        };
         if let Some((a, b, phi)) = self.holt {
             leaves.push(Box::new(HoltLeaf::new(a, b, phi)));
         }
@@ -752,6 +788,45 @@ mod tests {
         let mut f = LaplaceForecaster::new().with_yeo_johnson(0.5);
         f.fit(&ts).unwrap();
         assert_eq!(f.yeo_johnson_lambda(), Some(0.5));
+    }
+
+    #[test]
+    fn with_populations_expands_leaf_count() {
+        let ts = ts_ar1(120, 0.4);
+        let mut f = LaplaceForecaster::new().with_populations();
+        f.fit(&ts).unwrap();
+        match Inspectable::explanation(&f).unwrap() {
+            Explanation::Laplace(e) => {
+                assert_eq!(e.leaf_names.len(), 7, "population set: {:?}", e.leaf_names);
+                // Rate labels are the same as the singleton versions —
+                // three EMAs, two Drifts, two AR(1)s.
+                let counts = |name: &str| -> usize {
+                    e.leaf_names.iter().filter(|n| n.as_str() == name).count()
+                };
+                assert_eq!(counts("ema"), 3);
+                assert_eq!(counts("drift"), 2);
+                assert_eq!(counts("ar1"), 2);
+                assert!((e.leaf_weights.iter().sum::<f64>() - 1.0).abs() < 1e-9);
+            }
+            other => panic!("expected Explanation::Laplace, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn with_populations_composes_with_seasonal_and_ar2() {
+        let ts = ts_ar1(120, 0.4);
+        let mut f = LaplaceForecaster::new()
+            .with_populations()
+            .with_seasonal(7)
+            .with_ar2_defaults();
+        f.fit(&ts).unwrap();
+        match Inspectable::explanation(&f).unwrap() {
+            Explanation::Laplace(e) => {
+                // 7 population + 1 AR(2) + 1 seasonal = 9.
+                assert_eq!(e.leaf_names.len(), 9);
+            }
+            other => panic!("expected Explanation::Laplace, got {other:?}"),
+        }
     }
 
     #[test]

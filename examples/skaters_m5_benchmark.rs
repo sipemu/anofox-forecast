@@ -122,8 +122,9 @@ fn main() {
 
     // Slot layout stable so the pairwise matrix and summary lines match:
     //   0=AutoETS, 1=AutoTheta, 2=Laplace, 3=Laplace+H, 4=Laplace+AR2,
-    //   5=Laplace+S7, 6=Laplace+AR2+S7, 7=+Cal, 8=+YJ, 9=+YJ+Cal.
-    const N_MODELS: usize = 10;
+    //   5=Laplace+S7, 6=Laplace+AR2+S7, 7=+Cal, 8=+YJ, 9=+YJ+Cal,
+    //   10=Laplace+Pops, 11=Laplace+Pops+AR2+S7.
+    const N_MODELS: usize = 12;
     let labels: [&str; N_MODELS] = [
         "AutoETS",
         "AutoTheta",
@@ -135,6 +136,8 @@ fn main() {
         "Laplace+AR2+S7+Cal",
         "Laplace+AR2+S7+YJ",
         "Laplace+AR2+S7+YJ+Cal",
+        "Laplace+Pops",
+        "Laplace+Pops+AR2+S7",
     ];
     let mut results: Vec<Vec<SeriesResult>> = (0..N_MODELS).map(|_| Vec::new()).collect();
     let mut characteristics: Vec<Characteristics> = Vec::new();
@@ -175,7 +178,7 @@ fn main() {
 
         #[cfg(feature = "distributional")]
         {
-            let cfgs: [(usize, LaplaceForecaster); 8] = [
+            let cfgs: [(usize, LaplaceForecaster); 10] = [
                 (2, LaplaceForecaster::new()),
                 (3, LaplaceForecaster::new().with_holt_defaults()),
                 (4, LaplaceForecaster::new().with_ar2_defaults()),
@@ -207,6 +210,14 @@ fn main() {
                         .with_seasonal(7)
                         .with_yeo_johnson_mle()
                         .with_calibration(),
+                ),
+                (10, LaplaceForecaster::new().with_populations()),
+                (
+                    11,
+                    LaplaceForecaster::new()
+                        .with_populations()
+                        .with_ar2_defaults()
+                        .with_seasonal(7),
                 ),
             ];
             for (slot, model) in cfgs {
