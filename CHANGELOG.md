@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0-alpha.7] - 2026-07-06
+
+### Added
+
+- **Hyperparameter-population leaf set for `LaplaceForecaster`** — opt-in via `LaplaceForecaster::new().with_populations()`. Replaces the 3-leaf default with a 7-leaf expansion in the same families: `EMA` at α ∈ {0.05, 0.20, 0.50}, `Drift` at α ∈ {0.05, 0.15}, `AR(1)` mean-EMA at α ∈ {0.05, 0.15}. The softmax-over-cumulative-log-lik weighting picks the effective rate per series — imitates skaters' "Bayesian ensemble over a large candidate population" without adding new leaf families.
+- Composes freely with `with_holt` / `with_ar2` / `with_seasonal` — those still add their own opt-in leaves on top.
+
+### Benchmark: populations regressed on M5 retail
+
+Same pattern as Holt (alpha-3) and Yeo-Johnson (alpha-6) — the paper's design regresses on M5 retail specifics:
+
+| variant | MAE (median) | MAE (mean) | cover@90 | fit time |
+|---|---|---|---|---|
+| Laplace (plain, 3 leaves) | 5.46 | 7.05 | 0.961 | 0.24 s |
+| **Laplace + Populations (7 leaves)** | **5.58 (+2.2%)** | **7.55 (+7.1%)** | **0.966** | 0.47 s |
+| Laplace + AR2 + S7 (best config) | 5.09 | 6.64 | 0.970 | 0.38 s |
+| **Laplace + Populations + AR2 + S7** | **5.36 (+5.3%)** | **7.35 (+10.7%)** | **0.974** | 0.61 s |
+
+**Hypothesized cause.** The softmax weighting collapses onto a single best-fitting α per series based on cumulative log-lik. On M5's short training windows (~1900 obs, 28-day held-out), that collapse happens quickly and the wrong α often wins — the residual variance's dependence on level (the thing that would justify the fast-EMA family) isn't strongly stationary, so a globally-best α is a mirage. Ensemble diversity that would help on longer, more stationary series just adds noise here.
+
+Coverage moved slightly (~+0.5 pp, similar magnitude to alpha-5 calibration).
+
+**Ship recommendation.** Opt-in with the tradeoff documented — for non-retail panels (skaters' FRED-non-price target) the population weighting should recover the paper's advertised behavior. On M5-style retail data, prefer the alpha-2 3-leaf default with `AR(2) + seasonal` opt-ins.
+
+### Notes
+
+Alpha surface: additive behind the `distributional` feature. Default builds unchanged.
+
 ## [0.12.0-alpha.6] - 2026-07-06
 
 ### Added
