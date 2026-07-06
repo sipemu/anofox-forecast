@@ -3,7 +3,7 @@
 //! Alpha surface (behind the `distributional` feature). Inspired by
 //! [`microprediction/skaters`](https://github.com/microprediction/skaters):
 //! streaming leaves, likelihood-weighted mixture, per-horizon
-//! [`GaussianMixture`](super::dist::GaussianMixture) output. Only the shell
+//! [`GaussianMixture`] output. Only the shell
 //! and three cheap leaves are implemented — no CRPS terminal, no
 //! seasonal / OU / fractional-differencing / Yeo-Johnson leaves.
 
