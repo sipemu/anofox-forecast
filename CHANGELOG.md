@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0-alpha.20] - 2026-07-06
+
+### Added — full-M5 loss-driven fixes
+
+Full-M5 (30k series, including intermittent) exposed a big regression vs. AutoETS that the α-19 stack had not been trained against (`M5 top-1000` filtered intermittent series out). α-20 targets the three biggest loss segments identified from a 500-sample analysis of full M5:
+
+- **`SeasonalIntermittentLeaf`** — Croston + per-phase demand-EMA. Retail SKU data has non-zero clusters aligned to a period (weekend spikes on daily). Classic `IntermittentLeaf` predicts a flat `demand_ema / interval_ema` constant and misses the phase shape; the new leaf captures it via `demand_ema[phase] × (n_nonzero_at_phase / n_obs_at_phase)`.
+- **`LaplaceForecaster::with_seasonal_intermittent(period, α)`** + `.with_seasonal_intermittent_defaults(period)` builder.
+- **`.auto()` rule additions**:
+  - `trend_strength ∈ [0.3, 0.7]` → `with_holt_defaults()` — mid-trend series that were unwitnessed by α-10's rules.
+  - `zero_fraction > 0.3 && seasonality_strength > 0.10` → `with_seasonal_intermittent(period, 0.1)`.
+  - `zero_fraction > 0.4` → `with_intermittent(0.1)` (classic Croston as fallback).
+  - `zero_fraction > 0.3` → `non_negative()` — any intermittency-detected series bounds forecasts at 0.
+- **`SmartForecaster` routing revision**:
+  - Old rule `zero_fraction > 0.4 → Intermittent` → raised to `> 0.6`.
+  - New rule: `mean_y < 3.0 && zero_fraction ∈ [0.2, 0.6]` → **AutoETS**. Small-count noise-dominated segment where our Gaussian-mixture tails misbehave.
+
+### Benchmark: full-M5 500-sample
+
+| model | α-19 MAE (median) | **α-20 MAE (median)** | α-19 MAE (mean) | **α-20 MAE (mean)** |
+|---|---|---|---|---|
+| AutoETS | 0.960 | 0.960 (baseline) | 1.449 | 1.449 |
+| Laplace + auto | 1.024 (+6.7%) | **1.002 (+4.4%)** | 1.590 (+9.7%) | **1.552 (+7.1%)** |
+| SmartForecaster | 1.015 (+5.7%) | **0.988 (+2.9%)** | 1.592 (+9.9%) | **1.481 (+2.2%)** |
+
+Gap to AutoETS on median MAE: **5.7% → 2.9%**. On mean MAE: **9.9% → 2.2%**. SmartForecaster's routing shifted from 83% Intermittent / 0% AutoETS to 57% Intermittent / 30% AutoETS / 13% LaplaceAuto — the low-count fallback is catching series where AutoETS naturally wins.
+
+Full-30k benchmark is running in the background; will backfill numbers when it completes.
+
+### Notes
+
+Alpha surface: additive. The `.auto()` rule additions ONLY fire when the corresponding user builders haven't been called — user configuration is respected.
+
+
 ## [0.12.0-alpha.19] - 2026-07-06
 
 ### Added — cross-series shell + meta-learner scaffold

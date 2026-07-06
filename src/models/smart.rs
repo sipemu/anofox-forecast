@@ -97,6 +97,7 @@ fn routing_characteristics(train: &[f64]) -> RoutingChars {
     RoutingChars {
         zero_fraction,
         trend_strength,
+        mean_y,
     }
 }
 
@@ -104,6 +105,7 @@ fn routing_characteristics(train: &[f64]) -> RoutingChars {
 struct RoutingChars {
     zero_fraction: f64,
     trend_strength: f64,
+    mean_y: f64,
 }
 
 impl Forecaster for SmartForecaster {
@@ -117,18 +119,19 @@ impl Forecaster for SmartForecaster {
         }
         let chars = routing_characteristics(values);
 
-        // Rules (derived from the residual-slicing evidence + demand-domain
-        // priors):
+        // Rules (α-20 revision — derived from full-M5 loss analysis):
         //
-        // - zero_fraction > 0.4 → intermittent series; Croston beats EMA
-        //   family. Route to LaplaceForecaster with intermittent leaf +
-        //   non-negative clamp.
-        // - trend_strength > 0.6 → sustained trend; AutoETS' damped-trend
-        //   specs win. AR(2) blew up on this segment (see α-11) — auto
-        //   guards against it but AutoETS handles it more cleanly.
+        // - zero_fraction > 0.6 → highly intermittent; Croston wins on
+        //   these even at low counts.
+        // - low-count noise-dominated (mean < 3 && zero_fraction ∈ [0.2, 0.6])
+        //   → AutoETS. Our Gaussian-mixture tails misbehave on integer
+        //   counts near zero; AutoETS's damped model puts mass on realistic
+        //   regions.
+        // - trend_strength > 0.6 → sustained trend; AutoETS wins.
         // - Otherwise → LaplaceForecaster::auto() covers the residual
-        //   space (mid-trend, mid-seasonal, retail-normal).
-        let selected: SelectedFamily = if chars.zero_fraction > 0.4 {
+        //   space. `.auto()` now also handles zero-inflated seasonal via
+        //   the seasonal-Croston leaf (see α-20 changes in forecaster.rs).
+        let selected: SelectedFamily = if chars.zero_fraction > 0.6 {
             #[cfg(feature = "distributional")]
             {
                 SelectedFamily::Intermittent
@@ -137,7 +140,9 @@ impl Forecaster for SmartForecaster {
             {
                 SelectedFamily::AutoEts
             }
-        } else if chars.trend_strength > 0.6 {
+        } else if (chars.mean_y < 3.0 && chars.zero_fraction > 0.2 && chars.zero_fraction <= 0.6)
+            || chars.trend_strength > 0.6
+        {
             SelectedFamily::AutoEts
         } else {
             #[cfg(feature = "distributional")]

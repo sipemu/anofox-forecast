@@ -9,6 +9,7 @@ mod holt;
 mod intermittent;
 mod ou;
 mod seasonal_ema;
+mod seasonal_intermittent;
 mod seasonal_mult;
 mod yj_wrapper;
 
@@ -21,5 +22,6 @@ pub use holt::HoltLeaf;
 pub use intermittent::IntermittentLeaf;
 pub use ou::OuLeaf;
 pub use seasonal_ema::SeasonalEmaLeaf;
+pub use seasonal_intermittent::SeasonalIntermittentLeaf;
 pub use seasonal_mult::MultiplicativeSeasonalLeaf;
 pub use yj_wrapper::YjWrappedLeaf;

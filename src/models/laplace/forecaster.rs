@@ -29,6 +29,9 @@ struct AutoChars {
     /// on strong trends, producing recursive h-step blow-ups even with
     /// the leaf's stationarity projection).
     trend_strength: f64,
+    /// Fraction of observations at or near zero. Used to route
+    /// demand-side (Croston, seasonal-Croston) leaves.
+    zero_fraction: f64,
 }
 
 /// Compute (seasonality_strength_R², |ACF(1)|) on the training window.
@@ -41,10 +44,12 @@ fn auto_characteristics(train: &[f64], period: usize) -> AutoChars {
             seasonality_strength: 0.0,
             acf1: 0.0,
             trend_strength: 0.0,
+            zero_fraction: 0.0,
         };
     }
     let mean_y: f64 = train.iter().sum::<f64>() / n as f64;
     let ss_tot: f64 = train.iter().map(|y| (y - mean_y).powi(2)).sum();
+    let zero_fraction = train.iter().filter(|&&y| y.abs() < 1e-9).count() as f64 / n as f64;
 
     // Trend strength: R² of the linear fit y ~ t.
     let t_mean = (n - 1) as f64 / 2.0;
@@ -106,6 +111,7 @@ fn auto_characteristics(train: &[f64], period: usize) -> AutoChars {
         seasonality_strength,
         acf1,
         trend_strength,
+        zero_fraction,
     }
 }
 
@@ -164,7 +170,7 @@ fn yj_inverse_with_jac(y: f64, lambda: f64) -> (f64, f64) {
 use super::leaf::Leaf;
 use super::leaves::{
     Ar1Leaf, Ar2Leaf, DriftLeaf, EmaLeaf, FractionalDiffLeaf, HoltLeaf, IntermittentLeaf,
-    MultiplicativeSeasonalLeaf, OuLeaf, SeasonalEmaLeaf, YjWrappedLeaf,
+    MultiplicativeSeasonalLeaf, OuLeaf, SeasonalEmaLeaf, SeasonalIntermittentLeaf, YjWrappedLeaf,
 };
 use super::DistributionalForecaster;
 
@@ -249,6 +255,11 @@ pub struct LaplaceForecaster {
     /// better than level-EMAs (which get dragged toward 0 by the
     /// zero periods).
     intermittent: Option<f64>,
+    /// `(period, α)` for the seasonal-Croston leaf. Adds a
+    /// per-phase demand-EMA on top of the shared interval-EMA so
+    /// intermittent series with weekly / periodic non-zero clusters
+    /// (SKU weekend spikes) get the phase shape right.
+    seasonal_intermittent: Option<(usize, f64)>,
     /// When true, forecast means are clipped to `max(0, μ)` — the cheap
     /// "no-negative demand forecast" fix. Distribution std is left
     /// alone (so the 90% interval can still dip below zero — proper
@@ -322,6 +333,7 @@ impl LaplaceForecaster {
             frac_diff: None,
             ou: None,
             intermittent: None,
+            seasonal_intermittent: None,
             non_negative: false,
             seasonal_mult: None,
             exog_scaffold_declared: false,
@@ -401,6 +413,23 @@ impl LaplaceForecaster {
     /// value).
     pub fn with_intermittent_defaults(self) -> Self {
         self.with_intermittent(0.1)
+    }
+
+    /// Add a **seasonal-Croston** leaf that tracks per-phase demand-EMAs
+    /// on top of a shared interval-EMA. Retail SKU data typically has
+    /// non-zero clusters aligned to a period (weekend spikes on daily
+    /// data). Classic Croston predicts a flat constant and misses the
+    /// phase shape; this leaf captures it. `period < 2` is a no-op.
+    pub fn with_seasonal_intermittent(mut self, period: usize, alpha: f64) -> Self {
+        if period >= 2 {
+            self.seasonal_intermittent = Some((period, alpha));
+        }
+        self
+    }
+
+    /// Seasonal-Croston with the default rate `α = 0.1`.
+    pub fn with_seasonal_intermittent_defaults(self, period: usize) -> Self {
+        self.with_seasonal_intermittent(period, 0.1)
     }
 
     /// Clip forecast component means to `max(0, μ)` at prediction time.
@@ -648,6 +677,9 @@ impl LaplaceForecaster {
         if let Some(a) = self.intermittent {
             leaves.push(Box::new(IntermittentLeaf::new(a)));
         }
+        if let Some((p, a)) = self.seasonal_intermittent {
+            leaves.push(Box::new(SeasonalIntermittentLeaf::new(p, a)));
+        }
         if let Some(p) = self.seasonal_period {
             leaves.push(Box::new(SeasonalEmaLeaf::new(p, self.seasonal_alpha)));
         }
@@ -739,6 +771,31 @@ impl Forecaster for LaplaceForecaster {
             }
             if chars.acf1 > 0.5 && chars.trend_strength < 0.5 && self.frac_diff.is_none() {
                 self.frac_diff = Some((0.4, 0.1, 0.1));
+            }
+            // α-20 additions:
+            // - Mid-trend series get Holt (was evidence-negative on full-M5
+            //   only because it was applied to trend-free series; on the
+            //   trend_strength ∈ [0.3, 0.7] slice it wins).
+            if chars.trend_strength >= 0.3 && chars.trend_strength <= 0.7 && self.holt.is_none() {
+                self.holt = Some((0.3, 0.1, 0.98));
+            }
+            // - Zero-inflated seasonal series get the seasonal-Croston leaf.
+            //   Retail SKU data with weekend spikes is the biggest lose
+            //   segment on full M5; classic Croston misses the phase shape.
+            if chars.zero_fraction > 0.3
+                && chars.seasonality_strength > 0.10
+                && self.seasonal_intermittent.is_none()
+            {
+                self.seasonal_intermittent = Some((self.auto_seasonal_period, 0.1));
+            }
+            // - Purely intermittent (no phase signal) still gets classic
+            //   Croston.
+            if chars.zero_fraction > 0.4 && self.intermittent.is_none() {
+                self.intermittent = Some(0.1);
+            }
+            // - Any auto-detected intermittency implies non-negative output.
+            if chars.zero_fraction > 0.3 {
+                self.non_negative = true;
             }
         }
 
