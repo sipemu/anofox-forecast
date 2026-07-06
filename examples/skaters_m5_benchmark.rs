@@ -40,6 +40,16 @@ struct SeriesResult {
     fit_us: u128,
 }
 
+#[derive(Clone, Copy)]
+struct Characteristics {
+    /// R² of a linear fit y = a + b·t on the training window. In [0, 1].
+    trend_strength: f64,
+    /// R² of a phase-mean fit at period 7 on the training window. In [0, 1].
+    seasonality_strength: f64,
+    /// |Pearson correlation between y_t and y_{t-1}|. In [0, 1].
+    acf1: f64,
+}
+
 struct ModelSummary {
     name: &'static str,
     n_ok: usize,
@@ -123,6 +133,7 @@ fn main() {
         "Laplace+H+S7",
     ];
     let mut results: Vec<Vec<SeriesResult>> = (0..N_MODELS).map(|_| Vec::new()).collect();
+    let mut characteristics: Vec<Characteristics> = Vec::new();
 
     let global_start = Instant::now();
 
@@ -145,6 +156,12 @@ fn main() {
             Err(_) => continue,
         };
 
+        // Record series characteristics before any model runs; assumes all
+        // model fits below succeed (they do on this dataset). If a future
+        // dataset breaks that we'd need per-slot per-series alignment.
+        let chars = compute_characteristics(&train_values, 7);
+
+        let n0 = results[0].len();
         if let Some(r) = run_point(&mut AutoETS::new(), &train_ts, test_values) {
             results[0].push(r);
         }
@@ -171,6 +188,17 @@ fn main() {
                 }
             }
         }
+
+        // Only record characteristics if every model produced a matching row
+        // (keeps `characteristics[i]` aligned with `results[slot][i]`).
+        let all_ok = (0..N_MODELS).all(|s| results[s].len() == n0 + 1);
+        if all_ok {
+            characteristics.push(chars);
+        } else {
+            for s in 0..N_MODELS {
+                results[s].truncate(n0);
+            }
+        }
     }
 
     let total_wall = global_start.elapsed();
@@ -187,6 +215,7 @@ fn main() {
 
     print_summary(&summaries);
     print_pairwise(&labels, &results);
+    print_sliced_analysis(&labels, &results, &characteristics);
 }
 
 fn run_point<F: Forecaster>(
@@ -344,6 +373,174 @@ fn print_summary(summaries: &[ModelSummary]) {
             lp,
             s.total_ms as f64 / 1_000.0
         );
+    }
+}
+
+fn compute_characteristics(train: &[f64], period: usize) -> Characteristics {
+    let n = train.len();
+    if n < 2 {
+        return Characteristics {
+            trend_strength: 0.0,
+            seasonality_strength: 0.0,
+            acf1: 0.0,
+        };
+    }
+    let mean_y: f64 = train.iter().sum::<f64>() / n as f64;
+    let ss_tot: f64 = train.iter().map(|y| (y - mean_y).powi(2)).sum();
+
+    // Trend strength: R² of the linear fit y ~ t.
+    let t_mean = (n - 1) as f64 / 2.0;
+    let (mut sum_ty, mut sum_tt) = (0.0, 0.0);
+    for (t, y) in train.iter().enumerate() {
+        let dt = t as f64 - t_mean;
+        sum_ty += dt * (y - mean_y);
+        sum_tt += dt * dt;
+    }
+    let slope = if sum_tt > 0.0 { sum_ty / sum_tt } else { 0.0 };
+    let intercept = mean_y - slope * t_mean;
+    let ss_res_trend: f64 = train
+        .iter()
+        .enumerate()
+        .map(|(t, y)| (y - (intercept + slope * t as f64)).powi(2))
+        .sum();
+    let trend_strength = if ss_tot > 0.0 {
+        (1.0 - ss_res_trend / ss_tot).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+
+    // Seasonality strength: R² of the phase-mean fit at `period`.
+    let period = period.max(1);
+    let mut phase_sum = vec![0.0f64; period];
+    let mut phase_count = vec![0usize; period];
+    for (i, &y) in train.iter().enumerate() {
+        phase_sum[i % period] += y;
+        phase_count[i % period] += 1;
+    }
+    let phase_mean: Vec<f64> = phase_sum
+        .iter()
+        .zip(phase_count.iter())
+        .map(|(s, &c)| if c > 0 { s / c as f64 } else { mean_y })
+        .collect();
+    let ss_res_season: f64 = train
+        .iter()
+        .enumerate()
+        .map(|(i, y)| (y - phase_mean[i % period]).powi(2))
+        .sum();
+    let seasonality_strength = if ss_tot > 0.0 {
+        (1.0 - ss_res_season / ss_tot).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+
+    // |AR(1) autocorrelation|.
+    let mut num = 0.0f64;
+    for i in 1..n {
+        num += (train[i - 1] - mean_y) * (train[i] - mean_y);
+    }
+    let acf1 = if ss_tot > 0.0 {
+        (num / ss_tot).clamp(-1.0, 1.0).abs()
+    } else {
+        0.0
+    };
+
+    Characteristics {
+        trend_strength,
+        seasonality_strength,
+        acf1,
+    }
+}
+
+fn print_sliced_analysis(
+    labels: &[&str],
+    results: &[Vec<SeriesResult>],
+    characteristics: &[Characteristics],
+) {
+    let n = characteristics.len();
+    if n < 6 {
+        return;
+    }
+    let n_models = labels.len();
+    // Sanity: every model has one row per series.
+    for r in results {
+        assert_eq!(r.len(), n, "results/characteristics length mismatch");
+    }
+    let median_mae = |indices: &[usize], slot: usize| -> f64 {
+        let mut xs: Vec<f64> = indices.iter().map(|&i| results[slot][i].mae).collect();
+        xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let m = xs.len();
+        if m == 0 {
+            f64::NAN
+        } else if m % 2 == 1 {
+            xs[m / 2]
+        } else {
+            0.5 * (xs[m / 2 - 1] + xs[m / 2])
+        }
+    };
+    let winrate_vs_plain = |indices: &[usize], slot: usize| -> f64 {
+        let m = indices.len();
+        if m == 0 {
+            return f64::NAN;
+        }
+        let wins = indices
+            .iter()
+            .filter(|&&i| results[slot][i].mae < results[2][i].mae)
+            .count();
+        wins as f64 / m as f64
+    };
+
+    let dims: [(&str, Box<dyn Fn(&Characteristics) -> f64>); 3] = [
+        (
+            "trend_strength",
+            Box::new(|c: &Characteristics| c.trend_strength),
+        ),
+        (
+            "seasonality_strength",
+            Box::new(|c: &Characteristics| c.seasonality_strength),
+        ),
+        ("acf1", Box::new(|c: &Characteristics| c.acf1)),
+    ];
+
+    println!(
+        "\n=== Residual slicing — median MAE and Laplace-variant winrate vs. plain Laplace ==="
+    );
+    for (dim_name, key) in &dims {
+        let mut order: Vec<usize> = (0..n).collect();
+        order.sort_by(|&i, &j| {
+            key(&characteristics[i])
+                .partial_cmp(&key(&characteristics[j]))
+                .unwrap()
+        });
+        let third = n / 3;
+        let buckets: [(&str, &[usize]); 3] = [
+            ("low", &order[..third]),
+            ("mid", &order[third..2 * third]),
+            ("high", &order[2 * third..]),
+        ];
+        println!("\n[{}] (tercile splits)", dim_name);
+        // Header: bucket, n, then median MAE per model.
+        print!("{:<8}{:>6}", "bucket", "n");
+        for name in labels {
+            print!("{:>13}", name);
+        }
+        // Winrate columns for +H, +S7, +H+S7 vs. plain Laplace (slot 2).
+        for name in &labels[3..n_models] {
+            print!(
+                "{:>14}",
+                format!("{} v L", name.trim_start_matches("Laplace+"))
+            );
+        }
+        println!();
+        for (bucket_name, indices) in &buckets {
+            print!("{:<8}{:>6}", bucket_name, indices.len());
+            for slot in 0..n_models {
+                print!("{:>13.3}", median_mae(indices, slot));
+            }
+            for slot in 3..n_models {
+                print!("{:>14.3}", winrate_vs_plain(indices, slot));
+            }
+            println!();
+        }
     }
 }
 
