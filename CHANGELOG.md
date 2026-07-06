@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0-alpha.15] - 2026-07-06
+
+### Added — demand-forecasting basics
+
+- **`IntermittentLeaf`** — Croston-flavored leaf that tracks demand size and inter-demand interval as separate EMAs. Point forecast is `demand_ema / interval_ema` (expected demand per period). Dramatically better than level-EMAs on zero-inflated series (SKU sales with many zero days), which get dragged toward zero by the zero periods.
+- **`LaplaceForecaster::with_intermittent(α)` / `.with_intermittent_defaults()`** builder — adds the Croston leaf to the mixture. Composes with all other leaves; the softmax weights determine when it dominates (high-zero-fraction series) vs. the regression leaves (dense series).
+- **`LaplaceForecaster::non_negative()`** builder — clips forecast component means to `max(0, μ)` at prediction time. Cheap "no-negative-demand-forecast" fix; distribution std is left alone (the 90% interval can still dip below 0 — proper truncated-Gaussian output is deferred).
+
+### Notes
+
+Alpha surface: additive behind the `distributional` feature. Both new builders are opt-in and compose freely with all existing toggles. The intermittent leaf is unrelated to the M5 benchmark's `MIN_NONZERO_FRAC = 0.30` filter — real demand pipelines should now include the previously-excluded intermittent series with `.with_intermittent()`.
+
+### Future work
+
+- **Truncated-Gaussian mixture output** — proper non-negative distribution, not just the mean clamp.
+- **Multiplicative (log-normal / gamma) leaves** — retail demand is often log-normally distributed rather than symmetric.
+
 ## [0.12.0-alpha.14] - 2026-07-06
 
 ### Added

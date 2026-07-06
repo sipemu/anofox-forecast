@@ -163,8 +163,8 @@ fn yj_inverse_with_jac(y: f64, lambda: f64) -> (f64, f64) {
 }
 use super::leaf::Leaf;
 use super::leaves::{
-    Ar1Leaf, Ar2Leaf, DriftLeaf, EmaLeaf, FractionalDiffLeaf, HoltLeaf, OuLeaf, SeasonalEmaLeaf,
-    YjWrappedLeaf,
+    Ar1Leaf, Ar2Leaf, DriftLeaf, EmaLeaf, FractionalDiffLeaf, HoltLeaf, IntermittentLeaf, OuLeaf,
+    SeasonalEmaLeaf, YjWrappedLeaf,
 };
 use super::DistributionalForecaster;
 
@@ -244,6 +244,16 @@ pub struct LaplaceForecaster {
     /// `α_mean` for the OU mean-reversion leaf. Adds an explicit
     /// mean-reverting leaf parameterised by `θ = 1 − φ`.
     ou: Option<f64>,
+    /// `α` for the Croston-flavored intermittent-demand leaf. Adds a
+    /// demand-per-period leaf that handles zero-inflated series much
+    /// better than level-EMAs (which get dragged toward 0 by the
+    /// zero periods).
+    intermittent: Option<f64>,
+    /// When true, forecast means are clipped to `max(0, μ)` — the cheap
+    /// "no-negative demand forecast" fix. Distribution std is left
+    /// alone (so the 90% interval can still dip below zero — proper
+    /// truncated-Gaussian output is deferred).
+    non_negative: bool,
 
     leaves: Vec<Box<dyn Leaf + Send>>,
     cum_log_liks: Vec<f64>,
@@ -305,6 +315,8 @@ impl LaplaceForecaster {
             auto_seasonal_period: 7,
             frac_diff: None,
             ou: None,
+            intermittent: None,
+            non_negative: false,
             leaves: Vec::new(),
             cum_log_liks: Vec::new(),
             n_obs: 0,
@@ -366,6 +378,30 @@ impl LaplaceForecaster {
     /// OU leaf with the default mean-EMA rate 0.1.
     pub fn with_ou_defaults(self) -> Self {
         self.with_ou(0.1)
+    }
+
+    /// Add a Croston-flavored intermittent-demand leaf that tracks demand
+    /// size and inter-demand interval as separate EMAs. Handles
+    /// zero-inflated series (SKU sales with many zero days) much better
+    /// than level-EMAs. `α` clamped to `(0.001, 0.999)`.
+    pub fn with_intermittent(mut self, alpha: f64) -> Self {
+        self.intermittent = Some(alpha);
+        self
+    }
+
+    /// Intermittent leaf with the default rate `α = 0.1` (Croston's classic
+    /// value).
+    pub fn with_intermittent_defaults(self) -> Self {
+        self.with_intermittent(0.1)
+    }
+
+    /// Clip forecast component means to `max(0, μ)` at prediction time.
+    /// The cheap "no-negative demand forecast" fix. Distribution std is
+    /// left alone (the 90% interval can still dip below 0); proper
+    /// truncated-Gaussian output is deferred.
+    pub fn non_negative(mut self) -> Self {
+        self.non_negative = true;
+        self
     }
 
     /// Replace the 3-leaf default set (one EMA / drift / AR(1) each) with
@@ -566,6 +602,9 @@ impl LaplaceForecaster {
         }
         if let Some(a) = self.ou {
             leaves.push(Box::new(OuLeaf::new(a)));
+        }
+        if let Some(a) = self.intermittent {
+            leaves.push(Box::new(IntermittentLeaf::new(a)));
         }
         if let Some(p) = self.seasonal_period {
             leaves.push(Box::new(SeasonalEmaLeaf::new(p, self.seasonal_alpha)));
@@ -972,15 +1011,14 @@ impl DistributionalForecaster for LaplaceForecaster {
         let per_h = &self.calibration_scale_per_h;
         let yj = self.fitted_yj_lambda;
         let trans_range = self.yj_trans_range;
+        let non_negative = self.non_negative;
         Ok((0..horizon)
             .map(|h| {
                 let m = blend_horizon(&weights, &per_leaf, h);
-                // Apply per-h scale factor when available (fall back to the
-                // shared scalar). Applied in leaves' space, before YJ inverse.
                 let scale_h = per_h.get(h).copied().unwrap_or(scale);
                 let components = m.components.into_iter().map(|(w, g)| {
                     let sigma_scaled = g.std * scale_h;
-                    let (mean_out, sigma_out) = match yj {
+                    let (mut mean_out, sigma_out) = match yj {
                         Some(l) => {
                             let mean_trans = match trans_range {
                                 Some((lo, hi)) => g.mean.clamp(lo, hi),
@@ -991,6 +1029,9 @@ impl DistributionalForecaster for LaplaceForecaster {
                         }
                         None => (g.mean, sigma_scaled),
                     };
+                    if non_negative && mean_out < 0.0 {
+                        mean_out = 0.0;
+                    }
                     (w, super::dist::Gaussian::new(mean_out, sigma_out))
                 });
                 GaussianMixture::new(components)
