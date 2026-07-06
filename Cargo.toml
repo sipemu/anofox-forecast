@@ -310,3 +310,8 @@ path = "examples/forecasting/exogenous.rs"
 name = "m5_ets_benchmark"
 path = "examples/m5_ets_benchmark.rs"
 
+[[example]]
+name = "skaters_m5_benchmark"
+path = "examples/skaters_m5_benchmark.rs"
+required-features = ["distributional"]
+
