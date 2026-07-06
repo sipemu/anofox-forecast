@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0-alpha.16] - 2026-07-06
+
+### Added — feature-based routing across model families
+
+- **`SmartForecaster`** (new module `src/models/smart.rs`) — inspects the training series at `fit()`, computes `zero_fraction` + `trend_strength`, and routes to one of:
+  - `LaplaceForecaster::new().with_intermittent_defaults().non_negative()` — for zero-inflated series (Croston beats EMA-family leaves when zeros dominate).
+  - `AutoETS` — for strongly-trending series (its damped-trend specs handle sustained trends better than the α-11 AR(2) stationarity-projected leaf).
+  - `LaplaceForecaster::new().auto()` — for the residual space (mid-trend, mid-seasonal, retail-normal), delegating to the α-10 per-leaf auto-selector.
+- Public: `models::SmartForecaster`, `models::SelectedFamily`. Reachable via `SmartForecaster::selected_family()` after `fit()` for observability.
+
+### Routing rules
+
+Deliberately conservative and evidence-derived:
+
+- `zero_fraction > 0.4` → `Intermittent`
+- else `trend_strength > 0.6` → `AutoEts`
+- else → `LaplaceAuto`
+
+Wrong routes only cost users the target family's fit; there's no expensive CV inside — for CV-based selection use `AutoForecast` (α-18 will extend it to include `LaplaceForecaster`).
+
+### Test plan
+
+- New unit tests: intermittent series (60% zeros) routes to `Intermittent`; steady moderate series routes to `LaplaceAuto`; linear-trend series routes to `AutoEts`.
+
 ## [0.12.0-alpha.15] - 2026-07-06
 
 ### Added — demand-forecasting basics

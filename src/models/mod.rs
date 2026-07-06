@@ -19,6 +19,7 @@ pub mod laplace;
 pub mod mfles;
 pub mod mstl_forecaster;
 pub mod regression;
+pub mod smart;
 pub mod tbats;
 pub mod theta;
 pub mod var;
@@ -36,6 +37,7 @@ pub use kalman_forecaster::KalmanForecaster;
 pub use laplace::{DistributionalForecaster, Gaussian, GaussianMixture, LaplaceForecaster};
 pub use mfles::MFLES;
 pub use mstl_forecaster::{MSTLForecaster, SeasonalForecastMethod, TrendForecastMethod};
+pub use smart::{SelectedFamily, SmartForecaster};
 pub use tbats::{AutoTBATS, TBATS};
 pub use traits::{
     validate_series_complete, BoxedForecaster, FittedParams, Forecaster, ModelRegistry, ModelSpec,
