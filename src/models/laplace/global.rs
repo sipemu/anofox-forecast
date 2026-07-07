@@ -131,20 +131,20 @@ impl GlobalLaplace {
 pub struct MetaLearnerScaffold;
 
 impl MetaLearnerScaffold {
-    /// Delegates to `SmartForecaster`'s rules. Present so callers can
-    /// code against a stable `pick_family(chars)` API and swap in a
+    /// Approximates the AID-driven `SmartForecaster` picks from cheap
+    /// hand-computed characteristics — a rules-based fallback when
+    /// running the full AID classifier is impractical. Callers can code
+    /// against this stable `pick_family(chars)` API and swap in a
     /// trained model later.
     pub fn pick_family(
         zero_fraction: f64,
-        trend_strength: f64,
+        _trend_strength: f64,
     ) -> crate::models::smart::SelectedFamily {
         use crate::models::smart::SelectedFamily;
         if zero_fraction > 0.4 {
-            SelectedFamily::Intermittent
-        } else if trend_strength > 0.6 {
-            SelectedFamily::AutoEts
+            SelectedFamily::IntermittentNegBinomial
         } else {
-            SelectedFamily::LaplaceAuto
+            SelectedFamily::RegularNormal
         }
     }
 }
@@ -184,15 +184,11 @@ mod tests {
         use crate::models::smart::SelectedFamily;
         assert_eq!(
             MetaLearnerScaffold::pick_family(0.6, 0.0),
-            SelectedFamily::Intermittent
-        );
-        assert_eq!(
-            MetaLearnerScaffold::pick_family(0.1, 0.9),
-            SelectedFamily::AutoEts
+            SelectedFamily::IntermittentNegBinomial
         );
         assert_eq!(
             MetaLearnerScaffold::pick_family(0.1, 0.2),
-            SelectedFamily::LaplaceAuto
+            SelectedFamily::RegularNormal
         );
     }
 }

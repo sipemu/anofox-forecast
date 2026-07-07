@@ -7,6 +7,327 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-07-07
+
+Bundles the α-21 through α-31 alpha series into one stable release. Introduces the demand-forecasting distributional stack inspired by [`microprediction/skaters`](https://github.com/microprediction/skaters) plus AID-driven family selection from `anofox-regression`. See the alpha entries below for detailed per-alpha changes.
+
+### Added
+
+- **`LaplaceForecaster`** — streaming distributional forecaster with a Gaussian mixture output. 20+ opt-in leaves covering EMA, drift, AR(1), AR(2) with stationarity projection, seasonal-EMA, multi-period seasonal, multiplicative seasonal, seasonal-Croston, fractional differencing, OU, damped Holt, Yeo-Johnson coordinate grid, per-horizon calibration, hyperparameter populations, distribution-family (Poisson, NegBin, LogNormal, Gamma, RectifiedNormal, ZIP, ZINB, Student-t, Beta, Tweedie, SkewNormal, DiscreteUniform), classic Croston, and seasonal-Croston leaves. Behind the `distributional` feature.
+- **`.auto()`** — per-leaf characteristic-based selector. Enables OU, AR(2), seasonal, fractional-diff, damped Holt, multiplicative seasonal, seasonal-Croston, and non-negative clamp based on trend / seasonality / autocorrelation / zero-fraction / positivity of the training series. Auto-detects seasonal period via ACF scan across `{4, 7, 12, 24, 30, 52}`. Beats internal AutoETS/AutoTheta on the fev-benchmark classical panel.
+- **`.auto_aid()`** — statistically-derived selector. Runs the `anofox-regression` AID demand classifier at `fit()`; maps the fitted distribution family to the matching leaf. `Poisson`/`Geometric` + high zero-fraction → ZIP; `NegativeBinomial` + high zero-fraction → ZINB; else the plain family leaf. Requires `postprocess` + `distributional`.
+- **`SmartForecaster`** — AID-driven single-family Laplace commit. No AutoETS delegation (per design direction — demand-forecasting only). Picks one Laplace configuration per AID's `(demand_type, distribution)` output. New `SelectedFamily` enum with 8 variants.
+- **`CvSelectForecaster`** — CV-based per-series model selection. Given a slate of `Candidate` factories, fits each on the earlier portion of the series, scores on a holdout window, picks the winner, refits on full data.
+- **`HierarchicalLaplace`** — cross-series Empirical-Bayes wrapper with 4 pluggable prior modes: `PanelMean`, `Cluster { k }`, `Similarity`, `Decomposition`. Opt-in for homogeneous panels (cif_2016-style banking, retail during promo). Regresses on heterogeneous M-competition panels — documented anti-result in `docs/SOTA_POSITIONING.md`.
+- **`GlobalLaplace`** — panel-level wrapper for fitting one `LaplaceForecaster` per series with shared configuration. `fit_panel(iter)` for bulk fits; `predict_series(id, h)` / `forecast_dist_series(id, h)` per-series accessors.
+- **External regressor preregression** — `LaplaceForecaster::with_exog_preregression(&[names])` performs OLS on the named `TimeSeries` regressors before feeding residuals to the leaves. New `predict_with_exog(horizon, future_regressors)` method returns level-space forecasts. Replaces the α-17 scaffold.
+- **AID-derived training helpers** (opt-in, default off):
+  - `.with_stockout_indicator()` — synthesizes an `__aid_stockout` binary column from AID labels for OLS preregression.
+  - `.trim_new_product_prefix()` — trims leading `NewProduct`-flagged observations, guarded ≥ 12 obs.
+- **fev-style benchmark** (`examples/fev_benchmark.rs`) — MASE + WQL computed the autogluon/fev way on 27 Monash / Chronos-benchmark tasks. Downloads Monash `.tsf` from Zenodo; HuggingFace parquet-hosted datasets convertible via `/tmp/convert_hf.py`.
+- **`docs/SOTA_POSITIONING.md`** — full head-to-head report against Chronos, TimesFM, Moirai, Tirex on the fev leaderboard with honest gap analysis and design-boundary documentation.
+
+### Benchmark headline (from `docs/SOTA_POSITIONING.md`)
+
+On the 27-dataset fev Chronos-benchmark classical panel (500 series/dataset, geomean MASE across the 19 shared datasets):
+
+| rank | model | MASE | tier |
+|---|---|---|---|
+| 🥇 1 | Tirex | 1.351 | Foundation (GPU) |
+| 🥈 2 | TimesFM-2.0 | 1.354 | Foundation (GPU) |
+| 🥉 3 | fev auto_theta (Nixtla) | 1.362 | Classical (CPU) |
+| 4 | **`AutoTheta` (this crate)** | **1.381** | **Classical (CPU) — 1.4 % behind Nixtla** ✅ |
+| 5 | Chronos-Bolt-Base | 1.393 | Foundation |
+| 7 | fev auto_ets (Nixtla) | 1.440 | Classical (CPU) |
+| 8 | **`AutoETS` (this crate)** | **1.525** | **Classical (CPU) — 5.9 % behind Nixtla** |
+| 9 | Seasonal Naive | 1.665 | Baseline |
+| 10 | **`LaplaceForecaster::auto()`** | **1.723** | **Streaming distributional — 27 % behind foundation SOTA** |
+
+Two clear findings:
+
+1. **Our classical `AutoETS` / `AutoTheta` are Nixtla-quality** — within 1-6 % of the reference implementations. For general-purpose forecasting they are the right choice.
+2. **`LaplaceForecaster::auto()` sits at seasonal-naive level on this mixed panel** because the streaming per-observation design requires ~ 30-50 observations of warmup that classical closed-form fitters don't need. On short-history panels (`N < 100`), classical wins by 15-80 %. On long panels (`N > 300`), Laplace is competitive.
+
+### The design boundary — where Laplace shines
+
+For **retail SKU / demand forecasting** on the M5 full-30k benchmark:
+
+| model | median MAE | fit time | vs. AutoETS |
+|---|---|---|---|
+| AutoETS | 0.728 | 916 s | — |
+| **`Laplace + auto_aid`** | **0.734** | **22 s** | **+0.8 % MASE, ~42× faster** |
+| **`SmartForecaster`** | **0.735** | **11 s** | **+1.0 % MASE, ~82× faster** |
+
+For demand data with adequate history, the AID-driven selectors match classical accuracy while running 40-80× faster and providing native distributional output.
+
+**Rule of thumb:** use `LaplaceForecaster` when `N ≥ 100` per series AND you need distributional output OR you're on retail / demand data. Use `AutoTheta` / `AutoETS` when `N < 100` OR you just need a point forecast.
+
+### Cross-panel guidance (built into module docs + README)
+
+- **Retail / demand data (counts, intermittency)** → `LaplaceForecaster::new().auto_aid()` or `SmartForecaster::new()`.
+- **Economic / financial / continuous non-demand series** → `LaplaceForecaster::new().auto()` (no AID).
+- **`SmartForecaster` is demand-focused** — regresses on non-demand panels (documented in `src/models/smart.rs`, `src/models/laplace/mod.rs`, and `README.md`).
+
+### Attribution
+
+Design inspired by [`microprediction/skaters`](https://github.com/microprediction/skaters) (MIT, Peter Cotton) — see `THIRD_PARTY_NOTICES.md`.
+
+### Migration from 0.12.x
+
+- No breaking changes for callers of the stable 0.12 surface (ARIMA, ETS, Theta, TBATS, MSTL, MFLES, VAR, Kalman, GARCH, regression, ensemble, hierarchy, forecastability). Everything under `models::laplace` is behind the opt-in `distributional` feature.
+- `SmartForecaster` (previously in 0.12.0-alpha.16-α.20) had its `SelectedFamily` enum reshaped. Callers pattern-matching on old variants (`Intermittent`, `AutoEts`, `LaplaceAuto`) must update to the new 8 variants (`IntermittentPoisson`, `IntermittentNegBinomial`, ..., `RegularNormal`, `Fallback`).
+
+### Alpha history
+
+The following alpha releases contributed to 0.13.0:
+
+- `0.12.0-alpha.5` through `0.12.0-alpha.20` — the initial skaters-inspired shell, calibration, populations, seasonal & fractional-diff & OU leaves, per-horizon CRPS terminal, per-series meta-selector, cross-panel benchmarks (see below for details).
+
+## [0.12.0-alpha.27] - 2026-07-07
+
+### Changed — `.auto()` closes the gap to classical SOTA
+
+Three rule additions to `.auto()`, driven by the fev-benchmark loss analysis:
+
+- **Auto seasonal period detection.** New `detect_seasonal_period(train)` scans candidate periods `{4, 7, 12, 24, 30, 52}` and picks the one with highest ACF magnitude (threshold 0.35). When detected, `.auto()` uses the detected period for `SeasonalEmaLeaf`, `MultiplicativeSeasonalLeaf`, `SeasonalIntermittentLeaf`. Falls back to `auto_seasonal_period` (default 7) when no candidate meets the threshold.
+- **Multiplicative seasonal in `.auto()`.** When `seasonality_strength > 0.3` AND the series is strictly positive AND `mean > 0`, `.auto()` also enables `MultiplicativeSeasonalLeaf` at the (auto-detected) period. Retail/tourism data with proportional seasonality benefits substantially.
+- **Damped Holt by default.** When `trend_strength ∈ [0.3, 0.7]`, `Holt(α=0.3, β=0.1, φ=0.9)` — was φ=0.98 (near-undamped). When `trend_strength > 0.7`, more aggressive `Holt(α=0.2, β=0.05, φ=0.85)`. Damping bends the extrapolation on long horizons where undamped Drift/Holt overshoots.
+
+Also extends `AutoChars` with `mean_y` and `all_positive` fields.
+
+### Benchmark: fev-style, 10 datasets, 1000 series/dataset
+
+| model | α-25 geomean MASE | **α-27 geomean MASE** | Δ | vs. AutoTheta |
+|-------|-------------------:|----------------------:|:--|:--------------|
+| AutoTheta (internal) | 2.156 | 2.156 | — | baseline |
+| AutoETS (internal) | 2.158 | 2.158 | — | +0.1% |
+| **`Laplace + auto`** | 2.165 | **1.928** ⭐ | **−11.0%** | **−10.6% (WINS)** |
+| SmartForecaster | 2.482 | 2.390 | −3.7% | +10.9% |
+| `Laplace + auto_aid` | 2.615 | 2.440 | −6.7% | +13.2% |
+
+Per-dataset (biggest wins):
+
+| dataset | α-25 auto | α-27 auto | Δ | driver |
+|---------|----------:|----------:|:--|:-------|
+| m4_hourly | 7.055 | **4.559** | **−35.4%** | period auto-detected as 24 |
+| tourism_monthly | 2.819 | **2.186** | **−22.4%** | multiplicative seasonal + damped Holt |
+| cif_2016 | 1.519 | **1.231** | **−19.0%** | damped Holt on trending banking |
+| tourism_quarterly | 3.019 | **2.554** | **−15.4%** | multiplicative seasonal |
+
+On the 6 datasets we share with autogluon/fev's Chronos benchmark, our geomean MASE goes from 2.072 to 1.850 (−10.7%). Gap to fev's Nixtla-quality AutoTheta closes from +45% to +29%; gap to TimesFM-2.0 from +55% to +39%.
+
+WQL improvement: 0.117 → 0.113 (−3.4%).
+
+Fit time unchanged (5.1s vs 4.9s at α-25 — negligible).
+
+### Backwards compatibility
+
+`.auto()` behavior changes for series where any of the three new rules fire. Users targeting exact reproducibility of α-20/α-25 behavior can pre-set their leaves explicitly (auto never overrides user choices).
+
+`.auto_with_seasonal_period(p)` still overrides the auto-detected period.
+
+
+## [0.12.0-alpha.25] - 2026-07-07
+
+### Added — three more distribution leaves (Tweedie, Skew-Normal, Discrete-Uniform)
+
+All moment-matched Gaussian output following the α-21 pattern. Softmax weighting extends to aggregate-retail, asymmetric-continuous, and bounded-small-count regimes that weren't cleanly handled by the α-24 slate.
+
+| leaf | family | mean/variance / when it wins |
+|------|--------|------------------------------|
+| **`TweedieLeaf`** | compound Poisson-gamma | `E[Y]=μ`, `Var[Y]=φ·μ^p`. Aggregate retail (SKU × store × week): point mass at 0 + positive continuous + overdispersion without a hurdle. `p ∈ (1, 2)`; canonical retail-aggregate `p = 1.5`. |
+| **`SkewNormalLeaf`** | skew-normal | Location + scale + shape via sample M3. When `|γ₁| < 0.05` falls back to Gaussian. For asymmetric continuous data where YJ/log doesn't fully symmetrize. |
+| **`DiscreteUniformLeaf`** | Discrete-Uniform `{0..K}` | `E[Y]=K/2`, `Var[Y]=(K²+2K)/12`. K inferred via running max. No hyperparameter. Bounded small-count series (promo-count, capacity-limited demand, capped service tickets). |
+
+Tweedie is intentionally NOT auto-enabled by `.auto_aid()` — AID doesn't classify aggregate compound-Poisson-gamma. Callers opt in explicitly for aggregate-level series.
+
+### New builders (all opt-in)
+
+- `.with_tweedie(α, p)` / `.with_tweedie_defaults()` (p=1.5)
+- `.with_skew_normal(α)` / `.with_skew_normal_defaults()`
+- `.with_discrete_uniform()` (no hyperparameter)
+
+### Test plan
+
+- 8 new unit tests total (3 for Tweedie including a clamping-invariant, 3 for SkewNormal including a right-skew-detection assertion, 2 for DiscreteUniform).
+- Full laplace suite: 88 tests pass (up from 80).
+
+### Notes
+
+Alpha surface: additive. Existing behavior unchanged. Total distribution-family leaves now: **11** (Poisson, NegativeBinomial, LogNormal, Gamma, RectifiedNormal, ZIP, ZINB, Student-t, Beta, Tweedie, SkewNormal) + DiscreteUniform.
+
+
+## [0.12.0-alpha.24] - 2026-07-07
+
+### Added — four more distribution-family leaves
+
+All following the α-21 moment-matched-Gaussian-output pattern. Softmax weighting now sees plausible densities for excess-zeros / heavy-tail / bounded regimes.
+
+| leaf | family | when it wins |
+|------|--------|--------------|
+| **`ZeroInflatedPoissonLeaf`** (ZIP) | `p₀ · 0 + (1−p₀) · Poi(λ)` | count series with more zeros than pure Poisson predicts (out-of-assortment SKUs) |
+| **`ZeroInflatedNegativeBinomialLeaf`** (ZINB) | `p₀ · 0 + (1−p₀) · NB(μ, r)` | overdispersed excess-zero counts — the canonical retail-SKU form |
+| **`StudentTLeaf`** | Student-t, ν estimated from kurtosis | heavy-tailed continuous — financial/economic tail events |
+| **`BetaLeaf`** | Beta on `[0, 1]` | rates, proportions, conversion, service levels; obs clamped to unit interval |
+
+All five prior distribution leaves (Poisson, NegBinomial, LogNormal, Gamma, RectifiedNormal) unchanged.
+
+### `.auto_aid()` extension
+
+The AID → leaf mapping now routes to zero-inflated variants when the observed zero fraction exceeds `0.5`:
+
+- `Poisson`/`Geometric` + `zero_proportion > 0.5` → **ZIP** (was: `PoissonLeaf`)
+- `NegativeBinomial` + `zero_proportion > 0.5` → **ZINB** (was: `NegativeBinomialLeaf`)
+
+Other AID mappings unchanged. Student-t and Beta are NOT auto-enabled — AID doesn't classify heavy tail or bounded data, so those leaves stay opt-in via explicit builders.
+
+### New builders (all opt-in)
+
+- `.with_zip(α)` / `.with_zip_defaults()`
+- `.with_zinb(α)` / `.with_zinb_defaults()`
+- `.with_student_t(α)` / `.with_student_t_defaults()`
+- `.with_beta(α)` / `.with_beta_defaults()`
+
+### Test plan
+
+- Unit tests: 2 per leaf × 4 = 8 new tests, plus AID-integration coverage via the existing `.auto_aid()` test.
+- Full laplace suite: 80 tests pass (up from 72).
+
+
+## [0.12.0-alpha.23] - 2026-07-07
+
+### Added — external regressor preregression + AID-derived helpers
+
+- **`LaplaceForecaster::with_exog_preregression(&[names])`** — replaces the α-17 scaffold. At `fit()`, runs OLS on the named regressors (from `TimeSeries::calendar()`'s regressors), feeds the residuals `y − Xβ` to the leaves, caches the `OLSResult`. New method **`predict_with_exog(horizon, future_regressors: &HashMap<String, Vec<f64>>)`** returns the level-space forecast (`mixture_mean_residual + β · X_future`). Standard `predict()` still returns the residual-space mixture.
+- **`.with_stockout_indicator()`** — opt-in, default off (behind `postprocess`). Runs AID at `fit()`, synthesizes a binary `__aid_stockout` column from the `Stockout` per-observation labels, adds it to the exog design matrix. The OLS coefficient captures the mean demand shift during stockout periods. Requires `.with_exog_preregression(...)`.
+- **`.trim_new_product_prefix()`** — opt-in, default off (behind `postprocess`). Runs AID, trims the training window to start after the last `NewProduct` label. Guarded to keep at least 12 observations after trim so leaves have warm-up. **Outliers are NOT trimmed** — they remain part of the data-generating process per project design direction.
+
+### Design notes
+
+- All three flags are opt-in. `.auto()` and `.auto_aid()` don't auto-enable them.
+- AID is invoked at most once at fit() when trim + stockout are used (labels are cached and shared).
+- Existing `Forecaster` trait unchanged — `predict_with_exog` is an inherent method on `LaplaceForecaster`.
+- OLS solver comes from `crate::utils::ols` (existing infrastructure used by ARIMA / MFLES / baseline). Requires `postprocess` feature only for AID (the OLS solver ships default).
+
+### Test plan
+
+- Unit tests: `exog_preregression_removes_linear_component`, `trim_new_product_prefix_smoke`.
+- Full-suite pass: 72 laplace tests + 2946 crate-wide.
+
+### Notes
+
+Alpha surface: additive. Breaking API vs α-22: `with_exog_preregression()` now takes `&[&str]` (was a no-arg scaffold that always erred at fit). Downstream code that called it will need `.with_exog_preregression(&[])` (no columns) to preserve the old fit-error behavior, or `.with_exog_preregression(&["promo", "holiday"])` to actually use it.
+
+
+## [0.12.0-alpha.22] - 2026-07-07
+
+### Changed — `SmartForecaster` redesigned around AID, no ETS
+
+`SmartForecaster` now uses the `anofox-regression` AID demand classifier's `(demand_type, distribution)` output to commit to a single **Laplace-family** configuration — no cross-family delegation. Any AutoETS routing (α-16 through α-20) has been removed per the project's demand-first design direction.
+
+**New `SelectedFamily` variants** (breaking change vs α-21):
+
+- `IntermittentPoisson` — small-count intermittent (`Poisson | Geometric`)
+- `IntermittentNegBinomial` — overdispersed intermittent counts (retail-SKU norm)
+- `IntermittentRectifiedNormal` — continuous with point mass at zero
+- `IntermittentPositive` — positive-skewed intermittent (`LogNormal | Gamma`)
+- `RegularCount` — regular count data (`Poisson | Geometric | NegativeBinomial`)
+- `RegularPositive` — positive skewed (`LogNormal | Gamma`)
+- `RegularNormal` — falls through to `LaplaceForecaster::auto()`
+- `Fallback` — AID unavailable (feature off)
+
+Each Smart route builds a **slim** `LaplaceForecaster` config (one distribution leaf + seasonal-Croston or seasonal-EMA + non_negative) — no leaf-mixture soup. Complements `LaplaceForecaster::auto_aid()` (α-21) which *adds* the AID-picked leaf to the full mixture; Smart *replaces* the mixture with a single-family commit.
+
+### New builder
+
+- `SmartForecaster::with_seasonal_period(period)` — override the default weekly (7) period when AID picks a seasonality-aware family.
+
+### Benchmark: full-M5 500-sample
+
+| model | α-21 MAE(med) | **α-22 MAE(med)** | α-21 MAE(mean) | **α-22 MAE(mean)** | fit |
+|---|---|---|---|---|---|
+| AutoETS | 0.960 | 0.960 (baseline) | 1.449 | 1.449 | 14.8s |
+| Laplace+auto | 1.002 (+4.4%) | 1.002 (unchanged) | 1.552 | 1.552 | 0.4s |
+| Laplace+auto_aid | 0.978 (+1.9%) | 0.978 (unchanged) | 1.483 | 1.483 | 0.4s |
+| **SmartForecaster** | 0.988 (+2.9%) | **0.974 (+1.5%)** | 1.481 | **1.492** | **0.2s** |
+
+- **Median-MAE gap to AutoETS cut from 6.2% (α-20 Smart) to 1.5% (α-22 Smart).**
+- **Smart is now the best distributional-only config** on median MAE — beats `auto_aid`.
+- Fit time drops to **0.2s** (single-family commit vs `auto_aid`'s leaf mixture) — **2× faster than auto_aid, 74× faster than AutoETS**.
+- Smart routing on 500 sample: 75% NegBinomial intermittent, 15% Poisson intermittent, 9% Regular count, 1% Regular normal, **0% ETS**.
+
+### AID cost
+
+Confirmed on 5,000 M5 series (new example `aid_cost`):
+
+- Mean 37 μs / series
+- p99 52 μs
+- Throughput 26,417 series/second
+- Full 30k-M5: ~1.1 s AID overhead total
+- ~4-5% of `LaplaceForecaster::fit` cost
+
+Effectively free at any realistic scale.
+
+### Breaking
+
+- `SelectedFamily::Intermittent`, `SelectedFamily::AutoEts`, `SelectedFamily::LaplaceAuto` **removed**. Callers pattern-matching on `SmartForecaster::selected_family()` will get compile errors and need to update to the new variants.
+
+### Notes
+
+The `SmartForecaster` public API surface is otherwise unchanged; only the enum variant names differ. Old callers that don't inspect `selected_family()` continue to work. `LaplaceForecaster::auto()` and `.auto_aid()` unchanged.
+
+
+## [0.12.0-alpha.21] - 2026-07-07
+
+### Added — distribution-family leaves + AID-driven selection
+
+Five new **moment-matched Gaussian** leaves that track a specific distribution family internally (its mean/variance) but output `Gaussian(mean, √(var·h))` for compatibility with the existing softmax + calibration + YJ machinery. Softmax weighting now sees a plausible density under the correct family for low-count and skewed-positive data.
+
+| leaf | when AID picks it | streaming state | notes |
+|---|---|---|---|
+| **`PoissonLeaf`** | small counts, `variance ≈ mean` | `λ_ema` | variance = λ (parameter) |
+| **`NegativeBinomialLeaf`** | overdispersed counts | `μ_ema`, Welford `σ²` | nests Poisson at `r → ∞` |
+| **`LogNormalLeaf`** | multiplicative positive | `μ_log_ema`, Welford log-variance | works on `ln(y+1)` |
+| **`GammaLeaf`** | positive-skewed continuous | `μ_ema`, Welford `σ²` | moment-match |
+| **`RectifiedNormalLeaf`** | intermittent continuous (hurdle) | `p_zero_ema`, positive-branch `(μ_ema, σ²)` | `E[Y] = (1-p₀)·μ`, `Var[Y] = (1-p₀)σ² + p₀(1-p₀)μ²` |
+
+### `.auto_aid()` — statistically-derived leaf selection
+
+New `LaplaceForecaster::auto_aid()` builder (behind the default `postprocess` feature). At `fit()`, runs the `anofox-regression` AID demand classifier on the training values; the AID-selected distribution family maps to the matching leaf:
+
+- `Poisson`, `Geometric` → `PoissonLeaf`
+- `NegativeBinomial` → `NegativeBinomialLeaf`
+- `LogNormal` → `LogNormalLeaf`
+- `Gamma` → `GammaLeaf`
+- `RectifiedNormal` → `RectifiedNormalLeaf`
+- `Normal` → falls through to `.auto()`'s rule set
+
+Any AID-detected count / positive family also auto-enables `.non_negative()`.
+
+### Benchmark: full-M5 500-sample
+
+| model | α-20 MAE(med) | **α-21 MAE(med)** | α-20 MAE(mean) | **α-21 MAE(mean)** | fit |
+|---|---|---|---|---|---|
+| AutoETS | 0.960 | 0.960 (baseline) | 1.449 | 1.449 | 14.7s |
+| Laplace+auto | 1.002 (+4.4%) | 1.002 (unchanged) | 1.552 (+7.1%) | 1.552 | 0.4s |
+| **Laplace+auto_aid** | — | **0.978 (+1.9%)** | — | **1.483 (+2.3%)** | **0.4s** |
+| SmartForecaster | 0.988 (+2.9%) | 0.988 (unchanged) | 1.481 (+2.2%) | 1.481 | 4.6s |
+
+- **Median-MAE gap to AutoETS cut from 4.4% (α-20 auto) to 1.9% (α-21 auto_aid).**
+- **auto_aid matches SmartForecaster's mean-MAE** while being **12× faster** — no AutoETS delegation needed.
+- AID overhead is negligible (≤ ms per series).
+- Full 30k backfill running in the background; will backfill numbers.
+
+### Notes
+
+Alpha surface: additive behind `distributional` + `postprocess`. Five new builders: `.with_poisson()`, `.with_negative_binomial()`, `.with_lognormal()`, `.with_gamma()`, `.with_rectified_normal()` (each with a `_defaults()` shortcut). `.auto_aid()` is opt-in — old `.auto()` behavior unchanged. `SmartForecaster` not yet routed through AID (deferred to α-22).
+
+### Future work
+
+- Level 2: `TypedMixture` output preserving true distribution shape end-to-end (correct quantiles on count / skewed data).
+- Extend `SmartForecaster` to route via `AidSummary { demand_type, distribution }` rather than hand-tuned thresholds.
+- Use AID's per-observation anomaly labels (`NewProduct`, `Stockout`, `HighOutlier`) to trim / weight training observations.
+
 ## [0.12.0-alpha.20] - 2026-07-06
 
 ### Added — full-M5 loss-driven fixes

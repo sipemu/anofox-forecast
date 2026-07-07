@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "anofox-forecast"
-version = "0.12.0-alpha.20"
+version = "0.13.0"
 edition = "2021"
 authors = ["Simon Müller"]
 description = "Time series forecasting library"
@@ -325,3 +325,22 @@ name = "skaters_m5_full_auto"
 path = "examples/skaters_m5_full_auto.rs"
 required-features = ["distributional"]
 
+
+[[example]]
+name = "skaters_m3_monthly_benchmark"
+path = "examples/skaters_m3_monthly_benchmark.rs"
+required-features = ["distributional"]
+
+[[example]]
+name = "fev_benchmark"
+path = "examples/fev_benchmark.rs"
+required-features = ["distributional"]
+
+[[example]]
+name = "hierarchical_benchmark"
+path = "examples/hierarchical_benchmark.rs"
+required-features = ["distributional"]
+
+[[example]]
+name = "period_fix_check"
+path = "examples/period_fix_check.rs"

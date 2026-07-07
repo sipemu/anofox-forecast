@@ -19,7 +19,7 @@ use anofox_forecast::models::theta::AutoTheta;
 use anofox_forecast::models::Forecaster;
 
 #[cfg(feature = "distributional")]
-use anofox_forecast::models::{DistributionalForecaster, LaplaceForecaster};
+use anofox_forecast::models::{DistributionalForecaster, LaplaceForecaster, SmartForecaster};
 
 use chrono::{Duration, TimeZone, Utc};
 use std::collections::HashMap;
@@ -79,8 +79,8 @@ fn main() {
     let base_date = Utc.with_ymd_and_hms(2000, 1, 1, 0, 0, 0).unwrap();
 
     // Slot layout — mirror of the M5 benchmark's Laplace variants for
-    // easy cross-panel comparison.
-    const N_MODELS: usize = 8;
+    // easy cross-panel comparison. α-21/α-22 additions: auto_aid, Smart.
+    const N_MODELS: usize = 10;
     let labels: [&str; N_MODELS] = [
         "AutoETS",
         "AutoTheta",
@@ -90,6 +90,8 @@ fn main() {
         "Laplace+AR2+S7",
         "Laplace+AR2+S7+FD+OU",
         "Laplace+auto",
+        "Laplace+auto_aid",
+        "SmartForecaster",
     ];
     let mut results: Vec<Vec<SeriesResult>> = (0..N_MODELS).map(|_| Vec::new()).collect();
 
@@ -146,6 +148,18 @@ fn main() {
                 if let Some(r) = run_laplace(model, &train_ts, test_values) {
                     results[slot].push(r);
                 }
+            }
+
+            #[cfg(feature = "postprocess")]
+            if let Some(r) =
+                run_laplace(LaplaceForecaster::new().auto_aid(), &train_ts, test_values)
+            {
+                results[8].push(r);
+            }
+
+            #[cfg(feature = "postprocess")]
+            if let Some(r) = run_smart(&train_ts, test_values) {
+                results[9].push(r);
             }
         }
     }
@@ -227,6 +241,27 @@ fn run_laplace(
         mae,
         coverage90: Some(coverage),
         logpdf_mean,
+        fit_us,
+    })
+}
+
+#[cfg(all(feature = "distributional", feature = "postprocess"))]
+fn run_smart(train: &TimeSeries, test: &[f64]) -> Option<SeriesResult> {
+    let t0 = Instant::now();
+    let mut m = SmartForecaster::new();
+    if m.fit(train).is_err() {
+        return None;
+    }
+    let fit_us = t0.elapsed().as_micros();
+    let fc = m.predict(HORIZON).ok()?;
+    let point = fc.primary();
+    if point.len() != test.len() {
+        return None;
+    }
+    Some(SeriesResult {
+        mae: mae(point, test),
+        coverage90: None,
+        logpdf_mean: None,
         fit_us,
     })
 }

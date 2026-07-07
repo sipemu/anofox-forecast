@@ -15,6 +15,8 @@ use crate::models::traits::{validate_series_complete, Forecaster};
 
 use super::dist::GaussianMixture;
 use crate::transform::yeo_johnson::yeo_johnson_lambda;
+use crate::utils::ols::{ols_fit, OLSResult};
+use std::collections::HashMap;
 
 use super::ensemble::{blend_horizon, softmax};
 
@@ -32,6 +34,51 @@ struct AutoChars {
     /// Fraction of observations at or near zero. Used to route
     /// demand-side (Croston, seasonal-Croston) leaves.
     zero_fraction: f64,
+    /// Sample mean. Positive-mean series can be routed to multiplicative
+    /// / lognormal / gamma leaves.
+    mean_y: f64,
+    /// True if all observations are ≥ 0 (needed for multiplicative
+    /// seasonal, lognormal, gamma leaves).
+    all_positive: bool,
+}
+
+/// Detect the most likely seasonal period from the training window.
+/// Scans a canonical set of candidate periods {7, 12, 24, 30, 52, 4}
+/// and picks the one with the highest ACF at that lag. Returns `None`
+/// if none of the candidates has ACF above a threshold — the caller
+/// then falls back to the user-configured `auto_seasonal_period`.
+pub(crate) fn detect_seasonal_period(train: &[f64]) -> Option<usize> {
+    let n = train.len();
+    if n < 30 {
+        return None;
+    }
+    let mean_y: f64 = train.iter().sum::<f64>() / n as f64;
+    let var: f64 = train.iter().map(|y| (y - mean_y).powi(2)).sum::<f64>() / n as f64;
+    if var < 1e-9 {
+        return None;
+    }
+    let candidates: [usize; 6] = [12, 7, 24, 52, 4, 30];
+    let mut best_period = 0usize;
+    let mut best_acf = 0.35_f64; // threshold — below this, no period is picked
+    for &p in &candidates {
+        if p >= n / 2 {
+            continue;
+        }
+        let mut cov = 0.0f64;
+        for i in p..n {
+            cov += (train[i] - mean_y) * (train[i - p] - mean_y);
+        }
+        let acf = (cov / ((n - p) as f64 * var)).clamp(-1.0, 1.0).abs();
+        if acf > best_acf {
+            best_acf = acf;
+            best_period = p;
+        }
+    }
+    if best_period > 0 {
+        Some(best_period)
+    } else {
+        None
+    }
 }
 
 /// Compute (seasonality_strength_R², |ACF(1)|) on the training window.
@@ -45,11 +92,14 @@ fn auto_characteristics(train: &[f64], period: usize) -> AutoChars {
             acf1: 0.0,
             trend_strength: 0.0,
             zero_fraction: 0.0,
+            mean_y: 0.0,
+            all_positive: true,
         };
     }
     let mean_y: f64 = train.iter().sum::<f64>() / n as f64;
     let ss_tot: f64 = train.iter().map(|y| (y - mean_y).powi(2)).sum();
     let zero_fraction = train.iter().filter(|&&y| y.abs() < 1e-9).count() as f64 / n as f64;
+    let all_positive = train.iter().all(|&y| y >= 0.0);
 
     // Trend strength: R² of the linear fit y ~ t.
     let t_mean = (n - 1) as f64 / 2.0;
@@ -112,6 +162,8 @@ fn auto_characteristics(train: &[f64], period: usize) -> AutoChars {
         acf1,
         trend_strength,
         zero_fraction,
+        mean_y,
+        all_positive,
     }
 }
 
@@ -169,8 +221,11 @@ fn yj_inverse_with_jac(y: f64, lambda: f64) -> (f64, f64) {
 }
 use super::leaf::Leaf;
 use super::leaves::{
-    Ar1Leaf, Ar2Leaf, DriftLeaf, EmaLeaf, FractionalDiffLeaf, HoltLeaf, IntermittentLeaf,
-    MultiplicativeSeasonalLeaf, OuLeaf, SeasonalEmaLeaf, SeasonalIntermittentLeaf, YjWrappedLeaf,
+    Ar1Leaf, Ar2Leaf, BetaLeaf, DiscreteUniformLeaf, DriftLeaf, EmaLeaf, FractionalDiffLeaf,
+    GammaLeaf, HoltLeaf, IntermittentLeaf, LogNormalLeaf, MultiplicativeSeasonalLeaf,
+    NegativeBinomialLeaf, OuLeaf, PoissonLeaf, RectifiedNormalLeaf, SeasonalEmaLeaf,
+    SeasonalIntermittentLeaf, SkewNormalLeaf, StudentTLeaf, TweedieLeaf, YjWrappedLeaf,
+    ZeroInflatedNegativeBinomialLeaf, ZeroInflatedPoissonLeaf,
 };
 use super::DistributionalForecaster;
 
@@ -241,6 +296,9 @@ pub struct LaplaceForecaster {
     /// on M5). The user-configured toggles are respected — `auto()` only
     /// adds, never removes.
     use_auto: bool,
+    /// Enable AID-driven leaf selection (in addition to `use_auto` rules).
+    /// Only meaningful when the `postprocess` feature is on.
+    use_aid: bool,
     /// Seasonal period used by `auto()`. Defaults to 7 (weekly). Set via
     /// [`Self::auto_with_seasonal_period`] for non-daily panels.
     auto_seasonal_period: usize,
@@ -260,6 +318,30 @@ pub struct LaplaceForecaster {
     /// intermittent series with weekly / periodic non-zero clusters
     /// (SKU weekend spikes) get the phase shape right.
     seasonal_intermittent: Option<(usize, f64)>,
+    /// `α` for the Poisson-family count leaf.
+    poisson: Option<f64>,
+    /// `α` for the Negative-Binomial count leaf.
+    neg_binomial: Option<f64>,
+    /// `α` for the Log-Normal positive-multiplicative leaf.
+    lognormal: Option<f64>,
+    /// `α` for the Gamma positive-skewed continuous leaf.
+    gamma: Option<f64>,
+    /// `α` for the Rectified-Normal (hurdle) leaf.
+    rectified_normal: Option<f64>,
+    /// `α` for the Zero-Inflated Poisson leaf.
+    zip: Option<f64>,
+    /// `α` for the Zero-Inflated Negative-Binomial leaf.
+    zinb: Option<f64>,
+    /// `α` for the Student-t leaf.
+    student_t: Option<f64>,
+    /// `α` for the Beta leaf (bounded [0,1] data).
+    beta: Option<f64>,
+    /// `(α, p)` for the Tweedie leaf. `p ∈ (1, 2)`.
+    tweedie: Option<(f64, f64)>,
+    /// `α` for the Skew-Normal leaf.
+    skew_normal: Option<f64>,
+    /// Toggle for the Discrete-Uniform leaf (no hyperparameter).
+    discrete_uniform: bool,
     /// When true, forecast means are clipped to `max(0, μ)` — the cheap
     /// "no-negative demand forecast" fix. Distribution std is left
     /// alone (so the 90% interval can still dip below zero — proper
@@ -269,8 +351,20 @@ pub struct LaplaceForecaster {
     /// the additive `seasonal_period`; retail seasonality is often
     /// proportional (peak week = 3× baseline).
     seasonal_mult: Option<(usize, f64)>,
-    /// Scaffold flag — see [`Self::with_exog_preregression`].
-    exog_scaffold_declared: bool,
+    /// Names of exogenous regressors to preregress `y` on via OLS before
+    /// feeding residuals to the leaves. Empty = no preregression. See
+    /// [`Self::with_exog_preregression`].
+    exog_names: Vec<String>,
+    /// Cached OLS result after `fit()` — used by `predict_with_exog` to
+    /// add `β · X_future` back to the mixture mean.
+    exog_ols: Option<OLSResult>,
+    /// α-23 opt-in: synthesize an `is_stockout` binary column from AID's
+    /// per-observation labels and add it to the exog preregression
+    /// design matrix. Default off.
+    use_stockout_indicator: bool,
+    /// α-23 opt-in: trim the training window to start after the last
+    /// AID-flagged `NewProduct` observation. Default off.
+    trim_new_product_prefix: bool,
 
     leaves: Vec<Box<dyn Leaf + Send>>,
     cum_log_liks: Vec<f64>,
@@ -329,14 +423,30 @@ impl LaplaceForecaster {
             use_populations_wide: false,
             yj_grid: Vec::new(),
             use_auto: false,
+            use_aid: false,
             auto_seasonal_period: 7,
             frac_diff: None,
             ou: None,
             intermittent: None,
             seasonal_intermittent: None,
+            poisson: None,
+            neg_binomial: None,
+            lognormal: None,
+            gamma: None,
+            rectified_normal: None,
+            zip: None,
+            zinb: None,
+            student_t: None,
+            beta: None,
+            tweedie: None,
+            skew_normal: None,
+            discrete_uniform: false,
             non_negative: false,
             seasonal_mult: None,
-            exog_scaffold_declared: false,
+            exog_names: Vec::new(),
+            exog_ols: None,
+            use_stockout_indicator: false,
+            trim_new_product_prefix: false,
             leaves: Vec::new(),
             cum_log_liks: Vec::new(),
             n_obs: 0,
@@ -432,6 +542,154 @@ impl LaplaceForecaster {
         self.with_seasonal_intermittent(period, 0.1)
     }
 
+    /// Add a Poisson leaf — moment-matched Gaussian output for small
+    /// count data with `variance ≈ mean`. See [`super::leaves::PoissonLeaf`].
+    pub fn with_poisson(mut self, alpha: f64) -> Self {
+        self.poisson = Some(alpha);
+        self
+    }
+
+    /// Poisson leaf with `α = 0.1`.
+    pub fn with_poisson_defaults(self) -> Self {
+        self.with_poisson(0.1)
+    }
+
+    /// Add a Negative-Binomial leaf — moment-matched Gaussian output for
+    /// overdispersed count data (retail-demand norm). Nests Poisson when
+    /// observed variance ≤ mean.
+    pub fn with_negative_binomial(mut self, alpha: f64) -> Self {
+        self.neg_binomial = Some(alpha);
+        self
+    }
+
+    /// Negative-Binomial leaf with `α = 0.05` (slow — retail dispersion
+    /// estimates need more history than mean estimates).
+    pub fn with_negative_binomial_defaults(self) -> Self {
+        self.with_negative_binomial(0.05)
+    }
+
+    /// Add a Log-Normal leaf — moment-matched Gaussian output for positive
+    /// multiplicative processes. Works on `ln(y + 1)` internally.
+    pub fn with_lognormal(mut self, alpha: f64) -> Self {
+        self.lognormal = Some(alpha);
+        self
+    }
+
+    /// Log-Normal leaf with `α = 0.05`.
+    pub fn with_lognormal_defaults(self) -> Self {
+        self.with_lognormal(0.05)
+    }
+
+    /// Add a Gamma leaf — moment-matched Gaussian output for
+    /// positive-skewed continuous data.
+    pub fn with_gamma(mut self, alpha: f64) -> Self {
+        self.gamma = Some(alpha);
+        self
+    }
+
+    /// Gamma leaf with `α = 0.05`.
+    pub fn with_gamma_defaults(self) -> Self {
+        self.with_gamma(0.05)
+    }
+
+    /// Add a Rectified-Normal (hurdle) leaf — intermittent continuous
+    /// demand modeled as `p_zero · 0 + (1 - p_zero) · N(μ, σ²)`.
+    pub fn with_rectified_normal(mut self, alpha: f64) -> Self {
+        self.rectified_normal = Some(alpha);
+        self
+    }
+
+    /// Rectified-Normal leaf with `α = 0.1`.
+    pub fn with_rectified_normal_defaults(self) -> Self {
+        self.with_rectified_normal(0.1)
+    }
+
+    /// Add a Zero-Inflated Poisson (ZIP) leaf — hurdle model on Poisson
+    /// for high-zero-fraction count series where the observed zero
+    /// share exceeds Poisson's own zero probability.
+    pub fn with_zip(mut self, alpha: f64) -> Self {
+        self.zip = Some(alpha);
+        self
+    }
+
+    /// ZIP leaf with `α = 0.1`.
+    pub fn with_zip_defaults(self) -> Self {
+        self.with_zip(0.1)
+    }
+
+    /// Add a Zero-Inflated Negative-Binomial (ZINB) leaf — hurdle on NB
+    /// for overdispersed excess-zero counts (retail-SKU norm).
+    pub fn with_zinb(mut self, alpha: f64) -> Self {
+        self.zinb = Some(alpha);
+        self
+    }
+
+    /// ZINB leaf with `α = 0.05` (slow — dispersion needs history).
+    pub fn with_zinb_defaults(self) -> Self {
+        self.with_zinb(0.05)
+    }
+
+    /// Add a Student-t leaf — heavy-tailed continuous, softmax weighting
+    /// then sees plausible density around outliers. `ν` (degrees of
+    /// freedom) is estimated via kurtosis when N ≥ 50.
+    pub fn with_student_t(mut self, alpha: f64) -> Self {
+        self.student_t = Some(alpha);
+        self
+    }
+
+    /// Student-t leaf with `α = 0.05`.
+    pub fn with_student_t_defaults(self) -> Self {
+        self.with_student_t(0.05)
+    }
+
+    /// Add a Beta leaf for bounded `[0, 1]` data (rates, proportions,
+    /// service levels, conversion rates). Observations outside are
+    /// clamped.
+    pub fn with_beta(mut self, alpha: f64) -> Self {
+        self.beta = Some(alpha);
+        self
+    }
+
+    /// Beta leaf with `α = 0.05`.
+    pub fn with_beta_defaults(self) -> Self {
+        self.with_beta(0.05)
+    }
+
+    /// Add a Tweedie leaf — compound Poisson-gamma for aggregate retail
+    /// (SKU × store × week) with point mass at zero + positive continuous
+    /// branch + overdispersion. `p ∈ (1, 2)` interpolates between
+    /// Poisson (p=1) and Gamma (p=2). Values outside are clamped.
+    pub fn with_tweedie(mut self, alpha: f64, p: f64) -> Self {
+        self.tweedie = Some((alpha, p));
+        self
+    }
+
+    /// Tweedie leaf with the canonical retail-aggregate `α = 0.05, p = 1.5`.
+    pub fn with_tweedie_defaults(self) -> Self {
+        self.with_tweedie(0.05, 1.5)
+    }
+
+    /// Add a Skew-Normal leaf — asymmetric continuous data where YJ/log
+    /// doesn't fully symmetrize. Skewness estimated via sample M3 when
+    /// `N >= 30`; otherwise treated as Gaussian.
+    pub fn with_skew_normal(mut self, alpha: f64) -> Self {
+        self.skew_normal = Some(alpha);
+        self
+    }
+
+    /// Skew-Normal leaf with `α = 0.05`.
+    pub fn with_skew_normal_defaults(self) -> Self {
+        self.with_skew_normal(0.05)
+    }
+
+    /// Add a Discrete-Uniform leaf for bounded small-count series
+    /// `{0, 1, ..., K}`. `K` inferred as `max(observed)`. No
+    /// hyperparameter.
+    pub fn with_discrete_uniform(mut self) -> Self {
+        self.discrete_uniform = true;
+        self
+    }
+
     /// Clip forecast component means to `max(0, μ)` at prediction time.
     /// The cheap "no-negative demand forecast" fix. Distribution std is
     /// left alone (the 90% interval can still dip below 0); proper
@@ -459,20 +717,101 @@ impl LaplaceForecaster {
         self.with_seasonal_multiplicative(period, 0.15)
     }
 
-    /// **Scaffold — not yet implemented.** Declares intent to preregress
-    /// `y` on the [`TimeSeries`]'s calendar regressors via OLS, then feed
-    /// residuals to the leaves. At `predict_with_exog()` time the OLS
-    /// intercept + `β·X_future` would be added back to the leaf mixture.
+    /// Preregress `y` on the named regressors via OLS at `fit()` time,
+    /// then feed the residuals `y - Xβ` to the leaves. The OLS intercept
+    /// and `β · X_future` are added back to the mixture mean when the
+    /// caller uses [`Self::predict_with_exog`].
     ///
-    /// Calling this builder currently causes `fit()` to return `Err`. The
-    /// API is reserved so downstream code can compile against it; the
-    /// implementation is planned as a follow-up. Until then, callers that
-    /// need exog preregression should use [`RegressionForecaster`](crate::models::regression::RegressionForecaster)
-    /// with its residual-Ridge / dynamic backends, or preregress in
-    /// application code.
-    pub fn with_exog_preregression(mut self) -> Self {
-        self.exog_scaffold_declared = true;
+    /// Regressor names must exist in `TimeSeries::all_regressors()`
+    /// (`TimeSeries::with_calendar(...)` on construction). Unknown names
+    /// cause `fit()` to error.
+    ///
+    /// Standard [`Self::predict`] returns the residual-space mixture
+    /// only. To get the level forecast, use [`Self::predict_with_exog`]
+    /// with the future regressor values. Requires the `postprocess`
+    /// feature for the OLS solver.
+    pub fn with_exog_preregression(mut self, names: &[&str]) -> Self {
+        self.exog_names = names.iter().map(|s| s.to_string()).collect();
         self
+    }
+
+    /// α-23 opt-in: at `fit()` time, run the AID classifier on the training
+    /// values and synthesize a binary `__aid_stockout` column marking
+    /// AID-flagged stockout observations. That column is added to the
+    /// exog preregression design matrix — the OLS coefficient captures
+    /// the mean demand shift during stockout periods. **Default off.**
+    ///
+    /// Requires that `.with_exog_preregression(...)` is also called
+    /// (the synthesized column joins the exog set). Requires the
+    /// `postprocess` feature (for AID).
+    pub fn with_stockout_indicator(mut self) -> Self {
+        self.use_stockout_indicator = true;
+        self
+    }
+
+    /// α-23 opt-in: at `fit()` time, run the AID classifier and trim the
+    /// training window to start after the last observation flagged as
+    /// `NewProduct`. Reasoning: the new-product lifecycle phase is a
+    /// different regime (ramp-up, no equilibrium) that pollutes the
+    /// leaves' state. **Default off.**
+    ///
+    /// If AID doesn't flag any `NewProduct` observations (or the flag
+    /// is at the very end), no trimming happens.
+    pub fn trim_new_product_prefix(mut self) -> Self {
+        self.trim_new_product_prefix = true;
+        self
+    }
+
+    /// Level-space point forecast for callers that used
+    /// [`Self::with_exog_preregression`]. Requires the future values of
+    /// every named regressor (and, if
+    /// [`Self::with_stockout_indicator`] was set, the future
+    /// `__aid_stockout` column). Returns
+    /// `mixture_mean_residual + β · X_future` per horizon.
+    ///
+    /// When called without any exog preregression having been configured,
+    /// this is equivalent to [`Self::predict`].
+    pub fn predict_with_exog(
+        &self,
+        horizon: usize,
+        future_regressors: &HashMap<String, Vec<f64>>,
+    ) -> Result<Forecast> {
+        if self.leaves.is_empty() {
+            return Err(ForecastError::FitRequired {
+                model: Some("LaplaceForecaster".into()),
+            });
+        }
+        if horizon == 0 {
+            return Ok(Forecast::from_values(Vec::new()));
+        }
+        let mixtures = self.forecast_dist(horizon)?;
+        let points: Vec<f64> = mixtures.iter().map(|m| m.mean()).collect();
+        match &self.exog_ols {
+            None => Ok(Forecast::from_values(points)),
+            Some(ols) => {
+                for name in &ols.regressor_names {
+                    let col = future_regressors.get(name).ok_or_else(|| {
+                        ForecastError::InvalidParameter(format!(
+                            "predict_with_exog: missing future regressor `{name}`"
+                        ))
+                    })?;
+                    if col.len() != horizon {
+                        return Err(ForecastError::InvalidParameter(format!(
+                            "predict_with_exog: future `{name}` length {} != horizon {}",
+                            col.len(),
+                            horizon
+                        )));
+                    }
+                }
+                let level_shift = ols.predict(future_regressors)?;
+                let level_points: Vec<f64> = points
+                    .iter()
+                    .zip(level_shift.iter())
+                    .map(|(p, s)| p + s)
+                    .collect();
+                Ok(Forecast::from_values(level_points))
+            }
+        }
     }
 
     /// Replace the 3-leaf default set (one EMA / drift / AR(1) each) with
@@ -530,6 +869,33 @@ impl LaplaceForecaster {
     /// adds leaves, never removes.
     pub fn auto(mut self) -> Self {
         self.use_auto = true;
+        self
+    }
+
+    /// AID-driven auto-selector: run the `anofox-regression` AID demand
+    /// classifier on the training values at `fit()` time and enable the
+    /// distribution-family leaf that matches the fitted family. Replaces
+    /// the hand-tuned rules in [`Self::auto`] with a statistically-derived
+    /// choice.
+    ///
+    /// Family → leaf mapping:
+    ///
+    /// * `Poisson`, `Geometric` → [`super::leaves::PoissonLeaf`]
+    /// * `NegativeBinomial` → [`super::leaves::NegativeBinomialLeaf`]
+    /// * `LogNormal` → [`super::leaves::LogNormalLeaf`]
+    /// * `Gamma` → [`super::leaves::GammaLeaf`]
+    /// * `RectifiedNormal` → [`super::leaves::RectifiedNormalLeaf`]
+    /// * `Normal` → falls through to [`Self::auto`]'s rule set
+    ///
+    /// Any AID-detected count / positive family also enables
+    /// [`Self::non_negative`] on the output.
+    ///
+    /// Composes with explicit `with_*` builders. Requires the
+    /// `postprocess` feature (default).
+    #[cfg(feature = "postprocess")]
+    pub fn auto_aid(mut self) -> Self {
+        self.use_auto = true;
+        self.use_aid = true;
         self
     }
 
@@ -680,6 +1046,42 @@ impl LaplaceForecaster {
         if let Some((p, a)) = self.seasonal_intermittent {
             leaves.push(Box::new(SeasonalIntermittentLeaf::new(p, a)));
         }
+        if let Some(a) = self.poisson {
+            leaves.push(Box::new(PoissonLeaf::new(a)));
+        }
+        if let Some(a) = self.neg_binomial {
+            leaves.push(Box::new(NegativeBinomialLeaf::new(a)));
+        }
+        if let Some(a) = self.lognormal {
+            leaves.push(Box::new(LogNormalLeaf::new(a)));
+        }
+        if let Some(a) = self.gamma {
+            leaves.push(Box::new(GammaLeaf::new(a)));
+        }
+        if let Some(a) = self.rectified_normal {
+            leaves.push(Box::new(RectifiedNormalLeaf::new(a)));
+        }
+        if let Some(a) = self.zip {
+            leaves.push(Box::new(ZeroInflatedPoissonLeaf::new(a)));
+        }
+        if let Some(a) = self.zinb {
+            leaves.push(Box::new(ZeroInflatedNegativeBinomialLeaf::new(a)));
+        }
+        if let Some(a) = self.student_t {
+            leaves.push(Box::new(StudentTLeaf::new(a)));
+        }
+        if let Some(a) = self.beta {
+            leaves.push(Box::new(BetaLeaf::new(a)));
+        }
+        if let Some((a, p)) = self.tweedie {
+            leaves.push(Box::new(TweedieLeaf::new(a, p)));
+        }
+        if let Some(a) = self.skew_normal {
+            leaves.push(Box::new(SkewNormalLeaf::new(a)));
+        }
+        if self.discrete_uniform {
+            leaves.push(Box::new(DiscreteUniformLeaf::new()));
+        }
         if let Some(p) = self.seasonal_period {
             leaves.push(Box::new(SeasonalEmaLeaf::new(p, self.seasonal_alpha)));
         }
@@ -735,25 +1137,182 @@ impl Default for LaplaceForecaster {
 impl Forecaster for LaplaceForecaster {
     fn fit(&mut self, series: &TimeSeries) -> Result<()> {
         validate_series_complete(series)?;
-        if self.exog_scaffold_declared {
-            return Err(ForecastError::InvalidParameter(
-                "LaplaceForecaster::with_exog_preregression() is a reserved scaffold; \
-                 implementation is planned. Use RegressionForecaster in the meantime."
-                    .into(),
-            ));
-        }
-        let values = series.primary_values();
-        if values.is_empty() {
+        let raw = series.primary_values();
+        if raw.is_empty() {
             return Err(ForecastError::InvalidParameter(
                 "LaplaceForecaster requires at least one observation".into(),
             ));
+        }
+
+        // Reset exog state so a re-fit doesn't reuse the previous OLS.
+        self.exog_ols = None;
+
+        // α-23: Run AID once at the top when any AID-driven pre-step
+        // (trim NewProduct, stockout indicator) is requested. Cached
+        // labels are consumed by the two branches below. Behind the
+        // `postprocess` feature.
+        #[cfg(feature = "postprocess")]
+        let aid_labels: Option<Vec<crate::validation::aid::AidAnomalyLabel>> = {
+            if self.trim_new_product_prefix || self.use_stockout_indicator {
+                use crate::validation::aid::AidAnalyzer;
+                let result = AidAnalyzer::new().analyze(raw);
+                Some(result.features().labels)
+            } else {
+                None
+            }
+        };
+
+        // α-23 opt-in: trim leading NewProduct observations. `train_start`
+        // is the offset into `raw` where the leaf-observed training
+        // sub-window begins. Default 0.
+        let mut train_start = 0usize;
+        #[cfg(feature = "postprocess")]
+        if self.trim_new_product_prefix {
+            if let Some(labels) = &aid_labels {
+                let last_np = labels
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find(|(_, l)| matches!(l, crate::validation::aid::AidAnomalyLabel::NewProduct))
+                    .map(|(i, _)| i);
+                if let Some(idx) = last_np {
+                    // Never trim to fewer than 12 obs — the leaves need
+                    // *some* data to warm up.
+                    let candidate = idx + 1;
+                    if candidate + 12 <= raw.len() {
+                        train_start = candidate;
+                    }
+                }
+            }
+        }
+        let raw_train: &[f64] = &raw[train_start..];
+
+        // α-23: OLS preregression on named exog regressors + (optionally)
+        // an AID-derived is_stockout column. Residuals `y - Xβ` are what
+        // the leaves observe; the OLS is cached for `predict_with_exog`.
+        let leaf_values: Vec<f64> = if !self.exog_names.is_empty() {
+            let mut regressors: HashMap<String, Vec<f64>> = HashMap::new();
+            for name in &self.exog_names {
+                let col = series.regressor(name).ok_or_else(|| {
+                    ForecastError::InvalidParameter(format!(
+                        "LaplaceForecaster: exog regressor `{name}` not in TimeSeries"
+                    ))
+                })?;
+                if col.len() != raw.len() {
+                    return Err(ForecastError::InvalidParameter(format!(
+                        "LaplaceForecaster: exog regressor `{name}` length {} != series {}",
+                        col.len(),
+                        raw.len()
+                    )));
+                }
+                regressors.insert(name.clone(), col[train_start..].to_vec());
+            }
+            #[cfg(feature = "postprocess")]
+            if self.use_stockout_indicator {
+                if let Some(labels) = &aid_labels {
+                    let col: Vec<f64> = labels[train_start..]
+                        .iter()
+                        .map(|l| {
+                            if matches!(l, crate::validation::aid::AidAnomalyLabel::Stockout) {
+                                1.0
+                            } else {
+                                0.0
+                            }
+                        })
+                        .collect();
+                    regressors.insert("__aid_stockout".to_string(), col);
+                }
+            }
+            let ols = ols_fit(raw_train, &regressors)?;
+            let fitted = ols.predict(&regressors)?;
+            let residuals: Vec<f64> = raw_train
+                .iter()
+                .zip(fitted.iter())
+                .map(|(y, f)| y - f)
+                .collect();
+            self.exog_ols = Some(ols);
+            residuals
+        } else {
+            raw_train.to_vec()
+        };
+
+        // Existing downstream code reads a `values` slice; alias to the
+        // (potentially trimmed & residual) `leaf_values` we just built.
+        let values: &[f64] = &leaf_values;
+
+        // AID-driven family selection (α-21). Runs before the classical
+        // `use_auto` rules so those only fill in gaps AID didn't cover.
+        // The AID call is behind the `postprocess` feature; when off, this
+        // block compiles out and `use_aid` stays `false`.
+        #[cfg(feature = "postprocess")]
+        if self.use_aid {
+            use crate::validation::aid::AidAnalyzer;
+            use anofox_regression::solvers::DemandDistribution;
+            let aid_result = AidAnalyzer::new().analyze(values);
+            let summary = aid_result.summary();
+            let mut count_or_positive = false;
+            // α-24: When AID picks Poisson/NB AND the observed zero
+            // fraction exceeds what that distribution would predict,
+            // route to the zero-inflated variant instead. Threshold:
+            // observed zero fraction > 0.5 → ZIP/ZINB.
+            let excess_zeros = summary.zero_proportion > 0.5;
+            match summary.distribution {
+                DemandDistribution::Poisson | DemandDistribution::Geometric => {
+                    if excess_zeros {
+                        if self.zip.is_none() {
+                            self.zip = Some(0.1);
+                        }
+                    } else if self.poisson.is_none() {
+                        self.poisson = Some(0.1);
+                    }
+                    count_or_positive = true;
+                }
+                DemandDistribution::NegativeBinomial => {
+                    if excess_zeros {
+                        if self.zinb.is_none() {
+                            self.zinb = Some(0.05);
+                        }
+                    } else if self.neg_binomial.is_none() {
+                        self.neg_binomial = Some(0.05);
+                    }
+                    count_or_positive = true;
+                }
+                DemandDistribution::LogNormal => {
+                    if self.lognormal.is_none() {
+                        self.lognormal = Some(0.05);
+                    }
+                    count_or_positive = true;
+                }
+                DemandDistribution::Gamma => {
+                    if self.gamma.is_none() {
+                        self.gamma = Some(0.05);
+                    }
+                    count_or_positive = true;
+                }
+                DemandDistribution::RectifiedNormal => {
+                    if self.rectified_normal.is_none() {
+                        self.rectified_normal = Some(0.1);
+                    }
+                    count_or_positive = true;
+                }
+                DemandDistribution::Normal => {}
+            }
+            if count_or_positive {
+                self.non_negative = true;
+            }
         }
 
         // Auto-selector: inspect series characteristics before initialising
         // leaves and set the opt-in toggles from residual-slicing evidence.
         // User-configured toggles are respected — auto only adds.
         if self.use_auto {
-            let chars = auto_characteristics(values, self.auto_seasonal_period);
+            // α-27 fix #2: auto-detect the seasonal period when the user
+            // hasn't set one explicitly. Falls back to `auto_seasonal_period`
+            // (default 7) when no candidate has ACF > 0.35.
+            let detected_period = detect_seasonal_period(values);
+            let effective_period = detected_period.unwrap_or(self.auto_seasonal_period);
+
+            let chars = auto_characteristics(values, effective_period);
             if self.ou.is_none() {
                 self.ou = Some(0.1);
             }
@@ -767,7 +1326,18 @@ impl Forecaster for LaplaceForecaster {
                 self.ar2 = Some(0.1);
             }
             if chars.seasonality_strength > 0.15 && self.seasonal_period.is_none() {
-                self.seasonal_period = Some(self.auto_seasonal_period);
+                self.seasonal_period = Some(effective_period);
+            }
+            // α-27 fix #1: enable the multiplicative seasonal leaf when
+            // seasonality is present AND series is strictly positive
+            // (tourism, retail-aggregate — where the peak-trough pattern
+            // is proportional to the level, not additive).
+            if chars.seasonality_strength > 0.3
+                && chars.all_positive
+                && chars.mean_y > 0.0
+                && self.seasonal_mult.is_none()
+            {
+                self.seasonal_mult = Some((effective_period, 0.15));
             }
             if chars.acf1 > 0.5 && chars.trend_strength < 0.5 && self.frac_diff.is_none() {
                 self.frac_diff = Some((0.4, 0.1, 0.1));
@@ -776,8 +1346,18 @@ impl Forecaster for LaplaceForecaster {
             // - Mid-trend series get Holt (was evidence-negative on full-M5
             //   only because it was applied to trend-free series; on the
             //   trend_strength ∈ [0.3, 0.7] slice it wins).
+            // α-27 fix #3: use damped Holt (φ=0.9) instead of near-undamped
+            // (φ=0.98). fev tourism/m4_yearly show classical damped-trend
+            // wins big on long horizons — damping bends extrapolation.
             if chars.trend_strength >= 0.3 && chars.trend_strength <= 0.7 && self.holt.is_none() {
-                self.holt = Some((0.3, 0.1, 0.98));
+                self.holt = Some((0.3, 0.1, 0.9));
+            }
+            // α-27 fix #3b: strong-trend (>0.7) series also benefit from
+            // damped Holt with more aggressive damping. Otherwise our
+            // Drift leaf's linear extrapolation blows the tail on long
+            // horizons (fev m4_yearly, m4_quarterly).
+            if chars.trend_strength > 0.7 && self.holt.is_none() {
+                self.holt = Some((0.2, 0.05, 0.85));
             }
             // - Zero-inflated seasonal series get the seasonal-Croston leaf.
             //   Retail SKU data with weekend spikes is the biggest lose
@@ -786,7 +1366,7 @@ impl Forecaster for LaplaceForecaster {
                 && chars.seasonality_strength > 0.10
                 && self.seasonal_intermittent.is_none()
             {
-                self.seasonal_intermittent = Some((self.auto_seasonal_period, 0.1));
+                self.seasonal_intermittent = Some((effective_period, 0.1));
             }
             // - Purely intermittent (no phase signal) still gets classic
             //   Croston.
@@ -1574,5 +2154,91 @@ mod tests {
             Inspectable::explanation(&f),
             Err(ForecastError::FitRequired { .. })
         ));
+    }
+
+    #[cfg(feature = "postprocess")]
+    #[test]
+    fn auto_aid_predicts_finite_on_intermittent_data() {
+        // Sparse count series (60% zeros, mean ≈ 0.6) — AID should
+        // classify as intermittent count and the fit should succeed.
+        let n = 200;
+        let base = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let vals: Vec<f64> = (0..n).map(|i| if i % 3 == 0 { 2.0 } else { 0.0 }).collect();
+        let stamps: Vec<_> = (0..n).map(|i| base + Duration::hours(i as i64)).collect();
+        let ts = TimeSeries::univariate(stamps, vals).unwrap();
+        let mut f = LaplaceForecaster::new().auto_aid();
+        f.fit(&ts).unwrap();
+        let fc = f.predict(10).unwrap();
+        for v in fc.primary() {
+            assert!(v.is_finite() && *v >= 0.0);
+        }
+    }
+
+    #[cfg(feature = "postprocess")]
+    #[test]
+    fn auto_aid_predicts_finite_on_normal_data() {
+        let n = 200;
+        let base = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let vals: Vec<f64> = (0..n)
+            .map(|i| 50.0 + ((i as f64 * 0.1).sin() * 5.0))
+            .collect();
+        let stamps: Vec<_> = (0..n).map(|i| base + Duration::hours(i as i64)).collect();
+        let ts = TimeSeries::univariate(stamps, vals).unwrap();
+        let mut f = LaplaceForecaster::new().auto_aid();
+        f.fit(&ts).unwrap();
+        let fc = f.predict(10).unwrap();
+        for v in fc.primary() {
+            assert!(v.is_finite());
+        }
+    }
+
+    #[test]
+    fn exog_preregression_removes_linear_component() {
+        // y = 3.0 + 2.0 * promo + noise. Preregress on promo → residuals
+        // should be near-zero-mean and small; predict_with_exog should
+        // add ~2 back when future promo=1.
+        let n = 200;
+        let base = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let promo: Vec<f64> = (0..n).map(|i| if i % 7 == 0 { 1.0 } else { 0.0 }).collect();
+        let vals: Vec<f64> = promo
+            .iter()
+            .enumerate()
+            .map(|(i, p)| 3.0 + 2.0 * p + ((i as f64 * 0.13).sin() * 0.1))
+            .collect();
+        let stamps: Vec<_> = (0..n).map(|i| base + Duration::hours(i as i64)).collect();
+        let cal = crate::core::time_series::CalendarAnnotations::default()
+            .with_regressor("promo".into(), promo.clone());
+        let mut ts = TimeSeries::univariate(stamps, vals).unwrap();
+        ts.set_calendar(cal);
+        let mut f = LaplaceForecaster::new().with_exog_preregression(&["promo"]);
+        f.fit(&ts).unwrap();
+
+        // Future promo=1 for 5 steps.
+        let mut fut = std::collections::HashMap::new();
+        fut.insert("promo".to_string(), vec![1.0; 5]);
+        let fc = f.predict_with_exog(5, &fut).unwrap();
+        // Level forecast should include the promo lift (~2 above baseline).
+        for v in fc.primary() {
+            assert!(*v > 4.0, "expected level >4 with promo lift, got {v}");
+            assert!(*v < 6.5, "level should be bounded above ~5+noise, got {v}");
+        }
+    }
+
+    #[cfg(feature = "postprocess")]
+    #[test]
+    fn trim_new_product_prefix_smoke() {
+        // Series with an obvious 10-obs early-life ramp, then stable.
+        let n = 150;
+        let base = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let mut vals = vec![0.0; 10]; // NewProduct-like zeros
+        vals.extend((0..(n - 10)).map(|i| 5.0 + ((i as f64 * 0.1).sin() * 0.5)));
+        let stamps: Vec<_> = (0..n).map(|i| base + Duration::hours(i as i64)).collect();
+        let ts = TimeSeries::univariate(stamps, vals).unwrap();
+        let mut f = LaplaceForecaster::new().trim_new_product_prefix();
+        f.fit(&ts).unwrap();
+        let fc = f.predict(5).unwrap();
+        for v in fc.primary() {
+            assert!(v.is_finite());
+        }
     }
 }
