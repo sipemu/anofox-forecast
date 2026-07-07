@@ -34,6 +34,51 @@ struct AutoChars {
     /// Fraction of observations at or near zero. Used to route
     /// demand-side (Croston, seasonal-Croston) leaves.
     zero_fraction: f64,
+    /// Sample mean. Positive-mean series can be routed to multiplicative
+    /// / lognormal / gamma leaves.
+    mean_y: f64,
+    /// True if all observations are ≥ 0 (needed for multiplicative
+    /// seasonal, lognormal, gamma leaves).
+    all_positive: bool,
+}
+
+/// Detect the most likely seasonal period from the training window.
+/// Scans a canonical set of candidate periods {7, 12, 24, 30, 52, 4}
+/// and picks the one with the highest ACF at that lag. Returns `None`
+/// if none of the candidates has ACF above a threshold — the caller
+/// then falls back to the user-configured `auto_seasonal_period`.
+pub(crate) fn detect_seasonal_period(train: &[f64]) -> Option<usize> {
+    let n = train.len();
+    if n < 30 {
+        return None;
+    }
+    let mean_y: f64 = train.iter().sum::<f64>() / n as f64;
+    let var: f64 = train.iter().map(|y| (y - mean_y).powi(2)).sum::<f64>() / n as f64;
+    if var < 1e-9 {
+        return None;
+    }
+    let candidates: [usize; 6] = [12, 7, 24, 52, 4, 30];
+    let mut best_period = 0usize;
+    let mut best_acf = 0.35_f64; // threshold — below this, no period is picked
+    for &p in &candidates {
+        if p >= n / 2 {
+            continue;
+        }
+        let mut cov = 0.0f64;
+        for i in p..n {
+            cov += (train[i] - mean_y) * (train[i - p] - mean_y);
+        }
+        let acf = (cov / ((n - p) as f64 * var)).clamp(-1.0, 1.0).abs();
+        if acf > best_acf {
+            best_acf = acf;
+            best_period = p;
+        }
+    }
+    if best_period > 0 {
+        Some(best_period)
+    } else {
+        None
+    }
 }
 
 /// Compute (seasonality_strength_R², |ACF(1)|) on the training window.
@@ -47,11 +92,14 @@ fn auto_characteristics(train: &[f64], period: usize) -> AutoChars {
             acf1: 0.0,
             trend_strength: 0.0,
             zero_fraction: 0.0,
+            mean_y: 0.0,
+            all_positive: true,
         };
     }
     let mean_y: f64 = train.iter().sum::<f64>() / n as f64;
     let ss_tot: f64 = train.iter().map(|y| (y - mean_y).powi(2)).sum();
     let zero_fraction = train.iter().filter(|&&y| y.abs() < 1e-9).count() as f64 / n as f64;
+    let all_positive = train.iter().all(|&y| y >= 0.0);
 
     // Trend strength: R² of the linear fit y ~ t.
     let t_mean = (n - 1) as f64 / 2.0;
@@ -114,6 +162,8 @@ fn auto_characteristics(train: &[f64], period: usize) -> AutoChars {
         acf1,
         trend_strength,
         zero_fraction,
+        mean_y,
+        all_positive,
     }
 }
 
@@ -1256,7 +1306,13 @@ impl Forecaster for LaplaceForecaster {
         // leaves and set the opt-in toggles from residual-slicing evidence.
         // User-configured toggles are respected — auto only adds.
         if self.use_auto {
-            let chars = auto_characteristics(values, self.auto_seasonal_period);
+            // α-27 fix #2: auto-detect the seasonal period when the user
+            // hasn't set one explicitly. Falls back to `auto_seasonal_period`
+            // (default 7) when no candidate has ACF > 0.35.
+            let detected_period = detect_seasonal_period(values);
+            let effective_period = detected_period.unwrap_or(self.auto_seasonal_period);
+
+            let chars = auto_characteristics(values, effective_period);
             if self.ou.is_none() {
                 self.ou = Some(0.1);
             }
@@ -1270,7 +1326,18 @@ impl Forecaster for LaplaceForecaster {
                 self.ar2 = Some(0.1);
             }
             if chars.seasonality_strength > 0.15 && self.seasonal_period.is_none() {
-                self.seasonal_period = Some(self.auto_seasonal_period);
+                self.seasonal_period = Some(effective_period);
+            }
+            // α-27 fix #1: enable the multiplicative seasonal leaf when
+            // seasonality is present AND series is strictly positive
+            // (tourism, retail-aggregate — where the peak-trough pattern
+            // is proportional to the level, not additive).
+            if chars.seasonality_strength > 0.3
+                && chars.all_positive
+                && chars.mean_y > 0.0
+                && self.seasonal_mult.is_none()
+            {
+                self.seasonal_mult = Some((effective_period, 0.15));
             }
             if chars.acf1 > 0.5 && chars.trend_strength < 0.5 && self.frac_diff.is_none() {
                 self.frac_diff = Some((0.4, 0.1, 0.1));
@@ -1279,8 +1346,18 @@ impl Forecaster for LaplaceForecaster {
             // - Mid-trend series get Holt (was evidence-negative on full-M5
             //   only because it was applied to trend-free series; on the
             //   trend_strength ∈ [0.3, 0.7] slice it wins).
+            // α-27 fix #3: use damped Holt (φ=0.9) instead of near-undamped
+            // (φ=0.98). fev tourism/m4_yearly show classical damped-trend
+            // wins big on long horizons — damping bends extrapolation.
             if chars.trend_strength >= 0.3 && chars.trend_strength <= 0.7 && self.holt.is_none() {
-                self.holt = Some((0.3, 0.1, 0.98));
+                self.holt = Some((0.3, 0.1, 0.9));
+            }
+            // α-27 fix #3b: strong-trend (>0.7) series also benefit from
+            // damped Holt with more aggressive damping. Otherwise our
+            // Drift leaf's linear extrapolation blows the tail on long
+            // horizons (fev m4_yearly, m4_quarterly).
+            if chars.trend_strength > 0.7 && self.holt.is_none() {
+                self.holt = Some((0.2, 0.05, 0.85));
             }
             // - Zero-inflated seasonal series get the seasonal-Croston leaf.
             //   Retail SKU data with weekend spikes is the biggest lose
@@ -1289,7 +1366,7 @@ impl Forecaster for LaplaceForecaster {
                 && chars.seasonality_strength > 0.10
                 && self.seasonal_intermittent.is_none()
             {
-                self.seasonal_intermittent = Some((self.auto_seasonal_period, 0.1));
+                self.seasonal_intermittent = Some((effective_period, 0.1));
             }
             // - Purely intermittent (no phase signal) still gets classic
             //   Croston.

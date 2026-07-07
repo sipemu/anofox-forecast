@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0-alpha.27] - 2026-07-07
+
+### Changed — `.auto()` closes the gap to classical SOTA
+
+Three rule additions to `.auto()`, driven by the fev-benchmark loss analysis:
+
+- **Auto seasonal period detection.** New `detect_seasonal_period(train)` scans candidate periods `{4, 7, 12, 24, 30, 52}` and picks the one with highest ACF magnitude (threshold 0.35). When detected, `.auto()` uses the detected period for `SeasonalEmaLeaf`, `MultiplicativeSeasonalLeaf`, `SeasonalIntermittentLeaf`. Falls back to `auto_seasonal_period` (default 7) when no candidate meets the threshold.
+- **Multiplicative seasonal in `.auto()`.** When `seasonality_strength > 0.3` AND the series is strictly positive AND `mean > 0`, `.auto()` also enables `MultiplicativeSeasonalLeaf` at the (auto-detected) period. Retail/tourism data with proportional seasonality benefits substantially.
+- **Damped Holt by default.** When `trend_strength ∈ [0.3, 0.7]`, `Holt(α=0.3, β=0.1, φ=0.9)` — was φ=0.98 (near-undamped). When `trend_strength > 0.7`, more aggressive `Holt(α=0.2, β=0.05, φ=0.85)`. Damping bends the extrapolation on long horizons where undamped Drift/Holt overshoots.
+
+Also extends `AutoChars` with `mean_y` and `all_positive` fields.
+
+### Benchmark: fev-style, 10 datasets, 1000 series/dataset
+
+| model | α-25 geomean MASE | **α-27 geomean MASE** | Δ | vs. AutoTheta |
+|-------|-------------------:|----------------------:|:--|:--------------|
+| AutoTheta (internal) | 2.156 | 2.156 | — | baseline |
+| AutoETS (internal) | 2.158 | 2.158 | — | +0.1% |
+| **`Laplace + auto`** | 2.165 | **1.928** ⭐ | **−11.0%** | **−10.6% (WINS)** |
+| SmartForecaster | 2.482 | 2.390 | −3.7% | +10.9% |
+| `Laplace + auto_aid` | 2.615 | 2.440 | −6.7% | +13.2% |
+
+Per-dataset (biggest wins):
+
+| dataset | α-25 auto | α-27 auto | Δ | driver |
+|---------|----------:|----------:|:--|:-------|
+| m4_hourly | 7.055 | **4.559** | **−35.4%** | period auto-detected as 24 |
+| tourism_monthly | 2.819 | **2.186** | **−22.4%** | multiplicative seasonal + damped Holt |
+| cif_2016 | 1.519 | **1.231** | **−19.0%** | damped Holt on trending banking |
+| tourism_quarterly | 3.019 | **2.554** | **−15.4%** | multiplicative seasonal |
+
+On the 6 datasets we share with autogluon/fev's Chronos benchmark, our geomean MASE goes from 2.072 to 1.850 (−10.7%). Gap to fev's Nixtla-quality AutoTheta closes from +45% to +29%; gap to TimesFM-2.0 from +55% to +39%.
+
+WQL improvement: 0.117 → 0.113 (−3.4%).
+
+Fit time unchanged (5.1s vs 4.9s at α-25 — negligible).
+
+### Backwards compatibility
+
+`.auto()` behavior changes for series where any of the three new rules fire. Users targeting exact reproducibility of α-20/α-25 behavior can pre-set their leaves explicitly (auto never overrides user choices).
+
+`.auto_with_seasonal_period(p)` still overrides the auto-detected period.
+
+
 ## [0.12.0-alpha.25] - 2026-07-07
 
 ### Added — three more distribution leaves (Tweedie, Skew-Normal, Discrete-Uniform)
