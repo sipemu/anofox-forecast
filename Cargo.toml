@@ -325,3 +325,8 @@ name = "skaters_m5_full_auto"
 path = "examples/skaters_m5_full_auto.rs"
 required-features = ["distributional"]
 
+
+[[example]]
+name = "skaters_m3_monthly_benchmark"
+path = "examples/skaters_m3_monthly_benchmark.rs"
+required-features = ["distributional"]

@@ -1,17 +1,17 @@
-//! Cross-panel benchmark on M4 daily.
+//! M3 monthly cross-panel benchmark.
 //!
-//! Same design as `examples/skaters_m5_benchmark.rs`, retargeted to the
-//! M4 daily competition subset. Answers the cross-panel generalization
-//! question: does the M5-optimized best config (`Laplace + AR2 + S7 +
-//! FD + OU`) generalize to a different panel type?
+//! 1428 monthly series across 6 domains (demographic, micro, macro,
+//! industry, finance, other) from the M3 forecasting competition
+//! (Makridakis & Hibon, 2000). 18-month held-out competition horizon.
+//! Data via the Monash Time Series Forecasting Archive
+//! (`m3_monthly_dataset.tsf`, ~336 KB unpacked to `~1 MB`).
 //!
-//! M4 daily is 4,227 non-price economic-adjacent series with a 14-day
-//! held-out competition horizon. Weekly seasonality is present but
-//! weaker than M5 retail. Series are longer (median ~2,900 obs vs. M5's
-//! ~1,900).
+//! Answers the cross-panel question: does the α-21 AID-driven Laplace
+//! stack help on monthly economic-adjacent data (typically smoother than
+//! M4 daily, longer horizon, period 12)?
 //!
-//! Run: cargo run --release --features distributional --example skaters_m4_daily_benchmark
-//! Configure: SAMPLE_SIZE=500 (default 100) for a larger run.
+//! Run: `cargo run --release --features distributional --example skaters_m3_monthly_benchmark`
+//! Configure: `SAMPLE_SIZE=500` (default: all 1428).
 
 use anofox_forecast::core::TimeSeries;
 use anofox_forecast::models::exponential::AutoETS;
@@ -22,12 +22,11 @@ use anofox_forecast::models::Forecaster;
 use anofox_forecast::models::{DistributionalForecaster, LaplaceForecaster, SmartForecaster};
 
 use chrono::{Duration, TimeZone, Utc};
-use std::collections::HashMap;
 use std::fs;
 use std::time::Instant;
 
-const HORIZON: usize = 14;
-const MIN_LEN: usize = 200;
+const HORIZON: usize = 18;
+const MIN_LEN: usize = 60;
 
 struct SeriesResult {
     mae: f64,
@@ -46,49 +45,65 @@ struct ModelSummary {
     total_ms: u128,
 }
 
+/// Parse the Monash `.tsf` M3 monthly dataset. Returns `(id, values)` pairs.
+fn parse_tsf(path: &str) -> Vec<(String, Vec<f64>)> {
+    // Monash .tsf is Latin-1 (non-UTF-8) with CRLF terminators. Read as
+    // bytes and decode losslessly.
+    let bytes = fs::read(path).expect("read tsf");
+    let content: String = bytes.iter().map(|&b| b as char).collect();
+    let mut series = Vec::new();
+    let mut in_data = false;
+    for line in content.lines() {
+        if !in_data {
+            if line.trim_start().starts_with("@data") {
+                in_data = true;
+            }
+            continue;
+        }
+        // Data line: id:start_ts:v1,v2,v3,...
+        let mut parts = line.splitn(3, ':');
+        let id = match parts.next() {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
+        let _start_ts = parts.next();
+        let vals_str = match parts.next() {
+            Some(s) => s,
+            None => continue,
+        };
+        let values: Vec<f64> = vals_str
+            .split(',')
+            .filter_map(|tok| tok.trim().parse::<f64>().ok())
+            .collect();
+        if values.len() > HORIZON + 6 {
+            series.push((id, values));
+        }
+    }
+    series
+}
+
 fn main() {
     let sample_size: usize = std::env::var("SAMPLE_SIZE")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(100);
+        .unwrap_or(usize::MAX);
+    let path =
+        std::env::var("DATA_PATH").unwrap_or_else(|_| "validation/data/m3_monthly.tsf".into());
 
-    let train_json = fs::read_to_string("validation/data/m4_daily_train.json")
-        .expect("read m4_daily_train.json");
-    let test_json =
-        fs::read_to_string("validation/data/m4_daily_test.json").expect("read m4_daily_test.json");
-    let train: HashMap<String, Vec<f64>> =
-        serde_json::from_str(&train_json).expect("parse train JSON");
-    let test: HashMap<String, Vec<f64>> =
-        serde_json::from_str(&test_json).expect("parse test JSON");
-
-    eprintln!("Loaded {} training series", train.len());
-
-    // Sort ids for reproducibility, keep only sufficiently long series.
-    let mut ids: Vec<&String> = train.keys().collect();
-    ids.sort();
-    let ids: Vec<&String> = ids
-        .into_iter()
-        .filter(|id| {
-            train.get(*id).is_some_and(|v| v.len() >= MIN_LEN)
-                && test.get(*id).is_some_and(|v| v.len() >= HORIZON)
-        })
-        .take(sample_size)
-        .collect();
-    eprintln!("Running benchmark on {} series", ids.len());
+    eprintln!("Parsing {path}...");
+    let mut kept = parse_tsf(&path);
+    kept.truncate(sample_size);
+    eprintln!("Running on {} series (H={})", kept.len(), HORIZON);
 
     let base_date = Utc.with_ymd_and_hms(2000, 1, 1, 0, 0, 0).unwrap();
 
-    // Slot layout — mirror of the M5 benchmark's Laplace variants for
-    // easy cross-panel comparison. α-21/α-22 additions: auto_aid, Smart.
-    const N_MODELS: usize = 10;
+    const N_MODELS: usize = 8;
     let labels: [&str; N_MODELS] = [
         "AutoETS",
         "AutoTheta",
         "Laplace",
-        "Laplace+AR2",
-        "Laplace+S7",
-        "Laplace+AR2+S7",
-        "Laplace+AR2+S7+FD+OU",
+        "Laplace+S12",
+        "Laplace+AR2+S12",
         "Laplace+auto",
         "Laplace+auto_aid",
         "SmartForecaster",
@@ -96,19 +111,27 @@ fn main() {
     let mut results: Vec<Vec<SeriesResult>> = (0..N_MODELS).map(|_| Vec::new()).collect();
 
     let global_start = Instant::now();
-
-    for (idx, id) in ids.iter().enumerate() {
-        if idx % 25 == 0 {
-            eprintln!("[{}/{}] {}", idx, ids.len(), id);
+    for (idx, (id, values)) in kept.iter().enumerate() {
+        if idx % 100 == 0 {
+            eprintln!(
+                "[{}/{}] {} — elapsed {:.1}s",
+                idx,
+                kept.len(),
+                id,
+                global_start.elapsed().as_secs_f64()
+            );
         }
-        let train_values = train.get(*id).unwrap().clone();
-        let test_values = test.get(*id).unwrap();
+        if values.len() <= HORIZON + 6 {
+            continue;
+        }
+        let split = values.len() - HORIZON;
+        let train_values = values[..split].to_vec();
+        let test_values = &values[split..];
         if train_values.len() < MIN_LEN {
             continue;
         }
-
         let stamps: Vec<_> = (0..train_values.len())
-            .map(|i| base_date + Duration::days(i as i64))
+            .map(|i| base_date + Duration::days(30 * i as i64))
             .collect();
         let train_ts = match TimeSeries::univariate(stamps, train_values.clone()) {
             Ok(ts) => ts,
@@ -124,56 +147,53 @@ fn main() {
 
         #[cfg(feature = "distributional")]
         {
-            let cfgs: [(usize, LaplaceForecaster); 6] = [
+            let cfgs: [(usize, LaplaceForecaster); 4] = [
                 (2, LaplaceForecaster::new()),
-                (3, LaplaceForecaster::new().with_ar2_defaults()),
-                (4, LaplaceForecaster::new().with_seasonal(7)),
+                (3, LaplaceForecaster::new().with_seasonal(12)),
+                (
+                    4,
+                    LaplaceForecaster::new()
+                        .with_ar2_defaults()
+                        .with_seasonal(12),
+                ),
                 (
                     5,
                     LaplaceForecaster::new()
-                        .with_ar2_defaults()
-                        .with_seasonal(7),
+                        .auto()
+                        .auto_with_seasonal_period(12),
                 ),
-                (
-                    6,
-                    LaplaceForecaster::new()
-                        .with_ar2_defaults()
-                        .with_seasonal(7)
-                        .with_fractional_diff_defaults()
-                        .with_ou_defaults(),
-                ),
-                (7, LaplaceForecaster::new().auto()),
             ];
             for (slot, model) in cfgs {
                 if let Some(r) = run_laplace(model, &train_ts, test_values) {
                     results[slot].push(r);
                 }
             }
-
             #[cfg(feature = "postprocess")]
-            if let Some(r) =
-                run_laplace(LaplaceForecaster::new().auto_aid(), &train_ts, test_values)
-            {
-                results[8].push(r);
+            if let Some(r) = run_laplace(
+                LaplaceForecaster::new()
+                    .auto_aid()
+                    .auto_with_seasonal_period(12),
+                &train_ts,
+                test_values,
+            ) {
+                results[6].push(r);
             }
-
             #[cfg(feature = "postprocess")]
             if let Some(r) = run_smart(&train_ts, test_values) {
-                results[9].push(r);
+                results[7].push(r);
             }
         }
     }
 
-    let total_wall = global_start.elapsed();
     eprintln!(
         "\nBenchmark done in {:.1}s (wall-clock)",
-        total_wall.as_secs_f64()
+        global_start.elapsed().as_secs_f64()
     );
 
     let summaries: Vec<ModelSummary> = labels
         .iter()
         .zip(results.iter())
-        .map(|(name, r)| summarize(*name, r))
+        .map(|(name, r)| summarize(name, r))
         .collect();
     print_summary(&summaries);
     print_pairwise(&labels, &results);
@@ -194,9 +214,8 @@ fn run_point<F: Forecaster>(
     if point.len() != test.len() {
         return None;
     }
-    let mae = mae(point, test);
     Some(SeriesResult {
-        mae,
+        mae: mae(point, test),
         coverage90: None,
         logpdf_mean: None,
         fit_us,
@@ -219,7 +238,6 @@ fn run_laplace(
         return None;
     }
     let point: Vec<f64> = mixtures.iter().map(|m| m.mean()).collect();
-    let mae = mae(&point, test);
     let mut covered = 0usize;
     let mut logpdfs = Vec::with_capacity(test.len());
     for (m, &y) in mixtures.iter().zip(test.iter()) {
@@ -238,7 +256,7 @@ fn run_laplace(
         Some(logpdfs.iter().sum::<f64>() / logpdfs.len() as f64)
     };
     Some(SeriesResult {
-        mae,
+        mae: mae(&point, test),
         coverage90: Some(coverage),
         logpdf_mean,
         fit_us,
@@ -248,7 +266,7 @@ fn run_laplace(
 #[cfg(all(feature = "distributional", feature = "postprocess"))]
 fn run_smart(train: &TimeSeries, test: &[f64]) -> Option<SeriesResult> {
     let t0 = Instant::now();
-    let mut m = SmartForecaster::new();
+    let mut m = SmartForecaster::new().with_seasonal_period(12);
     if m.fit(train).is_err() {
         return None;
     }
@@ -275,55 +293,57 @@ fn mae(pred: &[f64], truth: &[f64]) -> f64 {
     s / pred.len() as f64
 }
 
-fn median(xs: &mut [f64]) -> f64 {
+fn median(xs: &[f64]) -> f64 {
+    if xs.is_empty() {
+        return f64::NAN;
+    }
+    let mut xs: Vec<f64> = xs.to_vec();
     xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let n = xs.len();
-    if n == 0 {
-        f64::NAN
-    } else if n % 2 == 1 {
+    if n % 2 == 1 {
         xs[n / 2]
     } else {
         0.5 * (xs[n / 2 - 1] + xs[n / 2])
     }
 }
 
-fn summarize(name: &'static str, results: &[SeriesResult]) -> ModelSummary {
-    let n_ok = results.len();
-    let mut maes: Vec<f64> = results.iter().map(|r| r.mae).collect();
-    let mae_mean = if n_ok == 0 {
+fn summarize(name: &'static str, r: &[SeriesResult]) -> ModelSummary {
+    let n = r.len();
+    let maes: Vec<f64> = r.iter().map(|s| s.mae).collect();
+    let mean = if n == 0 {
         f64::NAN
     } else {
-        maes.iter().sum::<f64>() / n_ok as f64
+        maes.iter().sum::<f64>() / n as f64
     };
-    let mae_median = median(&mut maes);
-    let covs: Vec<f64> = results.iter().filter_map(|r| r.coverage90).collect();
-    let coverage90_mean = if covs.is_empty() {
+    let mae_median = median(&maes);
+    let coverages: Vec<f64> = r.iter().filter_map(|s| s.coverage90).collect();
+    let coverage_mean = if coverages.is_empty() {
         None
     } else {
-        Some(covs.iter().sum::<f64>() / covs.len() as f64)
+        Some(coverages.iter().sum::<f64>() / coverages.len() as f64)
     };
-    let lps: Vec<f64> = results.iter().filter_map(|r| r.logpdf_mean).collect();
-    let logpdf_mean = if lps.is_empty() {
+    let logpdfs: Vec<f64> = r.iter().filter_map(|s| s.logpdf_mean).collect();
+    let logpdf_mean = if logpdfs.is_empty() {
         None
     } else {
-        Some(lps.iter().sum::<f64>() / lps.len() as f64)
+        Some(logpdfs.iter().sum::<f64>() / logpdfs.len() as f64)
     };
-    let total_ms: u128 = results.iter().map(|r| r.fit_us).sum::<u128>() / 1_000;
+    let total_ms: u128 = r.iter().map(|s| s.fit_us / 1000).sum();
     ModelSummary {
         name,
-        n_ok,
+        n_ok: n,
         mae_median,
-        mae_mean,
-        coverage90_mean,
+        mae_mean: mean,
+        coverage90_mean: coverage_mean,
         logpdf_mean,
         total_ms,
     }
 }
 
 fn print_summary(summaries: &[ModelSummary]) {
-    println!("\n=== M4 daily cross-panel benchmark ===");
+    println!("\n=== M3 monthly cross-panel benchmark ===");
     println!(
-        "{:<22}{:>8}{:>14}{:>14}{:>16}{:>14}{:>16}",
+        "{:<24}{:>5}  {:>12}  {:>12}  {:>15}  {:>12}  {:>12}",
         "model",
         "n",
         "MAE (median)",
@@ -335,14 +355,14 @@ fn print_summary(summaries: &[ModelSummary]) {
     for s in summaries {
         let cov = s
             .coverage90_mean
-            .map(|v| format!("{:.3}", v))
+            .map(|c| format!("{:.3}", c))
             .unwrap_or_else(|| "-".to_string());
         let lp = s
             .logpdf_mean
-            .map(|v| format!("{:.3}", v))
+            .map(|l| format!("{:.3}", l))
             .unwrap_or_else(|| "-".to_string());
         println!(
-            "{:<22}{:>8}{:>14.4}{:>14.4}{:>16}{:>14}{:>16.2}",
+            "{:<24}{:>5}  {:>12.4}  {:>12.4}  {:>15}  {:>12}  {:>12.2}",
             s.name,
             s.n_ok,
             s.mae_median,
@@ -355,31 +375,31 @@ fn print_summary(summaries: &[ModelSummary]) {
 }
 
 fn print_pairwise(labels: &[&str], results: &[Vec<SeriesResult>]) {
-    let n = results.iter().map(|r| r.len()).min().unwrap_or(0);
-    if n == 0 {
-        return;
-    }
-    let winrate = |a: &[SeriesResult], b: &[SeriesResult]| -> f64 {
-        let wins = (0..n).filter(|&i| a[i].mae < b[i].mae).count();
-        wins as f64 / n as f64
-    };
-    println!(
-        "\n=== Pairwise MAE win-rate on {} matched series (row beats column) ===",
-        n
-    );
-    print!("{:<22}", "");
-    for name in labels {
-        print!("{:>16}", name);
+    println!("\n=== Pairwise MAE win-rate (row beats column, ties excluded) ===");
+    print!("{:<24}", "");
+    for l in labels {
+        print!("{:>15}", l);
     }
     println!();
-    for (i, row_name) in labels.iter().enumerate() {
-        print!("{:<22}", row_name);
-        for (j, _) in labels.iter().enumerate() {
+    let n = results[0].len();
+    for i in 0..labels.len() {
+        print!("{:<24}", labels[i]);
+        for j in 0..labels.len() {
             if i == j {
-                print!("{:>16}", "-");
-            } else {
-                print!("{:>16.3}", winrate(&results[i], &results[j]));
+                print!("{:>15}", "-");
+                continue;
             }
+            let mi = &results[i];
+            let mj = &results[j];
+            let k = mi.len().min(mj.len()).min(n);
+            let mut wins = 0usize;
+            for t in 0..k {
+                if mi[t].mae < mj[t].mae {
+                    wins += 1;
+                }
+            }
+            let rate = if k > 0 { wins as f64 / k as f64 } else { 0.0 };
+            print!("{:>15.3}", rate);
         }
         println!();
     }
