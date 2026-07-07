@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0-alpha.23] - 2026-07-07
+
+### Added — external regressor preregression + AID-derived helpers
+
+- **`LaplaceForecaster::with_exog_preregression(&[names])`** — replaces the α-17 scaffold. At `fit()`, runs OLS on the named regressors (from `TimeSeries::calendar()`'s regressors), feeds the residuals `y − Xβ` to the leaves, caches the `OLSResult`. New method **`predict_with_exog(horizon, future_regressors: &HashMap<String, Vec<f64>>)`** returns the level-space forecast (`mixture_mean_residual + β · X_future`). Standard `predict()` still returns the residual-space mixture.
+- **`.with_stockout_indicator()`** — opt-in, default off (behind `postprocess`). Runs AID at `fit()`, synthesizes a binary `__aid_stockout` column from the `Stockout` per-observation labels, adds it to the exog design matrix. The OLS coefficient captures the mean demand shift during stockout periods. Requires `.with_exog_preregression(...)`.
+- **`.trim_new_product_prefix()`** — opt-in, default off (behind `postprocess`). Runs AID, trims the training window to start after the last `NewProduct` label. Guarded to keep at least 12 observations after trim so leaves have warm-up. **Outliers are NOT trimmed** — they remain part of the data-generating process per project design direction.
+
+### Design notes
+
+- All three flags are opt-in. `.auto()` and `.auto_aid()` don't auto-enable them.
+- AID is invoked at most once at fit() when trim + stockout are used (labels are cached and shared).
+- Existing `Forecaster` trait unchanged — `predict_with_exog` is an inherent method on `LaplaceForecaster`.
+- OLS solver comes from `crate::utils::ols` (existing infrastructure used by ARIMA / MFLES / baseline). Requires `postprocess` feature only for AID (the OLS solver ships default).
+
+### Test plan
+
+- Unit tests: `exog_preregression_removes_linear_component`, `trim_new_product_prefix_smoke`.
+- Full-suite pass: 72 laplace tests + 2946 crate-wide.
+
+### Notes
+
+Alpha surface: additive. Breaking API vs α-22: `with_exog_preregression()` now takes `&[&str]` (was a no-arg scaffold that always erred at fit). Downstream code that called it will need `.with_exog_preregression(&[])` (no columns) to preserve the old fit-error behavior, or `.with_exog_preregression(&["promo", "holiday"])` to actually use it.
+
+
 ## [0.12.0-alpha.22] - 2026-07-07
 
 ### Changed — `SmartForecaster` redesigned around AID, no ETS

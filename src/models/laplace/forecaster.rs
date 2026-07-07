@@ -15,6 +15,8 @@ use crate::models::traits::{validate_series_complete, Forecaster};
 
 use super::dist::GaussianMixture;
 use crate::transform::yeo_johnson::yeo_johnson_lambda;
+use crate::utils::ols::{ols_fit, OLSResult};
+use std::collections::HashMap;
 
 use super::ensemble::{blend_horizon, softmax};
 
@@ -283,8 +285,20 @@ pub struct LaplaceForecaster {
     /// the additive `seasonal_period`; retail seasonality is often
     /// proportional (peak week = 3× baseline).
     seasonal_mult: Option<(usize, f64)>,
-    /// Scaffold flag — see [`Self::with_exog_preregression`].
-    exog_scaffold_declared: bool,
+    /// Names of exogenous regressors to preregress `y` on via OLS before
+    /// feeding residuals to the leaves. Empty = no preregression. See
+    /// [`Self::with_exog_preregression`].
+    exog_names: Vec<String>,
+    /// Cached OLS result after `fit()` — used by `predict_with_exog` to
+    /// add `β · X_future` back to the mixture mean.
+    exog_ols: Option<OLSResult>,
+    /// α-23 opt-in: synthesize an `is_stockout` binary column from AID's
+    /// per-observation labels and add it to the exog preregression
+    /// design matrix. Default off.
+    use_stockout_indicator: bool,
+    /// α-23 opt-in: trim the training window to start after the last
+    /// AID-flagged `NewProduct` observation. Default off.
+    trim_new_product_prefix: bool,
 
     leaves: Vec<Box<dyn Leaf + Send>>,
     cum_log_liks: Vec<f64>,
@@ -356,7 +370,10 @@ impl LaplaceForecaster {
             rectified_normal: None,
             non_negative: false,
             seasonal_mult: None,
-            exog_scaffold_declared: false,
+            exog_names: Vec::new(),
+            exog_ols: None,
+            use_stockout_indicator: false,
+            trim_new_product_prefix: false,
             leaves: Vec::new(),
             cum_log_liks: Vec::new(),
             n_obs: 0,
@@ -541,20 +558,101 @@ impl LaplaceForecaster {
         self.with_seasonal_multiplicative(period, 0.15)
     }
 
-    /// **Scaffold — not yet implemented.** Declares intent to preregress
-    /// `y` on the [`TimeSeries`]'s calendar regressors via OLS, then feed
-    /// residuals to the leaves. At `predict_with_exog()` time the OLS
-    /// intercept + `β·X_future` would be added back to the leaf mixture.
+    /// Preregress `y` on the named regressors via OLS at `fit()` time,
+    /// then feed the residuals `y - Xβ` to the leaves. The OLS intercept
+    /// and `β · X_future` are added back to the mixture mean when the
+    /// caller uses [`Self::predict_with_exog`].
     ///
-    /// Calling this builder currently causes `fit()` to return `Err`. The
-    /// API is reserved so downstream code can compile against it; the
-    /// implementation is planned as a follow-up. Until then, callers that
-    /// need exog preregression should use [`RegressionForecaster`](crate::models::regression::RegressionForecaster)
-    /// with its residual-Ridge / dynamic backends, or preregress in
-    /// application code.
-    pub fn with_exog_preregression(mut self) -> Self {
-        self.exog_scaffold_declared = true;
+    /// Regressor names must exist in `TimeSeries::all_regressors()`
+    /// (`TimeSeries::with_calendar(...)` on construction). Unknown names
+    /// cause `fit()` to error.
+    ///
+    /// Standard [`Self::predict`] returns the residual-space mixture
+    /// only. To get the level forecast, use [`Self::predict_with_exog`]
+    /// with the future regressor values. Requires the `postprocess`
+    /// feature for the OLS solver.
+    pub fn with_exog_preregression(mut self, names: &[&str]) -> Self {
+        self.exog_names = names.iter().map(|s| s.to_string()).collect();
         self
+    }
+
+    /// α-23 opt-in: at `fit()` time, run the AID classifier on the training
+    /// values and synthesize a binary `__aid_stockout` column marking
+    /// AID-flagged stockout observations. That column is added to the
+    /// exog preregression design matrix — the OLS coefficient captures
+    /// the mean demand shift during stockout periods. **Default off.**
+    ///
+    /// Requires that `.with_exog_preregression(...)` is also called
+    /// (the synthesized column joins the exog set). Requires the
+    /// `postprocess` feature (for AID).
+    pub fn with_stockout_indicator(mut self) -> Self {
+        self.use_stockout_indicator = true;
+        self
+    }
+
+    /// α-23 opt-in: at `fit()` time, run the AID classifier and trim the
+    /// training window to start after the last observation flagged as
+    /// `NewProduct`. Reasoning: the new-product lifecycle phase is a
+    /// different regime (ramp-up, no equilibrium) that pollutes the
+    /// leaves' state. **Default off.**
+    ///
+    /// If AID doesn't flag any `NewProduct` observations (or the flag
+    /// is at the very end), no trimming happens.
+    pub fn trim_new_product_prefix(mut self) -> Self {
+        self.trim_new_product_prefix = true;
+        self
+    }
+
+    /// Level-space point forecast for callers that used
+    /// [`Self::with_exog_preregression`]. Requires the future values of
+    /// every named regressor (and, if
+    /// [`Self::with_stockout_indicator`] was set, the future
+    /// `__aid_stockout` column). Returns
+    /// `mixture_mean_residual + β · X_future` per horizon.
+    ///
+    /// When called without any exog preregression having been configured,
+    /// this is equivalent to [`Self::predict`].
+    pub fn predict_with_exog(
+        &self,
+        horizon: usize,
+        future_regressors: &HashMap<String, Vec<f64>>,
+    ) -> Result<Forecast> {
+        if self.leaves.is_empty() {
+            return Err(ForecastError::FitRequired {
+                model: Some("LaplaceForecaster".into()),
+            });
+        }
+        if horizon == 0 {
+            return Ok(Forecast::from_values(Vec::new()));
+        }
+        let mixtures = self.forecast_dist(horizon)?;
+        let points: Vec<f64> = mixtures.iter().map(|m| m.mean()).collect();
+        match &self.exog_ols {
+            None => Ok(Forecast::from_values(points)),
+            Some(ols) => {
+                for name in &ols.regressor_names {
+                    let col = future_regressors.get(name).ok_or_else(|| {
+                        ForecastError::InvalidParameter(format!(
+                            "predict_with_exog: missing future regressor `{name}`"
+                        ))
+                    })?;
+                    if col.len() != horizon {
+                        return Err(ForecastError::InvalidParameter(format!(
+                            "predict_with_exog: future `{name}` length {} != horizon {}",
+                            col.len(),
+                            horizon
+                        )));
+                    }
+                }
+                let level_shift = ols.predict(future_regressors)?;
+                let level_points: Vec<f64> = points
+                    .iter()
+                    .zip(level_shift.iter())
+                    .map(|(p, s)| p + s)
+                    .collect();
+                Ok(Forecast::from_values(level_points))
+            }
+        }
     }
 
     /// Replace the 3-leaf default set (one EMA / drift / AR(1) each) with
@@ -859,19 +957,108 @@ impl Default for LaplaceForecaster {
 impl Forecaster for LaplaceForecaster {
     fn fit(&mut self, series: &TimeSeries) -> Result<()> {
         validate_series_complete(series)?;
-        if self.exog_scaffold_declared {
-            return Err(ForecastError::InvalidParameter(
-                "LaplaceForecaster::with_exog_preregression() is a reserved scaffold; \
-                 implementation is planned. Use RegressionForecaster in the meantime."
-                    .into(),
-            ));
-        }
-        let values = series.primary_values();
-        if values.is_empty() {
+        let raw = series.primary_values();
+        if raw.is_empty() {
             return Err(ForecastError::InvalidParameter(
                 "LaplaceForecaster requires at least one observation".into(),
             ));
         }
+
+        // Reset exog state so a re-fit doesn't reuse the previous OLS.
+        self.exog_ols = None;
+
+        // α-23: Run AID once at the top when any AID-driven pre-step
+        // (trim NewProduct, stockout indicator) is requested. Cached
+        // labels are consumed by the two branches below. Behind the
+        // `postprocess` feature.
+        #[cfg(feature = "postprocess")]
+        let aid_labels: Option<Vec<crate::validation::aid::AidAnomalyLabel>> = {
+            if self.trim_new_product_prefix || self.use_stockout_indicator {
+                use crate::validation::aid::AidAnalyzer;
+                let result = AidAnalyzer::new().analyze(raw);
+                Some(result.features().labels)
+            } else {
+                None
+            }
+        };
+
+        // α-23 opt-in: trim leading NewProduct observations. `train_start`
+        // is the offset into `raw` where the leaf-observed training
+        // sub-window begins. Default 0.
+        let mut train_start = 0usize;
+        #[cfg(feature = "postprocess")]
+        if self.trim_new_product_prefix {
+            if let Some(labels) = &aid_labels {
+                let last_np = labels
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find(|(_, l)| matches!(l, crate::validation::aid::AidAnomalyLabel::NewProduct))
+                    .map(|(i, _)| i);
+                if let Some(idx) = last_np {
+                    // Never trim to fewer than 12 obs — the leaves need
+                    // *some* data to warm up.
+                    let candidate = idx + 1;
+                    if candidate + 12 <= raw.len() {
+                        train_start = candidate;
+                    }
+                }
+            }
+        }
+        let raw_train: &[f64] = &raw[train_start..];
+
+        // α-23: OLS preregression on named exog regressors + (optionally)
+        // an AID-derived is_stockout column. Residuals `y - Xβ` are what
+        // the leaves observe; the OLS is cached for `predict_with_exog`.
+        let leaf_values: Vec<f64> = if !self.exog_names.is_empty() {
+            let mut regressors: HashMap<String, Vec<f64>> = HashMap::new();
+            for name in &self.exog_names {
+                let col = series.regressor(name).ok_or_else(|| {
+                    ForecastError::InvalidParameter(format!(
+                        "LaplaceForecaster: exog regressor `{name}` not in TimeSeries"
+                    ))
+                })?;
+                if col.len() != raw.len() {
+                    return Err(ForecastError::InvalidParameter(format!(
+                        "LaplaceForecaster: exog regressor `{name}` length {} != series {}",
+                        col.len(),
+                        raw.len()
+                    )));
+                }
+                regressors.insert(name.clone(), col[train_start..].to_vec());
+            }
+            #[cfg(feature = "postprocess")]
+            if self.use_stockout_indicator {
+                if let Some(labels) = &aid_labels {
+                    let col: Vec<f64> = labels[train_start..]
+                        .iter()
+                        .map(|l| {
+                            if matches!(l, crate::validation::aid::AidAnomalyLabel::Stockout) {
+                                1.0
+                            } else {
+                                0.0
+                            }
+                        })
+                        .collect();
+                    regressors.insert("__aid_stockout".to_string(), col);
+                }
+            }
+            let ols = ols_fit(raw_train, &regressors)?;
+            let fitted = ols.predict(&regressors)?;
+            let residuals: Vec<f64> = raw_train
+                .iter()
+                .zip(fitted.iter())
+                .map(|(y, f)| y - f)
+                .collect();
+            self.exog_ols = Some(ols);
+            residuals
+        } else {
+            raw_train.to_vec()
+        };
+
+        // Existing downstream code reads a `values` slice; alias to the
+        // (potentially trimmed & residual) `leaf_values` we just built.
+        let values: &[f64] = &leaf_values;
 
         // AID-driven family selection (α-21). Runs before the classical
         // `use_auto` rules so those only fill in gaps AID didn't cover.
@@ -1780,6 +1967,56 @@ mod tests {
         let mut f = LaplaceForecaster::new().auto_aid();
         f.fit(&ts).unwrap();
         let fc = f.predict(10).unwrap();
+        for v in fc.primary() {
+            assert!(v.is_finite());
+        }
+    }
+
+    #[test]
+    fn exog_preregression_removes_linear_component() {
+        // y = 3.0 + 2.0 * promo + noise. Preregress on promo → residuals
+        // should be near-zero-mean and small; predict_with_exog should
+        // add ~2 back when future promo=1.
+        let n = 200;
+        let base = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let promo: Vec<f64> = (0..n).map(|i| if i % 7 == 0 { 1.0 } else { 0.0 }).collect();
+        let vals: Vec<f64> = promo
+            .iter()
+            .enumerate()
+            .map(|(i, p)| 3.0 + 2.0 * p + ((i as f64 * 0.13).sin() * 0.1))
+            .collect();
+        let stamps: Vec<_> = (0..n).map(|i| base + Duration::hours(i as i64)).collect();
+        let cal = crate::core::time_series::CalendarAnnotations::default()
+            .with_regressor("promo".into(), promo.clone());
+        let mut ts = TimeSeries::univariate(stamps, vals).unwrap();
+        ts.set_calendar(cal);
+        let mut f = LaplaceForecaster::new().with_exog_preregression(&["promo"]);
+        f.fit(&ts).unwrap();
+
+        // Future promo=1 for 5 steps.
+        let mut fut = std::collections::HashMap::new();
+        fut.insert("promo".to_string(), vec![1.0; 5]);
+        let fc = f.predict_with_exog(5, &fut).unwrap();
+        // Level forecast should include the promo lift (~2 above baseline).
+        for v in fc.primary() {
+            assert!(*v > 4.0, "expected level >4 with promo lift, got {v}");
+            assert!(*v < 6.5, "level should be bounded above ~5+noise, got {v}");
+        }
+    }
+
+    #[cfg(feature = "postprocess")]
+    #[test]
+    fn trim_new_product_prefix_smoke() {
+        // Series with an obvious 10-obs early-life ramp, then stable.
+        let n = 150;
+        let base = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let mut vals = vec![0.0; 10]; // NewProduct-like zeros
+        vals.extend((0..(n - 10)).map(|i| 5.0 + ((i as f64 * 0.1).sin() * 0.5)));
+        let stamps: Vec<_> = (0..n).map(|i| base + Duration::hours(i as i64)).collect();
+        let ts = TimeSeries::univariate(stamps, vals).unwrap();
+        let mut f = LaplaceForecaster::new().trim_new_product_prefix();
+        f.fit(&ts).unwrap();
+        let fc = f.predict(5).unwrap();
         for v in fc.primary() {
             assert!(v.is_finite());
         }
