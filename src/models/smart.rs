@@ -11,6 +11,28 @@
 //!
 //! Requires the default `postprocess` feature (for AID) and the
 //! `distributional` feature (for the Laplace shell).
+//!
+//! # Design boundary — demand data only
+//!
+//! `SmartForecaster` is a **demand-forecasting** tool. Empirical
+//! cross-panel evidence (see the
+//! [`laplace` module docs](crate::models::laplace) for the full table):
+//!
+//! - **M5 full 30k (retail counts)**: Smart matches
+//!   [`LaplaceForecaster::auto_aid`] within ~0.5 pp median MAE while
+//!   being ~2× faster (single-family commit is cheaper than the full
+//!   leaf mixture).
+//! - **M3 monthly (macroeconomic)**: Smart regresses **~14 %** median
+//!   MAE vs. plain
+//!   [`LaplaceForecaster::auto`](crate::models::laplace::LaplaceForecaster::auto).
+//!   Committing to a single distribution family is exactly wrong for
+//!   smooth continuous economic data — the leaf-mixture soup that
+//!   `auto()` runs is doing important work there.
+//!
+//! **Do not reach for `SmartForecaster` on non-demand panels.** On
+//! economic / financial / continuous time series, use plain
+//! [`LaplaceForecaster::new().auto()`](crate::models::laplace::LaplaceForecaster::auto)
+//! or route via an upstream `AutoTheta` / `AutoETS` in application code.
 
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};

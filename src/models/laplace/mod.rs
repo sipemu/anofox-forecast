@@ -26,6 +26,47 @@
 //! trait; the point-forecast surface via the existing
 //! [`Forecaster`](crate::models::Forecaster) trait. The mixture parameters
 //! are also reachable via [`Explanation::Laplace`](crate::models::Explanation).
+//!
+//! # Choosing a selector (empirical cross-panel guidance)
+//!
+//! The α-21/α-22 stack ships three zero-config selectors. Which one wins
+//! depends on the panel type. Full benchmarks are in
+//! `examples/skaters_m5_full_auto.rs`, `skaters_m4_daily_benchmark.rs`,
+//! and `skaters_m3_monthly_benchmark.rs`.
+//!
+//! | panel | domain | best selector | vs. AutoETS median MAE gap |
+//! |-------|--------|---------------|-----------------------------|
+//! | M5 full 30k | retail counts (all intermittent) | [`LaplaceForecaster::auto_aid`] | **+0.8%**, 42× faster than AutoETS |
+//! | M5 top-1000 | retail (non-intermittent only) | `Laplace + AR2 + S7 + FD + OU` | +2.9% |
+//! | M4 daily | economic continuous | [`LaplaceForecaster::auto`] (or upstream `AutoTheta`) | +7.5% |
+//! | M3 monthly | macroeconomic | [`LaplaceForecaster::auto`] (or upstream `AutoTheta`) | +6.2% |
+//!
+//! ## Rules of thumb
+//!
+//! - **Retail SKU / demand data (counts, intermittency)** → use
+//!   [`LaplaceForecaster::new().auto_aid()`](LaplaceForecaster::auto_aid)
+//!   or [`SmartForecaster`](crate::models::SmartForecaster). AID's
+//!   distribution-family classification is designed for this segment;
+//!   [Poisson](leaves::PoissonLeaf) / [Negative-Binomial](leaves::NegativeBinomialLeaf)
+//!   / [seasonal-Croston](leaves::SeasonalIntermittentLeaf) are the right
+//!   leaves.
+//!
+//! - **Economic / financial / continuous non-demand series** → use
+//!   [`LaplaceForecaster::new().auto()`](LaplaceForecaster::auto) (no
+//!   AID). On M3 monthly `auto_aid` **regresses ~7% median MAE vs plain
+//!   auto** because AID picks distribution families (usually LogNormal)
+//!   whose Gaussian moment-match doesn't fit smooth continuous data.
+//!
+//! - **Not sure which** → benchmark both on a held-out window of your
+//!   own data before deciding. A single `.fit()` + `.predict()` per
+//!   selector is a few milliseconds.
+//!
+//! **The [`SmartForecaster`](crate::models::SmartForecaster) route is
+//! specifically demand-focused.** It commits to a single Laplace
+//! distribution-family configuration based on AID's classification and
+//! is not designed to be a general-purpose replacement for `AutoETS` /
+//! `AutoTheta` on economic panels. On M3 monthly it regresses ~14% vs.
+//! plain `auto()`.
 
 pub mod dist;
 pub mod ensemble;

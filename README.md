@@ -650,6 +650,38 @@ println!("Lower: {:?}", intervals.lower());
 println!("Upper: {:?}", intervals.upper());
 ```
 
+## Demand Forecasting (α feature)
+
+Behind the default `postprocess` + opt-in `distributional` features, the crate ships a distributional-forecasting shell inspired by [skaters](https://github.com/microprediction/skaters) and integrated with the `anofox-regression` AID (Automatic Identification of Demand) classifier. Three zero-config selectors are available; **which one wins depends on your panel type**.
+
+### Choosing a selector
+
+Full cross-panel benchmarks are in `examples/skaters_m5_full_auto.rs`, `skaters_m4_daily_benchmark.rs`, and `skaters_m3_monthly_benchmark.rs`. Summary:
+
+| panel | domain | best selector | vs. AutoETS median MAE |
+|-------|--------|---------------|------------------------|
+| **M5 full 30k** | retail counts (all intermittent) | `LaplaceForecaster::new().auto_aid()` | **+0.8 %**, 42× faster than AutoETS |
+| **M5 top-1000** | retail non-intermittent | `Laplace + AR2 + S7 + FD + OU` | +2.9 % |
+| **M4 daily** | economic continuous | `LaplaceForecaster::new().auto()` | +7.5 % |
+| **M3 monthly** | macroeconomic | `LaplaceForecaster::new().auto()` | +6.2 % |
+
+### Rules of thumb
+
+- **Retail SKU / demand data (counts, intermittency)** → use `LaplaceForecaster::new().auto_aid()` or `SmartForecaster::new()`. The AID classifier picks a matching distribution family (Poisson, Negative-Binomial, LogNormal, Gamma, RectifiedNormal); Croston-style intermittent leaves are enabled automatically.
+
+  ```rust
+  use anofox_forecast::models::{Forecaster, SmartForecaster};
+  let mut f = SmartForecaster::new();
+  f.fit(&series)?;
+  let forecast = f.predict(28)?;   // 28-day horizon, non-negative
+  ```
+
+- **Economic / financial / continuous non-demand series** → use `LaplaceForecaster::new().auto()` (plain, no AID). On M3 monthly `auto_aid` **regresses ~7 % median MAE vs plain auto** because AID picks distribution families whose Gaussian moment-match doesn't fit smooth continuous data. AutoTheta remains a stronger point-forecast baseline for these panels.
+
+- **Not sure which** → benchmark both on a held-out window of your own data. Each fit+predict is a few milliseconds.
+
+> ⚠ `SmartForecaster` is specifically **demand-focused**. It commits to a single Laplace distribution-family configuration based on AID's classification. On non-demand panels (M3 monthly, M4 daily) it regresses vs. plain `auto()`. Do not use it as a general-purpose selector.
+
 ## API Reference
 
 ### Core Types
