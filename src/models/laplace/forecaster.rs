@@ -453,7 +453,7 @@ impl LaplaceForecaster {
     }
 
     /// Add a Poisson leaf — moment-matched Gaussian output for small
-    /// count data with `variance ≈ mean`. See [`PoissonLeaf`](super::leaves::PoissonLeaf).
+    /// count data with `variance ≈ mean`. See [`super::leaves::PoissonLeaf`].
     pub fn with_poisson(mut self, alpha: f64) -> Self {
         self.poisson = Some(alpha);
         self
@@ -623,11 +623,11 @@ impl LaplaceForecaster {
     ///
     /// Family → leaf mapping:
     ///
-    /// * `Poisson`, `Geometric` → [`PoissonLeaf`](super::leaves::PoissonLeaf)
-    /// * `NegativeBinomial` → [`NegativeBinomialLeaf`](super::leaves::NegativeBinomialLeaf)
-    /// * `LogNormal` → [`LogNormalLeaf`](super::leaves::LogNormalLeaf)
-    /// * `Gamma` → [`GammaLeaf`](super::leaves::GammaLeaf)
-    /// * `RectifiedNormal` → [`RectifiedNormalLeaf`](super::leaves::RectifiedNormalLeaf)
+    /// * `Poisson`, `Geometric` → [`super::leaves::PoissonLeaf`]
+    /// * `NegativeBinomial` → [`super::leaves::NegativeBinomialLeaf`]
+    /// * `LogNormal` → [`super::leaves::LogNormalLeaf`]
+    /// * `Gamma` → [`super::leaves::GammaLeaf`]
+    /// * `RectifiedNormal` → [`super::leaves::RectifiedNormalLeaf`]
     /// * `Normal` → falls through to [`Self::auto`]'s rule set
     ///
     /// Any AID-detected count / positive family also enables
