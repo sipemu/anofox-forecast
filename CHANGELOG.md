@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0-alpha.22] - 2026-07-07
+
+### Changed — `SmartForecaster` redesigned around AID, no ETS
+
+`SmartForecaster` now uses the `anofox-regression` AID demand classifier's `(demand_type, distribution)` output to commit to a single **Laplace-family** configuration — no cross-family delegation. Any AutoETS routing (α-16 through α-20) has been removed per the project's demand-first design direction.
+
+**New `SelectedFamily` variants** (breaking change vs α-21):
+
+- `IntermittentPoisson` — small-count intermittent (`Poisson | Geometric`)
+- `IntermittentNegBinomial` — overdispersed intermittent counts (retail-SKU norm)
+- `IntermittentRectifiedNormal` — continuous with point mass at zero
+- `IntermittentPositive` — positive-skewed intermittent (`LogNormal | Gamma`)
+- `RegularCount` — regular count data (`Poisson | Geometric | NegativeBinomial`)
+- `RegularPositive` — positive skewed (`LogNormal | Gamma`)
+- `RegularNormal` — falls through to `LaplaceForecaster::auto()`
+- `Fallback` — AID unavailable (feature off)
+
+Each Smart route builds a **slim** `LaplaceForecaster` config (one distribution leaf + seasonal-Croston or seasonal-EMA + non_negative) — no leaf-mixture soup. Complements `LaplaceForecaster::auto_aid()` (α-21) which *adds* the AID-picked leaf to the full mixture; Smart *replaces* the mixture with a single-family commit.
+
+### New builder
+
+- `SmartForecaster::with_seasonal_period(period)` — override the default weekly (7) period when AID picks a seasonality-aware family.
+
+### Benchmark: full-M5 500-sample
+
+| model | α-21 MAE(med) | **α-22 MAE(med)** | α-21 MAE(mean) | **α-22 MAE(mean)** | fit |
+|---|---|---|---|---|---|
+| AutoETS | 0.960 | 0.960 (baseline) | 1.449 | 1.449 | 14.8s |
+| Laplace+auto | 1.002 (+4.4%) | 1.002 (unchanged) | 1.552 | 1.552 | 0.4s |
+| Laplace+auto_aid | 0.978 (+1.9%) | 0.978 (unchanged) | 1.483 | 1.483 | 0.4s |
+| **SmartForecaster** | 0.988 (+2.9%) | **0.974 (+1.5%)** | 1.481 | **1.492** | **0.2s** |
+
+- **Median-MAE gap to AutoETS cut from 6.2% (α-20 Smart) to 1.5% (α-22 Smart).**
+- **Smart is now the best distributional-only config** on median MAE — beats `auto_aid`.
+- Fit time drops to **0.2s** (single-family commit vs `auto_aid`'s leaf mixture) — **2× faster than auto_aid, 74× faster than AutoETS**.
+- Smart routing on 500 sample: 75% NegBinomial intermittent, 15% Poisson intermittent, 9% Regular count, 1% Regular normal, **0% ETS**.
+
+### AID cost
+
+Confirmed on 5,000 M5 series (new example `aid_cost`):
+
+- Mean 37 μs / series
+- p99 52 μs
+- Throughput 26,417 series/second
+- Full 30k-M5: ~1.1 s AID overhead total
+- ~4-5% of `LaplaceForecaster::fit` cost
+
+Effectively free at any realistic scale.
+
+### Breaking
+
+- `SelectedFamily::Intermittent`, `SelectedFamily::AutoEts`, `SelectedFamily::LaplaceAuto` **removed**. Callers pattern-matching on `SmartForecaster::selected_family()` will get compile errors and need to update to the new variants.
+
+### Notes
+
+The `SmartForecaster` public API surface is otherwise unchanged; only the enum variant names differ. Old callers that don't inspect `selected_family()` continue to work. `LaplaceForecaster::auto()` and `.auto_aid()` unchanged.
+
+
 ## [0.12.0-alpha.21] - 2026-07-07
 
 ### Added — distribution-family leaves + AID-driven selection

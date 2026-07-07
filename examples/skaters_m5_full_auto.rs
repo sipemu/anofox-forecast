@@ -110,10 +110,15 @@ fn main() {
     let mut auto_aid_time_us = 0u128;
     let mut smart_time_us = 0u128;
 
-    // Per-series zero fraction bucket counts for Smart's routing.
-    let mut smart_intermittent = 0usize;
-    let mut smart_ets = 0usize;
-    let mut smart_laplace_auto = 0usize;
+    // Per-series counts of Smart's AID-driven family picks.
+    let mut smart_intermittent_poisson = 0usize;
+    let mut smart_intermittent_nb = 0usize;
+    let mut smart_intermittent_rectnorm = 0usize;
+    let mut smart_intermittent_positive = 0usize;
+    let mut smart_regular_count = 0usize;
+    let mut smart_regular_positive = 0usize;
+    let mut smart_regular_normal = 0usize;
+    let mut smart_fallback = 0usize;
 
     let base_date = timestamps[0];
     let start = Instant::now();
@@ -194,15 +199,16 @@ fn main() {
         if m.fit(&train_ts).is_ok() {
             if let Ok(fc) = m.predict(HORIZON) {
                 smart_maes.push(mae(fc.primary(), test_values));
-                #[cfg(feature = "distributional")]
+                use anofox_forecast::models::SelectedFamily as F;
                 match m.selected_family() {
-                    Some(anofox_forecast::models::SelectedFamily::Intermittent) => {
-                        smart_intermittent += 1
-                    }
-                    Some(anofox_forecast::models::SelectedFamily::AutoEts) => smart_ets += 1,
-                    Some(anofox_forecast::models::SelectedFamily::LaplaceAuto) => {
-                        smart_laplace_auto += 1
-                    }
+                    Some(F::IntermittentPoisson) => smart_intermittent_poisson += 1,
+                    Some(F::IntermittentNegBinomial) => smart_intermittent_nb += 1,
+                    Some(F::IntermittentRectifiedNormal) => smart_intermittent_rectnorm += 1,
+                    Some(F::IntermittentPositive) => smart_intermittent_positive += 1,
+                    Some(F::RegularCount) => smart_regular_count += 1,
+                    Some(F::RegularPositive) => smart_regular_positive += 1,
+                    Some(F::RegularNormal) => smart_regular_normal += 1,
+                    Some(F::Fallback) => smart_fallback += 1,
                     None => {}
                 }
             }
@@ -268,9 +274,23 @@ fn main() {
         );
     }
 
-    #[cfg(feature = "distributional")]
     println!(
-        "\nSmartForecaster routing: Intermittent={}, AutoETS={}, LaplaceAuto={}",
-        smart_intermittent, smart_ets, smart_laplace_auto
+        "\nSmartForecaster routing (AID-driven):\n\
+         \x20 Intermittent+Poisson    = {}\n\
+         \x20 Intermittent+NegBinom   = {}\n\
+         \x20 Intermittent+RectNormal = {}\n\
+         \x20 Intermittent+Positive   = {}\n\
+         \x20 Regular+Count           = {}\n\
+         \x20 Regular+Positive        = {}\n\
+         \x20 Regular+Normal          = {}\n\
+         \x20 Fallback                = {}",
+        smart_intermittent_poisson,
+        smart_intermittent_nb,
+        smart_intermittent_rectnorm,
+        smart_intermittent_positive,
+        smart_regular_count,
+        smart_regular_positive,
+        smart_regular_normal,
+        smart_fallback,
     );
 }

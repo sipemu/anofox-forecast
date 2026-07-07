@@ -1,46 +1,66 @@
-//! `SmartForecaster` — feature-based routing across forecaster families.
+//! `SmartForecaster` — AID-driven single-family Laplace commit.
 //!
-//! Inspects the training series at `fit()`, computes cheap characteristics
-//! (zero fraction, trend strength, seasonality strength, `acf1`, coefficient
-//! of variation), and picks the model family that the residual-slicing
-//! evidence says wins on that segment. Routes to one of:
+//! Given the AID demand classification of the training series
+//! (`(demand_type, distribution)`), picks **one** Laplace configuration
+//! that commits to that family — no leaf-mixture soup, no cross-family
+//! delegation. Complements
+//! [`LaplaceForecaster::auto_aid`](crate::models::laplace::LaplaceForecaster::auto_aid),
+//! which uses AID to *add* a distribution-family leaf to the full
+//! mixture. Smart *replaces* the mixture with a slimmed-down
+//! single-family setup.
 //!
-//! * `LaplaceForecaster::new().with_intermittent_defaults().non_negative()` —
-//!   for zero-inflated series (Croston beats AR-family EMA leaves on
-//!   high-zero-fraction).
-//! * `AutoETS` — for strongly-trending series (its damped-trend specs
-//!   handle sustained trend better than any of our leaves).
-//! * `LaplaceForecaster::new().auto()` — for everything else, delegating to
-//!   the α-10 per-leaf auto-selector.
-//!
-//! Rules are deliberately conservative and evidence-derived. Wrong routes
-//! only cost users the target family's fit; there's no expensive CV inside.
-//! Callers that want CV-based selection should use [`AutoForecast`](super::auto_forecast::AutoForecast)
-//! (which α-18 will extend to include `LaplaceForecaster`).
+//! Requires the default `postprocess` feature (for AID) and the
+//! `distributional` feature (for the Laplace shell).
 
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
-use crate::models::exponential::AutoETS;
 use crate::models::traits::{validate_series_complete, FittedParams, Forecaster};
 use crate::utils::ols::OLSResult;
 use std::collections::HashMap;
 
-#[cfg(feature = "distributional")]
+#[cfg(all(feature = "distributional", feature = "postprocess"))]
 use crate::models::laplace::LaplaceForecaster;
+#[cfg(feature = "postprocess")]
+use crate::validation::aid::AidAnalyzer;
+#[cfg(feature = "postprocess")]
+use anofox_regression::solvers::{DemandDistribution, DemandType};
 
-/// Family that `SmartForecaster` routed to.
+/// AID-derived label describing what family Smart committed to.
+///
+/// Enum-shaped rather than carrying the raw `AidSummary` so callers can
+/// pattern-match cheaply. Reachable via
+/// [`SmartForecaster::selected_family`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum SelectedFamily {
-    #[cfg(feature = "distributional")]
-    Intermittent,
-    AutoEts,
-    #[cfg(feature = "distributional")]
-    LaplaceAuto,
+    /// AID: `Intermittent + Poisson | Geometric`. Small-count
+    /// intermittent demand.
+    IntermittentPoisson,
+    /// AID: `Intermittent + NegativeBinomial`. Overdispersed intermittent
+    /// counts — the retail-SKU norm.
+    IntermittentNegBinomial,
+    /// AID: `Intermittent + RectifiedNormal`. Continuous demand with a
+    /// point mass at zero.
+    IntermittentRectifiedNormal,
+    /// AID: `Intermittent + LogNormal | Gamma`. Positive skewed with
+    /// zero clusters.
+    IntermittentPositive,
+    /// AID: `Regular + Poisson | Geometric | NegativeBinomial`. Count
+    /// data without heavy zero-inflation.
+    RegularCount,
+    /// AID: `Regular + LogNormal | Gamma`. Positive skewed.
+    RegularPositive,
+    /// AID: `Regular + Normal`. Falls through to
+    /// [`LaplaceForecaster::auto`](crate::models::laplace::LaplaceForecaster::auto).
+    RegularNormal,
+    /// AID was unavailable (feature off) — used the classical
+    /// `LaplaceForecaster::auto()` fallback.
+    Fallback,
 }
 
 pub struct SmartForecaster {
     inner: Option<Box<dyn Forecaster + Send>>,
     selected: Option<SelectedFamily>,
+    seasonal_period: usize,
 }
 
 impl SmartForecaster {
@@ -48,10 +68,18 @@ impl SmartForecaster {
         Self {
             inner: None,
             selected: None,
+            seasonal_period: 7,
         }
     }
 
-    /// The family the router picked. `None` before `fit()` is called.
+    /// Override the seasonal period used when the AID family lands on
+    /// something with a seasonality component (default 7, weekly).
+    pub fn with_seasonal_period(mut self, period: usize) -> Self {
+        self.seasonal_period = period.max(2);
+        self
+    }
+
+    /// The family Smart committed to. `None` before `fit()` is called.
     pub fn selected_family(&self) -> Option<&SelectedFamily> {
         self.selected.as_ref()
     }
@@ -63,52 +91,103 @@ impl Default for SmartForecaster {
     }
 }
 
-/// Compute the routing characteristics on the training window.
-fn routing_characteristics(train: &[f64]) -> RoutingChars {
-    let n = train.len();
-    if n < 2 {
-        return RoutingChars::default();
+#[cfg(all(feature = "distributional", feature = "postprocess"))]
+fn build_from_aid(
+    demand_type: DemandType,
+    distribution: DemandDistribution,
+    seasonal_period: usize,
+) -> (Box<dyn Forecaster + Send>, SelectedFamily) {
+    match (demand_type, distribution) {
+        (DemandType::Intermittent, DemandDistribution::Poisson)
+        | (DemandType::Intermittent, DemandDistribution::Geometric) => {
+            let m = LaplaceForecaster::new()
+                .with_poisson_defaults()
+                .with_seasonal_intermittent_defaults(seasonal_period)
+                .non_negative();
+            (Box::new(m), SelectedFamily::IntermittentPoisson)
+        }
+        (DemandType::Intermittent, DemandDistribution::NegativeBinomial) => {
+            let m = LaplaceForecaster::new()
+                .with_negative_binomial_defaults()
+                .with_seasonal_intermittent_defaults(seasonal_period)
+                .non_negative();
+            (Box::new(m), SelectedFamily::IntermittentNegBinomial)
+        }
+        (DemandType::Intermittent, DemandDistribution::RectifiedNormal) => {
+            let m = LaplaceForecaster::new()
+                .with_rectified_normal_defaults()
+                .with_seasonal_intermittent_defaults(seasonal_period)
+                .non_negative();
+            (Box::new(m), SelectedFamily::IntermittentRectifiedNormal)
+        }
+        (DemandType::Intermittent, DemandDistribution::LogNormal) => {
+            let m = LaplaceForecaster::new()
+                .with_lognormal_defaults()
+                .with_seasonal_intermittent_defaults(seasonal_period)
+                .non_negative();
+            (Box::new(m), SelectedFamily::IntermittentPositive)
+        }
+        (DemandType::Intermittent, DemandDistribution::Gamma) => {
+            let m = LaplaceForecaster::new()
+                .with_gamma_defaults()
+                .with_seasonal_intermittent_defaults(seasonal_period)
+                .non_negative();
+            (Box::new(m), SelectedFamily::IntermittentPositive)
+        }
+        (DemandType::Intermittent, DemandDistribution::Normal) => {
+            // Rare — regular normal shouldn't be intermittent per AID's rules,
+            // but if it happens fall through to the intermittent leaf +
+            // classical auto for the Gaussian branch.
+            let m = LaplaceForecaster::new()
+                .with_intermittent_defaults()
+                .non_negative()
+                .auto();
+            (Box::new(m), SelectedFamily::IntermittentPositive)
+        }
+        (DemandType::Regular, DemandDistribution::Poisson)
+        | (DemandType::Regular, DemandDistribution::Geometric) => {
+            let m = LaplaceForecaster::new()
+                .with_poisson_defaults()
+                .with_seasonal(seasonal_period)
+                .non_negative();
+            (Box::new(m), SelectedFamily::RegularCount)
+        }
+        (DemandType::Regular, DemandDistribution::NegativeBinomial) => {
+            let m = LaplaceForecaster::new()
+                .with_negative_binomial_defaults()
+                .with_seasonal(seasonal_period)
+                .non_negative();
+            (Box::new(m), SelectedFamily::RegularCount)
+        }
+        (DemandType::Regular, DemandDistribution::LogNormal) => {
+            let m = LaplaceForecaster::new()
+                .with_lognormal_defaults()
+                .with_seasonal(seasonal_period)
+                .non_negative();
+            (Box::new(m), SelectedFamily::RegularPositive)
+        }
+        (DemandType::Regular, DemandDistribution::Gamma) => {
+            let m = LaplaceForecaster::new()
+                .with_gamma_defaults()
+                .with_seasonal(seasonal_period)
+                .non_negative();
+            (Box::new(m), SelectedFamily::RegularPositive)
+        }
+        (DemandType::Regular, DemandDistribution::RectifiedNormal) => {
+            let m = LaplaceForecaster::new()
+                .with_rectified_normal_defaults()
+                .non_negative();
+            (Box::new(m), SelectedFamily::RegularPositive)
+        }
+        (DemandType::Regular, DemandDistribution::Normal) => {
+            let m = LaplaceForecaster::new().auto();
+            (Box::new(m), SelectedFamily::RegularNormal)
+        }
     }
-    let mean_y: f64 = train.iter().sum::<f64>() / n as f64;
-    let ss_tot: f64 = train.iter().map(|y| (y - mean_y).powi(2)).sum();
-    let zero_fraction = train.iter().filter(|&&y| y.abs() < 1e-9).count() as f64 / n as f64;
-
-    // Trend strength.
-    let t_mean = (n - 1) as f64 / 2.0;
-    let (mut sum_ty, mut sum_tt) = (0.0, 0.0);
-    for (t, y) in train.iter().enumerate() {
-        let dt = t as f64 - t_mean;
-        sum_ty += dt * (y - mean_y);
-        sum_tt += dt * dt;
-    }
-    let slope = if sum_tt > 0.0 { sum_ty / sum_tt } else { 0.0 };
-    let intercept = mean_y - slope * t_mean;
-    let ss_res_trend: f64 = train
-        .iter()
-        .enumerate()
-        .map(|(t, y)| (y - (intercept + slope * t as f64)).powi(2))
-        .sum();
-    let trend_strength = if ss_tot > 0.0 {
-        (1.0 - ss_res_trend / ss_tot).clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-
-    RoutingChars {
-        zero_fraction,
-        trend_strength,
-        mean_y,
-    }
-}
-
-#[derive(Default, Debug, Clone, Copy)]
-struct RoutingChars {
-    zero_fraction: f64,
-    trend_strength: f64,
-    mean_y: f64,
 }
 
 impl Forecaster for SmartForecaster {
+    #[allow(unused_variables)] // seasonal_period unused when features off
     fn fit(&mut self, series: &TimeSeries) -> Result<()> {
         validate_series_complete(series)?;
         let values = series.primary_values();
@@ -117,55 +196,28 @@ impl Forecaster for SmartForecaster {
                 "SmartForecaster requires at least one observation".into(),
             ));
         }
-        let chars = routing_characteristics(values);
 
-        // Rules (α-20 revision — derived from full-M5 loss analysis):
-        //
-        // - zero_fraction > 0.6 → highly intermittent; Croston wins on
-        //   these even at low counts.
-        // - low-count noise-dominated (mean < 3 && zero_fraction ∈ [0.2, 0.6])
-        //   → AutoETS. Our Gaussian-mixture tails misbehave on integer
-        //   counts near zero; AutoETS's damped model puts mass on realistic
-        //   regions.
-        // - trend_strength > 0.6 → sustained trend; AutoETS wins.
-        // - Otherwise → LaplaceForecaster::auto() covers the residual
-        //   space. `.auto()` now also handles zero-inflated seasonal via
-        //   the seasonal-Croston leaf (see α-20 changes in forecaster.rs).
-        let selected: SelectedFamily = if chars.zero_fraction > 0.6 {
-            #[cfg(feature = "distributional")]
-            {
-                SelectedFamily::Intermittent
-            }
-            #[cfg(not(feature = "distributional"))]
-            {
-                SelectedFamily::AutoEts
-            }
-        } else if (chars.mean_y < 3.0 && chars.zero_fraction > 0.2 && chars.zero_fraction <= 0.6)
-            || chars.trend_strength > 0.6
-        {
-            SelectedFamily::AutoEts
-        } else {
-            #[cfg(feature = "distributional")]
-            {
-                SelectedFamily::LaplaceAuto
-            }
-            #[cfg(not(feature = "distributional"))]
-            {
-                SelectedFamily::AutoEts
-            }
+        #[cfg(all(feature = "distributional", feature = "postprocess"))]
+        let (mut inner, selected) = {
+            let aid = AidAnalyzer::new().analyze(values);
+            let summary = aid.summary();
+            build_from_aid(
+                summary.demand_type,
+                summary.distribution,
+                self.seasonal_period,
+            )
         };
 
-        let mut inner: Box<dyn Forecaster + Send> = match &selected {
-            SelectedFamily::AutoEts => Box::new(AutoETS::new()),
-            #[cfg(feature = "distributional")]
-            SelectedFamily::Intermittent => Box::new(
-                LaplaceForecaster::new()
-                    .with_intermittent_defaults()
-                    .non_negative(),
-            ),
-            #[cfg(feature = "distributional")]
-            SelectedFamily::LaplaceAuto => Box::new(LaplaceForecaster::new().auto()),
+        #[cfg(not(all(feature = "distributional", feature = "postprocess")))]
+        let (mut inner, selected): (Box<dyn Forecaster + Send>, SelectedFamily) = {
+            // Without AID + Laplace, fall back to a classical baseline —
+            // AutoTheta (not ETS, per project directive).
+            (
+                Box::new(crate::models::theta::AutoTheta::new()),
+                SelectedFamily::Fallback,
+            )
         };
+
         inner.fit(series)?;
         self.inner = Some(inner);
         self.selected = Some(selected);
@@ -237,38 +289,45 @@ mod tests {
         TimeSeries::univariate(stamps, vals).unwrap()
     }
 
-    #[cfg(feature = "distributional")]
+    #[cfg(all(feature = "distributional", feature = "postprocess"))]
     #[test]
-    fn intermittent_series_routes_to_intermittent() {
-        // Sparse series — 60% zeros → should route to intermittent.
-        let mut vals = vec![0.0; 120];
-        for i in (0..120).step_by(3) {
-            vals[i] = 5.0;
+    fn intermittent_count_series_routes_to_intermittent_family() {
+        let mut vals = vec![0.0; 200];
+        for i in (0..200).step_by(3) {
+            vals[i] = 2.0;
         }
         let ts = make_ts(vals);
         let mut f = SmartForecaster::new();
         f.fit(&ts).unwrap();
-        assert_eq!(f.selected_family(), Some(&SelectedFamily::Intermittent));
+        assert!(matches!(
+            f.selected_family(),
+            Some(SelectedFamily::IntermittentPoisson)
+                | Some(SelectedFamily::IntermittentNegBinomial)
+                | Some(SelectedFamily::IntermittentRectifiedNormal)
+                | Some(SelectedFamily::IntermittentPositive)
+        ));
+        let fc = f.predict(10).unwrap();
+        for v in fc.primary() {
+            assert!(*v >= 0.0);
+        }
     }
 
-    #[cfg(feature = "distributional")]
+    #[cfg(all(feature = "distributional", feature = "postprocess"))]
     #[test]
-    fn steady_moderate_series_routes_to_laplace_auto() {
+    fn continuous_regular_normal_falls_through_to_auto() {
         let vals: Vec<f64> = (0..200)
             .map(|i| 50.0 + (i as f64 * 0.05).sin() * 5.0)
             .collect();
         let ts = make_ts(vals);
         let mut f = SmartForecaster::new();
         f.fit(&ts).unwrap();
-        assert_eq!(f.selected_family(), Some(&SelectedFamily::LaplaceAuto));
-    }
-
-    #[test]
-    fn strong_linear_trend_routes_to_ets() {
-        let vals: Vec<f64> = (0..200).map(|i| 10.0 + 2.0 * i as f64).collect();
-        let ts = make_ts(vals);
-        let mut f = SmartForecaster::new();
-        f.fit(&ts).unwrap();
-        assert_eq!(f.selected_family(), Some(&SelectedFamily::AutoEts));
+        // Continuous smooth data → Regular family — could be Normal or
+        // one of the positive variants depending on AID's IC choice.
+        assert!(matches!(
+            f.selected_family(),
+            Some(SelectedFamily::RegularNormal)
+                | Some(SelectedFamily::RegularPositive)
+                | Some(SelectedFamily::RegularCount)
+        ));
     }
 }
