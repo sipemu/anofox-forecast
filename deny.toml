@@ -5,9 +5,11 @@
 # Deny crates with known security advisories
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
-# Allow unmaintained advisories for transitive dependencies we cannot control
+# Allow advisories for transitive dependencies we cannot directly update
 ignore = [
     "RUSTSEC-2024-0436", # paste crate unmaintained — transitive dep via criterion/statrs
+    "RUSTSEC-2025-0141", # bincode 1.3 unmaintained — transitive dep (optional serde feature); upstream migration to bincode 2.x tracked separately
+    "RUSTSEC-2026-0204", # crossbeam-utils invalid pointer dereference in fmt::Pointer — transitive dep via rayon/faer; awaiting crossbeam-utils >= 0.9.20 propagation
 ]
 
 [licenses]
