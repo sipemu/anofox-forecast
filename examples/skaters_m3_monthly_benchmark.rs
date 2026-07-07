@@ -30,6 +30,9 @@ const MIN_LEN: usize = 60;
 
 struct SeriesResult {
     mae: f64,
+    /// MASE = MAE(forecast) / MAE(seasonal_naive on training), the
+    /// canonical fev/autogluon and M-Competition scaled point metric.
+    mase: f64,
     coverage90: Option<f64>,
     logpdf_mean: Option<f64>,
     fit_us: u128,
@@ -40,6 +43,7 @@ struct ModelSummary {
     n_ok: usize,
     mae_median: f64,
     mae_mean: f64,
+    mase_mean: f64,
     coverage90_mean: Option<f64>,
     logpdf_mean: Option<f64>,
     total_ms: u128,
@@ -137,11 +141,12 @@ fn main() {
             Ok(ts) => ts,
             Err(_) => continue,
         };
+        let scale = mase_scale(&train_values, 12);
 
-        if let Some(r) = run_point(&mut AutoETS::new(), &train_ts, test_values) {
+        if let Some(r) = run_point(&mut AutoETS::new(), &train_ts, test_values, scale) {
             results[0].push(r);
         }
-        if let Some(r) = run_point(&mut AutoTheta::new(), &train_ts, test_values) {
+        if let Some(r) = run_point(&mut AutoTheta::new(), &train_ts, test_values, scale) {
             results[1].push(r);
         }
 
@@ -164,7 +169,7 @@ fn main() {
                 ),
             ];
             for (slot, model) in cfgs {
-                if let Some(r) = run_laplace(model, &train_ts, test_values) {
+                if let Some(r) = run_laplace(model, &train_ts, test_values, scale) {
                     results[slot].push(r);
                 }
             }
@@ -175,11 +180,12 @@ fn main() {
                     .auto_with_seasonal_period(12),
                 &train_ts,
                 test_values,
+                scale,
             ) {
                 results[6].push(r);
             }
             #[cfg(feature = "postprocess")]
-            if let Some(r) = run_smart(&train_ts, test_values) {
+            if let Some(r) = run_smart(&train_ts, test_values, scale) {
                 results[7].push(r);
             }
         }
@@ -203,6 +209,7 @@ fn run_point<F: Forecaster>(
     model: &mut F,
     train: &TimeSeries,
     test: &[f64],
+    mase_denom: f64,
 ) -> Option<SeriesResult> {
     let t0 = Instant::now();
     if model.fit(train).is_err() {
@@ -214,8 +221,10 @@ fn run_point<F: Forecaster>(
     if point.len() != test.len() {
         return None;
     }
+    let m = mae(point, test);
     Some(SeriesResult {
-        mae: mae(point, test),
+        mae: m,
+        mase: m / mase_denom,
         coverage90: None,
         logpdf_mean: None,
         fit_us,
@@ -227,6 +236,7 @@ fn run_laplace(
     mut model: LaplaceForecaster,
     train: &TimeSeries,
     test: &[f64],
+    mase_denom: f64,
 ) -> Option<SeriesResult> {
     let t0 = Instant::now();
     if model.fit(train).is_err() {
@@ -255,8 +265,10 @@ fn run_laplace(
     } else {
         Some(logpdfs.iter().sum::<f64>() / logpdfs.len() as f64)
     };
+    let m = mae(&point, test);
     Some(SeriesResult {
-        mae: mae(&point, test),
+        mae: m,
+        mase: m / mase_denom,
         coverage90: Some(coverage),
         logpdf_mean,
         fit_us,
@@ -264,7 +276,7 @@ fn run_laplace(
 }
 
 #[cfg(all(feature = "distributional", feature = "postprocess"))]
-fn run_smart(train: &TimeSeries, test: &[f64]) -> Option<SeriesResult> {
+fn run_smart(train: &TimeSeries, test: &[f64], mase_denom: f64) -> Option<SeriesResult> {
     let t0 = Instant::now();
     let mut m = SmartForecaster::new().with_seasonal_period(12);
     if m.fit(train).is_err() {
@@ -276,8 +288,10 @@ fn run_smart(train: &TimeSeries, test: &[f64]) -> Option<SeriesResult> {
     if point.len() != test.len() {
         return None;
     }
+    let mae_v = mae(point, test);
     Some(SeriesResult {
-        mae: mae(point, test),
+        mae: mae_v,
+        mase: mae_v / mase_denom,
         coverage90: None,
         logpdf_mean: None,
         fit_us,
@@ -291,6 +305,20 @@ fn mae(pred: &[f64], truth: &[f64]) -> f64 {
         .map(|(p, t)| (p - t).abs())
         .sum();
     s / pred.len() as f64
+}
+
+/// Seasonal-naive MASE denominator: mean absolute difference between
+/// consecutive same-phase observations in the training set. M3 monthly
+/// uses period = 12 per fev / M-Competition convention.
+fn mase_scale(train: &[f64], period: usize) -> f64 {
+    if train.len() <= period {
+        return 1.0;
+    }
+    let n = train.len() - period;
+    let sum: f64 = (period..train.len())
+        .map(|i| (train[i] - train[i - period]).abs())
+        .sum();
+    (sum / n as f64).max(1e-9)
 }
 
 fn median(xs: &[f64]) -> f64 {
@@ -316,6 +344,11 @@ fn summarize(name: &'static str, r: &[SeriesResult]) -> ModelSummary {
         maes.iter().sum::<f64>() / n as f64
     };
     let mae_median = median(&maes);
+    let mase_mean = if n == 0 {
+        f64::NAN
+    } else {
+        r.iter().map(|s| s.mase).sum::<f64>() / n as f64
+    };
     let coverages: Vec<f64> = r.iter().filter_map(|s| s.coverage90).collect();
     let coverage_mean = if coverages.is_empty() {
         None
@@ -334,6 +367,7 @@ fn summarize(name: &'static str, r: &[SeriesResult]) -> ModelSummary {
         n_ok: n,
         mae_median,
         mae_mean: mean,
+        mase_mean,
         coverage90_mean: coverage_mean,
         logpdf_mean,
         total_ms,
@@ -343,11 +377,12 @@ fn summarize(name: &'static str, r: &[SeriesResult]) -> ModelSummary {
 fn print_summary(summaries: &[ModelSummary]) {
     println!("\n=== M3 monthly cross-panel benchmark ===");
     println!(
-        "{:<24}{:>5}  {:>12}  {:>12}  {:>15}  {:>12}  {:>12}",
+        "{:<24}{:>5}  {:>12}  {:>12}  {:>12}  {:>15}  {:>12}  {:>12}",
         "model",
         "n",
         "MAE (median)",
         "MAE (mean)",
+        "MASE (mean)",
         "cover@90 (mean)",
         "logpdf (avg)",
         "fit time (s)"
@@ -362,11 +397,12 @@ fn print_summary(summaries: &[ModelSummary]) {
             .map(|l| format!("{:.3}", l))
             .unwrap_or_else(|| "-".to_string());
         println!(
-            "{:<24}{:>5}  {:>12.4}  {:>12.4}  {:>15}  {:>12}  {:>12.2}",
+            "{:<24}{:>5}  {:>12.4}  {:>12.4}  {:>12.3}  {:>15}  {:>12}  {:>12.2}",
             s.name,
             s.n_ok,
             s.mae_median,
             s.mae_mean,
+            s.mase_mean,
             cov,
             lp,
             s.total_ms as f64 / 1000.0
