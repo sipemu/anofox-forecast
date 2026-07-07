@@ -7,6 +7,7 @@
 //! or only on outliers.
 
 use anofox_forecast::core::TimeSeries;
+use anofox_forecast::models::laplace::hierarchical::PriorMode;
 use anofox_forecast::models::laplace::HierarchicalLaplace;
 use anofox_forecast::models::{Forecaster, LaplaceForecaster};
 
@@ -150,12 +151,10 @@ struct PanelResult {
     name: &'static str,
     n_series: usize,
     plain_mase: f64,
-    hier_mase: f64,
-    plain_fit_s: f64,
-    hier_fit_s: f64,
-    /// Fraction of series where hier improved over plain.
-    hier_win_rate: f64,
+    /// MASE for each prior mode: PanelMean, Cluster, Similarity, Decomposition.
+    mode_mases: [f64; 4],
 }
+const MODE_NAMES: [&str; 4] = ["PanelMean", "Cluster", "Similarity", "Decomposition"];
 
 fn run_dataset(ds: &Dataset, sample: usize) -> Option<PanelResult> {
     let mut kept = parse_tsf(ds.path);
@@ -192,8 +191,7 @@ fn run_dataset(ds: &Dataset, sample: usize) -> Option<PanelResult> {
     }
 
     let period = ds.period;
-    // Fit both models.
-    let t0 = Instant::now();
+    // Fit plain baseline.
     let mut plain_forecasters: Vec<(String, LaplaceForecaster)> = Vec::new();
     for (id, ts) in &train_ts_map {
         let mut m = LaplaceForecaster::new()
@@ -203,59 +201,70 @@ fn run_dataset(ds: &Dataset, sample: usize) -> Option<PanelResult> {
             plain_forecasters.push((id.clone(), m));
         }
     }
-    let plain_fit_s = t0.elapsed().as_secs_f64();
 
-    let t0 = Instant::now();
-    let mut hier = HierarchicalLaplace::new(ds.prior_strength, move || {
-        LaplaceForecaster::new()
-            .auto()
-            .auto_with_seasonal_period(period.max(2))
-    });
-    for (id, ts) in &train_ts_map {
-        let _ = hier.fit_series(id.clone(), ts);
+    // Fit one HierarchicalLaplace per prior mode.
+    let modes = [
+        PriorMode::PanelMean,
+        PriorMode::Cluster {
+            k: ((train_ts_map.len() as f64 / 10.0).sqrt() as usize).max(3),
+        },
+        PriorMode::Similarity,
+        PriorMode::Decomposition,
+    ];
+    let mut hier_per_mode: Vec<HierarchicalLaplace> = Vec::new();
+    for mode in modes.iter() {
+        let period_local = period;
+        let mut hier = HierarchicalLaplace::new(ds.prior_strength, move || {
+            LaplaceForecaster::new()
+                .auto()
+                .auto_with_seasonal_period(period_local.max(2))
+        })
+        .with_prior_mode(*mode);
+        for (id, ts) in &train_ts_map {
+            let _ = hier.fit_series(id.clone(), ts);
+        }
+        let _ = hier.finalize(ds.horizon);
+        hier_per_mode.push(hier);
     }
-    let _ = hier.finalize(ds.horizon);
-    let hier_fit_s = t0.elapsed().as_secs_f64();
 
-    // Compute MASE per model.
+    // MASE.
     let mut plain_mases = Vec::new();
-    let mut hier_mases = Vec::new();
-    let mut hier_wins = 0usize;
-    let mut n_matched = 0usize;
+    let mut mode_mases: [Vec<f64>; 4] = Default::default();
     for (id, test_v, scale) in &test_map {
         let plain_fc = plain_forecasters
             .iter()
             .find(|(oid, _)| oid == id)
             .and_then(|(_, m)| m.predict(ds.horizon).ok());
-        let hier_fc = hier.predict_series(id, ds.horizon).ok();
-        let (Some(p), Some(h)) = (plain_fc, hier_fc) else {
-            continue;
-        };
-        if p.primary().len() != test_v.len() || h.primary().len() != test_v.len() {
+        let Some(p) = plain_fc else { continue };
+        if p.primary().len() != test_v.len() {
             continue;
         }
-        let pm = mae(p.primary(), test_v) / *scale;
-        let hm = mae(h.primary(), test_v) / *scale;
-        plain_mases.push(pm);
-        hier_mases.push(hm);
-        if hm < pm {
-            hier_wins += 1;
+        plain_mases.push(mae(p.primary(), test_v) / *scale);
+        for (mi, h) in hier_per_mode.iter().enumerate() {
+            if let Ok(fc) = h.predict_series(id, ds.horizon) {
+                if fc.primary().len() == test_v.len() {
+                    mode_mases[mi].push(mae(fc.primary(), test_v) / *scale);
+                }
+            }
         }
-        n_matched += 1;
     }
-    if n_matched == 0 {
+    if plain_mases.is_empty() {
         return None;
     }
-    let plain_mase = plain_mases.iter().sum::<f64>() / n_matched as f64;
-    let hier_mase = hier_mases.iter().sum::<f64>() / n_matched as f64;
+    let plain_mase = plain_mases.iter().sum::<f64>() / plain_mases.len() as f64;
+    let mut mode_means = [0.0f64; 4];
+    for (mi, v) in mode_mases.iter().enumerate() {
+        mode_means[mi] = if v.is_empty() {
+            f64::NAN
+        } else {
+            v.iter().sum::<f64>() / v.len() as f64
+        };
+    }
     Some(PanelResult {
         name: ds.name,
-        n_series: n_matched,
+        n_series: plain_mases.len(),
         plain_mase,
-        hier_mase,
-        plain_fit_s,
-        hier_fit_s,
-        hier_win_rate: hier_wins as f64 / n_matched as f64,
+        mode_mases: mode_means,
     })
 }
 
@@ -285,31 +294,31 @@ fn main() {
             results.push(r);
         }
     }
-    println!(
-        "\n{:<20}{:>8}{:>12}{:>12}{:>10}{:>12}{:>12}",
-        "panel", "n", "plain MASE", "hier MASE", "Δ", "hier win %", "hier fit(s)"
-    );
+    print!("\n{:<20}{:>8}{:>12}", "panel", "n", "plain");
+    for name in &MODE_NAMES {
+        print!("{:>14}", name);
+    }
+    println!();
     for r in &results {
-        let delta = 100.0 * (r.hier_mase - r.plain_mase) / r.plain_mase;
-        println!(
-            "{:<20}{:>8}{:>12.3}{:>12.3}{:>9.1}%{:>11.1}%{:>12.2}",
-            r.name,
-            r.n_series,
-            r.plain_mase,
-            r.hier_mase,
-            delta,
-            r.hier_win_rate * 100.0,
-            r.hier_fit_s
-        );
+        print!("{:<20}{:>8}{:>12.3}", r.name, r.n_series, r.plain_mase,);
+        for (mi, mv) in r.mode_mases.iter().enumerate() {
+            let delta = 100.0 * (mv - r.plain_mase) / r.plain_mase;
+            let sign = if delta >= 0.0 { '+' } else { '-' };
+            print!("{:>8.3}{:>1}{:>4.1}%", mv, sign, delta.abs());
+            let _ = mi;
+        }
+        println!();
     }
     let plain_gm = geomean(&results.iter().map(|r| r.plain_mase).collect::<Vec<_>>());
-    let hier_gm = geomean(&results.iter().map(|r| r.hier_mase).collect::<Vec<_>>());
-    println!(
-        "\n{:<20}{:>8}{:>12.3}{:>12.3}{:>9.1}%",
-        "geomean MASE",
-        "-",
-        plain_gm,
-        hier_gm,
-        100.0 * (hier_gm - plain_gm) / plain_gm
-    );
+    let mode_gms: [f64; 4] = std::array::from_fn(|mi| {
+        geomean(&results.iter().map(|r| r.mode_mases[mi]).collect::<Vec<_>>())
+    });
+    print!("\n{:<20}{:>8}{:>12.3}", "geomean MASE", "-", plain_gm);
+    for (mi, gm) in mode_gms.iter().enumerate() {
+        let delta = 100.0 * (gm - plain_gm) / plain_gm;
+        let sign = if delta >= 0.0 { '+' } else { '-' };
+        print!("{:>8.3}{:>1}{:>4.1}%", gm, sign, delta.abs());
+        let _ = mi;
+    }
+    println!();
 }
