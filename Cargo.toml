@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "anofox-forecast"
-version = "0.12.0-alpha.27"
+version = "0.13.0"
 edition = "2021"
 authors = ["Simon Müller"]
 description = "Time series forecasting library"
@@ -340,3 +340,7 @@ required-features = ["distributional"]
 name = "hierarchical_benchmark"
 path = "examples/hierarchical_benchmark.rs"
 required-features = ["distributional"]
+
+[[example]]
+name = "period_fix_check"
+path = "examples/period_fix_check.rs"

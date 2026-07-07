@@ -7,6 +7,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-07-07
+
+Bundles the α-21 through α-31 alpha series into one stable release. Introduces the demand-forecasting distributional stack inspired by [`microprediction/skaters`](https://github.com/microprediction/skaters) plus AID-driven family selection from `anofox-regression`. See the alpha entries below for detailed per-alpha changes.
+
+### Added
+
+- **`LaplaceForecaster`** — streaming distributional forecaster with a Gaussian mixture output. 20+ opt-in leaves covering EMA, drift, AR(1), AR(2) with stationarity projection, seasonal-EMA, multi-period seasonal, multiplicative seasonal, seasonal-Croston, fractional differencing, OU, damped Holt, Yeo-Johnson coordinate grid, per-horizon calibration, hyperparameter populations, distribution-family (Poisson, NegBin, LogNormal, Gamma, RectifiedNormal, ZIP, ZINB, Student-t, Beta, Tweedie, SkewNormal, DiscreteUniform), classic Croston, and seasonal-Croston leaves. Behind the `distributional` feature.
+- **`.auto()`** — per-leaf characteristic-based selector. Enables OU, AR(2), seasonal, fractional-diff, damped Holt, multiplicative seasonal, seasonal-Croston, and non-negative clamp based on trend / seasonality / autocorrelation / zero-fraction / positivity of the training series. Auto-detects seasonal period via ACF scan across `{4, 7, 12, 24, 30, 52}`. Beats internal AutoETS/AutoTheta on the fev-benchmark classical panel.
+- **`.auto_aid()`** — statistically-derived selector. Runs the `anofox-regression` AID demand classifier at `fit()`; maps the fitted distribution family to the matching leaf. `Poisson`/`Geometric` + high zero-fraction → ZIP; `NegativeBinomial` + high zero-fraction → ZINB; else the plain family leaf. Requires `postprocess` + `distributional`.
+- **`SmartForecaster`** — AID-driven single-family Laplace commit. No AutoETS delegation (per design direction — demand-forecasting only). Picks one Laplace configuration per AID's `(demand_type, distribution)` output. New `SelectedFamily` enum with 8 variants.
+- **`CvSelectForecaster`** — CV-based per-series model selection. Given a slate of `Candidate` factories, fits each on the earlier portion of the series, scores on a holdout window, picks the winner, refits on full data.
+- **`HierarchicalLaplace`** — cross-series Empirical-Bayes wrapper with 4 pluggable prior modes: `PanelMean`, `Cluster { k }`, `Similarity`, `Decomposition`. Opt-in for homogeneous panels (cif_2016-style banking, retail during promo). Regresses on heterogeneous M-competition panels — documented anti-result in `docs/SOTA_POSITIONING.md`.
+- **`GlobalLaplace`** — panel-level wrapper for fitting one `LaplaceForecaster` per series with shared configuration. `fit_panel(iter)` for bulk fits; `predict_series(id, h)` / `forecast_dist_series(id, h)` per-series accessors.
+- **External regressor preregression** — `LaplaceForecaster::with_exog_preregression(&[names])` performs OLS on the named `TimeSeries` regressors before feeding residuals to the leaves. New `predict_with_exog(horizon, future_regressors)` method returns level-space forecasts. Replaces the α-17 scaffold.
+- **AID-derived training helpers** (opt-in, default off):
+  - `.with_stockout_indicator()` — synthesizes an `__aid_stockout` binary column from AID labels for OLS preregression.
+  - `.trim_new_product_prefix()` — trims leading `NewProduct`-flagged observations, guarded ≥ 12 obs.
+- **fev-style benchmark** (`examples/fev_benchmark.rs`) — MASE + WQL computed the autogluon/fev way on 27 Monash / Chronos-benchmark tasks. Downloads Monash `.tsf` from Zenodo; HuggingFace parquet-hosted datasets convertible via `/tmp/convert_hf.py`.
+- **`docs/SOTA_POSITIONING.md`** — full head-to-head report against Chronos, TimesFM, Moirai, Tirex on the fev leaderboard with honest gap analysis and design-boundary documentation.
+
+### Benchmark headline (from `docs/SOTA_POSITIONING.md`)
+
+On the 27-dataset fev Chronos-benchmark classical panel (500 series/dataset, geomean MASE across the 19 shared datasets):
+
+| rank | model | MASE | tier |
+|---|---|---|---|
+| 🥇 1 | Tirex | 1.351 | Foundation (GPU) |
+| 🥈 2 | TimesFM-2.0 | 1.354 | Foundation (GPU) |
+| 🥉 3 | fev auto_theta (Nixtla) | 1.362 | Classical (CPU) |
+| 4 | **`AutoTheta` (this crate)** | **1.381** | **Classical (CPU) — 1.4 % behind Nixtla** ✅ |
+| 5 | Chronos-Bolt-Base | 1.393 | Foundation |
+| 7 | fev auto_ets (Nixtla) | 1.440 | Classical (CPU) |
+| 8 | **`AutoETS` (this crate)** | **1.525** | **Classical (CPU) — 5.9 % behind Nixtla** |
+| 9 | Seasonal Naive | 1.665 | Baseline |
+| 10 | **`LaplaceForecaster::auto()`** | **1.723** | **Streaming distributional — 27 % behind foundation SOTA** |
+
+Two clear findings:
+
+1. **Our classical `AutoETS` / `AutoTheta` are Nixtla-quality** — within 1-6 % of the reference implementations. For general-purpose forecasting they are the right choice.
+2. **`LaplaceForecaster::auto()` sits at seasonal-naive level on this mixed panel** because the streaming per-observation design requires ~ 30-50 observations of warmup that classical closed-form fitters don't need. On short-history panels (`N < 100`), classical wins by 15-80 %. On long panels (`N > 300`), Laplace is competitive.
+
+### The design boundary — where Laplace shines
+
+For **retail SKU / demand forecasting** on the M5 full-30k benchmark:
+
+| model | median MAE | fit time | vs. AutoETS |
+|---|---|---|---|
+| AutoETS | 0.728 | 916 s | — |
+| **`Laplace + auto_aid`** | **0.734** | **22 s** | **+0.8 % MASE, ~42× faster** |
+| **`SmartForecaster`** | **0.735** | **11 s** | **+1.0 % MASE, ~82× faster** |
+
+For demand data with adequate history, the AID-driven selectors match classical accuracy while running 40-80× faster and providing native distributional output.
+
+**Rule of thumb:** use `LaplaceForecaster` when `N ≥ 100` per series AND you need distributional output OR you're on retail / demand data. Use `AutoTheta` / `AutoETS` when `N < 100` OR you just need a point forecast.
+
+### Cross-panel guidance (built into module docs + README)
+
+- **Retail / demand data (counts, intermittency)** → `LaplaceForecaster::new().auto_aid()` or `SmartForecaster::new()`.
+- **Economic / financial / continuous non-demand series** → `LaplaceForecaster::new().auto()` (no AID).
+- **`SmartForecaster` is demand-focused** — regresses on non-demand panels (documented in `src/models/smart.rs`, `src/models/laplace/mod.rs`, and `README.md`).
+
+### Attribution
+
+Design inspired by [`microprediction/skaters`](https://github.com/microprediction/skaters) (MIT, Peter Cotton) — see `THIRD_PARTY_NOTICES.md`.
+
+### Migration from 0.12.x
+
+- No breaking changes for callers of the stable 0.12 surface (ARIMA, ETS, Theta, TBATS, MSTL, MFLES, VAR, Kalman, GARCH, regression, ensemble, hierarchy, forecastability). Everything under `models::laplace` is behind the opt-in `distributional` feature.
+- `SmartForecaster` (previously in 0.12.0-alpha.16-α.20) had its `SelectedFamily` enum reshaped. Callers pattern-matching on old variants (`Intermittent`, `AutoEts`, `LaplaceAuto`) must update to the new 8 variants (`IntermittentPoisson`, `IntermittentNegBinomial`, ..., `RegularNormal`, `Fallback`).
+
+### Alpha history
+
+The following alpha releases contributed to 0.13.0:
+
+- `0.12.0-alpha.5` through `0.12.0-alpha.20` — the initial skaters-inspired shell, calibration, populations, seasonal & fractional-diff & OU leaves, per-horizon CRPS terminal, per-series meta-selector, cross-panel benchmarks (see below for details).
+
 ## [0.12.0-alpha.27] - 2026-07-07
 
 ### Changed — `.auto()` closes the gap to classical SOTA

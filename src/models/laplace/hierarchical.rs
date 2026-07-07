@@ -71,9 +71,9 @@ pub struct HierarchicalLaplace {
     features: HashMap<String, [f64; 6]>,
     /// Panel-level cache computed at finalize. Its meaning depends on
     /// the `PriorMode`:
-    /// - `PanelMean` / `Decomposition`: one Vec<f64> for the whole panel.
-    /// - `Cluster`: one Vec<f64> per cluster.
-    /// - `Similarity`: one Vec<f64> per series (its own similarity-weighted prior).
+    /// - `PanelMean` / `Decomposition`: one `Vec<f64>` for the whole panel.
+    /// - `Cluster`: one `Vec<f64>` per cluster.
+    /// - `Similarity`: one `Vec<f64>` per series (its own similarity-weighted prior).
     prior_cache: PriorCache,
     /// Per-series → cluster id (Cluster mode only).
     cluster_ids: HashMap<String, usize>,

@@ -233,27 +233,10 @@ const DATASETS: &[Dataset] = &[
         period: 12,
         step_seconds: 30 * 86400,
     },
-    Dataset {
-        name: "traffic",
-        path: "validation/data/traffic.tsf",
-        horizon: 24,
-        period: 24,
-        step_seconds: 3600,
-    },
-    Dataset {
-        name: "ETTh",
-        path: "validation/data/ETTh.tsf",
-        horizon: 24,
-        period: 24,
-        step_seconds: 3600,
-    },
-    Dataset {
-        name: "ETTm",
-        path: "validation/data/ETTm.tsf",
-        horizon: 24,
-        period: 96,
-        step_seconds: 15 * 60,
-    },
+    // traffic, ETTh, ETTm dropped — long histories × period 24-96 make the
+    // classical AutoETS grid search (19 ETS variants × Kalman filter over
+    // 10k+ timesteps) prohibitively slow. Included in a future targeted
+    // benchmark that uses a simpler AutoETS spec for those.
 ];
 
 const MODEL_NAMES: &[&str] = &[
