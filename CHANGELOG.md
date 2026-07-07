@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0-alpha.24] - 2026-07-07
+
+### Added — four more distribution-family leaves
+
+All following the α-21 moment-matched-Gaussian-output pattern. Softmax weighting now sees plausible densities for excess-zeros / heavy-tail / bounded regimes.
+
+| leaf | family | when it wins |
+|------|--------|--------------|
+| **`ZeroInflatedPoissonLeaf`** (ZIP) | `p₀ · 0 + (1−p₀) · Poi(λ)` | count series with more zeros than pure Poisson predicts (out-of-assortment SKUs) |
+| **`ZeroInflatedNegativeBinomialLeaf`** (ZINB) | `p₀ · 0 + (1−p₀) · NB(μ, r)` | overdispersed excess-zero counts — the canonical retail-SKU form |
+| **`StudentTLeaf`** | Student-t, ν estimated from kurtosis | heavy-tailed continuous — financial/economic tail events |
+| **`BetaLeaf`** | Beta on `[0, 1]` | rates, proportions, conversion, service levels; obs clamped to unit interval |
+
+All five prior distribution leaves (Poisson, NegBinomial, LogNormal, Gamma, RectifiedNormal) unchanged.
+
+### `.auto_aid()` extension
+
+The AID → leaf mapping now routes to zero-inflated variants when the observed zero fraction exceeds `0.5`:
+
+- `Poisson`/`Geometric` + `zero_proportion > 0.5` → **ZIP** (was: `PoissonLeaf`)
+- `NegativeBinomial` + `zero_proportion > 0.5` → **ZINB** (was: `NegativeBinomialLeaf`)
+
+Other AID mappings unchanged. Student-t and Beta are NOT auto-enabled — AID doesn't classify heavy tail or bounded data, so those leaves stay opt-in via explicit builders.
+
+### New builders (all opt-in)
+
+- `.with_zip(α)` / `.with_zip_defaults()`
+- `.with_zinb(α)` / `.with_zinb_defaults()`
+- `.with_student_t(α)` / `.with_student_t_defaults()`
+- `.with_beta(α)` / `.with_beta_defaults()`
+
+### Test plan
+
+- Unit tests: 2 per leaf × 4 = 8 new tests, plus AID-integration coverage via the existing `.auto_aid()` test.
+- Full laplace suite: 80 tests pass (up from 72).
+
+
 ## [0.12.0-alpha.23] - 2026-07-07
 
 ### Added — external regressor preregression + AID-derived helpers

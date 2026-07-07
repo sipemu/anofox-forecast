@@ -171,9 +171,10 @@ fn yj_inverse_with_jac(y: f64, lambda: f64) -> (f64, f64) {
 }
 use super::leaf::Leaf;
 use super::leaves::{
-    Ar1Leaf, Ar2Leaf, DriftLeaf, EmaLeaf, FractionalDiffLeaf, GammaLeaf, HoltLeaf,
+    Ar1Leaf, Ar2Leaf, BetaLeaf, DriftLeaf, EmaLeaf, FractionalDiffLeaf, GammaLeaf, HoltLeaf,
     IntermittentLeaf, LogNormalLeaf, MultiplicativeSeasonalLeaf, NegativeBinomialLeaf, OuLeaf,
-    PoissonLeaf, RectifiedNormalLeaf, SeasonalEmaLeaf, SeasonalIntermittentLeaf, YjWrappedLeaf,
+    PoissonLeaf, RectifiedNormalLeaf, SeasonalEmaLeaf, SeasonalIntermittentLeaf, StudentTLeaf,
+    YjWrappedLeaf, ZeroInflatedNegativeBinomialLeaf, ZeroInflatedPoissonLeaf,
 };
 use super::DistributionalForecaster;
 
@@ -276,6 +277,14 @@ pub struct LaplaceForecaster {
     gamma: Option<f64>,
     /// `α` for the Rectified-Normal (hurdle) leaf.
     rectified_normal: Option<f64>,
+    /// `α` for the Zero-Inflated Poisson leaf.
+    zip: Option<f64>,
+    /// `α` for the Zero-Inflated Negative-Binomial leaf.
+    zinb: Option<f64>,
+    /// `α` for the Student-t leaf.
+    student_t: Option<f64>,
+    /// `α` for the Beta leaf (bounded [0,1] data).
+    beta: Option<f64>,
     /// When true, forecast means are clipped to `max(0, μ)` — the cheap
     /// "no-negative demand forecast" fix. Distribution std is left
     /// alone (so the 90% interval can still dip below zero — proper
@@ -368,6 +377,10 @@ impl LaplaceForecaster {
             lognormal: None,
             gamma: None,
             rectified_normal: None,
+            zip: None,
+            zinb: None,
+            student_t: None,
+            beta: None,
             non_negative: false,
             seasonal_mult: None,
             exog_names: Vec::new(),
@@ -529,6 +542,57 @@ impl LaplaceForecaster {
     /// Rectified-Normal leaf with `α = 0.1`.
     pub fn with_rectified_normal_defaults(self) -> Self {
         self.with_rectified_normal(0.1)
+    }
+
+    /// Add a Zero-Inflated Poisson (ZIP) leaf — hurdle model on Poisson
+    /// for high-zero-fraction count series where the observed zero
+    /// share exceeds Poisson's own zero probability.
+    pub fn with_zip(mut self, alpha: f64) -> Self {
+        self.zip = Some(alpha);
+        self
+    }
+
+    /// ZIP leaf with `α = 0.1`.
+    pub fn with_zip_defaults(self) -> Self {
+        self.with_zip(0.1)
+    }
+
+    /// Add a Zero-Inflated Negative-Binomial (ZINB) leaf — hurdle on NB
+    /// for overdispersed excess-zero counts (retail-SKU norm).
+    pub fn with_zinb(mut self, alpha: f64) -> Self {
+        self.zinb = Some(alpha);
+        self
+    }
+
+    /// ZINB leaf with `α = 0.05` (slow — dispersion needs history).
+    pub fn with_zinb_defaults(self) -> Self {
+        self.with_zinb(0.05)
+    }
+
+    /// Add a Student-t leaf — heavy-tailed continuous, softmax weighting
+    /// then sees plausible density around outliers. `ν` (degrees of
+    /// freedom) is estimated via kurtosis when N ≥ 50.
+    pub fn with_student_t(mut self, alpha: f64) -> Self {
+        self.student_t = Some(alpha);
+        self
+    }
+
+    /// Student-t leaf with `α = 0.05`.
+    pub fn with_student_t_defaults(self) -> Self {
+        self.with_student_t(0.05)
+    }
+
+    /// Add a Beta leaf for bounded `[0, 1]` data (rates, proportions,
+    /// service levels, conversion rates). Observations outside are
+    /// clamped.
+    pub fn with_beta(mut self, alpha: f64) -> Self {
+        self.beta = Some(alpha);
+        self
+    }
+
+    /// Beta leaf with `α = 0.05`.
+    pub fn with_beta_defaults(self) -> Self {
+        self.with_beta(0.05)
     }
 
     /// Clip forecast component means to `max(0, μ)` at prediction time.
@@ -902,6 +966,18 @@ impl LaplaceForecaster {
         if let Some(a) = self.rectified_normal {
             leaves.push(Box::new(RectifiedNormalLeaf::new(a)));
         }
+        if let Some(a) = self.zip {
+            leaves.push(Box::new(ZeroInflatedPoissonLeaf::new(a)));
+        }
+        if let Some(a) = self.zinb {
+            leaves.push(Box::new(ZeroInflatedNegativeBinomialLeaf::new(a)));
+        }
+        if let Some(a) = self.student_t {
+            leaves.push(Box::new(StudentTLeaf::new(a)));
+        }
+        if let Some(a) = self.beta {
+            leaves.push(Box::new(BetaLeaf::new(a)));
+        }
         if let Some(p) = self.seasonal_period {
             leaves.push(Box::new(SeasonalEmaLeaf::new(p, self.seasonal_alpha)));
         }
@@ -1071,15 +1147,28 @@ impl Forecaster for LaplaceForecaster {
             let aid_result = AidAnalyzer::new().analyze(values);
             let summary = aid_result.summary();
             let mut count_or_positive = false;
+            // α-24: When AID picks Poisson/NB AND the observed zero
+            // fraction exceeds what that distribution would predict,
+            // route to the zero-inflated variant instead. Threshold:
+            // observed zero fraction > 0.5 → ZIP/ZINB.
+            let excess_zeros = summary.zero_proportion > 0.5;
             match summary.distribution {
                 DemandDistribution::Poisson | DemandDistribution::Geometric => {
-                    if self.poisson.is_none() {
+                    if excess_zeros {
+                        if self.zip.is_none() {
+                            self.zip = Some(0.1);
+                        }
+                    } else if self.poisson.is_none() {
                         self.poisson = Some(0.1);
                     }
                     count_or_positive = true;
                 }
                 DemandDistribution::NegativeBinomial => {
-                    if self.neg_binomial.is_none() {
+                    if excess_zeros {
+                        if self.zinb.is_none() {
+                            self.zinb = Some(0.05);
+                        }
+                    } else if self.neg_binomial.is_none() {
                         self.neg_binomial = Some(0.05);
                     }
                     count_or_positive = true;

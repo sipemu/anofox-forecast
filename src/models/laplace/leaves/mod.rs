@@ -2,6 +2,7 @@
 
 mod ar;
 mod ar2;
+mod beta;
 mod drift;
 mod ema;
 mod frac_diff;
@@ -16,10 +17,14 @@ mod rectified_normal;
 mod seasonal_ema;
 mod seasonal_intermittent;
 mod seasonal_mult;
+mod student_t;
 mod yj_wrapper;
+mod zinb;
+mod zip;
 
 pub use ar::Ar1Leaf;
 pub use ar2::Ar2Leaf;
+pub use beta::BetaLeaf;
 pub use drift::DriftLeaf;
 pub use ema::EmaLeaf;
 pub use frac_diff::FractionalDiffLeaf;
@@ -34,4 +39,7 @@ pub use rectified_normal::RectifiedNormalLeaf;
 pub use seasonal_ema::SeasonalEmaLeaf;
 pub use seasonal_intermittent::SeasonalIntermittentLeaf;
 pub use seasonal_mult::MultiplicativeSeasonalLeaf;
+pub use student_t::StudentTLeaf;
 pub use yj_wrapper::YjWrappedLeaf;
+pub use zinb::ZeroInflatedNegativeBinomialLeaf;
+pub use zip::ZeroInflatedPoissonLeaf;
