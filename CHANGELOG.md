@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0-alpha.21] - 2026-07-07
+
+### Added — distribution-family leaves + AID-driven selection
+
+Five new **moment-matched Gaussian** leaves that track a specific distribution family internally (its mean/variance) but output `Gaussian(mean, √(var·h))` for compatibility with the existing softmax + calibration + YJ machinery. Softmax weighting now sees a plausible density under the correct family for low-count and skewed-positive data.
+
+| leaf | when AID picks it | streaming state | notes |
+|---|---|---|---|
+| **`PoissonLeaf`** | small counts, `variance ≈ mean` | `λ_ema` | variance = λ (parameter) |
+| **`NegativeBinomialLeaf`** | overdispersed counts | `μ_ema`, Welford `σ²` | nests Poisson at `r → ∞` |
+| **`LogNormalLeaf`** | multiplicative positive | `μ_log_ema`, Welford log-variance | works on `ln(y+1)` |
+| **`GammaLeaf`** | positive-skewed continuous | `μ_ema`, Welford `σ²` | moment-match |
+| **`RectifiedNormalLeaf`** | intermittent continuous (hurdle) | `p_zero_ema`, positive-branch `(μ_ema, σ²)` | `E[Y] = (1-p₀)·μ`, `Var[Y] = (1-p₀)σ² + p₀(1-p₀)μ²` |
+
+### `.auto_aid()` — statistically-derived leaf selection
+
+New `LaplaceForecaster::auto_aid()` builder (behind the default `postprocess` feature). At `fit()`, runs the `anofox-regression` AID demand classifier on the training values; the AID-selected distribution family maps to the matching leaf:
+
+- `Poisson`, `Geometric` → `PoissonLeaf`
+- `NegativeBinomial` → `NegativeBinomialLeaf`
+- `LogNormal` → `LogNormalLeaf`
+- `Gamma` → `GammaLeaf`
+- `RectifiedNormal` → `RectifiedNormalLeaf`
+- `Normal` → falls through to `.auto()`'s rule set
+
+Any AID-detected count / positive family also auto-enables `.non_negative()`.
+
+### Benchmark: full-M5 500-sample
+
+| model | α-20 MAE(med) | **α-21 MAE(med)** | α-20 MAE(mean) | **α-21 MAE(mean)** | fit |
+|---|---|---|---|---|---|
+| AutoETS | 0.960 | 0.960 (baseline) | 1.449 | 1.449 | 14.7s |
+| Laplace+auto | 1.002 (+4.4%) | 1.002 (unchanged) | 1.552 (+7.1%) | 1.552 | 0.4s |
+| **Laplace+auto_aid** | — | **0.978 (+1.9%)** | — | **1.483 (+2.3%)** | **0.4s** |
+| SmartForecaster | 0.988 (+2.9%) | 0.988 (unchanged) | 1.481 (+2.2%) | 1.481 | 4.6s |
+
+- **Median-MAE gap to AutoETS cut from 4.4% (α-20 auto) to 1.9% (α-21 auto_aid).**
+- **auto_aid matches SmartForecaster's mean-MAE** while being **12× faster** — no AutoETS delegation needed.
+- AID overhead is negligible (≤ ms per series).
+- Full 30k backfill running in the background; will backfill numbers.
+
+### Notes
+
+Alpha surface: additive behind `distributional` + `postprocess`. Five new builders: `.with_poisson()`, `.with_negative_binomial()`, `.with_lognormal()`, `.with_gamma()`, `.with_rectified_normal()` (each with a `_defaults()` shortcut). `.auto_aid()` is opt-in — old `.auto()` behavior unchanged. `SmartForecaster` not yet routed through AID (deferred to α-22).
+
+### Future work
+
+- Level 2: `TypedMixture` output preserving true distribution shape end-to-end (correct quantiles on count / skewed data).
+- Extend `SmartForecaster` to route via `AidSummary { demand_type, distribution }` rather than hand-tuned thresholds.
+- Use AID's per-observation anomaly labels (`NewProduct`, `Stockout`, `HighOutlier`) to trim / weight training observations.
+
 ## [0.12.0-alpha.20] - 2026-07-06
 
 ### Added — full-M5 loss-driven fixes

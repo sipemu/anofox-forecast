@@ -98,14 +98,16 @@ fn main() {
     kept.truncate(sample_size);
     eprintln!("Running on {} series (no intermittency filter)", kept.len());
 
-    // Six per-series MAE arrays.
+    // Per-series MAE arrays.
     let mut ets_maes = Vec::with_capacity(kept.len());
     let mut theta_maes = Vec::with_capacity(kept.len());
     let mut auto_maes = Vec::with_capacity(kept.len());
+    let mut auto_aid_maes = Vec::with_capacity(kept.len());
     let mut smart_maes = Vec::with_capacity(kept.len());
     let mut ets_time_us = 0u128;
     let mut theta_time_us = 0u128;
     let mut auto_time_us = 0u128;
+    let mut auto_aid_time_us = 0u128;
     let mut smart_time_us = 0u128;
 
     // Per-series zero fraction bucket counts for Smart's routing.
@@ -173,6 +175,19 @@ fn main() {
             auto_time_us += t0.elapsed().as_micros();
         }
 
+        // Laplace + auto_aid — α-21 AID-driven distribution-family selector
+        #[cfg(all(feature = "distributional", feature = "postprocess"))]
+        {
+            let t0 = Instant::now();
+            let mut m = LaplaceForecaster::new().auto_aid();
+            if m.fit(&train_ts).is_ok() {
+                if let Ok(fc) = m.predict(HORIZON) {
+                    auto_aid_maes.push(mae(fc.primary(), test_values));
+                }
+            }
+            auto_aid_time_us += t0.elapsed().as_micros();
+        }
+
         // SmartForecaster
         let t0 = Instant::now();
         let mut m = SmartForecaster::new();
@@ -217,10 +232,16 @@ fn main() {
     summary("AutoTheta", theta_maes.clone(), theta_time_us);
     #[cfg(feature = "distributional")]
     summary("Laplace+auto", auto_maes.clone(), auto_time_us);
+    #[cfg(all(feature = "distributional", feature = "postprocess"))]
+    summary("Laplace+auto_aid", auto_aid_maes.clone(), auto_aid_time_us);
     summary("SmartForecaster", smart_maes.clone(), smart_time_us);
 
     // Winrate: Laplace/Smart vs AutoETS on matched series.
-    let n_match = ets_maes.len().min(auto_maes.len()).min(smart_maes.len());
+    let n_match = ets_maes
+        .len()
+        .min(auto_maes.len())
+        .min(auto_aid_maes.len().max(auto_maes.len()))
+        .min(smart_maes.len());
     if n_match > 0 {
         let auto_wins = (0..n_match).filter(|&i| auto_maes[i] < ets_maes[i]).count();
         let smart_wins = (0..n_match)
@@ -234,6 +255,13 @@ fn main() {
             "  Laplace+auto:    {:.3}",
             auto_wins as f64 / n_match as f64
         );
+        #[cfg(all(feature = "distributional", feature = "postprocess"))]
+        if auto_aid_maes.len() >= n_match {
+            let aid_wins = (0..n_match)
+                .filter(|&i| auto_aid_maes[i] < ets_maes[i])
+                .count();
+            println!("  Laplace+auto_aid:{:.3}", aid_wins as f64 / n_match as f64);
+        }
         println!(
             "  SmartForecaster: {:.3}",
             smart_wins as f64 / n_match as f64

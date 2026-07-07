@@ -169,8 +169,9 @@ fn yj_inverse_with_jac(y: f64, lambda: f64) -> (f64, f64) {
 }
 use super::leaf::Leaf;
 use super::leaves::{
-    Ar1Leaf, Ar2Leaf, DriftLeaf, EmaLeaf, FractionalDiffLeaf, HoltLeaf, IntermittentLeaf,
-    MultiplicativeSeasonalLeaf, OuLeaf, SeasonalEmaLeaf, SeasonalIntermittentLeaf, YjWrappedLeaf,
+    Ar1Leaf, Ar2Leaf, DriftLeaf, EmaLeaf, FractionalDiffLeaf, GammaLeaf, HoltLeaf,
+    IntermittentLeaf, LogNormalLeaf, MultiplicativeSeasonalLeaf, NegativeBinomialLeaf, OuLeaf,
+    PoissonLeaf, RectifiedNormalLeaf, SeasonalEmaLeaf, SeasonalIntermittentLeaf, YjWrappedLeaf,
 };
 use super::DistributionalForecaster;
 
@@ -241,6 +242,9 @@ pub struct LaplaceForecaster {
     /// on M5). The user-configured toggles are respected — `auto()` only
     /// adds, never removes.
     use_auto: bool,
+    /// Enable AID-driven leaf selection (in addition to `use_auto` rules).
+    /// Only meaningful when the `postprocess` feature is on.
+    use_aid: bool,
     /// Seasonal period used by `auto()`. Defaults to 7 (weekly). Set via
     /// [`Self::auto_with_seasonal_period`] for non-daily panels.
     auto_seasonal_period: usize,
@@ -260,6 +264,16 @@ pub struct LaplaceForecaster {
     /// intermittent series with weekly / periodic non-zero clusters
     /// (SKU weekend spikes) get the phase shape right.
     seasonal_intermittent: Option<(usize, f64)>,
+    /// `α` for the Poisson-family count leaf.
+    poisson: Option<f64>,
+    /// `α` for the Negative-Binomial count leaf.
+    neg_binomial: Option<f64>,
+    /// `α` for the Log-Normal positive-multiplicative leaf.
+    lognormal: Option<f64>,
+    /// `α` for the Gamma positive-skewed continuous leaf.
+    gamma: Option<f64>,
+    /// `α` for the Rectified-Normal (hurdle) leaf.
+    rectified_normal: Option<f64>,
     /// When true, forecast means are clipped to `max(0, μ)` — the cheap
     /// "no-negative demand forecast" fix. Distribution std is left
     /// alone (so the 90% interval can still dip below zero — proper
@@ -329,11 +343,17 @@ impl LaplaceForecaster {
             use_populations_wide: false,
             yj_grid: Vec::new(),
             use_auto: false,
+            use_aid: false,
             auto_seasonal_period: 7,
             frac_diff: None,
             ou: None,
             intermittent: None,
             seasonal_intermittent: None,
+            poisson: None,
+            neg_binomial: None,
+            lognormal: None,
+            gamma: None,
+            rectified_normal: None,
             non_negative: false,
             seasonal_mult: None,
             exog_scaffold_declared: false,
@@ -430,6 +450,68 @@ impl LaplaceForecaster {
     /// Seasonal-Croston with the default rate `α = 0.1`.
     pub fn with_seasonal_intermittent_defaults(self, period: usize) -> Self {
         self.with_seasonal_intermittent(period, 0.1)
+    }
+
+    /// Add a Poisson leaf — moment-matched Gaussian output for small
+    /// count data with `variance ≈ mean`. See [`PoissonLeaf`](super::leaves::PoissonLeaf).
+    pub fn with_poisson(mut self, alpha: f64) -> Self {
+        self.poisson = Some(alpha);
+        self
+    }
+
+    /// Poisson leaf with `α = 0.1`.
+    pub fn with_poisson_defaults(self) -> Self {
+        self.with_poisson(0.1)
+    }
+
+    /// Add a Negative-Binomial leaf — moment-matched Gaussian output for
+    /// overdispersed count data (retail-demand norm). Nests Poisson when
+    /// observed variance ≤ mean.
+    pub fn with_negative_binomial(mut self, alpha: f64) -> Self {
+        self.neg_binomial = Some(alpha);
+        self
+    }
+
+    /// Negative-Binomial leaf with `α = 0.05` (slow — retail dispersion
+    /// estimates need more history than mean estimates).
+    pub fn with_negative_binomial_defaults(self) -> Self {
+        self.with_negative_binomial(0.05)
+    }
+
+    /// Add a Log-Normal leaf — moment-matched Gaussian output for positive
+    /// multiplicative processes. Works on `ln(y + 1)` internally.
+    pub fn with_lognormal(mut self, alpha: f64) -> Self {
+        self.lognormal = Some(alpha);
+        self
+    }
+
+    /// Log-Normal leaf with `α = 0.05`.
+    pub fn with_lognormal_defaults(self) -> Self {
+        self.with_lognormal(0.05)
+    }
+
+    /// Add a Gamma leaf — moment-matched Gaussian output for
+    /// positive-skewed continuous data.
+    pub fn with_gamma(mut self, alpha: f64) -> Self {
+        self.gamma = Some(alpha);
+        self
+    }
+
+    /// Gamma leaf with `α = 0.05`.
+    pub fn with_gamma_defaults(self) -> Self {
+        self.with_gamma(0.05)
+    }
+
+    /// Add a Rectified-Normal (hurdle) leaf — intermittent continuous
+    /// demand modeled as `p_zero · 0 + (1 - p_zero) · N(μ, σ²)`.
+    pub fn with_rectified_normal(mut self, alpha: f64) -> Self {
+        self.rectified_normal = Some(alpha);
+        self
+    }
+
+    /// Rectified-Normal leaf with `α = 0.1`.
+    pub fn with_rectified_normal_defaults(self) -> Self {
+        self.with_rectified_normal(0.1)
     }
 
     /// Clip forecast component means to `max(0, μ)` at prediction time.
@@ -530,6 +612,33 @@ impl LaplaceForecaster {
     /// adds leaves, never removes.
     pub fn auto(mut self) -> Self {
         self.use_auto = true;
+        self
+    }
+
+    /// AID-driven auto-selector: run the `anofox-regression` AID demand
+    /// classifier on the training values at `fit()` time and enable the
+    /// distribution-family leaf that matches the fitted family. Replaces
+    /// the hand-tuned rules in [`Self::auto`] with a statistically-derived
+    /// choice.
+    ///
+    /// Family → leaf mapping:
+    ///
+    /// * `Poisson`, `Geometric` → [`PoissonLeaf`](super::leaves::PoissonLeaf)
+    /// * `NegativeBinomial` → [`NegativeBinomialLeaf`](super::leaves::NegativeBinomialLeaf)
+    /// * `LogNormal` → [`LogNormalLeaf`](super::leaves::LogNormalLeaf)
+    /// * `Gamma` → [`GammaLeaf`](super::leaves::GammaLeaf)
+    /// * `RectifiedNormal` → [`RectifiedNormalLeaf`](super::leaves::RectifiedNormalLeaf)
+    /// * `Normal` → falls through to [`Self::auto`]'s rule set
+    ///
+    /// Any AID-detected count / positive family also enables
+    /// [`Self::non_negative`] on the output.
+    ///
+    /// Composes with explicit `with_*` builders. Requires the
+    /// `postprocess` feature (default).
+    #[cfg(feature = "postprocess")]
+    pub fn auto_aid(mut self) -> Self {
+        self.use_auto = true;
+        self.use_aid = true;
         self
     }
 
@@ -680,6 +789,21 @@ impl LaplaceForecaster {
         if let Some((p, a)) = self.seasonal_intermittent {
             leaves.push(Box::new(SeasonalIntermittentLeaf::new(p, a)));
         }
+        if let Some(a) = self.poisson {
+            leaves.push(Box::new(PoissonLeaf::new(a)));
+        }
+        if let Some(a) = self.neg_binomial {
+            leaves.push(Box::new(NegativeBinomialLeaf::new(a)));
+        }
+        if let Some(a) = self.lognormal {
+            leaves.push(Box::new(LogNormalLeaf::new(a)));
+        }
+        if let Some(a) = self.gamma {
+            leaves.push(Box::new(GammaLeaf::new(a)));
+        }
+        if let Some(a) = self.rectified_normal {
+            leaves.push(Box::new(RectifiedNormalLeaf::new(a)));
+        }
         if let Some(p) = self.seasonal_period {
             leaves.push(Box::new(SeasonalEmaLeaf::new(p, self.seasonal_alpha)));
         }
@@ -747,6 +871,55 @@ impl Forecaster for LaplaceForecaster {
             return Err(ForecastError::InvalidParameter(
                 "LaplaceForecaster requires at least one observation".into(),
             ));
+        }
+
+        // AID-driven family selection (α-21). Runs before the classical
+        // `use_auto` rules so those only fill in gaps AID didn't cover.
+        // The AID call is behind the `postprocess` feature; when off, this
+        // block compiles out and `use_aid` stays `false`.
+        #[cfg(feature = "postprocess")]
+        if self.use_aid {
+            use crate::validation::aid::AidAnalyzer;
+            use anofox_regression::solvers::DemandDistribution;
+            let aid_result = AidAnalyzer::new().analyze(values);
+            let summary = aid_result.summary();
+            let mut count_or_positive = false;
+            match summary.distribution {
+                DemandDistribution::Poisson | DemandDistribution::Geometric => {
+                    if self.poisson.is_none() {
+                        self.poisson = Some(0.1);
+                    }
+                    count_or_positive = true;
+                }
+                DemandDistribution::NegativeBinomial => {
+                    if self.neg_binomial.is_none() {
+                        self.neg_binomial = Some(0.05);
+                    }
+                    count_or_positive = true;
+                }
+                DemandDistribution::LogNormal => {
+                    if self.lognormal.is_none() {
+                        self.lognormal = Some(0.05);
+                    }
+                    count_or_positive = true;
+                }
+                DemandDistribution::Gamma => {
+                    if self.gamma.is_none() {
+                        self.gamma = Some(0.05);
+                    }
+                    count_or_positive = true;
+                }
+                DemandDistribution::RectifiedNormal => {
+                    if self.rectified_normal.is_none() {
+                        self.rectified_normal = Some(0.1);
+                    }
+                    count_or_positive = true;
+                }
+                DemandDistribution::Normal => {}
+            }
+            if count_or_positive {
+                self.non_negative = true;
+            }
         }
 
         // Auto-selector: inspect series characteristics before initialising
@@ -1574,5 +1747,41 @@ mod tests {
             Inspectable::explanation(&f),
             Err(ForecastError::FitRequired { .. })
         ));
+    }
+
+    #[cfg(feature = "postprocess")]
+    #[test]
+    fn auto_aid_predicts_finite_on_intermittent_data() {
+        // Sparse count series (60% zeros, mean ≈ 0.6) — AID should
+        // classify as intermittent count and the fit should succeed.
+        let n = 200;
+        let base = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let vals: Vec<f64> = (0..n).map(|i| if i % 3 == 0 { 2.0 } else { 0.0 }).collect();
+        let stamps: Vec<_> = (0..n).map(|i| base + Duration::hours(i as i64)).collect();
+        let ts = TimeSeries::univariate(stamps, vals).unwrap();
+        let mut f = LaplaceForecaster::new().auto_aid();
+        f.fit(&ts).unwrap();
+        let fc = f.predict(10).unwrap();
+        for v in fc.primary() {
+            assert!(v.is_finite() && *v >= 0.0);
+        }
+    }
+
+    #[cfg(feature = "postprocess")]
+    #[test]
+    fn auto_aid_predicts_finite_on_normal_data() {
+        let n = 200;
+        let base = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let vals: Vec<f64> = (0..n)
+            .map(|i| 50.0 + ((i as f64 * 0.1).sin() * 5.0))
+            .collect();
+        let stamps: Vec<_> = (0..n).map(|i| base + Duration::hours(i as i64)).collect();
+        let ts = TimeSeries::univariate(stamps, vals).unwrap();
+        let mut f = LaplaceForecaster::new().auto_aid();
+        f.fit(&ts).unwrap();
+        let fc = f.predict(10).unwrap();
+        for v in fc.primary() {
+            assert!(v.is_finite());
+        }
     }
 }
