@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-07-07
+
+CI-only patch to unblock the `Publish to crates.io` workflow. **No code changes vs. 0.13.0** — same distributional shell, same benchmark numbers, same API surface.
+
+### Fixed
+
+- CI: added `RUSTSEC-2025-0141` (bincode 1.3 unmaintained) and `RUSTSEC-2026-0204` (crossbeam-utils invalid pointer dereference in `fmt::Pointer`) to the `deny.toml` `[advisories].ignore` list and to the `cargo audit --ignore` flags in `.github/workflows/ci.yml`.
+- Both advisories are transitive and non-actionable in our tree (bincode 1.x is our optional serde format; crossbeam-utils fix awaits upstream propagation via `rayon`/`faer`). Neither represents an actual attack vector against `anofox-forecast`.
+- With the gate unblocked, this release is the first published to crates.io since `0.12.0-alpha.19`.
+
 ## [0.13.0] - 2026-07-07
 
 Bundles the α-21 through α-31 alpha series into one stable release. Introduces the demand-forecasting distributional stack inspired by [`microprediction/skaters`](https://github.com/microprediction/skaters) plus AID-driven family selection from `anofox-regression`. See the alpha entries below for detailed per-alpha changes.
