@@ -171,10 +171,11 @@ fn yj_inverse_with_jac(y: f64, lambda: f64) -> (f64, f64) {
 }
 use super::leaf::Leaf;
 use super::leaves::{
-    Ar1Leaf, Ar2Leaf, BetaLeaf, DriftLeaf, EmaLeaf, FractionalDiffLeaf, GammaLeaf, HoltLeaf,
-    IntermittentLeaf, LogNormalLeaf, MultiplicativeSeasonalLeaf, NegativeBinomialLeaf, OuLeaf,
-    PoissonLeaf, RectifiedNormalLeaf, SeasonalEmaLeaf, SeasonalIntermittentLeaf, StudentTLeaf,
-    YjWrappedLeaf, ZeroInflatedNegativeBinomialLeaf, ZeroInflatedPoissonLeaf,
+    Ar1Leaf, Ar2Leaf, BetaLeaf, DiscreteUniformLeaf, DriftLeaf, EmaLeaf, FractionalDiffLeaf,
+    GammaLeaf, HoltLeaf, IntermittentLeaf, LogNormalLeaf, MultiplicativeSeasonalLeaf,
+    NegativeBinomialLeaf, OuLeaf, PoissonLeaf, RectifiedNormalLeaf, SeasonalEmaLeaf,
+    SeasonalIntermittentLeaf, SkewNormalLeaf, StudentTLeaf, TweedieLeaf, YjWrappedLeaf,
+    ZeroInflatedNegativeBinomialLeaf, ZeroInflatedPoissonLeaf,
 };
 use super::DistributionalForecaster;
 
@@ -285,6 +286,12 @@ pub struct LaplaceForecaster {
     student_t: Option<f64>,
     /// `α` for the Beta leaf (bounded [0,1] data).
     beta: Option<f64>,
+    /// `(α, p)` for the Tweedie leaf. `p ∈ (1, 2)`.
+    tweedie: Option<(f64, f64)>,
+    /// `α` for the Skew-Normal leaf.
+    skew_normal: Option<f64>,
+    /// Toggle for the Discrete-Uniform leaf (no hyperparameter).
+    discrete_uniform: bool,
     /// When true, forecast means are clipped to `max(0, μ)` — the cheap
     /// "no-negative demand forecast" fix. Distribution std is left
     /// alone (so the 90% interval can still dip below zero — proper
@@ -381,6 +388,9 @@ impl LaplaceForecaster {
             zinb: None,
             student_t: None,
             beta: None,
+            tweedie: None,
+            skew_normal: None,
+            discrete_uniform: false,
             non_negative: false,
             seasonal_mult: None,
             exog_names: Vec::new(),
@@ -593,6 +603,41 @@ impl LaplaceForecaster {
     /// Beta leaf with `α = 0.05`.
     pub fn with_beta_defaults(self) -> Self {
         self.with_beta(0.05)
+    }
+
+    /// Add a Tweedie leaf — compound Poisson-gamma for aggregate retail
+    /// (SKU × store × week) with point mass at zero + positive continuous
+    /// branch + overdispersion. `p ∈ (1, 2)` interpolates between
+    /// Poisson (p=1) and Gamma (p=2). Values outside are clamped.
+    pub fn with_tweedie(mut self, alpha: f64, p: f64) -> Self {
+        self.tweedie = Some((alpha, p));
+        self
+    }
+
+    /// Tweedie leaf with the canonical retail-aggregate `α = 0.05, p = 1.5`.
+    pub fn with_tweedie_defaults(self) -> Self {
+        self.with_tweedie(0.05, 1.5)
+    }
+
+    /// Add a Skew-Normal leaf — asymmetric continuous data where YJ/log
+    /// doesn't fully symmetrize. Skewness estimated via sample M3 when
+    /// `N >= 30`; otherwise treated as Gaussian.
+    pub fn with_skew_normal(mut self, alpha: f64) -> Self {
+        self.skew_normal = Some(alpha);
+        self
+    }
+
+    /// Skew-Normal leaf with `α = 0.05`.
+    pub fn with_skew_normal_defaults(self) -> Self {
+        self.with_skew_normal(0.05)
+    }
+
+    /// Add a Discrete-Uniform leaf for bounded small-count series
+    /// `{0, 1, ..., K}`. `K` inferred as `max(observed)`. No
+    /// hyperparameter.
+    pub fn with_discrete_uniform(mut self) -> Self {
+        self.discrete_uniform = true;
+        self
     }
 
     /// Clip forecast component means to `max(0, μ)` at prediction time.
@@ -977,6 +1022,15 @@ impl LaplaceForecaster {
         }
         if let Some(a) = self.beta {
             leaves.push(Box::new(BetaLeaf::new(a)));
+        }
+        if let Some((a, p)) = self.tweedie {
+            leaves.push(Box::new(TweedieLeaf::new(a, p)));
+        }
+        if let Some(a) = self.skew_normal {
+            leaves.push(Box::new(SkewNormalLeaf::new(a)));
+        }
+        if self.discrete_uniform {
+            leaves.push(Box::new(DiscreteUniformLeaf::new()));
         }
         if let Some(p) = self.seasonal_period {
             leaves.push(Box::new(SeasonalEmaLeaf::new(p, self.seasonal_alpha)));

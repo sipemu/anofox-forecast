@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0-alpha.25] - 2026-07-07
+
+### Added — three more distribution leaves (Tweedie, Skew-Normal, Discrete-Uniform)
+
+All moment-matched Gaussian output following the α-21 pattern. Softmax weighting extends to aggregate-retail, asymmetric-continuous, and bounded-small-count regimes that weren't cleanly handled by the α-24 slate.
+
+| leaf | family | mean/variance / when it wins |
+|------|--------|------------------------------|
+| **`TweedieLeaf`** | compound Poisson-gamma | `E[Y]=μ`, `Var[Y]=φ·μ^p`. Aggregate retail (SKU × store × week): point mass at 0 + positive continuous + overdispersion without a hurdle. `p ∈ (1, 2)`; canonical retail-aggregate `p = 1.5`. |
+| **`SkewNormalLeaf`** | skew-normal | Location + scale + shape via sample M3. When `|γ₁| < 0.05` falls back to Gaussian. For asymmetric continuous data where YJ/log doesn't fully symmetrize. |
+| **`DiscreteUniformLeaf`** | Discrete-Uniform `{0..K}` | `E[Y]=K/2`, `Var[Y]=(K²+2K)/12`. K inferred via running max. No hyperparameter. Bounded small-count series (promo-count, capacity-limited demand, capped service tickets). |
+
+Tweedie is intentionally NOT auto-enabled by `.auto_aid()` — AID doesn't classify aggregate compound-Poisson-gamma. Callers opt in explicitly for aggregate-level series.
+
+### New builders (all opt-in)
+
+- `.with_tweedie(α, p)` / `.with_tweedie_defaults()` (p=1.5)
+- `.with_skew_normal(α)` / `.with_skew_normal_defaults()`
+- `.with_discrete_uniform()` (no hyperparameter)
+
+### Test plan
+
+- 8 new unit tests total (3 for Tweedie including a clamping-invariant, 3 for SkewNormal including a right-skew-detection assertion, 2 for DiscreteUniform).
+- Full laplace suite: 88 tests pass (up from 80).
+
+### Notes
+
+Alpha surface: additive. Existing behavior unchanged. Total distribution-family leaves now: **11** (Poisson, NegativeBinomial, LogNormal, Gamma, RectifiedNormal, ZIP, ZINB, Student-t, Beta, Tweedie, SkewNormal) + DiscreteUniform.
+
+
 ## [0.12.0-alpha.24] - 2026-07-07
 
 ### Added — four more distribution-family leaves
