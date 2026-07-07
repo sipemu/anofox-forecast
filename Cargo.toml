@@ -335,3 +335,8 @@ required-features = ["distributional"]
 name = "fev_benchmark"
 path = "examples/fev_benchmark.rs"
 required-features = ["distributional"]
+
+[[example]]
+name = "hierarchical_benchmark"
+path = "examples/hierarchical_benchmark.rs"
+required-features = ["distributional"]

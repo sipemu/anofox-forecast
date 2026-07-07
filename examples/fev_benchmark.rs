@@ -188,6 +188,72 @@ const DATASETS: &[Dataset] = &[
         period: 48,
         step_seconds: 1800,
     },
+    // α-27 addition: the 9 fev tasks hosted on HuggingFace Datasets
+    // (chronos_datasets / chronos_datasets_extra), converted to Monash
+    // TSF via /tmp/convert_hf.py.
+    Dataset {
+        name: "m5",
+        path: "validation/data/m5.tsf",
+        horizon: 28,
+        period: 1,
+        step_seconds: 86400,
+    },
+    Dataset {
+        name: "nn5",
+        path: "validation/data/nn5.tsf",
+        horizon: 56,
+        period: 1,
+        step_seconds: 86400,
+    },
+    Dataset {
+        name: "exchange_rate",
+        path: "validation/data/exchange_rate.tsf",
+        horizon: 30,
+        period: 5,
+        step_seconds: 86400,
+    },
+    Dataset {
+        name: "dominick",
+        path: "validation/data/dominick.tsf",
+        horizon: 8,
+        period: 1,
+        step_seconds: 7 * 86400,
+    },
+    Dataset {
+        name: "ercot",
+        path: "validation/data/ercot.tsf",
+        horizon: 24,
+        period: 24,
+        step_seconds: 3600,
+    },
+    Dataset {
+        name: "car_parts",
+        path: "validation/data/car_parts.tsf",
+        horizon: 12,
+        period: 12,
+        step_seconds: 30 * 86400,
+    },
+    Dataset {
+        name: "traffic",
+        path: "validation/data/traffic.tsf",
+        horizon: 24,
+        period: 24,
+        step_seconds: 3600,
+    },
+    Dataset {
+        name: "ETTh",
+        path: "validation/data/ETTh.tsf",
+        horizon: 24,
+        period: 24,
+        step_seconds: 3600,
+    },
+    Dataset {
+        name: "ETTm",
+        path: "validation/data/ETTm.tsf",
+        horizon: 24,
+        period: 96,
+        step_seconds: 15 * 60,
+    },
 ];
 
 const MODEL_NAMES: &[&str] = &[
@@ -395,9 +461,18 @@ fn run_dataset(ds: &Dataset, sample_per: usize) -> Option<DatasetResult> {
         };
 
         // Model 0: AutoETS — point-only; Gaussian PropheticQuantile fallback for WQL.
+        // α-27 fix: pass the dataset's canonical seasonal period so ETS
+        // enables its seasonal state-space variants. Nixtla's AutoETS
+        // does this automatically from series metadata; ours needs it
+        // explicitly (was previously calling AutoETS::new() → no period
+        // → non-seasonal, huge handicap on monthly/hourly panels).
         {
             let t0 = Instant::now();
-            let mut m = AutoETS::new();
+            let mut m = if ds.period >= 2 {
+                AutoETS::with_period(ds.period)
+            } else {
+                AutoETS::new()
+            };
             if m.fit(&train_ts).is_ok() {
                 if let Ok(fc) = m.predict(ds.horizon) {
                     let p = fc.primary();
@@ -422,10 +497,14 @@ fn run_dataset(ds: &Dataset, sample_per: usize) -> Option<DatasetResult> {
             }
             fit_us_sum[0] += t0.elapsed().as_micros();
         }
-        // Model 1: AutoTheta — point-only; Gaussian PropheticQuantile fallback for WQL.
+        // Model 1: AutoTheta — point-only. Same period-passing fix.
         {
             let t0 = Instant::now();
-            let mut m = AutoTheta::new();
+            let mut m = if ds.period >= 2 {
+                AutoTheta::seasonal(ds.period)
+            } else {
+                AutoTheta::new()
+            };
             if m.fit(&train_ts).is_ok() {
                 if let Ok(fc) = m.predict(ds.horizon) {
                     let p = fc.primary();
