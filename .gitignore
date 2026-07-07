@@ -50,3 +50,5 @@ validation/data/m5_top1000.csv
 validation/data/m5_full.csv
 validation/data/m4_daily_train.json
 validation/data/m4_daily_test.json
+validation/data/weather.tsf
+validation/data/kaggle_web_traffic_weekly.tsf

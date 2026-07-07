@@ -38,12 +38,50 @@ struct Dataset {
 }
 
 const DATASETS: &[Dataset] = &[
+    // fev's Chronos benchmark tasks we can match with Monash data.
+    // (name, path, horizon, period, step_seconds) — horizons match
+    // fev's task definitions.
     Dataset {
         name: "m3_monthly",
         path: "validation/data/m3_monthly.tsf",
         horizon: 18,
         period: 12,
         step_seconds: 30 * 86400,
+    },
+    Dataset {
+        name: "m3_quarterly",
+        path: "validation/data/m3_quarterly.tsf",
+        horizon: 8,
+        period: 4,
+        step_seconds: 90 * 86400,
+    },
+    Dataset {
+        name: "m3_yearly",
+        path: "validation/data/m3_yearly.tsf",
+        horizon: 6,
+        period: 1,
+        step_seconds: 365 * 86400,
+    },
+    Dataset {
+        name: "m1_monthly",
+        path: "validation/data/m1_monthly.tsf",
+        horizon: 18,
+        period: 12,
+        step_seconds: 30 * 86400,
+    },
+    Dataset {
+        name: "m1_quarterly",
+        path: "validation/data/m1_quarterly.tsf",
+        horizon: 8,
+        period: 4,
+        step_seconds: 90 * 86400,
+    },
+    Dataset {
+        name: "m1_yearly",
+        path: "validation/data/m1_yearly.tsf",
+        horizon: 6,
+        period: 1,
+        step_seconds: 365 * 86400,
     },
     Dataset {
         name: "m4_hourly",
@@ -102,11 +140,53 @@ const DATASETS: &[Dataset] = &[
         step_seconds: 90 * 86400,
     },
     Dataset {
+        name: "tourism_yearly",
+        path: "validation/data/tourism_yearly.tsf",
+        horizon: 4,
+        period: 1,
+        step_seconds: 365 * 86400,
+    },
+    Dataset {
         name: "cif_2016",
         path: "validation/data/cif_2016.tsf",
         horizon: 12,
         period: 12,
         step_seconds: 30 * 86400,
+    },
+    Dataset {
+        name: "nn5_weekly",
+        path: "validation/data/nn5_weekly.tsf",
+        horizon: 8,
+        period: 1,
+        step_seconds: 7 * 86400,
+    },
+    Dataset {
+        name: "covid_deaths",
+        path: "validation/data/covid_deaths.tsf",
+        horizon: 30,
+        period: 1,
+        step_seconds: 86400,
+    },
+    Dataset {
+        name: "fred_md",
+        path: "validation/data/fred_md.tsf",
+        horizon: 12,
+        period: 12,
+        step_seconds: 30 * 86400,
+    },
+    Dataset {
+        name: "hospital",
+        path: "validation/data/hospital.tsf",
+        horizon: 12,
+        period: 12,
+        step_seconds: 30 * 86400,
+    },
+    Dataset {
+        name: "australian_electricity",
+        path: "validation/data/australian_electricity.tsf",
+        horizon: 48,
+        period: 48,
+        step_seconds: 1800,
     },
 ];
 
