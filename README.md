@@ -265,25 +265,29 @@ anofox-forecast = "0.13.0"
 
 ```toml
 [dependencies]
+# Distributional forecasting shell (LaplaceForecaster, SmartForecaster, HierarchicalLaplace)
+anofox-forecast = { version = "0.13.0", features = ["distributional"] }
+
 # Forecastability analysis (MI, GCMI, distance correlation, fingerprint)
-anofox-forecast = { version = "0.8", features = ["forecastability"] }
+anofox-forecast = { version = "0.13.0", features = ["forecastability"] }
 
 # Forecastability + parallel (60× faster with rayon)
-anofox-forecast = { version = "0.8", features = ["forecastability", "parallel"] }
+anofox-forecast = { version = "0.13.0", features = ["forecastability", "parallel"] }
 
 # Parallel AutoARIMA (4-8x speedup via rayon, opt-in for embedding contexts like DuckDB)
-anofox-forecast = { version = "0.8", features = ["parallel"] }
+anofox-forecast = { version = "0.13.0", features = ["parallel"] }
 
 # Model serialization (save/load to JSON)
-anofox-forecast = { version = "0.8", features = ["serde"] }
+anofox-forecast = { version = "0.13.0", features = ["serde"] }
 
 # Probabilistic postprocessing (conformal, IDR, QRA — enabled by default)
-anofox-forecast = { version = "0.8", default-features = false }  # to disable
+anofox-forecast = { version = "0.13.0", default-features = false }  # to disable
 ```
 
 | Feature | Default | Description |
 |---------|---------|-------------|
-| `postprocess` | No | Conformal prediction, IDR, QRA, historical simulation |
+| `postprocess` | Yes | Conformal prediction, IDR, QRA, historical simulation, AID demand classifier |
+| `distributional` | No | `LaplaceForecaster` streaming distributional shell, `SmartForecaster`, `HierarchicalLaplace`, 20+ opt-in leaves, AID-driven family selection |
 | `forecastability` | No | kNN MI, GCMI, distance correlation, phase surrogates, fingerprint, Lyapunov exponent, 10-scorer registry |
 | `parallel` | No | Rayon-based parallelism for AutoARIMA, AutoForecast, bootstrap, cross-validation, and forecastability (not available on WASM) |
 | `serde` | No | JSON and bincode serialization/deserialization for models |
@@ -650,24 +654,42 @@ println!("Lower: {:?}", intervals.lower());
 println!("Upper: {:?}", intervals.upper());
 ```
 
-## Demand Forecasting (α feature)
+## Demand Forecasting (`distributional` feature)
 
-Behind the default `postprocess` + opt-in `distributional` features, the crate ships a distributional-forecasting shell inspired by [skaters](https://github.com/microprediction/skaters) and integrated with the `anofox-regression` AID (Automatic Identification of Demand) classifier. Three zero-config selectors are available; **which one wins depends on your panel type**.
+Behind the default `postprocess` + opt-in `distributional` features, the crate ships a streaming distributional-forecasting shell (`LaplaceForecaster`) inspired by [skaters](https://github.com/microprediction/skaters) and integrated with the `anofox-regression` AID (Automatic Identification of Demand) classifier. Three zero-config selectors are available; **which one wins depends on your panel type**.
 
-### Choosing a selector
+### Position vs. SOTA (fev Chronos-benchmark, 27 datasets)
 
-Full cross-panel benchmarks are in `examples/skaters_m5_full_auto.rs`, `skaters_m4_daily_benchmark.rs`, and `skaters_m3_monthly_benchmark.rs`. Summary:
+Full head-to-head positioning is in [`docs/SOTA_POSITIONING.md`](docs/SOTA_POSITIONING.md). Summary on the 19 datasets we share with autogluon/fev's leaderboard:
 
-| panel | domain | best selector | vs. AutoETS median MAE |
-|-------|--------|---------------|------------------------|
-| **M5 full 30k** | retail counts (all intermittent) | `LaplaceForecaster::new().auto_aid()` | **+0.8 %**, 42× faster than AutoETS |
-| **M5 top-1000** | retail non-intermittent | `Laplace + AR2 + S7 + FD + OU` | +2.9 % |
-| **M4 daily** | economic continuous | `LaplaceForecaster::new().auto()` | +7.5 % |
-| **M3 monthly** | macroeconomic | `LaplaceForecaster::new().auto()` | +6.2 % |
+| rank | model | geomean MASE | tier |
+|------|-------|--------------|------|
+| 1 | Tirex | 1.351 | Foundation (GPU) |
+| 2 | TimesFM-2.0 | 1.354 | Foundation (GPU) |
+| 3 | fev `auto_theta` (Nixtla) | 1.362 | Classical (CPU) |
+| 4 | **`AutoTheta` (this crate)** | **1.381** | **Classical — 1.4 % behind Nixtla** ✅ |
+| 5 | Chronos-Bolt-Base | 1.393 | Foundation |
+| 8 | **`AutoETS` (this crate)** | **1.525** | **Classical — 5.9 % behind Nixtla** |
+| 10 | **`LaplaceForecaster::auto()`** | **1.723** | **Streaming distributional** |
+
+Two findings:
+
+1. Our classical `AutoTheta` / `AutoETS` are Nixtla-quality. For general-purpose classical forecasting they are the right choice.
+2. `LaplaceForecaster::auto()` sits at seasonal-naive level on this mixed panel because the streaming per-observation design requires **~30-50 observations of warmup** that classical closed-form fitters don't need. On short-history panels (N < 100) classical wins by 15-80 %. On long panels (N > 300) Laplace is competitive.
+
+### Where LaplaceForecaster shines — M5 full-30k retail
+
+| model | median MAE | fit time | vs. AutoETS |
+|-------|-----------:|---------:|:-----------:|
+| AutoETS | 0.728 | 916 s | — |
+| **`Laplace + auto_aid`** | **0.734** | **22 s** | **+0.8 % MASE, 42× faster** |
+| **`SmartForecaster`** | **0.735** | **11 s** | **+1.0 % MASE, 82× faster** |
+
+For **retail SKU / demand forecasting** with adequate history, the AID-driven selectors match classical accuracy at 40-80× the speed while providing native distributional output (mixture density, quantiles, per-horizon calibration).
 
 ### Rules of thumb
 
-- **Retail SKU / demand data (counts, intermittency)** → use `LaplaceForecaster::new().auto_aid()` or `SmartForecaster::new()`. The AID classifier picks a matching distribution family (Poisson, Negative-Binomial, LogNormal, Gamma, RectifiedNormal); Croston-style intermittent leaves are enabled automatically.
+- **Retail / demand data (counts, intermittency, N ≥ 100)** → `LaplaceForecaster::new().auto_aid()` or `SmartForecaster::new()`. AID picks a matching distribution family (Poisson, Negative-Binomial, LogNormal, Gamma, RectifiedNormal, ZIP, ZINB, ...); Croston-family intermittent leaves are enabled automatically.
 
   ```rust
   use anofox_forecast::models::{Forecaster, SmartForecaster};
@@ -676,11 +698,15 @@ Full cross-panel benchmarks are in `examples/skaters_m5_full_auto.rs`, `skaters_
   let forecast = f.predict(28)?;   // 28-day horizon, non-negative
   ```
 
-- **Economic / financial / continuous non-demand series** → use `LaplaceForecaster::new().auto()` (plain, no AID). On M3 monthly `auto_aid` **regresses ~7 % median MAE vs plain auto** because AID picks distribution families whose Gaussian moment-match doesn't fit smooth continuous data. AutoTheta remains a stronger point-forecast baseline for these panels.
+- **Continuous / economic series with adequate history (N ≥ 100)** → `LaplaceForecaster::new().auto()`. Plain `.auto()` uses AR / EMA / Drift / seasonal / damped-Holt / OU leaves without AID's family classification. Streaming, distributional output, sub-millisecond fit.
 
-- **Not sure which** → benchmark both on a held-out window of your own data. Each fit+predict is a few milliseconds.
+- **Short-history panels (N < 100)** → prefer `AutoTheta` or `AutoETS` from `crate::models::theta` / `crate::models::exponential`. Streaming leaves need warmup that closed-form classical fitters don't. This is an architectural property documented in the [`src/models/laplace/mod.rs`](src/models/laplace/mod.rs) module docs.
 
-> ⚠ `SmartForecaster` is specifically **demand-focused**. It commits to a single Laplace distribution-family configuration based on AID's classification. On non-demand panels (M3 monthly, M4 daily) it regresses vs. plain `auto()`. Do not use it as a general-purpose selector.
+- **Just need a point forecast, no distributional output needed** → `AutoTheta` / `AutoETS`. Competitive with foundation models on the fev benchmark and orders of magnitude simpler.
+
+> ⚠ `SmartForecaster` is **demand-focused**. It commits to a single Laplace distribution-family configuration based on AID's classification. On non-demand panels (M3 monthly, M4 daily, M-Competition mix) it regresses vs. plain `auto()`. Do not use it as a general-purpose selector.
+
+> Foundation-model gap (`Chronos-Bolt` / `TimesFM-2.0` / `Tirex`, ~2-3 % ahead of the best classical) is a **pretraining data-scale advantage** — an amortized Bayesian predictor with a learned prior over data-generating processes. Documented mathematically in the module docs; not accessible to a per-series streaming design without pretraining infrastructure.
 
 ## API Reference
 
@@ -833,6 +859,7 @@ cargo run --example postprocess_conformal   # Conformal prediction intervals
 
 - [Model Selection Guide](docs/model_selection_guide.md) — Which model to use for your data
 - [M5 ETS Benchmark](docs/m5_ets_benchmark.md) — AutoETS Complete vs Reduced pool on 30,490 M5 series
+- [SOTA Positioning](docs/SOTA_POSITIONING.md) — full head-to-head against Chronos-Bolt, TimesFM-2.0, Tirex, Moirai, Nixtla `auto_theta` / `auto_ets` on the fev Chronos-benchmark 27-panel
 
 ## Dependencies
 
