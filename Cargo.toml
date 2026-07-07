@@ -330,3 +330,8 @@ required-features = ["distributional"]
 name = "skaters_m3_monthly_benchmark"
 path = "examples/skaters_m3_monthly_benchmark.rs"
 required-features = ["distributional"]
+
+[[example]]
+name = "fev_benchmark"
+path = "examples/fev_benchmark.rs"
+required-features = ["distributional"]
