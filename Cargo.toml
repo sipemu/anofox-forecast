@@ -12,6 +12,21 @@ license = "MIT"
 repository = "https://github.com/sipemu/anofox-forecast"
 keywords = ["time-series", "forecasting", "arima", "ets", "statistics"]
 categories = ["science", "mathematics"]
+# Exclude bulky files that only exist for local benchmarking / regression
+# fixtures. The crates.io tarball is capped at 10 MB; validation/data
+# alone is ~1.4 GB. Users who want to reproduce our benchmarks can
+# fetch the datasets themselves — instructions are in the top-of-file
+# doc comments of examples/fev_benchmark.rs, examples/m5_wape.rs,
+# examples/skaters_m5_full_auto.rs.
+exclude = [
+    "validation/data/**/*.tsf",
+    "validation/data/**/*.csv",
+    "validation/data/**/*.json",
+    "validation/data/**/*.parquet",
+    "tests/data/",
+    "docs/rendered/",
+    "target/",
+]
 
 [features]
 default = ["postprocess"]
