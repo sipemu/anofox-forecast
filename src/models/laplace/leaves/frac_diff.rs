@@ -25,6 +25,7 @@ use crate::models::laplace::leaf::Leaf;
 const DEFAULT_WINDOW: usize = 60;
 const WEIGHT_THRESHOLD: f64 = 1e-3;
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct FractionalDiffLeaf {
     d: f64,
     alpha_mean: f64,

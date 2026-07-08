@@ -24,6 +24,7 @@
 use crate::models::laplace::dist::Gaussian;
 use crate::models::laplace::leaf::Leaf;
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SkewNormalLeaf {
     alpha: f64,
     /// Location EMA.

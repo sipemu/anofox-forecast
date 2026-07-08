@@ -235,6 +235,28 @@ fn eta_schedule(base_eta: f64, n_obs: usize) -> f64 {
     }
 }
 
+/// Short-data softmax dampener (yearly Trick 3).
+///
+/// When the total training length is very short (M-competition yearly:
+/// N=24-33), the fit loop's η stays at 1.0 throughout warmup. Softmax
+/// accumulates full log-likelihood per step, which can lock the
+/// ensemble onto whichever leaf was best in the first few rounds —
+/// with only 30 obs behind the ranking of ~15 leaves, this "winner"
+/// is essentially noise.
+///
+/// Returns a multiplier `≤ 1.0` applied to the schedule's η. For
+/// `total_n ≥ 60` returns 1.0 (no dampening). Below that, scales
+/// linearly down to `0.4` at N=0 — mild flattening that leaves room
+/// for slower but more reliable ensemble averaging.
+#[inline]
+fn short_data_multiplier(total_n: usize) -> f64 {
+    if total_n >= 60 {
+        1.0
+    } else {
+        (total_n as f64 / 60.0).max(0.4)
+    }
+}
+
 /// Solve the ensemble stacking problem (accuracy-audit #1).
 ///
 /// Given per-leaf 1-step prediction history and the target training
@@ -366,6 +388,44 @@ fn project_to_simplex(w: &mut [f64]) {
             *w_i /= sum;
         }
     }
+}
+
+/// Heuristic: does the training window look **trending** enough that
+/// batch-initializing Drift + Holt with OLS β is a net win? (Yearly Trick 1.)
+///
+/// Returns `true` when `|β| > 0.5 · residual_σ / N`, i.e. the OLS
+/// slope is at least half the "noise slope" you'd get from N random-
+/// walk steps of size σ. Trend-strength threshold empirically tuned to
+/// avoid initializing zero-drift on flat-noise series (where init
+/// would hurt).
+fn looks_trending(values: &[f64]) -> bool {
+    let n = values.len();
+    if n < 5 {
+        return false;
+    }
+    let n_f = n as f64;
+    let mean_t = (n_f - 1.0) / 2.0;
+    let mean_y: f64 = values.iter().sum::<f64>() / n_f;
+    let mut num = 0.0;
+    let mut den = 0.0;
+    let mut ss = 0.0;
+    for (i, &y) in values.iter().enumerate() {
+        let dt = i as f64 - mean_t;
+        let dy = y - mean_y;
+        num += dt * dy;
+        den += dt * dt;
+        ss += dy * dy;
+    }
+    if den < 1e-12 || ss < 1e-12 {
+        return false;
+    }
+    let beta = num / den;
+    let sigma = (ss / n_f).sqrt();
+    // Trend contribution over the window: β · (N-1). Compare to the
+    // total "noise budget" σ · √N.
+    let trend_over_window = (beta * (n_f - 1.0)).abs();
+    let noise_budget = sigma * n_f.sqrt();
+    trend_over_window > 0.5 * noise_budget
 }
 
 /// Median-absolute-deviation robust σ estimator (accuracy-audit #3a).
@@ -599,6 +659,11 @@ use super::DistributionalForecaster;
 /// on series with weak or no trend). Seasonal and AR(2) are cheap wins
 /// on the panels where they apply, but the shell keeps them opt-in for
 /// symmetry with Holt and to preserve the alpha-2 3-leaf default.
+// Serde derives WIP — 27/33 leaves + terminals have derives, but the
+// six Box<dyn Leaf + Send> wrapper leaves + LeafEnum::Wrapped variant
+// need a manual impl (or refactor to Box<LeafEnum>). Removed from
+// LaplaceForecaster + LeafEnum + wrappers until that refactor lands
+// so cargo build --features serde succeeds. See Option A plan.
 pub struct LaplaceForecaster {
     ema_alpha: f64,
     drift_alpha: f64,
@@ -1949,7 +2014,36 @@ impl LaplaceForecaster {
     /// Build a fresh copy of the base leaf set (respecting user toggles).
     /// Used both for the single-shell path and per-λ in the YJ coord grid.
     fn build_base_leaves(&self) -> Vec<super::leaf_enum::LeafEnum> {
+        self.build_base_leaves_with_batch(None)
+    }
+
+    /// Same as [`Self::build_base_leaves`] but optionally batch-inits
+    /// Drift + Holt candidates from the given training values (yearly
+    /// Trick 1). When `batch` is `Some`, Drift/Holt use `from_batch`
+    /// instead of `new`.
+    fn build_base_leaves_with_batch(
+        &self,
+        batch: Option<&[f64]>,
+    ) -> Vec<super::leaf_enum::LeafEnum> {
         use super::leaf_enum::LeafEnum;
+        // Local shims: `mk_drift(α)` and `mk_holt(α, β, φ)` fall back to
+        // `::new` when there's no batch. This keeps the pool-construction
+        // code below unchanged (which is heavily tuned per `.auto()` /
+        // `.skaters()` variant).
+        let mk_drift = |a: f64| -> DriftLeaf {
+            match batch {
+                Some(v) => DriftLeaf::from_batch(a, v),
+                None => DriftLeaf::new(a),
+            }
+        };
+        let mk_holt = |a: f64, b: f64, p: f64| -> HoltLeaf {
+            match batch {
+                Some(v) => HoltLeaf::from_batch(a, b, p, v),
+                None => HoltLeaf::new(a, b, p),
+            }
+        };
+        let _ = &mk_drift; // silence unused-if-no-hits warnings
+        let _ = &mk_holt;
         let mut leaves: Vec<LeafEnum> = if self.use_populations_wide {
             vec![
                 LeafEnum::Ema(EmaLeaf::new(0.02)),
@@ -1957,9 +2051,9 @@ impl LaplaceForecaster {
                 LeafEnum::Ema(EmaLeaf::new(0.25)),
                 LeafEnum::Ema(EmaLeaf::new(0.45)),
                 LeafEnum::Ema(EmaLeaf::new(0.60)),
-                LeafEnum::Drift(DriftLeaf::new(0.03)),
-                LeafEnum::Drift(DriftLeaf::new(0.10)),
-                LeafEnum::Drift(DriftLeaf::new(0.25)),
+                LeafEnum::Drift(mk_drift(0.03)),
+                LeafEnum::Drift(mk_drift(0.10)),
+                LeafEnum::Drift(mk_drift(0.25)),
                 LeafEnum::Ar1(Ar1Leaf::new(0.03)),
                 LeafEnum::Ar1(Ar1Leaf::new(0.10)),
                 LeafEnum::Ar1(Ar1Leaf::new(0.25)),
@@ -1969,20 +2063,20 @@ impl LaplaceForecaster {
                 LeafEnum::Ema(EmaLeaf::new(0.05)),
                 LeafEnum::Ema(EmaLeaf::new(0.20)),
                 LeafEnum::Ema(EmaLeaf::new(0.50)),
-                LeafEnum::Drift(DriftLeaf::new(0.05)),
-                LeafEnum::Drift(DriftLeaf::new(0.15)),
+                LeafEnum::Drift(mk_drift(0.05)),
+                LeafEnum::Drift(mk_drift(0.15)),
                 LeafEnum::Ar1(Ar1Leaf::new(0.05)),
                 LeafEnum::Ar1(Ar1Leaf::new(0.15)),
             ]
         } else {
             vec![
                 LeafEnum::Ema(EmaLeaf::new(self.ema_alpha)),
-                LeafEnum::Drift(DriftLeaf::new(self.drift_alpha)),
+                LeafEnum::Drift(mk_drift(self.drift_alpha)),
                 LeafEnum::Ar1(Ar1Leaf::new(self.ar_alpha_mean)),
             ]
         };
         if let Some((a, b, phi)) = self.holt {
-            leaves.push(LeafEnum::Holt(HoltLeaf::new(a, b, phi)));
+            leaves.push(LeafEnum::Holt(mk_holt(a, b, phi)));
         }
         if let Some(a) = self.ar2 {
             leaves.push(LeafEnum::Ar2(Ar2Leaf::new(a)));
@@ -2030,7 +2124,7 @@ impl LaplaceForecaster {
         }
         // PR #4 of #180: multi-speed drift grid.
         for &alpha in &self.drift_alphas {
-            leaves.push(LeafEnum::Drift(DriftLeaf::new(alpha)));
+            leaves.push(LeafEnum::Drift(mk_drift(alpha)));
         }
         // PR #6 of #180: fractional-diff variants.
         for &(d, am, ad) in &self.frac_diff_variants {
@@ -2149,18 +2243,26 @@ impl LaplaceForecaster {
     }
 
     fn init_leaves(&mut self) {
+        self.init_leaves_maybe_batch(None);
+    }
+
+    /// Init with optional batch values for yearly-Trick 1 (batch OLS
+    /// initialization of Drift + Holt trends). When `Some(values)` is
+    /// passed AND the series appears trending AND is short (N < 60),
+    /// Drift/Holt candidates start from the OLS-fitted slope rather
+    /// than from zero.
+    fn init_leaves_maybe_batch(&mut self, batch_values: Option<&[f64]>) {
         use super::leaf_enum::LeafEnum;
-        let leaves = self.build_base_leaves();
+        // Trick 1 gate: apply batch init only when short-history AND
+        // trend appears significant relative to noise.
+        let batch: Option<&[f64]> =
+            batch_values.filter(|v| v.len() >= 5 && v.len() < 60 && looks_trending(v));
+        let leaves = self.build_base_leaves_with_batch(batch);
         let leaves = if !self.yj_grid.is_empty() {
-            // Coordinate grid: wrap every base leaf per λ. Since the enum
-            // dispatch requires concrete types, we materialize each
-            // wrapped leaf through the `LeafEnum::Wrapped` escape hatch.
             let mut wrapped: Vec<LeafEnum> = Vec::with_capacity(leaves.len() * self.yj_grid.len());
             for lam in self.yj_grid.clone() {
-                let per_lambda = self.build_base_leaves();
+                let per_lambda = self.build_base_leaves_with_batch(batch);
                 for l in per_lambda {
-                    // Move the LeafEnum into a Box<dyn Leaf + Send> via the
-                    // Leaf impl on LeafEnum, then re-wrap.
                     let boxed: Box<dyn Leaf + Send> = Box::new(l);
                     wrapped.push(LeafEnum::Wrapped(Box::new(YjWrappedLeaf::new(boxed, lam))));
                 }
@@ -2552,6 +2654,12 @@ impl Forecaster for LaplaceForecaster {
             }
         }
 
+        // Yearly-Trick 1 was REVERTED after fev-27 regression on
+        // cif_2016 (.skaters() MASE 1.32 → 5.02, +280 %). The
+        // `looks_trending` heuristic was too permissive; noisy
+        // short-history panels get bad OLS β estimates → Drift/Holt
+        // init to garbage → forecasts blow up. See
+        // docs/ACCURACY_AUDIT.md § Trick 1 retrospective.
         self.init_leaves();
         // Fev-27 follow-up: auto-gate sticky. When `.skaters()` set
         // `sticky_auto_gate = true`, decide sticky based on training
@@ -2764,6 +2872,11 @@ impl Forecaster for LaplaceForecaster {
             // 30 <= n < 100 linearly decay to self.learning_rate.
             // For n >= 100 hold at self.learning_rate. Prevents the
             // short-history yearly regression that Fix B introduced.
+            //
+            // Yearly-Trick 3 was REVERTED after cif_2016 regression
+            // caused by Trick 1. May have contributed independently
+            // to WQL regression; safer to revert together and revisit
+            // separately with proper isolation.
             let eta = eta_schedule(self.learning_rate, self.n_obs);
             let clamp = self.log_clamp;
             for (i, leaf) in self.leaves.iter_mut().enumerate() {

@@ -25,6 +25,7 @@ const NU_DEFAULT: f64 = 5.0;
 const NU_MIN: f64 = 2.5;
 const NU_MAX: f64 = 100.0;
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct StudentTLeaf {
     alpha: f64,
     mu_ema: f64,

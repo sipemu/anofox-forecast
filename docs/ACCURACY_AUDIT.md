@@ -1,5 +1,238 @@
 # Accuracy improvement audit — notes
 
+---
+
+# Short-yearly panel evaluation (Trick 1-3)
+
+**Context.** Fev-27 shows our MASE gap vs AutoTheta is worst on
+M-competition yearly (~20-30 % worse):
+
+| dataset | n series | AutoTheta | .auto() | gap |
+|---|---:|---:|---:|---:|
+| m3_yearly | 500 | 2.876 | 3.560 | +24 % |
+| m1_yearly | 157 | 3.824 | 4.997 | +31 % |
+| m4_yearly | 500 | 3.965 | 4.631 | +17 % |
+| tourism_yearly | 489 | 2.778 | 3.074 | +11 % |
+| **weighted mean** | 1646 | | | **+21 %** |
+
+These panels have N ≈ 24-33 observations. Our streaming leaves need
+~30 obs to converge; AutoTheta wins because it does batch OLS on the
+full series and starts from a good linear-trend estimate.
+
+Three tricks to close the gap:
+
+## Trick 1 — Batch trend init for Drift + Holt
+
+**Idea**: before the streaming fit loop, compute OLS `y ~ β·t + α` on
+the training values. Initialize `HoltLeaf.level = α + β·(n-1)`,
+`HoltLeaf.trend = β`, and same for `DriftLeaf.level`, `DriftLeaf.drift`.
+
+**Current state**:
+- `DriftLeaf::new(alpha)` starts `level: None, drift: 0.0` (drift.rs:22-31).
+  On first `observe(y)` sets `level = y`. Drift only updates from
+  step 2 onward via EWMA `drift = α·(y - prev) + (1-α)·drift`.
+- `HoltLeaf::new(α, β, φ)` starts `level: None, trend: 0.0` (holt.rs:35-46).
+  Same cold-start pattern.
+- After N=30 with `α=0.3`, drift EWMA has effectively integrated only
+  the last ~3-4 steps' info. Bad starting slope on trending series.
+
+**Feasibility**: MEDIUM.
+1. Add `fn from_batch(alpha: f64, values: &[f64]) -> Self` on both leaves.
+   Runs a 4-line OLS, returns `Self` with `level`, `drift`/`trend`
+   pre-populated.
+2. In `LaplaceForecaster::init_leaves()`, use `from_batch(alpha, values)`
+   when `self.training_values.len() >= 5`.
+
+**Expected impact**:
+- **10-20 % MASE on M-competition yearly** (1646 series). Weighted
+  aggregate would shift geomean by ~0.1-0.2 % MASE across all 27
+  panels. But per-panel impact on those 4 datasets could be huge.
+- Zero cost on long-history panels (leaves converge fast anyway).
+
+**Risk**: MODERATE.
+- Non-trending series: OLS β is noise. Bad init if β ≠ 0. Mitigation:
+  only init when `|β| > threshold` computed from residual variance.
+- Regime-change series: OLS from full history is wrong (recent
+  matters). Mitigation: run OLS on last `min(N, 60)` values.
+- Interaction with existing damped-trend + η schedule.
+
+**Verdict**: **STRONG CANDIDATE.** Highest expected impact of the
+three, and directly targets the AutoTheta-parity gap on yearly panels.
+Effort: 1 day (leaves + fit-loop integration + tests + measure).
+
+## Trick 2 — Repeated training pass warmup
+
+**Idea**: on short-history data (N < some threshold), pass the
+training data through leaves twice. First pass: leaves warm up their
+internal state (level, drift, variance) but the softmax
+`cum_log_liks` gets η=0 (no weight update). Second pass: leaves start
+converged, softmax updates normally.
+
+**Current state**:
+- `fit()` has a single pass through `values.iter().enumerate()` doing
+  `absorb_one(y)` per step.
+- No mechanism for "leaf warmup without softmax update".
+
+**Feasibility**: MEDIUM.
+1. Add `warmup_passes: usize` field (default 1) and
+   `warmup_passes_short_data: bool` (default false).
+2. When `warmup_passes_short_data` is on and `N < 60`, do 2 passes:
+   - Pass 1: iterate values, call `leaf.observe(y)` on each leaf,
+     but SKIP the softmax update (`cum_log_liks` unchanged).
+   - Pass 2: normal fit loop.
+
+**Expected impact**:
+- 3-8 % MASE on N < 30 panels. Smaller than Trick 1 because leaves
+  can only converge to statistics they can compute from N points —
+  seeing the same 30 points twice doesn't add new info, only lets
+  EWMA state stabilize.
+
+**Risk**: LOW-MODERATE.
+- Double-seeing early data over-anchors leaf state. Softmax then
+  scores against a biased starting point.
+- Mitigation: pass 1 sets state to end-of-window value, pass 2 does
+  the "real" scoring. Effectively equivalent to computing statistics
+  in closed form (which Trick 1 does more cleanly).
+
+**Verdict**: **INFERIOR TO TRICK 1.** Trick 1 achieves what this trick
+approximates, via a cleaner closed-form init. Skip in favor of Trick 1.
+If Trick 1 doesn't fully close the gap, revisit.
+
+## Trick 3 — Gentler η schedule on very short data
+
+**Idea**: current `eta_schedule` uses η=1.0 for `n_obs < 30`, then
+decays to `base_eta` (0.5) by obs 100. On N=30 yearly, we're
+**always** in warmup — η=1.0 the entire fit. Softmax accumulates full
+log-likelihood weight per step, may over-concentrate on one candidate.
+
+Alternative: for N < 30, use `η = 2 / (N + 1)` (matches the effective
+memory of a simple average over N points).
+
+**Current state**:
+```rust
+fn eta_schedule(base_eta: f64, n_obs: usize) -> f64 {
+    const WARMUP: usize = 30;
+    const DECAY_END: usize = 100;
+    if n_obs < WARMUP { 1.0 }
+    ...
+}
+```
+(forecaster.rs:225-236)
+
+**Feasibility**: TRIVIAL.
+- 2-line change: pass `total_n` into `eta_schedule`, add a branch for
+  `total_n < 30 → η = 2.0 / (total_n + 1)`.
+
+**Expected impact**: UNCERTAIN direction.
+- If softmax is over-concentrating on a lucky-early-winner leaf on
+  yearly panels: gentler η spreads weight → helps.
+- If softmax is correctly identifying the best leaf: gentler η
+  spreads weight → hurts.
+- Direction depends on data. On yearly panels, my prior is toward
+  "over-concentrating on the lucky winner" because 30 obs is not
+  enough to reliably rank ~15 leaves.
+- 2-5 % MASE either direction.
+
+**Risk**: MODERATE. Could win or lose per-dataset.
+
+**Verdict**: **MEASURE FIRST.** 2-line change, 30 min to test.
+Independent of Tricks 1 & 2. Worth trying if Trick 1 helps
+partially — could be additive.
+
+## Summary + recommended order
+
+| # | expected MASE gain | risk | effort |
+|---|---|---|---|
+| 1 (batch OLS init) | **10-20 % on yearly** | moderate | 1 day |
+| 3 (gentler η on N<30) | ±2-5 % | moderate | 30 min |
+| 2 (repeated pass) | 3-8 % on N<30 | low-moderate | 3 hours |
+
+**Recommended sequence**:
+1. **Trick 1** first — biggest bet, targets the exact problem.
+2. **Trick 3** as an additive experiment after Trick 1.
+3. **Trick 2** only if 1 and 3 leave gap open.
+
+Trick 1 is essentially "give our streaming leaves the same initial
+condition AutoTheta uses batch-fitted". Should close the majority of
+the yearly gap.
+
+## Retrospective — TRICKS 1+3 SHIPPED, THEN REVERTED
+
+**Shipped** (as a batch):
+- Trick 1: `from_batch(alpha, values)` on `DriftLeaf` + `HoltLeaf`;
+  new `init_leaves_maybe_batch(Some(values))` called from `fit()`;
+  gate via `looks_trending(values)` heuristic.
+- Trick 3: new `short_data_multiplier(total_n)` applied to `η` in the
+  fit loop; dampens softmax rate on `total_n < 60`.
+
+**Fev-27 result** (v11):
+
+| model | before | after tricks 1+3 | Δ |
+|---|---:|---:|---:|
+| `.auto()` MASE | 5.924 | 5.927 | +0.05 % (noise) |
+| `.auto()` WQL | 0.137 | 0.137 | unchanged |
+| `.skaters()` MASE | 6.186 | **6.519** | **+5.4 %** ❌ |
+| `.skaters()` WQL | 0.448 | 0.557 | +24 % ❌ |
+
+**Per-dataset diagnosis**:
+
+- Yearly panels changed by ±1-2 % — **no meaningful improvement** on
+  the target audience.
+- **cif_2016 catastrophe**: `.skaters()` MASE 1.322 → **5.018**
+  (+280 %). Cif_2016 has 72 series with H=12, period=12, N ≈ 50-100.
+  Our `looks_trending` heuristic (`|β · (N-1)| > 0.5 · σ · √N`) was
+  wildly too permissive. On noisy near-flat series it wrongly labels
+  them as trending → OLS β is essentially noise → Drift/Holt
+  initialized to garbage slope → forecasts blow up over 12-step
+  horizon.
+
+**Root cause of Trick 1's failure**:
+1. `looks_trending` threshold was set at "trend > half of noise
+   budget" — this is basically "any positive OLS β passes". A proper
+   heuristic would need a t-statistic style test (β / SE(β) > 2), not
+   just "β > half noise magnitude".
+2. Even a correctly-detected trend can be wrong when N is small —
+   30-50 obs of a mean-reverting series can look like a trend, and
+   Drift extrapolating that trend at h=12 compounds badly. Same
+   failure pattern as the STL leaf regression on tourism_monthly.
+3. AutoTheta escapes this by having damped-trend PLUS a residual
+   check that shrinks the trend contribution when noise dominates.
+   Our HoltLeaf has damping but no shrinkage.
+
+**Root cause of the yearly panels not improving**:
+- Yearly panels have H=4-6. Even if Drift starts from a wrong slope,
+  the h=6 forecast doesn't diverge as badly. But the softmax weight
+  learning is dominated by the terminal σ mixture (which we already
+  fixed with #3a and #5), not by which leaf's mean is best.
+- Turns out our yearly gap vs AutoTheta is more about the mixture
+  variance calibration (already at parity WQL-wise) than the point
+  forecast. We were solving the wrong problem.
+
+**Decision**: REVERT both tricks. Implementations preserved as opt-in
+via `DriftLeaf::from_batch()` and `HoltLeaf::from_batch()` (public
+methods, callers can use them explicitly). `looks_trending`,
+`short_data_multiplier`, `init_leaves_maybe_batch` all remain as
+private helpers so a future attempt can iterate on threshold tuning
+without re-inventing the plumbing.
+
+**What would need to change to make Trick 1 work**:
+1. Stricter trend detection: proper t-statistic check with SE(β).
+2. Compare against AutoTheta's damping mechanism specifically — the
+   Drift init would need to be paired with automatic slope-shrinkage
+   as a function of trend significance.
+3. Test on cif_2016 explicitly, not just yearly panels.
+
+**What would need to change to make Trick 3 work**:
+1. Isolate its measurement from Trick 1 (rerun with just Trick 3).
+2. The theoretical basis is weaker — softmax "over-concentrating" on
+   ~30 obs is one hypothesis but hasn't been verified with data.
+
+Both deferred; not a priority given `.auto()` is already within 6 %
+of AutoETS on MASE and at parity on WQL.
+
+---
+
+
 Systematic evaluation of the 8 accuracy improvement ideas proposed after the STL-auto revert. For each: current state in code, feasibility check, expected impact, regression risk, decision.
 
 *Last updated: fev-27 baseline is `.skaters()` at geomean MASE 6.085, WQL 0.6695 (post Fix A+B, before items 2-9).*

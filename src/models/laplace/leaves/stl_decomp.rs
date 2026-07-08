@@ -17,6 +17,7 @@ use super::super::dist::Gaussian;
 use super::super::leaf::Leaf;
 use crate::seasonality::STL;
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct StlDecompLeaf {
     period: usize,
     /// Rolling buffer of the last `max_buffer` observations.

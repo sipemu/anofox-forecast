@@ -24,6 +24,7 @@ use super::super::dist::Gaussian;
 use super::super::leaf::Leaf;
 
 /// SES + half-OLS-slope leaf with EWMA residual variance.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ThetaLeaf {
     alpha: f64,
     // SES level.

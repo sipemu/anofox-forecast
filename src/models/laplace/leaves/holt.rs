@@ -17,6 +17,7 @@
 use crate::models::laplace::dist::Gaussian;
 use crate::models::laplace::leaf::Leaf;
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct HoltLeaf {
     alpha: f64,
     beta: f64,
@@ -42,6 +43,23 @@ impl HoltLeaf {
             ss: 0.0,
             mean_resid: 0.0,
         }
+    }
+
+    /// Batch-initialize level and trend from an OLS fit on training
+    /// values (yearly Trick 1). AutoTheta / AutoETS effectively start
+    /// from this state; we approximate it here so short-history
+    /// yearly panels don't spend 30 obs converging trend from zero.
+    pub fn from_batch(alpha: f64, beta: f64, phi: f64, values: &[f64]) -> Self {
+        let mut leaf = Self::new(alpha, beta, phi);
+        if values.len() < 5 {
+            return leaf;
+        }
+        let (_, slope) = super::drift::ols_slope(values);
+        leaf.level = values.last().copied();
+        // Trend in Holt is per-step; OLS slope on time-index is the
+        // same quantity.
+        leaf.trend = slope;
+        leaf
     }
 
     fn sigma(&self) -> f64 {

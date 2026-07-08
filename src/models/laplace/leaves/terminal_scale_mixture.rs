@@ -36,6 +36,7 @@ const DEFAULT_SCALES: [f64; 5] = [0.7, 1.0, 1.6, 3.0, 6.0];
 /// - `v`: EWMA of the squared residual at rate `scale_alpha` → σ
 /// - `w[i]`: EM-updated weight on scale `scales[i]`, recency rate `gamma`
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TerminalScaleMixture {
     scales: [f64; 5],
     scale_alpha: f64,

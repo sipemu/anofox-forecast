@@ -7,6 +7,7 @@
 use crate::models::laplace::dist::Gaussian;
 use crate::models::laplace::leaf::Leaf;
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Ar1Leaf {
     alpha_mean: f64,
     mean: Option<f64>,

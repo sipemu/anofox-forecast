@@ -28,6 +28,7 @@
 use crate::models::laplace::dist::Gaussian;
 use crate::models::laplace::leaf::Leaf;
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Ar2Leaf {
     alpha: f64, // EMA rate for all first- and second-moment estimates
     last: Option<f64>,
