@@ -145,6 +145,21 @@ impl TerminalScaleMixture {
     pub fn n_obs(&self) -> usize {
         self.n_obs
     }
+
+    /// Warm-start the residual-variance EWMA with a robust batch
+    /// estimate (accuracy-audit #3a). Sets `v = sigma²` and
+    /// `n_obs = seed_n` so the subsequent `observe(r)` updates use
+    /// the configured EWMA rate rather than the `1/n` bootstrap.
+    ///
+    /// Callers should pass `sigma = 1.4826 · median(|r|)` (MAD scaled
+    /// to Gaussian σ) and `seed_n = 30` (or thereabouts) so the
+    /// bootstrap window ends immediately.
+    pub fn warm_start(&mut self, sigma: f64, seed_n: usize) {
+        if sigma.is_finite() && sigma > 0.0 {
+            self.v = sigma * sigma;
+            self.n_obs = seed_n.max(1);
+        }
+    }
 }
 
 impl Default for TerminalScaleMixture {

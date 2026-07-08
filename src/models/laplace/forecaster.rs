@@ -235,6 +235,36 @@ fn eta_schedule(base_eta: f64, n_obs: usize) -> f64 {
     }
 }
 
+/// Median-absolute-deviation robust σ estimator (accuracy-audit #3a).
+///
+/// Returns `1.4826 · median(|y_i − median(y)|)` — the MAD scaled to
+/// match a Gaussian σ. Used to warm-start the terminal scale-mixture
+/// so short-history panels don't spend 30 observations recalibrating.
+fn compute_mad(values: &[f64]) -> f64 {
+    if values.len() < 2 {
+        return 0.0;
+    }
+    let mut sorted: Vec<f64> = values.iter().copied().filter(|v| v.is_finite()).collect();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let mid = sorted.len() / 2;
+    let median = if sorted.len() % 2 == 0 {
+        0.5 * (sorted[mid - 1] + sorted[mid])
+    } else {
+        sorted[mid]
+    };
+    let mut abs_dev: Vec<f64> = sorted.iter().map(|v| (v - median).abs()).collect();
+    abs_dev.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let mad = if abs_dev.len() % 2 == 0 {
+        0.5 * (abs_dev[mid - 1] + abs_dev[mid])
+    } else {
+        abs_dev[mid]
+    };
+    1.4826 * mad
+}
+
 /// Heuristic: does the training window look **discrete-count-like**?
 /// Returns `true` if it does (few distinct near-integer values relative
 /// to sample size). Used to auto-gate sticky-lattice — atoms are
@@ -1028,6 +1058,14 @@ impl LaplaceForecaster {
         if self.theta_alphas.is_empty() {
             self.theta_alphas = vec![0.05, 0.1, 0.3];
         }
+        // Accuracy-audit #4b: unconditional damped Holt in `.skaters()`.
+        // HoltLeaf has damped-trend (φ ∈ (0, 1)) via #180's α-27 fix,
+        // matching AutoTheta's dominance on trending panels. Previously
+        // only enabled via `.auto()`'s trend detection; skaters' pool
+        // benefits too.
+        if self.holt.is_none() {
+            self.holt = Some((0.3, 0.1, 0.9));
+        }
         if self.standardize_ema_alphas.is_empty() {
             self.standardize_ema_alphas = vec![0.05, 0.1];
         }
@@ -1530,6 +1568,13 @@ impl LaplaceForecaster {
     /// adds leaves, never removes.
     pub fn auto(mut self) -> Self {
         self.use_auto = true;
+        // Accuracy-audit #7: import the XGBoost-shrunk log-weight update
+        // from `.skaters()` — smaller η + log-clamp cap prevents the
+        // softmax from over-concentrating on a single winner when the
+        // pool has many correlated candidates. Historical defaults were
+        // `η=1.0, clamp=-∞` (exact cumulative log-likelihood).
+        self.learning_rate = 0.5;
+        self.log_clamp = -20.0;
         // PR #1 of #180: terminal scale-mixture leaf — reshape the
         // predictive density once at the top. Cheap in fit time
         // (5-component EWMA + weight vector), meaningful LL win.
@@ -2325,6 +2370,19 @@ impl Forecaster for LaplaceForecaster {
         // with sticky on).
         if self.sticky_auto_gate && self.sticky.is_some() && !looks_discrete_count(values) {
             self.sticky = None;
+        }
+        // Accuracy-audit #3a: warm-start the terminal σ from the
+        // training values' MAD (1.4826 × median absolute deviation
+        // from the median). Skips the terminal's 1/n bootstrap on
+        // short-history panels where the first 30 obs' EWMA would
+        // otherwise miscalibrate the mixture spread.
+        if values.len() >= 10 {
+            let mad = compute_mad(values);
+            if mad > 0.0 && mad.is_finite() {
+                if let Some(t) = self.terminal.as_mut() {
+                    t.warm_start(mad, 30);
+                }
+            }
         }
         self.training_values = values.to_vec();
         self.fitted_values = Vec::with_capacity(values.len());
