@@ -69,6 +69,17 @@ impl Leaf for SlowStandardizeWrapper {
             .collect()
     }
 
+    #[inline]
+    fn predict_one(&self) -> Gaussian {
+        let g = self.inner.predict_one();
+        let sigma = if self.v_slow.is_finite() && self.v_slow > 0.0 {
+            self.v_slow.sqrt()
+        } else {
+            g.std
+        };
+        Gaussian::new(g.mean, sigma.max(1e-9))
+    }
+
     fn observe(&mut self, y: f64) {
         if !y.is_finite() {
             return;

@@ -37,6 +37,48 @@ pub fn softmax(log_liks: &[f64]) -> Vec<f64> {
     exps.iter().map(|e| e / sum).collect()
 }
 
+/// In-place softmax — writes weights into `out` without allocating.
+///
+/// `out` is resized to `log_liks.len()`. Reuses caller-owned storage on
+/// the fit hot path. Same semantics as [`softmax`] (uniform fallback on
+/// degenerate inputs, `-Inf` for non-finite entries).
+pub fn softmax_into(log_liks: &[f64], out: &mut Vec<f64>) {
+    out.clear();
+    out.resize(log_liks.len(), 0.0);
+    if log_liks.is_empty() {
+        return;
+    }
+    let max = log_liks
+        .iter()
+        .copied()
+        .filter(|l| l.is_finite())
+        .fold(f64::NEG_INFINITY, f64::max);
+    if !max.is_finite() {
+        let uniform = 1.0 / log_liks.len() as f64;
+        for w in out.iter_mut() {
+            *w = uniform;
+        }
+        return;
+    }
+    let mut sum = 0.0;
+    for (i, &l) in log_liks.iter().enumerate() {
+        let e = if l.is_finite() { (l - max).exp() } else { 0.0 };
+        out[i] = e;
+        sum += e;
+    }
+    if sum <= 0.0 {
+        let uniform = 1.0 / log_liks.len() as f64;
+        for w in out.iter_mut() {
+            *w = uniform;
+        }
+        return;
+    }
+    let inv = 1.0 / sum;
+    for w in out.iter_mut() {
+        *w *= inv;
+    }
+}
+
 /// For a fixed horizon `h`, produce the mixture over `weights.len()` leaves.
 ///
 /// `per_leaf_horizons[i]` is leaf `i`'s vector of per-horizon gaussians

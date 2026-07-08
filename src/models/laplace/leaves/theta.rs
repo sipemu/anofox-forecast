@@ -87,6 +87,16 @@ impl Leaf for ThetaLeaf {
             .collect()
     }
 
+    #[inline]
+    fn predict_one(&self) -> Gaussian {
+        let sigma_one = if self.var.is_finite() && self.var > 0.0 {
+            self.var.sqrt()
+        } else {
+            1.0
+        };
+        Gaussian::new(self.level + self.slope / 2.0, sigma_one.max(1e-9))
+    }
+
     fn observe(&mut self, y: f64) {
         if !y.is_finite() {
             return;

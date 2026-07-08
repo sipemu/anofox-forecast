@@ -102,6 +102,19 @@ impl Leaf for YjWrappedLeaf {
             .collect()
     }
 
+    #[inline]
+    fn predict_one(&self) -> Gaussian {
+        let g = self.inner.predict_one();
+        let (lo, hi) = if self.trans_min <= self.trans_max {
+            (self.trans_min, self.trans_max)
+        } else {
+            (f64::NEG_INFINITY, f64::INFINITY)
+        };
+        let mean_clamped = g.mean.clamp(lo, hi);
+        let (mean_orig, jac) = yj_inverse_with_jac(mean_clamped, self.lambda);
+        Gaussian::new(mean_orig, (g.std * jac.abs()).max(1e-9))
+    }
+
     fn observe(&mut self, y: f64) {
         let y_trans = yj_forward(y, self.lambda);
         if y_trans.is_finite() {

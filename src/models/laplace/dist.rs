@@ -9,6 +9,10 @@
 use std::f64::consts::{PI, SQRT_2};
 
 const SQRT_2PI: f64 = 2.506_628_274_631_000_7;
+/// Precomputed `0.5 · ln(2π)` — appears in `Gaussian::logpdf` and
+/// `GaussianMixture::logpdf`. Const so the compiler doesn't recompute
+/// via `(2·π).ln()` every call.
+const HALF_LN_2PI: f64 = 0.918_938_533_204_672_7;
 
 /// Single normal component.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -39,7 +43,7 @@ impl Gaussian {
 
     pub fn logpdf(&self, y: f64) -> f64 {
         let z = (y - self.mean) / self.std;
-        -0.5 * z * z - self.std.ln() - 0.5 * (2.0 * PI).ln()
+        -0.5 * z * z - self.std.ln() - HALF_LN_2PI
     }
 
     pub fn pdf(&self, y: f64) -> f64 {

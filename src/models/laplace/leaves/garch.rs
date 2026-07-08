@@ -83,6 +83,13 @@ impl Leaf for GarchWrappedLeaf {
             .collect()
     }
 
+    #[inline]
+    fn predict_one(&self) -> Gaussian {
+        let sigma_t = self.conditional_sigma();
+        let g = self.inner.predict_one();
+        Gaussian::new(g.mean * sigma_t, (g.std * sigma_t).max(1e-9))
+    }
+
     fn observe(&mut self, y: f64) {
         if !y.is_finite() {
             return;

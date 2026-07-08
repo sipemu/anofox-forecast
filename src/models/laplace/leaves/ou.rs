@@ -89,6 +89,14 @@ impl Leaf for OuLeaf {
             .collect()
     }
 
+    #[inline]
+    fn predict_one(&self) -> Gaussian {
+        let mu = self.mean.unwrap_or(0.0);
+        let last = self.last.unwrap_or(mu);
+        let phi = (1.0 - self.theta).clamp(-0.999, 0.999);
+        Gaussian::new(mu + phi * (last - mu), self.sigma())
+    }
+
     fn observe(&mut self, y: f64) {
         let mu_before = self.mean.unwrap_or(y);
         let last = self.last.unwrap_or(mu_before);

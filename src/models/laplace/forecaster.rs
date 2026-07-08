@@ -135,7 +135,7 @@ use crate::transform::yeo_johnson::yeo_johnson_lambda;
 use crate::utils::ols::{ols_fit, OLSResult};
 use std::collections::HashMap;
 
-use super::ensemble::{blend_horizon, softmax};
+use super::ensemble::{blend_horizon, softmax, softmax_into};
 
 /// Series characteristics used by the auto-selector.
 #[derive(Clone, Copy)]
@@ -587,6 +587,13 @@ pub struct LaplaceForecaster {
     /// continuous mixture doesn't pay density mass on exact-integer
     /// counts (the modal outcome on M5).
     sticky: Option<StickyState>,
+    /// Perf: reusable scratch buffer for per-leaf `Gaussian` predictions
+    /// so the fit-loop's `predict_one` results aren't heap-allocated per
+    /// observation. Sized once to `self.leaves.len()` at fit start.
+    scratch_per_leaf: Vec<Gaussian>,
+    /// Perf: reusable scratch buffer for softmax weights so
+    /// `self.weights()` doesn't allocate on the fit hot path.
+    scratch_weights: Vec<f64>,
 }
 
 impl LaplaceForecaster {
@@ -671,6 +678,8 @@ impl LaplaceForecaster {
             terminal: None,
             terminal_crps: None,
             sticky: None,
+            scratch_per_leaf: Vec::new(),
+            scratch_weights: Vec::new(),
         }
     }
 
@@ -2119,11 +2128,17 @@ impl Forecaster for LaplaceForecaster {
             }
 
             // 1-step predictions from each leaf, before observing y.
-            // `predict_one` avoids the intermediate Vec<Gaussian> allocation
-            // that `predict(1)[0]` would incur per leaf.
-            let per_leaf: Vec<super::dist::Gaussian> =
-                self.leaves.iter().map(|l| l.predict_one()).collect();
-            let weights = self.weights();
+            // Perf: fill the reusable scratch buffer (sized to leaf count
+            // in fit's initialization) instead of `collect`ing a fresh Vec.
+            self.scratch_per_leaf.clear();
+            for l in self.leaves.iter() {
+                self.scratch_per_leaf.push(l.predict_one());
+            }
+            let per_leaf = self.scratch_per_leaf.as_slice();
+            // Perf: softmax weights into a reused scratch buffer to skip
+            // the per-iteration `Vec<f64>` alloc.
+            softmax_into(&self.cum_log_liks, &mut self.scratch_weights);
+            let weights = self.scratch_weights.as_slice();
 
             // Perf: inline mixture mean / variance instead of building a
             // GaussianMixture struct — we only need mean/std/is_empty here,

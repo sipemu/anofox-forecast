@@ -135,6 +135,15 @@ impl Leaf for Ar2Leaf {
             .collect()
     }
 
+    #[inline]
+    fn predict_one(&self) -> Gaussian {
+        let mu = self.e_y;
+        let last = self.last.unwrap_or(mu);
+        let last2 = self.last2.unwrap_or(mu);
+        let y_h = self.phi1 * (last - mu) + self.phi2 * (last2 - mu);
+        Gaussian::new(mu + y_h, self.sigma())
+    }
+
     fn observe(&mut self, y: f64) {
         // Prediction from the *pre-update* coefficients, for residual tracking.
         let mu_pre = if self.n == 0 { y } else { self.e_y };

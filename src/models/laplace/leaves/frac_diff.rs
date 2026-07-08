@@ -82,6 +82,11 @@ impl Leaf for FractionalDiffLeaf {
             .collect()
     }
 
+    #[inline]
+    fn predict_one(&self) -> Gaussian {
+        Gaussian::new(self.mean.unwrap_or(0.0), self.sigma())
+    }
+
     fn observe(&mut self, y: f64) {
         let predicted = self.mean.map(|m| m + self.fd_ema).unwrap_or(y);
         let resid = y - predicted;
