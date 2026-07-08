@@ -2119,19 +2119,28 @@ impl Forecaster for LaplaceForecaster {
             }
 
             // 1-step predictions from each leaf, before observing y.
+            // `predict_one` avoids the intermediate Vec<Gaussian> allocation
+            // that `predict(1)[0]` would incur per leaf.
             let per_leaf: Vec<super::dist::Gaussian> =
-                self.leaves.iter().map(|l| l.predict(1)[0]).collect();
+                self.leaves.iter().map(|l| l.predict_one()).collect();
             let weights = self.weights();
 
-            let mixture =
-                GaussianMixture::new(weights.iter().zip(per_leaf.iter()).map(|(w, g)| (*w, *g)));
+            // Perf: inline mixture mean / variance instead of building a
+            // GaussianMixture struct — we only need mean/std/is_empty here,
+            // not the components vec.
+            let mixture_is_empty = per_leaf.is_empty();
+            let mixture_mean: f64 = weights
+                .iter()
+                .zip(per_leaf.iter())
+                .map(|(w, g)| w * g.mean)
+                .sum();
             // Fitted / residuals: expose in ORIGINAL space so downstream
             // consumers (Explanation, tests, callers computing MAE) see
             // the same scale as the training values.
-            let fitted_orig = if mixture.is_empty() {
+            let fitted_orig = if mixture_is_empty {
                 y_orig
             } else {
-                let m_trans = mixture.mean();
+                let m_trans = mixture_mean;
                 match yj {
                     Some(l) => yj_inverse_with_jac(m_trans, l).0,
                     None => m_trans,
@@ -2144,10 +2153,17 @@ impl Forecaster for LaplaceForecaster {
                 // leaves' Gaussian assumption lives there); stash both the
                 // transformed-space 1-step σ and the transformed-space
                 // residual so quantile-match sees matched-space `|z|`.
-                let (mu_trans, sigma_trans) = if mixture.is_empty() {
+                let (mu_trans, sigma_trans) = if mixture_is_empty {
                     (y, 1.0)
                 } else {
-                    (mixture.mean(), mixture.std())
+                    // Inline mixture variance to skip mixture allocation.
+                    let mu = mixture_mean;
+                    let var: f64 = weights
+                        .iter()
+                        .zip(per_leaf.iter())
+                        .map(|(w, g)| w * (g.std * g.std + (g.mean - mu).powi(2)))
+                        .sum();
+                    (mu, var.sqrt())
                 };
                 self.predictive_stds.push(sigma_trans);
                 self.predictive_residuals_trans.push(y - mu_trans);
@@ -2173,12 +2189,11 @@ impl Forecaster for LaplaceForecaster {
             // space) between the softmax mixture mean and y. This leaf
             // tracks the residual's own distribution independently of
             // the individual leaves' Gaussian assumptions.
-            let mixture_mean = if mixture.is_empty() {
-                y
+            let residual = if mixture_is_empty {
+                0.0
             } else {
-                mixture.mean()
+                y - mixture_mean
             };
-            let residual = y - mixture_mean;
             if let Some(t) = self.terminal.as_mut() {
                 t.observe(residual);
             }

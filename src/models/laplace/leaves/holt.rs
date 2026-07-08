@@ -77,6 +77,12 @@ impl Leaf for HoltLeaf {
             .collect()
     }
 
+    #[inline]
+    fn predict_one(&self) -> Gaussian {
+        let level = self.level.unwrap_or(0.0);
+        Gaussian::new(level + self.phi * self.trend, self.sigma())
+    }
+
     fn observe(&mut self, y: f64) {
         let level_prev = self.level.unwrap_or(y);
         let predicted = level_prev + self.phi * self.trend;

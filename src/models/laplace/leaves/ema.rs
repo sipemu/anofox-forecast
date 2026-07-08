@@ -47,6 +47,11 @@ impl Leaf for EmaLeaf {
             .collect()
     }
 
+    #[inline]
+    fn predict_one(&self) -> Gaussian {
+        Gaussian::new(self.level.unwrap_or(0.0), self.sigma())
+    }
+
     fn observe(&mut self, y: f64) {
         let predicted = self.level.unwrap_or(y);
         let resid = y - predicted;

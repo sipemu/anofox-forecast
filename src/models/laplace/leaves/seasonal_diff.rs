@@ -75,6 +75,18 @@ impl Leaf for SeasonalDifferenceWrapper {
         out
     }
 
+    #[inline]
+    fn predict_one(&self) -> Gaussian {
+        let g = self.inner.predict_one();
+        let s = self.period;
+        let anchor = if self.buffer.len() >= s {
+            self.buffer[self.buffer.len() - s]
+        } else {
+            0.0
+        };
+        Gaussian::new(g.mean + anchor, g.std)
+    }
+
     fn observe(&mut self, y: f64) {
         if !y.is_finite() {
             return;

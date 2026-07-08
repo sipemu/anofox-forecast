@@ -73,6 +73,14 @@ impl Leaf for StandardizeWrapper {
             .collect()
     }
 
+    #[inline]
+    fn predict_one(&self) -> Gaussian {
+        let sigma = self.sigma();
+        let mu = self.mu;
+        let g = self.inner.predict_one();
+        Gaussian::new(mu + sigma * g.mean, (sigma * g.std).max(1e-9))
+    }
+
     fn observe(&mut self, y: f64) {
         if !y.is_finite() {
             return;

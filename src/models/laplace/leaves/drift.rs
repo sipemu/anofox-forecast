@@ -50,6 +50,11 @@ impl Leaf for DriftLeaf {
             .collect()
     }
 
+    #[inline]
+    fn predict_one(&self) -> Gaussian {
+        Gaussian::new(self.level.unwrap_or(0.0) + self.drift, self.sigma())
+    }
+
     fn observe(&mut self, y: f64) {
         let predicted = self.level.map(|l| l + self.drift).unwrap_or(y);
         let resid = y - predicted;
