@@ -411,7 +411,7 @@ struct DatasetResult {
     total_s: [f64; N_MODELS],
 }
 
-fn run_dataset(ds: &Dataset, sample_per: usize) -> Option<DatasetResult> {
+fn run_dataset(ds: &Dataset, sample_per: usize, enabled: &[bool]) -> Option<DatasetResult> {
     let mut kept = parse_tsf(ds.path);
     if kept.is_empty() {
         eprintln!("  [{}] no data", ds.name);
@@ -450,7 +450,7 @@ fn run_dataset(ds: &Dataset, sample_per: usize) -> Option<DatasetResult> {
         // does this automatically from series metadata; ours needs it
         // explicitly (was previously calling AutoETS::new() → no period
         // → non-seasonal, huge handicap on monthly/hourly panels).
-        {
+        if enabled[0] {
             let t0 = Instant::now();
             let mut m = if ds.period >= 2 {
                 AutoETS::with_period(ds.period)
@@ -482,7 +482,7 @@ fn run_dataset(ds: &Dataset, sample_per: usize) -> Option<DatasetResult> {
             fit_us_sum[0] += t0.elapsed().as_micros();
         }
         // Model 1: AutoTheta — point-only. Same period-passing fix.
-        {
+        if enabled[1] {
             let t0 = Instant::now();
             let mut m = if ds.period >= 2 {
                 AutoTheta::seasonal(ds.period)
@@ -514,7 +514,7 @@ fn run_dataset(ds: &Dataset, sample_per: usize) -> Option<DatasetResult> {
         }
         // Model 2: Laplace + auto — mixture quantiles for WQL.
         #[cfg(feature = "distributional")]
-        {
+        if enabled[2] {
             use anofox_forecast::models::DistributionalForecaster;
             let t0 = Instant::now();
             let mut m = LaplaceForecaster::new()
@@ -541,7 +541,7 @@ fn run_dataset(ds: &Dataset, sample_per: usize) -> Option<DatasetResult> {
         }
         // Model 3: Laplace + auto_aid — mixture quantiles.
         #[cfg(all(feature = "distributional", feature = "postprocess"))]
-        {
+        if enabled[3] {
             use anofox_forecast::models::DistributionalForecaster;
             let t0 = Instant::now();
             let mut m = LaplaceForecaster::new()
@@ -568,7 +568,7 @@ fn run_dataset(ds: &Dataset, sample_per: usize) -> Option<DatasetResult> {
         }
         // Model 4: SmartForecaster — point-only via Forecaster trait; Gaussian fallback for WQL.
         #[cfg(all(feature = "distributional", feature = "postprocess"))]
-        {
+        if enabled[4] {
             let t0 = Instant::now();
             let mut m = SmartForecaster::new().with_seasonal_period(ds.period.max(2));
             if m.fit(&train_ts).is_ok() {
@@ -598,7 +598,7 @@ fn run_dataset(ds: &Dataset, sample_per: usize) -> Option<DatasetResult> {
         // Fixed skaters-shaped candidate pool, sticky lattice, terminal
         // scale-mixture, XGBoost-shrunk softmax updates. Post-#180.
         #[cfg(feature = "distributional")]
-        {
+        if enabled[5] {
             use anofox_forecast::models::DistributionalForecaster;
             let t0 = Instant::now();
             let mut m = LaplaceForecaster::new()
@@ -668,10 +668,41 @@ fn main() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(usize::MAX);
 
-    eprintln!("fev-style benchmark — sample={} series/dataset", sample_per);
+    // Filter which models to run (accuracy-audit workflow). Comma-separated
+    // list of names or "all". Names match MODEL_NAMES (case-insensitive,
+    // spaces ignored). E.g. `MODELS=laplace+skaters,laplace+auto` skips
+    // AutoETS (which eats ~90% of runtime). Default: all.
+    let models_filter: Vec<bool> = {
+        let raw = std::env::var("MODELS").unwrap_or_else(|_| "all".into());
+        if raw.eq_ignore_ascii_case("all") {
+            vec![true; N_MODELS]
+        } else {
+            let requested: Vec<String> = raw
+                .split(',')
+                .map(|s| s.trim().to_ascii_lowercase().replace(' ', ""))
+                .collect();
+            (0..N_MODELS)
+                .map(|i| {
+                    let name = MODEL_NAMES[i].to_ascii_lowercase().replace(' ', "");
+                    requested.iter().any(|r| *r == name)
+                })
+                .collect()
+        }
+    };
+    let enabled_count = models_filter.iter().filter(|b| **b).count();
+    eprintln!(
+        "fev-style benchmark — sample={} series/dataset, {}/{} models enabled",
+        sample_per, enabled_count, N_MODELS
+    );
+    for (i, on) in models_filter.iter().enumerate() {
+        if *on {
+            eprintln!("  ✓ {}", MODEL_NAMES[i]);
+        }
+    }
+
     let mut results: Vec<DatasetResult> = Vec::new();
     for ds in DATASETS.iter() {
-        if let Some(r) = run_dataset(ds, sample_per) {
+        if let Some(r) = run_dataset(ds, sample_per, &models_filter) {
             results.push(r);
         }
     }
