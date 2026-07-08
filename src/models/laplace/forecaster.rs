@@ -235,6 +235,139 @@ fn eta_schedule(base_eta: f64, n_obs: usize) -> f64 {
     }
 }
 
+/// Solve the ensemble stacking problem (accuracy-audit #1).
+///
+/// Given per-leaf 1-step prediction history and the target training
+/// values, solve:
+///   `min || y_train[burn..] − X · w ||² + λ · ||w||²`
+///   s.t. `w >= 0, Σ w_i = 1`
+///
+/// Uses ridge-regularized OLS via normal equations, then projects to
+/// the non-negative simplex.
+///
+/// The ridge term prevents blowup on collinear leaves (e.g.
+/// `EMA(0.05)` ≈ `EMA(0.1)` on smooth series). Simplex projection
+/// keeps the blend interpretable and non-degenerate.
+fn solve_stacking(
+    predictions: &[Vec<f64>], // [leaf_idx][step]
+    values: &[f64],
+    burn: usize,
+) -> Vec<f64> {
+    let n_leaves = predictions.len();
+    if n_leaves == 0 {
+        return Vec::new();
+    }
+    let n_steps = predictions[0].len().min(values.len());
+    if n_steps <= burn + n_leaves {
+        // Not enough data — fall back to uniform weights.
+        return vec![1.0 / n_leaves as f64; n_leaves];
+    }
+    let effective_n = n_steps - burn;
+    // Ridge parameter — small compared to typical MSE.
+    let ridge_lambda = 1e-4;
+    // Build X^T X (n_leaves × n_leaves) and X^T y (n_leaves).
+    let mut xtx = vec![vec![0.0f64; n_leaves]; n_leaves];
+    let mut xty = vec![0.0f64; n_leaves];
+    for step in burn..n_steps {
+        let y = values[step];
+        if !y.is_finite() {
+            continue;
+        }
+        for i in 0..n_leaves {
+            let xi = predictions[i][step];
+            if !xi.is_finite() {
+                continue;
+            }
+            xty[i] += xi * y;
+            for j in 0..n_leaves {
+                let xj = predictions[j][step];
+                if xj.is_finite() {
+                    xtx[i][j] += xi * xj;
+                }
+            }
+        }
+    }
+    // Add ridge to the diagonal.
+    for i in 0..n_leaves {
+        xtx[i][i] += ridge_lambda * effective_n as f64;
+    }
+    // Solve via Gaussian elimination (n_leaves is small, ~30).
+    let mut aug: Vec<Vec<f64>> = xtx
+        .iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let mut r = row.clone();
+            r.push(xty[i]);
+            r
+        })
+        .collect();
+    // Forward elimination.
+    for i in 0..n_leaves {
+        // Partial pivoting.
+        let mut max_row = i;
+        for k in i + 1..n_leaves {
+            if aug[k][i].abs() > aug[max_row][i].abs() {
+                max_row = k;
+            }
+        }
+        aug.swap(i, max_row);
+        let pivot = aug[i][i];
+        if pivot.abs() < 1e-12 {
+            // Singular — fall back to uniform.
+            return vec![1.0 / n_leaves as f64; n_leaves];
+        }
+        for k in i + 1..n_leaves {
+            let factor = aug[k][i] / pivot;
+            for j in i..=n_leaves {
+                aug[k][j] -= factor * aug[i][j];
+            }
+        }
+    }
+    // Back substitution.
+    let mut w = vec![0.0f64; n_leaves];
+    for i in (0..n_leaves).rev() {
+        let mut sum = aug[i][n_leaves];
+        for j in i + 1..n_leaves {
+            sum -= aug[i][j] * w[j];
+        }
+        w[i] = sum / aug[i][i];
+    }
+    // Simplex projection (Duchi 2008).
+    project_to_simplex(&mut w);
+    w
+}
+
+/// Project a vector onto the probability simplex (non-negative, sum-to-one).
+/// Uses the Duchi et al. (2008) algorithm — same as
+/// `ensemble::model::nnls_simplex`.
+fn project_to_simplex(w: &mut [f64]) {
+    let n = w.len();
+    if n == 0 {
+        return;
+    }
+    let mut sorted: Vec<f64> = w.to_vec();
+    sorted.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    let mut cumsum = 0.0;
+    let mut rho = 0;
+    for (j, &val) in sorted.iter().enumerate() {
+        cumsum += val;
+        if val - (cumsum - 1.0) / (j as f64 + 1.0) > 0.0 {
+            rho = j;
+        }
+    }
+    let theta = (sorted[..=rho].iter().sum::<f64>() - 1.0) / (rho as f64 + 1.0);
+    for w_i in w.iter_mut() {
+        *w_i = (*w_i - theta).max(0.0);
+    }
+    // Renormalize (should already sum to 1, but be safe).
+    let sum: f64 = w.iter().sum();
+    if sum > 0.0 {
+        for w_i in w.iter_mut() {
+            *w_i /= sum;
+        }
+    }
+}
+
 /// Median-absolute-deviation robust σ estimator (accuracy-audit #3a).
 ///
 /// Returns `1.4826 · median(|y_i − median(y)|)` — the MAD scaled to
@@ -713,6 +846,21 @@ pub struct LaplaceForecaster {
     /// Perf: reusable scratch buffer for softmax weights so
     /// `self.weights()` doesn't allocate on the fit hot path.
     scratch_weights: Vec<f64>,
+    /// Accuracy-audit #1 (ensemble stacking): enable OLS-based blend
+    /// weight learning at end of fit. When true and enough training data
+    /// is available, `stacking_weights` is populated with per-leaf
+    /// linear-combination weights minimising `||y_train - X · w||²`
+    /// (with non-negativity + simplex projection). Used at
+    /// `forecast_dist` time in place of softmax weights for the mean
+    /// blend.
+    stacking_enabled: bool,
+    /// Filled at end of fit when stacking is enabled and the training
+    /// window has enough observations. Length = `leaves.len()`.
+    stacking_weights: Option<Vec<f64>>,
+    /// Per-leaf, per-step 1-step-ahead prediction history collected
+    /// during fit — the design matrix for the stacking OLS. Only
+    /// populated when `stacking_enabled` is true.
+    predictions_history: Vec<Vec<f64>>,
 }
 
 impl LaplaceForecaster {
@@ -802,6 +950,9 @@ impl LaplaceForecaster {
             scratch_per_leaf: Vec::new(),
             scratch_ln_std: Vec::new(),
             scratch_weights: Vec::new(),
+            stacking_enabled: false,
+            stacking_weights: None,
+            predictions_history: Vec::new(),
         }
     }
 
@@ -900,6 +1051,26 @@ impl LaplaceForecaster {
         self.sticky = None;
         // Explicit user choice — honor it, don't auto-gate.
         self.sticky_auto_gate = false;
+        self
+    }
+
+    /// Enable ensemble stacking on top of the softmax blend
+    /// (accuracy-audit #1).
+    ///
+    /// After the streaming fit completes, solves an OLS problem for
+    /// per-leaf blend weights `w` minimising `||y_train - X · w||²`
+    /// where `X[t][i] = leaf_i.predict_one_at_step(t)`. Weights are
+    /// projected onto the non-negative simplex via `nnls_simplex`.
+    /// At `forecast_dist` time these weights replace the softmax
+    /// weights for the mean blend (σ mixture still uses softmax).
+    ///
+    /// **Requires N ≥ 60 training obs**. Below that, softmax is used
+    /// throughout — the ridge would overfit on short series.
+    ///
+    /// **Cost**: N × N_leaves × 8 bytes storage during fit
+    /// (~300 KB on M5). O(N × N_leaves²) solve at end of fit.
+    pub fn with_stacking(mut self) -> Self {
+        self.stacking_enabled = true;
         self
     }
 
@@ -1058,14 +1229,11 @@ impl LaplaceForecaster {
         if self.theta_alphas.is_empty() {
             self.theta_alphas = vec![0.05, 0.1, 0.3];
         }
-        // Accuracy-audit #4b: unconditional damped Holt in `.skaters()`.
-        // HoltLeaf has damped-trend (φ ∈ (0, 1)) via #180's α-27 fix,
-        // matching AutoTheta's dominance on trending panels. Previously
-        // only enabled via `.auto()`'s trend detection; skaters' pool
-        // benefits too.
-        if self.holt.is_none() {
-            self.holt = Some((0.3, 0.1, 0.9));
-        }
+        // Accuracy-audit #4b: REVERTED. Added damped Holt(0.3, 0.1, 0.9)
+        // unconditionally in `.skaters()` — caused a +1.5 % geomean MASE
+        // regression on fev-27 (see docs/ACCURACY_AUDIT.md). Callers who
+        // want damped Holt in the skaters pool can add it explicitly via
+        // `.with_holt(0.3, 0.1, 0.9).skaters()`.
         if self.standardize_ema_alphas.is_empty() {
             self.standardize_ema_alphas = vec![0.05, 0.1];
         }
@@ -2479,6 +2647,20 @@ impl Forecaster for LaplaceForecaster {
                 self.scratch_per_leaf.push(l.predict_one());
             }
             let per_leaf = self.scratch_per_leaf.as_slice();
+            // Accuracy-audit #1: stacking history snapshot. Store each
+            // leaf's 1-step-ahead prediction MEAN for the OLS solve at
+            // end of fit. Skip on very short series (< 60 obs) where
+            // stacking would overfit.
+            if self.stacking_enabled && values.len() >= 60 {
+                if self.predictions_history.len() != per_leaf.len() {
+                    self.predictions_history.clear();
+                    self.predictions_history
+                        .resize(per_leaf.len(), Vec::with_capacity(values.len()));
+                }
+                for (i, g) in per_leaf.iter().enumerate() {
+                    self.predictions_history[i].push(g.mean);
+                }
+            }
             // Perf: softmax weights into a reused scratch buffer to skip
             // the per-iteration `Vec<f64>` alloc.
             softmax_into(&self.cum_log_liks, &mut self.scratch_weights);
@@ -2575,6 +2757,24 @@ impl Forecaster for LaplaceForecaster {
                 s.observe(y_orig);
             }
             self.n_obs += 1;
+        }
+
+        // Accuracy-audit #1: ensemble stacking solve. If we collected
+        // per-leaf predictions during the fit loop and have enough
+        // observations, solve OLS for the blend weights and project
+        // onto the non-negative simplex.
+        if self.stacking_enabled && !self.predictions_history.is_empty() {
+            // Skip the first BURN steps so leaves have warmed up.
+            const BURN: usize = 30;
+            let n_leaves = self.predictions_history.len();
+            let n_steps = self.predictions_history[0].len();
+            if n_steps > BURN + n_leaves {
+                let stacking_weights = solve_stacking(&self.predictions_history, values, BURN);
+                self.stacking_weights = Some(stacking_weights);
+            }
+            // Free the history buffer — only needed once.
+            self.predictions_history.clear();
+            self.predictions_history.shrink_to_fit();
         }
 
         // Terminal calibration — quantile matching on |z| = |residual / σ|.
@@ -2757,7 +2957,15 @@ impl DistributionalForecaster for LaplaceForecaster {
         if horizon == 0 {
             return Ok(Vec::new());
         }
-        let weights = self.weights();
+        // Accuracy-audit #1: prefer stacking weights (learned by OLS
+        // on training predictions) over softmax when available.
+        // Stacking directly optimizes point-forecast MSE, closer to
+        // the MASE / WAPE metrics than softmax's 1-step-log-likelihood.
+        let weights = if let Some(sw) = self.stacking_weights.as_ref() {
+            sw.clone()
+        } else {
+            self.weights()
+        };
         let per_leaf = self.per_leaf_horizons(horizon);
         let scale = self.calibration_scale;
         let per_h = &self.calibration_scale_per_h;
