@@ -114,6 +114,10 @@ fn main() {
             let mut m = match builder.as_str() {
                 "skaters" => LaplaceForecaster::new().skaters(),
                 "skaters_no_sticky" => LaplaceForecaster::new().skaters().no_sticky(),
+                "skaters_crps" => LaplaceForecaster::new()
+                    .skaters()
+                    .no_sticky()
+                    .with_terminal_crps(),
                 _ => LaplaceForecaster::new().auto(),
             };
             if m.fit(&train_ts).is_ok() {

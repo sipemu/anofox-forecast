@@ -210,6 +210,66 @@ pub(crate) fn detect_seasonal_period(train: &[f64]) -> Option<usize> {
     }
 }
 
+/// Fev-27 follow-up (#5): learning-rate warmup schedule.
+///
+/// For the first 30 observations, use `η=1.0` (fast — the softmax
+/// needs to move away from uniform quickly during warmup). Then
+/// linearly decay to the configured `learning_rate` over the next
+/// 70 observations. Beyond n=100, hold at `learning_rate`.
+///
+/// Prevents the short-history yearly regression that #180's Fix B
+/// introduced: with η=0.5 the whole way, on N=30 yearly panels the
+/// softmax doesn't reach a peaked distribution before we need to
+/// predict.
+#[inline]
+fn eta_schedule(base_eta: f64, n_obs: usize) -> f64 {
+    const WARMUP: usize = 30;
+    const DECAY_END: usize = 100;
+    if n_obs < WARMUP {
+        1.0
+    } else if n_obs < DECAY_END {
+        let t = (n_obs - WARMUP) as f64 / (DECAY_END - WARMUP) as f64;
+        1.0 + t * (base_eta - 1.0)
+    } else {
+        base_eta
+    }
+}
+
+/// Heuristic: does the training window look **discrete-count-like**?
+/// Returns `true` if it does (few distinct near-integer values relative
+/// to sample size). Used to auto-gate sticky-lattice — atoms are
+/// meaningful only when the data actually revisits exact values.
+///
+/// Test: count distinct values in the first `N.min(1000)` observations
+/// after rounding to the nearest integer. If the ratio
+/// `distinct / total < 0.15` AND most values are within 0.05 of an
+/// integer, the data is discrete-count-like.
+fn looks_discrete_count(train: &[f64]) -> bool {
+    let n = train.len().min(1000);
+    if n < 20 {
+        return false;
+    }
+    let sample = &train[..n];
+    // Are most values integer-like?
+    let near_int = sample
+        .iter()
+        .filter(|y| y.is_finite() && (y.round() - **y).abs() < 0.05)
+        .count();
+    if (near_int as f64 / n as f64) < 0.8 {
+        return false;
+    }
+    // How many distinct integers?
+    let mut ints: Vec<i64> = sample
+        .iter()
+        .filter(|y| y.is_finite())
+        .map(|y| y.round() as i64)
+        .collect();
+    ints.sort_unstable();
+    ints.dedup();
+    let distinct = ints.len();
+    (distinct as f64 / n as f64) < 0.15
+}
+
 /// Compute (seasonality_strength_R², |ACF(1)|) on the training window.
 /// Same formulas as `examples/skaters_m5_benchmark.rs` so the auto-selector
 /// respects the same slicing evidence.
@@ -354,8 +414,8 @@ use super::leaves::{
     GammaLeaf, GarchWrappedLeaf, HoltLeaf, IntermittentLeaf, LogNormalLeaf,
     MultiplicativeSeasonalLeaf, NegativeBinomialLeaf, OuLeaf, PoissonLeaf, PowerTransformWrapper,
     RectifiedNormalLeaf, SeasonalDifferenceWrapper, SeasonalEmaLeaf, SeasonalIntermittentLeaf,
-    SkewNormalLeaf, StandardizeWrapper, StudentTLeaf, ThetaLeaf, TweedieLeaf, YjWrappedLeaf,
-    ZeroInflatedNegativeBinomialLeaf, ZeroInflatedPoissonLeaf,
+    SkewNormalLeaf, StandardizeWrapper, StlDecompLeaf, StudentTLeaf, ThetaLeaf, TweedieLeaf,
+    YjWrappedLeaf, ZeroInflatedNegativeBinomialLeaf, ZeroInflatedPoissonLeaf,
 };
 use super::DistributionalForecaster;
 
@@ -599,6 +659,19 @@ pub struct LaplaceForecaster {
     /// continuous mixture doesn't pay density mass on exact-integer
     /// counts (the modal outcome on M5).
     sticky: Option<StickyState>,
+    /// Fev-27 follow-up: auto-gate sticky based on data characteristics
+    /// at fit time. When true, sticky stays on only if the training
+    /// values look discrete-count-like (few distinct values → atoms
+    /// are meaningful). On continuous data, sticky is disabled at fit
+    /// time regardless of the initial `sticky` setting. `.skaters()`
+    /// sets this true; explicit `.with_sticky()` or `.no_sticky()`
+    /// leaves it false so the caller's choice is honored.
+    sticky_auto_gate: bool,
+    /// Fev-27 follow-up (#9): STL-decomposition leaf period.
+    /// When `Some(p)` with `p >= 2`, adds an `StlDecompLeaf(p)` to the
+    /// pool. Auto-enabled by `.auto()` / `.skaters()` when seasonality
+    /// detection returns a period.
+    stl_period: Option<usize>,
     /// Perf: reusable scratch buffer for per-leaf `Gaussian` predictions
     /// so the fit-loop's `predict_one` results aren't heap-allocated per
     /// observation. Sized once to `self.leaves.len()` at fit start.
@@ -694,6 +767,8 @@ impl LaplaceForecaster {
             terminal: None,
             terminal_crps: None,
             sticky: None,
+            sticky_auto_gate: false,
+            stl_period: None,
             scratch_per_leaf: Vec::new(),
             scratch_ln_std: Vec::new(),
             scratch_weights: Vec::new(),
@@ -772,6 +847,8 @@ impl LaplaceForecaster {
     /// Enabled automatically by `.skaters()`.
     pub fn with_sticky(mut self) -> Self {
         self.sticky = Some(StickyState::new());
+        // Explicit user choice — honor it, don't auto-gate.
+        self.sticky_auto_gate = false;
         self
     }
 
@@ -791,6 +868,8 @@ impl LaplaceForecaster {
     /// since that builder turns sticky back on.
     pub fn no_sticky(mut self) -> Self {
         self.sticky = None;
+        // Explicit user choice — honor it, don't auto-gate.
+        self.sticky_auto_gate = false;
         self
     }
 
@@ -906,10 +985,15 @@ impl LaplaceForecaster {
             self.terminal = Some(TerminalScaleMixture::new());
         }
         // PR #7 of #180: sticky lattice on by default in .skaters().
-        // No-op on continuous data (no revisited values → no atoms).
+        // Fev-27 follow-up: auto-gate at fit time — sticky stays on
+        // only if data looks discrete-count-like. On continuous
+        // panels (m1_yearly, cif_2016, tourism_yearly) sticky would
+        // otherwise blow up WQL. Callers can override with
+        // `.with_sticky()` (force on) or `.no_sticky()` (force off).
         if self.sticky.is_none() {
             self.sticky = Some(StickyState::new());
         }
+        self.sticky_auto_gate = true;
         // Populate the full fixed pool, matching skaters' candidate
         // types (excluding items that don't shift M5 auto-enable per
         // PR #4 empirical decisions — but still on here because
@@ -1650,6 +1734,16 @@ impl LaplaceForecaster {
         for &a in &self.theta_alphas {
             leaves.push(LeafEnum::Theta(ThetaLeaf::new(a)));
         }
+        // Fev-27 follow-up (#9): STL-decomposition leaf. Batch fitter
+        // dressed as a streaming leaf; runs STL on the rolling buffer
+        // at predict time. Closes the M-competition monthly/quarterly
+        // gap where our streaming leaves lose 30-50 % MASE to
+        // AutoTheta's proper seasonal decomposition.
+        if let Some(p) = self.stl_period {
+            if p >= 2 {
+                leaves.push(LeafEnum::Stl(StlDecompLeaf::new(p)));
+            }
+        }
         // PR #4 of #180: standardize + EMA depth-2 compositions.
         for &alpha in &self.standardize_ema_alphas {
             leaves.push(LeafEnum::Wrapped(Box::new(StandardizeWrapper::new(
@@ -1849,7 +1943,7 @@ impl LaplaceForecaster {
             .sum();
         // Score + absorb per leaf. Learning-rate shrinkage and
         // log-clamp applied to the cumulative-weight update.
-        let eta = self.learning_rate;
+        let eta = eta_schedule(self.learning_rate, self.n_obs);
         let clamp = self.log_clamp;
         for (i, leaf) in self.leaves.iter_mut().enumerate() {
             let g = per_leaf[i];
@@ -2127,6 +2221,17 @@ impl Forecaster for LaplaceForecaster {
             if chars.seasonality_strength > 0.15 && self.seasonal_period.is_none() {
                 self.seasonal_period = Some(effective_period);
             }
+            // Fev-27 follow-up (#9): STL leaf on strong-seasonal series.
+            // Threshold higher than the plain seasonal-EMA gate — STL
+            // is expensive (O(N log N) per predict) so we reserve it
+            // for panels where seasonal decomposition really matters.
+            if chars.seasonality_strength > 0.30
+                && effective_period >= 2
+                && self.stl_period.is_none()
+                && values.len() >= 3 * effective_period
+            {
+                self.stl_period = Some(effective_period);
+            }
             // α-27 fix #1: enable the multiplicative seasonal leaf when
             // seasonality is present AND series is strictly positive
             // (tourism, retail-aggregate — where the peak-trough pattern
@@ -2179,6 +2284,15 @@ impl Forecaster for LaplaceForecaster {
         }
 
         self.init_leaves();
+        // Fev-27 follow-up: auto-gate sticky. When `.skaters()` set
+        // `sticky_auto_gate = true`, decide sticky based on training
+        // data characteristics. Discrete-count-like → keep sticky
+        // (M5, dominick). Continuous smooth → disable (m1_yearly,
+        // tourism_*, cif_2016 all had catastrophic WQL blowups
+        // with sticky on).
+        if self.sticky_auto_gate && self.sticky.is_some() && !looks_discrete_count(values) {
+            self.sticky = None;
+        }
         self.training_values = values.to_vec();
         self.fitted_values = Vec::with_capacity(values.len());
         self.residuals = Vec::with_capacity(values.len());
@@ -2328,7 +2442,13 @@ impl Forecaster for LaplaceForecaster {
             // to the cumulative-weight update — skaters' XGBoost-style
             // ensemble regularization. Defaults (η=1.0, clamp=−∞)
             // preserve the historical behavior.
-            let eta = self.learning_rate;
+            // Fev-27 follow-up (#5): warmup schedule for η. For
+            // n < 30 obs we use η=1.0 (fast learning — the softmax
+            // needs to move away from uniform quickly). For
+            // 30 <= n < 100 linearly decay to self.learning_rate.
+            // For n >= 100 hold at self.learning_rate. Prevents the
+            // short-history yearly regression that Fix B introduced.
+            let eta = eta_schedule(self.learning_rate, self.n_obs);
             let clamp = self.log_clamp;
             for (i, leaf) in self.leaves.iter_mut().enumerate() {
                 let g = per_leaf[i];
@@ -2573,6 +2693,22 @@ impl DistributionalForecaster for LaplaceForecaster {
                     } else {
                         m
                     }
+                } else {
+                    m
+                };
+                // Fev-27 follow-up (#3): multi-horizon terminal σ scaling.
+                // The terminal tracks 1-step residual variance; at h > 1
+                // the true predictive spread grows. Assume random-walk
+                // residuals and scale std by √(h+1). Closes WQL underfit
+                // at long horizons (h + 1 since the closure's `h` is
+                // 0-based).
+                let m = if h > 0 {
+                    let scale = ((h + 1) as f64).sqrt();
+                    let inflated = m
+                        .components
+                        .into_iter()
+                        .map(|(w, g)| (w, super::dist::Gaussian::new(g.mean, g.std * scale)));
+                    GaussianMixture::new(inflated)
                 } else {
                     m
                 };

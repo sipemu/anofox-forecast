@@ -27,21 +27,34 @@ pub struct MultiScaleLaplace {
     scales: Vec<(usize, LaplaceForecaster)>,
     /// Horizon this stack was configured for; determines the strides.
     max_horizon: usize,
+    /// Optional period hint. When set (via [`Self::with_period`]) the
+    /// strides include the exact period rather than just skaters' `⌈√k⌉`
+    /// — a period-aligned decimated forecaster preserves the seasonal
+    /// cycle exactly, whereas `⌈√7⌉ = 3` on m4_hourly period=24 misaligns.
+    period_hint: Option<usize>,
 }
 
-/// Skaters' default scale set: `{1, ⌈√k⌉, k}` (dedup, sorted).
+/// Scale set for the multi-scale wrapper. Combines skaters' `{1, ⌈√k⌉, k}`
+/// with an optional period-aligned stride so seasonal signals decimate
+/// coherently.
 ///
-/// Skipped strides that give `< min_samples` decimated observations —
-/// our streaming leaves need warmup, so a stride that leaves us with
-/// 10 observations is worse than falling back to a smaller stride.
-fn default_scales(horizon: usize, n_train: usize, min_samples: usize) -> Vec<usize> {
+/// Strides are trimmed to those giving `≥ min_samples` decimated
+/// observations — the streaming leaves need warmup, so a stride that
+/// leaves us with 10 observations is worse than falling back to a
+/// smaller stride.
+fn default_scales(
+    horizon: usize,
+    n_train: usize,
+    min_samples: usize,
+    period: Option<usize>,
+) -> Vec<usize> {
     let mut out = vec![1usize];
     let sqrt_k = (horizon as f64).sqrt().ceil() as usize;
-    if sqrt_k > 1 && sqrt_k < horizon && n_train / sqrt_k >= min_samples {
-        out.push(sqrt_k);
-    }
-    if horizon > 1 && n_train / horizon >= min_samples {
-        out.push(horizon);
+    let candidates = [sqrt_k, period.unwrap_or(0), horizon];
+    for &s in &candidates {
+        if s > 1 && s <= horizon && n_train / s >= min_samples && !out.contains(&s) {
+            out.push(s);
+        }
     }
     out.sort();
     out.dedup();
@@ -55,7 +68,16 @@ impl MultiScaleLaplace {
         Self {
             scales: Vec::new(),
             max_horizon,
+            period_hint: None,
         }
+    }
+
+    /// Add a period-aligned decimated forecaster. The period stride
+    /// preserves seasonal cycles exactly (unlike skaters' `⌈√k⌉` which
+    /// misaligns for non-square-integer periods).
+    pub fn with_period(mut self, period: usize) -> Self {
+        self.period_hint = Some(period);
+        self
     }
 
     /// Which strides this stack is currently configured with (after
@@ -95,7 +117,7 @@ impl Forecaster for MultiScaleLaplace {
         // stride hurts tourism_monthly (short M-competition series
         // → decimated forecaster produces garbage). At 100 it's a
         // safe win on m4_hourly (700 obs) and neutral elsewhere.
-        let strides = default_scales(self.max_horizon, n, 100);
+        let strides = default_scales(self.max_horizon, n, 100, self.period_hint);
         self.scales.clear();
         self.scales.reserve(strides.len());
         for s in strides {
@@ -178,15 +200,21 @@ mod tests {
 
     #[test]
     fn strides_include_1_and_sqrt_k_and_k() {
-        let strides = default_scales(48, 1000, 10);
+        let strides = default_scales(48, 1000, 10, None);
         assert_eq!(strides, vec![1, 7, 48]);
     }
 
     #[test]
     fn strides_dropped_when_too_few_samples() {
         // 20 obs, stride 48 → 0 samples → dropped.
-        let strides = default_scales(48, 20, 5);
+        let strides = default_scales(48, 20, 5, None);
         assert_eq!(strides, vec![1]);
+    }
+
+    #[test]
+    fn strides_include_period_when_hint_given() {
+        let strides = default_scales(48, 1000, 10, Some(24));
+        assert_eq!(strides, vec![1, 7, 24, 48]);
     }
 
     #[test]

@@ -228,6 +228,42 @@ fn bench(name: &str, path: &str, horizon: usize, period: usize, sample: usize) {
             t0.elapsed().as_secs_f64()
         );
     }
+
+    // MultiScaleLaplace with period hint
+    {
+        let t0 = Instant::now();
+        let mut mases = Vec::new();
+        for values in &series {
+            let split = values.len() - horizon;
+            let train_v = values[..split].to_vec();
+            let test_v = &values[split..];
+            let stamps: Vec<_> = (0..train_v.len())
+                .map(|i| base + Duration::days(i as i64))
+                .collect();
+            let train_ts = match TimeSeries::univariate(stamps, train_v.clone()) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            let scale = mase_scale(&train_v, period);
+            let mut m = MultiScaleLaplace::skaters(horizon).with_period(period);
+            if m.fit(&train_ts).is_err() {
+                continue;
+            }
+            let pred = m.predict(horizon).ok().map(|f| f.primary().to_vec());
+            if let Some(p) = pred {
+                if p.len() == test_v.len() {
+                    mases.push(mae(&p, test_v) / scale);
+                }
+            }
+        }
+        let mean = mases.iter().sum::<f64>() / mases.len().max(1) as f64;
+        println!(
+            "{:<24}{:>14.4}{:>12.1}",
+            "multi-scale +period",
+            mean,
+            t0.elapsed().as_secs_f64()
+        );
+    }
 }
 
 fn main() {

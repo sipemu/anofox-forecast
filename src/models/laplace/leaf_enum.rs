@@ -17,7 +17,7 @@ use super::leaves::{
     Ar1Leaf, Ar2Leaf, BetaLeaf, DiscreteUniformLeaf, DriftLeaf, EmaLeaf, FractionalDiffLeaf,
     GammaLeaf, HoltLeaf, IntermittentLeaf, LogNormalLeaf, MultiplicativeSeasonalLeaf,
     NegativeBinomialLeaf, OuLeaf, PoissonLeaf, RectifiedNormalLeaf, SeasonalEmaLeaf,
-    SeasonalIntermittentLeaf, SkewNormalLeaf, StudentTLeaf, ThetaLeaf, TweedieLeaf,
+    SeasonalIntermittentLeaf, SkewNormalLeaf, StlDecompLeaf, StudentTLeaf, ThetaLeaf, TweedieLeaf,
     ZeroInflatedNegativeBinomialLeaf, ZeroInflatedPoissonLeaf,
 };
 
@@ -51,6 +51,7 @@ pub enum LeafEnum {
     DiscreteUniform(DiscreteUniformLeaf),
     Zip(ZeroInflatedPoissonLeaf),
     Zinb(ZeroInflatedNegativeBinomialLeaf),
+    Stl(StlDecompLeaf),
     /// Escape hatch for wrapped leaves — kept as trait-object to allow
     /// composed leaves (YJ / GARCH / PowerTransform / Standardize /
     /// SlowStandardize / SeasonalDiff wrappers) without recursing the
@@ -86,6 +87,7 @@ macro_rules! dispatch {
             LeafEnum::DiscreteUniform(l) => l.$method($($arg),*),
             LeafEnum::Zip(l) => l.$method($($arg),*),
             LeafEnum::Zinb(l) => l.$method($($arg),*),
+            LeafEnum::Stl(l) => l.$method($($arg),*),
             LeafEnum::Wrapped(l) => l.$method($($arg),*),
         }
     };
