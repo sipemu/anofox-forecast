@@ -14,6 +14,7 @@ use crate::models::inspect::{Explanation, Inspectable, LaplaceExplanation};
 use crate::models::traits::{validate_series_complete, Forecaster};
 
 use super::dist::GaussianMixture;
+use super::leaves::TerminalScaleMixture;
 use crate::transform::yeo_johnson::yeo_johnson_lambda;
 use crate::utils::ols::{ols_fit, OLSResult};
 use std::collections::HashMap;
@@ -394,6 +395,12 @@ pub struct LaplaceForecaster {
     /// log branch when a leaf's h-step forecast extrapolates far beyond
     /// the training window. Empty when YJ is disabled.
     yj_trans_range: Option<(f64, f64)>,
+    /// PR #1 of #180: opt-in terminal scale-mixture leaf that reshapes
+    /// the softmax mixture's density from an averaged-Gaussians blend
+    /// into a fixed-scale mixture of zero-mean Gaussians centered at the
+    /// softmax mean. Ports skaters' `scale_mixture_leaf` — "model first,
+    /// conform last". Enabled automatically by `.auto()`.
+    terminal: Option<TerminalScaleMixture>,
 }
 
 impl LaplaceForecaster {
@@ -458,7 +465,38 @@ impl LaplaceForecaster {
             calibration_scale: 1.0,
             fitted_yj_lambda: None,
             yj_trans_range: None,
+            terminal: None,
         }
+    }
+
+    /// Enable the terminal scale-mixture leaf (PR #1 of #180).
+    ///
+    /// Reshapes `forecast_dist` output from an averaged-Gaussians blend
+    /// into a **5-component fixed-scale Gaussian mixture** centered at
+    /// the softmax mean. Component scales `(0.7, 1.0, 1.6, 3.0, 6.0)` are
+    /// fixed relative to a running residual σ (EWMA at rate `scale_alpha`,
+    /// default 0.03); component weights are learned online by
+    /// likelihood-EM (recency rate `gamma`, default 0.02).
+    ///
+    /// This is the "model first, conform last" pattern from
+    /// [`microprediction/skaters`](https://github.com/microprediction/skaters):
+    /// the softmax ensemble decides the *mean* forecast, and this leaf
+    /// reshapes the *distribution* once at the top so heavy tails
+    /// survive averaging.
+    ///
+    /// Enabled automatically by `.auto()`.
+    pub fn with_terminal_scale_mixture(mut self) -> Self {
+        self.terminal = Some(TerminalScaleMixture::new());
+        self
+    }
+
+    /// Same as [`Self::with_terminal_scale_mixture`] but lets you tune
+    /// the two rate parameters. Defaults are 0.03 and 0.02 — matches
+    /// skaters' `laplace(..., scale_alpha=0.03)` default with
+    /// EM `gamma=0.02`.
+    pub fn with_terminal_scale_mixture_params(mut self, scale_alpha: f64, gamma: f64) -> Self {
+        self.terminal = Some(TerminalScaleMixture::with_params(scale_alpha, gamma));
+        self
     }
 
     /// Apply a Yeo-Johnson power transform with fixed λ before feeding
@@ -869,6 +907,11 @@ impl LaplaceForecaster {
     /// adds leaves, never removes.
     pub fn auto(mut self) -> Self {
         self.use_auto = true;
+        // Turn on the terminal scale-mixture by default. Cheap in fit
+        // time (5-component EWMA + weight vector), meaningful LL win.
+        if self.terminal.is_none() {
+            self.terminal = Some(TerminalScaleMixture::new());
+        }
         self
     }
 
@@ -896,6 +939,9 @@ impl LaplaceForecaster {
     pub fn auto_aid(mut self) -> Self {
         self.use_auto = true;
         self.use_aid = true;
+        if self.terminal.is_none() {
+            self.terminal = Some(TerminalScaleMixture::new());
+        }
         self
     }
 
@@ -1511,6 +1557,18 @@ impl Forecaster for LaplaceForecaster {
                 }
                 leaf.observe(y);
             }
+            // Terminal scale-mixture: absorb the residual (transformed
+            // space) between the softmax mixture mean and y. This leaf
+            // tracks the residual's own distribution independently of
+            // the individual leaves' Gaussian assumptions.
+            if let Some(t) = self.terminal.as_mut() {
+                let mixture_mean = if mixture.is_empty() {
+                    y
+                } else {
+                    mixture.mean()
+                };
+                t.observe(y - mixture_mean);
+            }
             self.n_obs += 1;
         }
 
@@ -1704,6 +1762,18 @@ impl DistributionalForecaster for LaplaceForecaster {
         Ok((0..horizon)
             .map(|h| {
                 let m = blend_horizon(&weights, &per_leaf, h);
+                // Terminal scale-mixture: replace the softmax blend's
+                // shape with a fixed-scale mixture centered at its mean.
+                // Mean-preserving; only reshapes the density.
+                let m = if let Some(t) = self.terminal.as_ref() {
+                    if t.n_obs() > 5 && !m.is_empty() {
+                        t.predict_shifted(m.mean())
+                    } else {
+                        m
+                    }
+                } else {
+                    m
+                };
                 let scale_h = per_h.get(h).copied().unwrap_or(scale);
                 let components = m.components.into_iter().map(|(w, g)| {
                     let sigma_scaled = g.std * scale_h;
