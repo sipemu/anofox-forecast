@@ -141,13 +141,10 @@ def rolling_skaters_laplace(
     `{i: skaters_Dist}` — the skaters Dist itself, since it already
     provides `.logpdf` / `.crps` matching our GaussianMixtureDist."""
     changes = np.diff(values).tolist()
-    # The default `objective="crps"` terminal leaf hits a NaN pruning
-    # bug on M5's zero-heavy integer counts (its `Dist.prune` search
-    # sets best_i=None when a component holds a NaN mean). `objective=
-    # "likelihood"` uses a different terminal leaf that handles the
-    # zero-inflated data cleanly. `sticky=False` skips the lattice
-    # projection (which is orthogonal to the bakeoff target).
-    f = laplace(k=1, objective="likelihood", sticky=False)
+    # objective="likelihood" avoids the NaN pruning bug in skaters'
+    # default `crps_leaf` terminal. `sticky=True` is skaters' default —
+    # matches our Rust `.with_sticky()` in `.skaters()`.
+    f = laplace(k=1, objective="likelihood", sticky=True)
     state = None
     pending = None
     point_set = set(points)

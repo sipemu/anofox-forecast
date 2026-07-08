@@ -13,8 +13,124 @@ use crate::error::{ForecastError, Result};
 use crate::models::inspect::{Explanation, Inspectable, LaplaceExplanation};
 use crate::models::traits::{validate_series_complete, Forecaster};
 
-use super::dist::GaussianMixture;
-use super::leaves::TerminalScaleMixture;
+use super::dist::{Gaussian, GaussianMixture};
+use super::leaves::{TerminalCrpsMixture, TerminalScaleMixture};
+
+/// PR #7 of #180: recency-weighted frequency table for the sticky
+/// lattice projection. Ports skaters' `sticky` wrapper.
+#[derive(Debug, Clone)]
+struct StickyState {
+    /// Recency-weighted count of each exact-value observation.
+    counts: Vec<(f64, f64)>,
+    /// EMA rate for the frequency table.
+    propensity_alpha: f64,
+    /// Spike width as fraction of predictive σ. Smaller = harder atom.
+    spike_frac: f64,
+    /// A value becomes an atom once `count > thresh_mult * propensity_alpha`.
+    thresh_mult: f64,
+    /// Max simultaneous atoms.
+    max_atoms: usize,
+    /// Prune entries whose recency weight drops below this.
+    prune_eps: f64,
+}
+
+impl StickyState {
+    fn new() -> Self {
+        Self {
+            counts: Vec::new(),
+            propensity_alpha: 0.05,
+            spike_frac: 0.005,
+            thresh_mult: 1.8,
+            max_atoms: 6,
+            prune_eps: 1e-6,
+        }
+    }
+
+    /// Skaters-style observe: decay all counts, add propensity to y.
+    fn observe(&mut self, y: f64) {
+        if !y.is_finite() {
+            return;
+        }
+        let decay = 1.0 - self.propensity_alpha;
+        let mut existing = None;
+        for (v, w) in self.counts.iter_mut() {
+            *w *= decay;
+            if (*v - y).abs() < 1e-12 {
+                existing = Some(*w);
+            }
+        }
+        self.counts.retain(|(_, w)| *w >= self.prune_eps);
+        if let Some(_) = existing {
+            for (v, w) in self.counts.iter_mut() {
+                if (*v - y).abs() < 1e-12 {
+                    *w += self.propensity_alpha;
+                    return;
+                }
+            }
+        }
+        self.counts.push((y, self.propensity_alpha));
+    }
+
+    /// Return the current lattice atoms (revisited values above threshold),
+    /// top `max_atoms` by weight.
+    fn atoms(&self) -> Vec<(f64, f64)> {
+        let thr = self.thresh_mult * self.propensity_alpha;
+        let mut sorted: Vec<(f64, f64)> = self
+            .counts
+            .iter()
+            .copied()
+            .filter(|(_, w)| *w > thr)
+            .collect();
+        sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        sorted.truncate(self.max_atoms);
+        sorted
+    }
+
+    /// Apply sticky-lattice projection to a Gaussian mixture. Returns
+    /// a new mean-preserving mixture with atom spikes plus the
+    /// original continuous mass, recentered so `E[out] == m.mean()`.
+    fn project(&self, m: &GaussianMixture) -> GaussianMixture {
+        let atoms = self.atoms();
+        if atoms.is_empty() || m.is_empty() {
+            return m.clone();
+        }
+        let sw: f64 = atoms.iter().map(|(_, w)| w).sum();
+        if sw <= 0.0 {
+            return m.clone();
+        }
+        // Cap total atom mass at 0.999 to keep some continuous coverage.
+        let p_atoms = sw.min(0.999);
+        let p_cont = 1.0 - p_atoms;
+        let atom_mean = atoms.iter().map(|(v, w)| v * w).sum::<f64>() / sw;
+        // Spike width from average predictive std.
+        let avg_std: f64 = m
+            .components
+            .iter()
+            .map(|(w, g)| w * g.std)
+            .sum::<f64>()
+            .max(1e-9);
+        let spike_std = (self.spike_frac * avg_std).max(1e-9);
+        let mu = m.mean();
+        let mut comps: Vec<(f64, Gaussian)> = Vec::with_capacity(atoms.len() + m.components.len());
+        if p_cont <= 1e-9 {
+            for (v, w) in &atoms {
+                comps.push((p_atoms * (w / sw), Gaussian::new(*v, spike_std)));
+            }
+            return GaussianMixture::new(comps);
+        }
+        // Mean-preserving recenter of the continuous component:
+        //   E[out] = P_atoms · atom_mean + P_cont · (mu + δ) = mu
+        //   δ = P_atoms · (mu - atom_mean) / P_cont
+        let delta = p_atoms * (mu - atom_mean) / p_cont;
+        for (v, w) in &atoms {
+            comps.push((p_atoms * (w / sw), Gaussian::new(*v, spike_std)));
+        }
+        for (w, g) in &m.components {
+            comps.push((p_cont * w, Gaussian::new(g.mean + delta, g.std)));
+        }
+        GaussianMixture::new(comps)
+    }
+}
 use crate::transform::yeo_johnson::yeo_johnson_lambda;
 use crate::utils::ols::{ols_fit, OLSResult};
 use std::collections::HashMap;
@@ -462,6 +578,15 @@ pub struct LaplaceForecaster {
     /// softmax mean. Ports skaters' `scale_mixture_leaf` — "model first,
     /// conform last". Enabled automatically by `.auto()`.
     terminal: Option<TerminalScaleMixture>,
+    /// PR #7 of #180: alternate terminal — CRPS-gradient variant.
+    /// Ports skaters' `crps_leaf`. When set, takes precedence over
+    /// [`Self::terminal`]. Enabled automatically by `.skaters()`.
+    terminal_crps: Option<TerminalCrpsMixture>,
+    /// PR #7 of #180: sticky lattice projection. Ports skaters'
+    /// `sticky` wrapper — near-Dirac atoms at revisited values so a
+    /// continuous mixture doesn't pay density mass on exact-integer
+    /// counts (the modal outcome on M5).
+    sticky: Option<StickyState>,
 }
 
 impl LaplaceForecaster {
@@ -544,6 +669,8 @@ impl LaplaceForecaster {
             fitted_yj_lambda: None,
             yj_trans_range: None,
             terminal: None,
+            terminal_crps: None,
+            sticky: None,
         }
     }
 
@@ -574,6 +701,51 @@ impl LaplaceForecaster {
     /// EM `gamma=0.02`.
     pub fn with_terminal_scale_mixture_params(mut self, scale_alpha: f64, gamma: f64) -> Self {
         self.terminal = Some(TerminalScaleMixture::with_params(scale_alpha, gamma));
+        self
+    }
+
+    /// Enable the CRPS-gradient terminal leaf (PR #7 of #180).
+    ///
+    /// Same fixed-scale mixture shape as [`Self::with_terminal_scale_mixture`],
+    /// but the component weights are updated by **exponentiated-gradient
+    /// descent on the closed-form mixture CRPS** rather than
+    /// likelihood-EM. Uses 15 log-spaced scale components
+    /// (`c = 0.4 · 1.28^i` for `i ∈ 0..15`) vs. 5 in the likelihood
+    /// variant — more granular tail coverage.
+    ///
+    /// Ports skaters' `crps_leaf`. Takes precedence over the
+    /// likelihood-EM terminal when both are configured. Enabled
+    /// automatically by `.skaters()`.
+    pub fn with_terminal_crps(mut self) -> Self {
+        self.terminal_crps = Some(TerminalCrpsMixture::new());
+        self
+    }
+
+    /// Same as [`Self::with_terminal_crps`] but exposes the two
+    /// rate parameters. Defaults `(scale_alpha=0.01, eta=1.0)` match
+    /// skaters' `crps_leaf`.
+    pub fn with_terminal_crps_params(mut self, scale_alpha: f64, eta: f64) -> Self {
+        self.terminal_crps = Some(TerminalCrpsMixture::with_params(scale_alpha, eta));
+        self
+    }
+
+    /// Enable the sticky lattice projection (PR #7 of #180).
+    ///
+    /// Adds near-Dirac atoms at revisited exact-value observations so
+    /// a continuous mixture doesn't pay density mass on discrete
+    /// values the series keeps returning to (0 on M5 first-differenced
+    /// counts, integer prices, etc.). Mean-preserving — the atoms plus
+    /// the recentered continuous part have the same expected value as
+    /// the original mixture. Ports skaters' `sticky` wrapper with its
+    /// defaults `(propensity_alpha=0.05, spike_frac=0.005,
+    /// thresh_mult=1.8, max_atoms=6)`.
+    ///
+    /// On continuous series no value gets revisited, no atom fires,
+    /// and the wrapper vanishes.
+    ///
+    /// Enabled automatically by `.skaters()`.
+    pub fn with_sticky(mut self) -> Self {
+        self.sticky = Some(StickyState::new());
         self
     }
 
@@ -680,8 +852,18 @@ impl LaplaceForecaster {
     pub fn skaters(mut self) -> Self {
         self.learning_rate = 0.5;
         self.log_clamp = -20.0;
-        if self.terminal.is_none() {
+        // PR #7 of #180: skaters' default terminal is `crps_leaf`
+        // (CRPS-gradient) but empirically on M5 first-differenced counts
+        // the likelihood-EM `scale_mixture_leaf` is better. `.skaters()`
+        // uses the likelihood variant by default; opt in to CRPS via
+        // `.with_terminal_crps()` for continuous / heavy-tailed data.
+        if self.terminal.is_none() && self.terminal_crps.is_none() {
             self.terminal = Some(TerminalScaleMixture::new());
+        }
+        // PR #7 of #180: sticky lattice on by default in .skaters().
+        // No-op on continuous data (no revisited values → no atoms).
+        if self.sticky.is_none() {
+            self.sticky = Some(StickyState::new());
         }
         // Populate the full fixed pool, matching skaters' candidate
         // types (excluding items that don't shift M5 auto-enable per
@@ -1991,13 +2173,26 @@ impl Forecaster for LaplaceForecaster {
             // space) between the softmax mixture mean and y. This leaf
             // tracks the residual's own distribution independently of
             // the individual leaves' Gaussian assumptions.
+            let mixture_mean = if mixture.is_empty() {
+                y
+            } else {
+                mixture.mean()
+            };
+            let residual = y - mixture_mean;
             if let Some(t) = self.terminal.as_mut() {
-                let mixture_mean = if mixture.is_empty() {
-                    y
-                } else {
-                    mixture.mean()
-                };
-                t.observe(y - mixture_mean);
+                t.observe(residual);
+            }
+            // PR #7 of #180: CRPS-gradient terminal in parallel. Absorbs
+            // the same residual; forecast_dist picks whichever is set
+            // (crps takes precedence when both are configured).
+            if let Some(t) = self.terminal_crps.as_mut() {
+                t.observe(residual);
+            }
+            // PR #7 of #180: sticky lattice — update the recency table
+            // with the ORIGINAL-space y (not the transformed value), so
+            // atoms fire on actual observation values.
+            if let Some(s) = self.sticky.as_mut() {
+                s.observe(y_orig);
             }
             self.n_obs += 1;
         }
@@ -2195,7 +2390,15 @@ impl DistributionalForecaster for LaplaceForecaster {
                 // Terminal scale-mixture: replace the softmax blend's
                 // shape with a fixed-scale mixture centered at its mean.
                 // Mean-preserving; only reshapes the density.
-                let m = if let Some(t) = self.terminal.as_ref() {
+                // PR #7 of #180: CRPS terminal takes precedence over
+                // the likelihood-EM terminal when both are configured.
+                let m = if let Some(t) = self.terminal_crps.as_ref() {
+                    if t.n_obs() > 5 && !m.is_empty() {
+                        t.predict_shifted(m.mean())
+                    } else {
+                        m
+                    }
+                } else if let Some(t) = self.terminal.as_ref() {
                     if t.n_obs() > 5 && !m.is_empty() {
                         t.predict_shifted(m.mean())
                     } else {
@@ -2223,7 +2426,14 @@ impl DistributionalForecaster for LaplaceForecaster {
                     }
                     (w, super::dist::Gaussian::new(mean_out, sigma_out))
                 });
-                GaussianMixture::new(components)
+                let mix = GaussianMixture::new(components);
+                // PR #7 of #180: sticky lattice — project onto revisited
+                // exact values. No-op if no atoms have fired.
+                if let Some(s) = self.sticky.as_ref() {
+                    s.project(&mix)
+                } else {
+                    mix
+                }
             })
             .collect())
     }
