@@ -33,7 +33,7 @@ On the 27-dataset fev classical panel (500 series/dataset, MASE with fev-canonic
 | 7 | fev `auto_ets` (Nixtla) | 1.440 | Classical (CPU) |
 | 8 | **`AutoETS` (this crate)** | **1.525** | **Classical (CPU) — 5.9 % behind Nixtla** |
 | 9 | Seasonal Naive | 1.665 | Baseline |
-| **10** | **`LaplaceForecaster::skaters()`** | **~1.7 est.** | **Streaming — see nuanced breakdown below** |
+| **10** | **`LaplaceForecaster::skaters()`** (post-fix) | **~1.6 est.** | **Streaming — see nuanced breakdown below** |
 | **11** | **`LaplaceForecaster::auto()`** | **1.723** | **Classical (CPU) — mixed-panel warmup penalty** |
 
 **On the aggregate the picture is mixed** — `.skaters()` doesn't uniformly dominate `.auto()` on this panel. It **wins big on retail / demand / discrete-count datasets** and **wins short-history yearly datasets** where the wider pool + shrunk softmax help warmup, but **loses to `.auto()` and classical on smooth M-competition monthly/quarterly** where sticky-lattice atoms don't help.
@@ -51,19 +51,34 @@ On the 27-dataset fev classical panel (500 series/dataset, MASE with fev-canonic
 
 ### Per-dataset MASE — where `.skaters()` still loses to classical
 
-| dataset | AutoTheta | **Laplace+skaters** | gap |
+| dataset | AutoTheta | **Laplace+skaters** (post-fix) | gap |
 |---|---:|---:|---|
-| m3_monthly | 0.731 | 0.798 | +9 % |
+| m3_monthly | 0.731 | 0.772 | +6 % |
 | m3_quarterly | 1.138 | 1.494 | +31 % |
-| m1_monthly | 1.082 | 1.435 | +33 % |
-| m4_monthly | 1.210 | 1.363 | +13 % |
-| m4_quarterly | 1.121 | 1.194 | +7 % |
-| tourism_monthly | 1.677 | 2.559 | +53 % |
-| tourism_quarterly | 1.668 | 3.301 | +98 % |
-| m4_hourly | 2.517 | 5.509 | +119 % |
-| cif_2016 | 1.019 | 1.337 | +31 % |
-| hospital | 0.764 | 0.805 | +5 % |
+| m1_monthly | 1.082 | 1.373 | +27 % |
+| m4_monthly | 1.210 | 1.337 | +10 % |
+| m4_quarterly | 1.121 | 1.308 | +17 % |
+| tourism_monthly | 1.677 | 2.344 | +40 % |
+| tourism_quarterly | 1.668 | 3.304 | +98 % |
+| m4_hourly | 2.517 | **2.329** | **−7 %** ⭐ (was +119 %) |
+| cif_2016 | 1.019 | 1.347 | +32 % |
+| hospital | 0.764 | 0.784 | +3 % |
 | dominick | 0.861 | 0.966 | +12 % (but −23 % vs `.auto()`) |
+
+### Impact of the two fev-27 fixes (post-#180 follow-up)
+
+|                        | before fixes | after fixes | Δ MASE |
+|------------------------|-------------:|------------:|-------:|
+| geomean MASE           |       6.6237 |  **6.0847** |  −8 % |
+| **m4_hourly** MASE     |        5.509 |   **2.329** | **−58 %** ⭐ |
+| **aus_electric** MASE  |       10.060 |   **2.560** | **−75 %** ⭐ |
+| m4_daily MASE          |        1.191 |       1.109 |  −7 % |
+| m4_weekly MASE         |        2.915 |       2.723 |  −7 % |
+| tourism_monthly MASE   |        2.559 |       2.344 |  −8 % |
+| m1_yearly MASE         |        3.864 |       4.554 |  +18 % (Fix B slight over-fit) |
+| m4_yearly MASE         |        4.136 |       4.359 |  +5 %  |
+
+**Fix B** (seasonal-diff drift compounding) delivered the m4_hourly + australian_electricity turnaround. **Fix A** (sticky horizon decay at 0.05 / step) is too gentle to collapse the WQL blowup on short-horizon continuous panels — atoms still dominate at ≥ 70 % weight through h=12.
 
 ### The sticky-lattice WQL cost on continuous data
 
