@@ -763,6 +763,25 @@ impl LaplaceForecaster {
         self
     }
 
+    /// Disable the sticky-lattice projection (PR #7 follow-up).
+    ///
+    /// Sticky is enabled by default in [`Self::skaters`] because it
+    /// dramatically improves LL / MASE on discrete-count panels (M5,
+    /// exchange_rate, dominick). On **continuous smooth panels** the
+    /// atoms are placed on spurious repeated values and quantile mass
+    /// concentrates in the wrong places — WQL blows up 100-1800× on
+    /// short-history yearly panels like `m1_yearly`, `tourism_yearly`,
+    /// `cif_2016` (fev-27 benchmark).
+    ///
+    /// Use `.skaters().no_sticky()` on continuous data — keeps the
+    /// fixed pool, terminal scale-mixture, and shrunk-softmax
+    /// mechanism, drops the atom projection. Call **after** `.skaters()`
+    /// since that builder turns sticky back on.
+    pub fn no_sticky(mut self) -> Self {
+        self.sticky = None;
+        self
+    }
+
     /// Enable Theta-method leaves at the given α values (PR #3 of #180).
     ///
     /// Ports skaters' `theta(α)` transform. Each variant is a SES level

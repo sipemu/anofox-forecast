@@ -374,3 +374,13 @@ required-features = ["distributional"]
 name = "m5_streaming_vs_refit"
 path = "examples/m5_streaming_vs_refit.rs"
 required-features = ["distributional"]
+
+[[example]]
+name = "m4_hourly_diagnostic"
+path = "examples/m4_hourly_diagnostic.rs"
+required-features = ["distributional"]
+
+[[example]]
+name = "fred_bakeoff_export"
+path = "examples/fred_bakeoff_export.rs"
+required-features = ["distributional"]
