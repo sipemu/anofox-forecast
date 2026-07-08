@@ -225,9 +225,9 @@ use super::leaves::{
     Ar1Leaf, Ar2Leaf, BetaLeaf, DiscreteUniformLeaf, DriftLeaf, EmaLeaf, FractionalDiffLeaf,
     GammaLeaf, GarchWrappedLeaf, HoltLeaf, IntermittentLeaf, LogNormalLeaf,
     MultiplicativeSeasonalLeaf, NegativeBinomialLeaf, OuLeaf, PoissonLeaf, PowerTransformWrapper,
-    RectifiedNormalLeaf, SeasonalEmaLeaf, SeasonalIntermittentLeaf, SkewNormalLeaf, StudentTLeaf,
-    ThetaLeaf, TweedieLeaf, YjWrappedLeaf, ZeroInflatedNegativeBinomialLeaf,
-    ZeroInflatedPoissonLeaf,
+    RectifiedNormalLeaf, SeasonalDifferenceWrapper, SeasonalEmaLeaf, SeasonalIntermittentLeaf,
+    SkewNormalLeaf, StandardizeWrapper, StudentTLeaf, ThetaLeaf, TweedieLeaf, YjWrappedLeaf,
+    ZeroInflatedNegativeBinomialLeaf, ZeroInflatedPoissonLeaf,
 };
 use super::DistributionalForecaster;
 
@@ -320,6 +320,22 @@ pub struct LaplaceForecaster {
     /// Distinct from [`Self::yj_grid`] (which replaces the base list).
     /// Empty = disabled.
     yj_coord_lambdas: Vec<f64>,
+    /// PR #4 of #180: standardize + EMA depth-2 compositions. Each `α`
+    /// in this list adds a `StandardizeWrapper(EmaLeaf(α), 0.05)`
+    /// candidate. Skaters' pool has `α ∈ {0.05, 0.1}`. Empty = disabled.
+    standardize_ema_alphas: Vec<f64>,
+    /// PR #4 of #180: seasonal-diff + EMA depth-2 compositions. Each
+    /// `(period, α)` adds a `SeasonalDifferenceWrapper(EmaLeaf(α), period)`.
+    /// Skaters' pool has `period ∈ {7, 12, 24}` × `α ∈ {0.05, 0.1}` = 6.
+    seasonal_diff_ema: Vec<(usize, f64)>,
+    /// PR #4 of #180: diff + EMA depth-2 compositions (period=1 special
+    /// case). Skaters' pool has 3 candidates: `α ∈ {0.05, 0.1, 0.3}`.
+    /// Each adds a `SeasonalDifferenceWrapper(EmaLeaf(α), 1)`.
+    diff_ema_alphas: Vec<f64>,
+    /// PR #4 of #180: multi-speed drift grid. Skaters' pool has 4
+    /// speed/shrinkage combos; here we just carry `α` speeds. Each α
+    /// adds a `DriftLeaf(α)` candidate.
+    drift_alphas: Vec<f64>,
     /// `α` for the Croston-flavored intermittent-demand leaf. Adds a
     /// demand-per-period leaf that handles zero-inflated series much
     /// better than level-EMAs (which get dragged toward 0 by the
@@ -447,6 +463,10 @@ impl LaplaceForecaster {
             ou: None,
             theta_alphas: Vec::new(),
             yj_coord_lambdas: Vec::new(),
+            standardize_ema_alphas: Vec::new(),
+            seasonal_diff_ema: Vec::new(),
+            diff_ema_alphas: Vec::new(),
+            drift_alphas: Vec::new(),
             intermittent: None,
             seasonal_intermittent: None,
             poisson: None,
@@ -522,6 +542,70 @@ impl LaplaceForecaster {
     /// Enabled automatically by `.auto()` at that same 3-α pool.
     pub fn with_theta(mut self, alphas: &[f64]) -> Self {
         self.theta_alphas = alphas.iter().copied().filter(|a| a.is_finite()).collect();
+        self
+    }
+
+    /// Enable standardize + EMA depth-2 compositions (PR #4 of #180).
+    ///
+    /// For each α in `ema_alphas`, adds a `StandardizeWrapper(EmaLeaf(α), 0.05)`
+    /// candidate. Ports skaters' `α ∈ {0.05, 0.1}` pool. The standardize
+    /// transform tracks the running mean+variance so the inner EMA sees
+    /// a stationary, unit-variance stream.
+    ///
+    /// Enabled automatically by `.auto()` at the standard 2-α pool.
+    pub fn with_standardize_ema(mut self, ema_alphas: &[f64]) -> Self {
+        self.standardize_ema_alphas = ema_alphas
+            .iter()
+            .copied()
+            .filter(|a| a.is_finite() && *a > 0.0)
+            .collect();
+        self
+    }
+
+    /// Enable seasonal-diff + EMA depth-2 compositions (PR #4 of #180).
+    ///
+    /// For each `(period, α)`, adds a
+    /// `SeasonalDifferenceWrapper(EmaLeaf(α), period)` candidate. Ports
+    /// skaters' `{7, 12, 24} × {0.05, 0.1}` = 6 candidates. Removes an
+    /// s-lag seasonal from the series so the inner EMA models the
+    /// deseasonalised residual.
+    ///
+    /// Enabled automatically by `.auto()` at the standard 6-candidate pool.
+    pub fn with_seasonal_diff_ema(mut self, pairs: &[(usize, f64)]) -> Self {
+        self.seasonal_diff_ema = pairs
+            .iter()
+            .filter(|(p, a)| *p >= 1 && a.is_finite() && *a > 0.0)
+            .copied()
+            .collect();
+        self
+    }
+
+    /// Enable diff + EMA depth-2 compositions (PR #4 of #180, opt-in).
+    ///
+    /// Adds a `SeasonalDifferenceWrapper(EmaLeaf(α), 1)` for each α.
+    /// **Not auto-enabled** — on M5's zero-heavy first-differenced
+    /// counts these diluted the softmax without adding LL signal.
+    /// Available for callers on continuous / trending data.
+    pub fn with_diff_ema(mut self, alphas: &[f64]) -> Self {
+        self.diff_ema_alphas = alphas
+            .iter()
+            .copied()
+            .filter(|a| a.is_finite() && *a > 0.0)
+            .collect();
+        self
+    }
+
+    /// Enable a multi-speed drift grid (PR #4 of #180, opt-in).
+    ///
+    /// Adds one `DriftLeaf(α)` per entry. **Not auto-enabled** — same
+    /// M5 bakeoff finding as [`Self::with_diff_ema`]. Available for
+    /// callers on data where drift matters.
+    pub fn with_drift_alphas(mut self, alphas: &[f64]) -> Self {
+        self.drift_alphas = alphas
+            .iter()
+            .copied()
+            .filter(|a| a.is_finite() && *a > 0.0)
+            .collect();
         self
     }
 
@@ -960,6 +1044,28 @@ impl LaplaceForecaster {
         if self.theta_alphas.is_empty() {
             self.theta_alphas = vec![0.05, 0.1, 0.3];
         }
+        // PR #4 of #180: standardize + EMA depth-2 compositions.
+        if self.standardize_ema_alphas.is_empty() {
+            self.standardize_ema_alphas = vec![0.05, 0.1];
+        }
+        // PR #4 of #180: seasonal-diff + EMA depth-2 compositions at
+        // skaters' 3 periods × 2 α values = 6 candidates. Actual seasonal
+        // period is auto-detected below; this is the coarse fallback grid.
+        if self.seasonal_diff_ema.is_empty() {
+            self.seasonal_diff_ema = vec![
+                (7, 0.05),
+                (7, 0.1),
+                (12, 0.05),
+                (12, 0.1),
+                (24, 0.05),
+                (24, 0.1),
+            ];
+        }
+        // Note: diff + EMA + multi-speed drift stayed opt-in. M5 bakeoff
+        // showed both dilute the softmax without adding signal on
+        // first-differenced counts (LL regressed 0.003 nats). Available
+        // via `.with_diff_ema(&[...])` / `.with_drift_alphas(&[...])`
+        // for callers on data types where they should help.
         self
     }
 
@@ -993,6 +1099,21 @@ impl LaplaceForecaster {
         if self.theta_alphas.is_empty() {
             self.theta_alphas = vec![0.05, 0.1, 0.3];
         }
+        if self.standardize_ema_alphas.is_empty() {
+            self.standardize_ema_alphas = vec![0.05, 0.1];
+        }
+        if self.seasonal_diff_ema.is_empty() {
+            self.seasonal_diff_ema = vec![
+                (7, 0.05),
+                (7, 0.1),
+                (12, 0.05),
+                (12, 0.1),
+                (24, 0.05),
+                (24, 0.1),
+            ];
+        }
+        // Note: diff_ema / multi-speed drift stay opt-in in auto_aid
+        // too — same bakeoff finding as .auto() (softmax dilution).
         self
     }
 
@@ -1140,6 +1261,31 @@ impl LaplaceForecaster {
         // PR #3 of #180: Theta-method leaves (SES + half OLS slope).
         for &a in &self.theta_alphas {
             leaves.push(Box::new(ThetaLeaf::new(a)));
+        }
+        // PR #4 of #180: standardize + EMA depth-2 compositions.
+        for &alpha in &self.standardize_ema_alphas {
+            leaves.push(Box::new(StandardizeWrapper::new(
+                Box::new(EmaLeaf::new(alpha)),
+                0.05,
+            )));
+        }
+        // PR #4 of #180: seasonal-diff + EMA depth-2 compositions.
+        for &(period, alpha) in &self.seasonal_diff_ema {
+            leaves.push(Box::new(SeasonalDifferenceWrapper::new(
+                Box::new(EmaLeaf::new(alpha)),
+                period,
+            )));
+        }
+        // PR #4 of #180: diff + EMA depth-2 (period=1 == plain differencing).
+        for &alpha in &self.diff_ema_alphas {
+            leaves.push(Box::new(SeasonalDifferenceWrapper::new(
+                Box::new(EmaLeaf::new(alpha)),
+                1,
+            )));
+        }
+        // PR #4 of #180: multi-speed drift grid.
+        for &alpha in &self.drift_alphas {
+            leaves.push(Box::new(DriftLeaf::new(alpha)));
         }
         // PR #3 of #180: Yeo-Johnson coordinate composition — for each λ,
         // append a wrapped copy of every base leaf so far. Skaters composes
