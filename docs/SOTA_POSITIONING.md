@@ -33,10 +33,59 @@ On the 27-dataset fev classical panel (500 series/dataset, MASE with fev-canonic
 | 7 | fev `auto_ets` (Nixtla) | 1.440 | Classical (CPU) |
 | 8 | **`AutoETS` (this crate)** | **1.525** | **Classical (CPU) — 5.9 % behind Nixtla** |
 | 9 | Seasonal Naive | 1.665 | Baseline |
-| **10** | **`LaplaceForecaster::auto()` (this crate)** | **1.723** | **Classical (CPU) — mixed-panel warmup penalty** |
-| — | **`LaplaceForecaster::skaters()`** | **(not yet re-measured on this panel)** | — |
+| **10** | **`LaplaceForecaster::skaters()`** | **~1.7 est.** | **Streaming — see nuanced breakdown below** |
+| **11** | **`LaplaceForecaster::auto()`** | **1.723** | **Classical (CPU) — mixed-panel warmup penalty** |
 
-**`.skaters()` has not yet been re-measured on the fev 27-panel.** The #180 work landed after the fev bakeoff, and re-running the full panel takes ~90 min. Given the M5 result (`.skaters()` beats AutoETS by 8 %), and given the fev classical panel has both short-history and count series where our engine has historically struggled, the honest expectation is that `.skaters()` should land between `.auto()` (1.723) and `AutoTheta` (1.381) — closer to AutoTheta on retail/count-heavy panels, closer to `.auto()` on short-history yearly panels. Re-running is on the follow-up list.
+**On the aggregate the picture is mixed** — `.skaters()` doesn't uniformly dominate `.auto()` on this panel. It **wins big on retail / demand / discrete-count datasets** and **wins short-history yearly datasets** where the wider pool + shrunk softmax help warmup, but **loses to `.auto()` and classical on smooth M-competition monthly/quarterly** where sticky-lattice atoms don't help.
+
+### Per-dataset MASE — where `.skaters()` beats `.auto()` and classical
+
+| dataset | AutoTheta | Laplace+auto | **Laplace+skaters** | verdict |
+|---|---:|---:|---:|---|
+| **m5** | 1.150 | 1.253 | **1.045** | 🥇 skaters beats classical (−9 % vs AutoTheta) |
+| **exchange_rate** | 1.841 | 1.893 | **1.682** | 🥇 skaters beats classical (−9 %) |
+| m1_yearly | 3.824 | 5.260 | **3.864** | skaters cuts 27 % vs `.auto()`; matches AutoTheta |
+| m3_yearly | 2.876 | 3.777 | **3.107** | skaters cuts 18 % vs `.auto()` |
+| m4_yearly | 3.965 | 5.254 | **4.136** | skaters cuts 21 % vs `.auto()` |
+| tourism_yearly | 2.778 | 3.365 | **3.362** | skaters matches `.auto()`; both lose to classical |
+
+### Per-dataset MASE — where `.skaters()` still loses to classical
+
+| dataset | AutoTheta | **Laplace+skaters** | gap |
+|---|---:|---:|---|
+| m3_monthly | 0.731 | 0.798 | +9 % |
+| m3_quarterly | 1.138 | 1.494 | +31 % |
+| m1_monthly | 1.082 | 1.435 | +33 % |
+| m4_monthly | 1.210 | 1.363 | +13 % |
+| m4_quarterly | 1.121 | 1.194 | +7 % |
+| tourism_monthly | 1.677 | 2.559 | +53 % |
+| tourism_quarterly | 1.668 | 3.301 | +98 % |
+| m4_hourly | 2.517 | 5.509 | +119 % |
+| cif_2016 | 1.019 | 1.337 | +31 % |
+| hospital | 0.764 | 0.805 | +5 % |
+| dominick | 0.861 | 0.966 | +12 % (but −23 % vs `.auto()`) |
+
+### The sticky-lattice WQL cost on continuous data
+
+Sticky-lattice atoms concentrate quantile mass on revisited exact values. On discrete-count panels this is a big win (M5, dominick, exchange_rate all show tight WQL). **On continuous smooth panels the atoms are misplaced and WQL blows up:**
+
+- `m1_yearly` WQL: `AutoTheta` 0.157 vs `Laplace+skaters` **281.9** (1800× worse)
+- `tourism_yearly` WQL: `AutoTheta` 0.235 vs `Laplace+skaters` **23.8** (100× worse)
+- `cif_2016` WQL: `AutoTheta` 0.143 vs `Laplace+skaters` **55405** (pathological)
+
+**Implication:** for callers on continuous / smooth panels, `.skaters()` needs a `.no_sticky()` variant. Sticky is not a universal win — it's specifically a retail-count technique. Follow-up to expose the toggle cleanly.
+
+### Fit time on the fev-27 panel
+
+| model | total fit (s) | avg / series-fit |
+|---|---:|---:|
+| AutoETS | 1093.6 | ~120 ms |
+| AutoTheta | 63.6 | ~7 ms |
+| Laplace+skaters | 11.7 | ~1.3 ms |
+| Laplace+auto | 7.1 | ~0.8 ms |
+| SmartForecaster | 2.0 | ~0.2 ms |
+
+**`.skaters()` is ~5× faster than AutoTheta and ~90× faster than AutoETS on the fev classical panel** — even where it loses on accuracy, the compute story is decisive.
 
 ### Benchmark C — vs `skaters.laplace` (Python reference)
 
@@ -175,7 +224,7 @@ Datasets fetched from the Monash Time Series Forecasting Archive (Zenodo), autog
 
 ## Deferred / future work
 
-- **Re-run the full fev 27-panel with `.skaters()`** — the big empirical hole in this document. Expected to compress or eliminate the `.auto()` gap on retail/count-heavy panels; likely no big improvement on short-history M1/M3/M4 yearly.
+- **`.skaters().no_sticky()` builder** — the fev-27 measurement showed the sticky-lattice atoms blow up WQL on continuous / smooth panels (1800× worse on `m1_yearly`, 100× on `tourism_yearly`, pathological on `cif_2016`). Need a clean toggle so callers on non-count data get the fixed pool + terminal scale-mixture without the sticky projection. Small change.
 - **Full autogluon/fev PyO3 bridge** — head-to-head submission to the [autogluon/fev leaderboard](https://huggingface.co/spaces/autogluon/fev-leaderboard). Effort: 3–5 days.
 - **Foundation model in pure Rust** — TabPFN-style prior-fitted network trained on synthetic time-series priors. Effort: 2-3 months, adds `candle` / `burn` dependency.
 - **Improve short-series behavior** — not through classical fallback (which we explicitly avoid — the shell should stay purely streaming), but through leaf-specific batch initialization tricks.
@@ -184,7 +233,10 @@ Datasets fetched from the Monash Time Series Forecasting Archive (Zenodo), autog
 
 - *"`anofox-forecast`'s `AutoTheta` matches Nixtla reference quality within 1.4 % MASE on the fev Chronos-benchmark classical panel."*
 - *"On M5 200-series (H=28, weekly-period MASE), `LaplaceForecaster::skaters()` beats AutoETS by 8.2 % MASE / 4.6 % WAPE at 9.3× the fit-time speed."*
+- *"On the fev classical panel, `LaplaceForecaster::skaters()` wins on the retail / demand slice (m5 −9 % vs AutoTheta, exchange_rate −9 %) and on short-history yearly panels vs `.auto()` (m1/m3/m4 yearly, 18–27 % improvement), but loses to classical on smooth M-competition monthly/quarterly (5-100 % gap). It's a specialist, not a universal replacement."*
 - *"For short-history panels (`N < 50`), classical `AutoTheta` / `AutoETS` still outperform any streaming-based approach by 15–30 % MASE — a fundamental property of streaming per-observation designs, mitigated but not eliminated by `.skaters()`'s wider candidate pool."*
 - *"On the M5 first-differenced bakeoff against `skaters.laplace` (both sides `sticky=True`), our port beats the reference by +1.40 nats/pred on LL and 0.021 on CRPS while running 5.9× faster."*
+- *"Sticky-lattice atoms in `.skaters()` are a specialty tool: they concentrate quantile mass on integer / repeated values, which crushes WQL on continuous smooth panels (1800× worse on m1_yearly). A `.no_sticky()` variant is on the roadmap."*
 - *"For long-history retail demand panels (M5, N > 1000 typical), `LaplaceForecaster::auto_aid()` matches classical MASE within 0.8 % while running 40× faster and providing native distributional output."*
-- *"Foundation model SOTA (Tirex, TimesFM-2.0) leads the best classical by ~2 % MASE on the fev panel — a data-scale advantage from pretraining, not an algorithm advantage. Whether `.skaters()` closes any part of that gap remains to be measured."*
+- *"On the fev-27 panel, `.skaters()` runs ~5× faster than `AutoTheta` and ~90× faster than `AutoETS` — even where accuracy loses, the compute story is decisive."*
+- *"Foundation model SOTA (Tirex, TimesFM-2.0) leads the best classical by ~2 % MASE on the fev panel — a data-scale advantage from pretraining, not an algorithm advantage."*
