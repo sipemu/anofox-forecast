@@ -384,3 +384,8 @@ required-features = ["distributional"]
 name = "fred_bakeoff_export"
 path = "examples/fred_bakeoff_export.rs"
 required-features = ["distributional"]
+
+[[example]]
+name = "multiscale_diagnostic"
+path = "examples/multiscale_diagnostic.rs"
+required-features = ["distributional"]
