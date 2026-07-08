@@ -336,6 +336,19 @@ pub struct LaplaceForecaster {
     /// speed/shrinkage combos; here we just carry `α` speeds. Each α
     /// adds a `DriftLeaf(α)` candidate.
     drift_alphas: Vec<f64>,
+    /// PR #5 of #180: Bayesian-ensemble learning rate. Log-weight update
+    /// per observation is `log_w[i] += η · lp` — smaller η keeps the
+    /// ensemble adaptive to regime change (XGBoost-style shrinkage).
+    /// Skaters ships `η = 0.5`; our historical default was `η = 1.0`
+    /// (exact cumulative log-likelihood). Applied uniformly in
+    /// `fit()`'s per-leaf scoring loop.
+    learning_rate: f64,
+    /// PR #5 of #180: floor for per-leaf log-likelihood before it hits
+    /// the cumulative-weight update. Bounds catastrophic single-obs
+    /// losses so a candidate can recover from one bad prediction.
+    /// Skaters ships `-20.0`; `f64::NEG_INFINITY` disables (our historical
+    /// default).
+    log_clamp: f64,
     /// `α` for the Croston-flavored intermittent-demand leaf. Adds a
     /// demand-per-period leaf that handles zero-inflated series much
     /// better than level-EMAs (which get dragged toward 0 by the
@@ -467,6 +480,12 @@ impl LaplaceForecaster {
             seasonal_diff_ema: Vec::new(),
             diff_ema_alphas: Vec::new(),
             drift_alphas: Vec::new(),
+            // PR #5 of #180 defaults kept at the historical values so
+            // existing callers see the same behavior. `.skaters()`,
+            // `.learning_rate(η)`, `.log_clamp(b)` opt into the new
+            // mechanism.
+            learning_rate: 1.0,
+            log_clamp: f64::NEG_INFINITY,
             intermittent: None,
             seasonal_intermittent: None,
             poisson: None,
@@ -577,6 +596,95 @@ impl LaplaceForecaster {
             .filter(|(p, a)| *p >= 1 && a.is_finite() && *a > 0.0)
             .copied()
             .collect();
+        self
+    }
+
+    /// Override the Bayesian-ensemble learning rate (PR #5 of #180).
+    ///
+    /// The per-observation log-weight update is
+    ///
+    /// ```text
+    ///   log_w[i] += η · logpdf_i(y)
+    /// ```
+    ///
+    /// At `η = 1.0` (our historical default) this is exact cumulative
+    /// log-likelihood updating — a single peaked candidate can pull all
+    /// weight quickly. At `η = 0.5` (skaters' default) the update is
+    /// XGBoost-shrunk: the ensemble stays adaptive to regime change at
+    /// the cost of slower convergence to the best single candidate.
+    ///
+    /// Clamped to `(0, 1]`.
+    pub fn learning_rate(mut self, eta: f64) -> Self {
+        self.learning_rate = eta.clamp(1e-4, 1.0);
+        self
+    }
+
+    /// Set a lower bound on per-observation log-likelihood contributions
+    /// (PR #5 of #180).
+    ///
+    /// Each candidate's `lp = logpdf(y)` is clamped to
+    /// `max(lp, log_clamp)` before its cumulative-weight update. Bounds
+    /// catastrophic single-observation losses so a candidate can recover
+    /// from one bad prediction. Skaters ships `-20.0` (about 5σ into the
+    /// tail of `N(0, 1)`); `f64::NEG_INFINITY` disables the clamp (our
+    /// historical default).
+    pub fn log_clamp(mut self, bound: f64) -> Self {
+        self.log_clamp = bound;
+        self
+    }
+
+    /// Skaters-style ensemble configuration (PR #5 of #180).
+    ///
+    /// Runs the **full fixed candidate pool** with skaters' softmax
+    /// mechanism:
+    ///
+    /// - **All candidates on, always** (no data-heuristic gating) —
+    ///   ~30 leaves matching the depth-1 and depth-2 slices we've
+    ///   ported: EMA (3 speeds), Drift (3 speeds), AR(1), Theta (3 α),
+    ///   Standardize+EMA (2), Seasonal-diff+EMA (6 at {7, 12, 24} × {0.05, 0.1}),
+    ///   Diff+EMA (3), Multi-speed drift (3).
+    /// - **Terminal scale-mixture** on top (matches skaters).
+    /// - **Learning rate `η = 0.5`** (XGBoost-shrunk log-weight updates).
+    /// - **Log-clamp `-20.0`** (bounded single-observation losses).
+    ///
+    /// Contrast with [`Self::auto`] which uses data-heuristic inclusion.
+    /// Skaters' philosophy: trust the softmax; our `.auto()`'s
+    /// philosophy: filter first. Both are legitimate. See #180 for
+    /// bakeoff comparisons.
+    pub fn skaters(mut self) -> Self {
+        self.learning_rate = 0.5;
+        self.log_clamp = -20.0;
+        if self.terminal.is_none() {
+            self.terminal = Some(TerminalScaleMixture::new());
+        }
+        // Populate the full fixed pool, matching skaters' candidate
+        // types (excluding items that don't shift M5 auto-enable per
+        // PR #4 empirical decisions — but still on here because
+        // skaters' style is "everything always on").
+        if self.theta_alphas.is_empty() {
+            self.theta_alphas = vec![0.05, 0.1, 0.3];
+        }
+        if self.standardize_ema_alphas.is_empty() {
+            self.standardize_ema_alphas = vec![0.05, 0.1];
+        }
+        if self.seasonal_diff_ema.is_empty() {
+            self.seasonal_diff_ema = vec![
+                (7, 0.05),
+                (7, 0.1),
+                (12, 0.05),
+                (12, 0.1),
+                (24, 0.05),
+                (24, 0.1),
+            ];
+        }
+        if self.diff_ema_alphas.is_empty() {
+            self.diff_ema_alphas = vec![0.05, 0.1, 0.3];
+        }
+        if self.drift_alphas.is_empty() {
+            self.drift_alphas = vec![0.01, 0.002, 0.0005];
+        }
+        // Do NOT set self.use_auto — the heuristic path is orthogonal
+        // and the caller may pipe `.skaters().auto()` if they want both.
         self
     }
 
@@ -1777,11 +1885,18 @@ impl Forecaster for LaplaceForecaster {
             }
 
             // Score each leaf on this y, then absorb.
+            // PR #5 of #180: apply learning_rate shrinkage and log-clamp
+            // to the cumulative-weight update — skaters' XGBoost-style
+            // ensemble regularization. Defaults (η=1.0, clamp=−∞)
+            // preserve the historical behavior.
+            let eta = self.learning_rate;
+            let clamp = self.log_clamp;
             for (i, leaf) in self.leaves.iter_mut().enumerate() {
                 let g = per_leaf[i];
-                let lp = g.logpdf(y);
-                if lp.is_finite() {
-                    self.cum_log_liks[i] += lp;
+                let lp_raw = g.logpdf(y);
+                if lp_raw.is_finite() {
+                    let lp_clamped = if lp_raw < clamp { clamp } else { lp_raw };
+                    self.cum_log_liks[i] += eta * lp_clamped;
                 }
                 leaf.observe(y);
             }

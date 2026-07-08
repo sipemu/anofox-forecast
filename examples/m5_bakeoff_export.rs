@@ -120,7 +120,12 @@ fn main() {
                 }
             };
             let t0 = Instant::now();
-            let mut m = LaplaceForecaster::new().auto();
+            // `BUILDER=auto` (default) — data-heuristic selector.
+            // `BUILDER=skaters` — fixed-pool + η=0.5 + log-clamp path.
+            let mut m = match std::env::var("BUILDER").as_deref() {
+                Ok("skaters") => LaplaceForecaster::new().skaters(),
+                _ => LaplaceForecaster::new().auto(),
+            };
             if m.fit(&train_ts).is_ok() {
                 if let Ok(mixtures) = m.forecast_dist(1) {
                     if let Some(mix) = mixtures.first() {
