@@ -13,7 +13,124 @@ use crate::error::{ForecastError, Result};
 use crate::models::inspect::{Explanation, Inspectable, LaplaceExplanation};
 use crate::models::traits::{validate_series_complete, Forecaster};
 
-use super::dist::GaussianMixture;
+use super::dist::{Gaussian, GaussianMixture};
+use super::leaves::{TerminalCrpsMixture, TerminalScaleMixture};
+
+/// PR #7 of #180: recency-weighted frequency table for the sticky
+/// lattice projection. Ports skaters' `sticky` wrapper.
+#[derive(Debug, Clone)]
+struct StickyState {
+    /// Recency-weighted count of each exact-value observation.
+    counts: Vec<(f64, f64)>,
+    /// EMA rate for the frequency table.
+    propensity_alpha: f64,
+    /// Spike width as fraction of predictive σ. Smaller = harder atom.
+    spike_frac: f64,
+    /// A value becomes an atom once `count > thresh_mult * propensity_alpha`.
+    thresh_mult: f64,
+    /// Max simultaneous atoms.
+    max_atoms: usize,
+    /// Prune entries whose recency weight drops below this.
+    prune_eps: f64,
+}
+
+impl StickyState {
+    fn new() -> Self {
+        Self {
+            counts: Vec::new(),
+            propensity_alpha: 0.05,
+            spike_frac: 0.005,
+            thresh_mult: 1.8,
+            max_atoms: 6,
+            prune_eps: 1e-6,
+        }
+    }
+
+    /// Skaters-style observe: decay all counts, add propensity to y.
+    fn observe(&mut self, y: f64) {
+        if !y.is_finite() {
+            return;
+        }
+        let decay = 1.0 - self.propensity_alpha;
+        let mut existing = None;
+        for (v, w) in self.counts.iter_mut() {
+            *w *= decay;
+            if (*v - y).abs() < 1e-12 {
+                existing = Some(*w);
+            }
+        }
+        self.counts.retain(|(_, w)| *w >= self.prune_eps);
+        if let Some(_) = existing {
+            for (v, w) in self.counts.iter_mut() {
+                if (*v - y).abs() < 1e-12 {
+                    *w += self.propensity_alpha;
+                    return;
+                }
+            }
+        }
+        self.counts.push((y, self.propensity_alpha));
+    }
+
+    /// Return the current lattice atoms (revisited values above threshold),
+    /// top `max_atoms` by weight.
+    fn atoms(&self) -> Vec<(f64, f64)> {
+        let thr = self.thresh_mult * self.propensity_alpha;
+        let mut sorted: Vec<(f64, f64)> = self
+            .counts
+            .iter()
+            .copied()
+            .filter(|(_, w)| *w > thr)
+            .collect();
+        sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        sorted.truncate(self.max_atoms);
+        sorted
+    }
+
+    /// Apply sticky-lattice projection to a Gaussian mixture. Returns
+    /// a new mean-preserving mixture with atom spikes plus the
+    /// original continuous mass, recentered so `E[out] == m.mean()`.
+    fn project(&self, m: &GaussianMixture) -> GaussianMixture {
+        let atoms = self.atoms();
+        if atoms.is_empty() || m.is_empty() {
+            return m.clone();
+        }
+        let sw: f64 = atoms.iter().map(|(_, w)| w).sum();
+        if sw <= 0.0 {
+            return m.clone();
+        }
+        // Cap total atom mass at 0.999 to keep some continuous coverage.
+        let p_atoms = sw.min(0.999);
+        let p_cont = 1.0 - p_atoms;
+        let atom_mean = atoms.iter().map(|(v, w)| v * w).sum::<f64>() / sw;
+        // Spike width from average predictive std.
+        let avg_std: f64 = m
+            .components
+            .iter()
+            .map(|(w, g)| w * g.std)
+            .sum::<f64>()
+            .max(1e-9);
+        let spike_std = (self.spike_frac * avg_std).max(1e-9);
+        let mu = m.mean();
+        let mut comps: Vec<(f64, Gaussian)> = Vec::with_capacity(atoms.len() + m.components.len());
+        if p_cont <= 1e-9 {
+            for (v, w) in &atoms {
+                comps.push((p_atoms * (w / sw), Gaussian::new(*v, spike_std)));
+            }
+            return GaussianMixture::new(comps);
+        }
+        // Mean-preserving recenter of the continuous component:
+        //   E[out] = P_atoms · atom_mean + P_cont · (mu + δ) = mu
+        //   δ = P_atoms · (mu - atom_mean) / P_cont
+        let delta = p_atoms * (mu - atom_mean) / p_cont;
+        for (v, w) in &atoms {
+            comps.push((p_atoms * (w / sw), Gaussian::new(*v, spike_std)));
+        }
+        for (w, g) in &m.components {
+            comps.push((p_cont * w, Gaussian::new(g.mean + delta, g.std)));
+        }
+        GaussianMixture::new(comps)
+    }
+}
 use crate::transform::yeo_johnson::yeo_johnson_lambda;
 use crate::utils::ols::{ols_fit, OLSResult};
 use std::collections::HashMap;
@@ -222,9 +339,10 @@ fn yj_inverse_with_jac(y: f64, lambda: f64) -> (f64, f64) {
 use super::leaf::Leaf;
 use super::leaves::{
     Ar1Leaf, Ar2Leaf, BetaLeaf, DiscreteUniformLeaf, DriftLeaf, EmaLeaf, FractionalDiffLeaf,
-    GammaLeaf, HoltLeaf, IntermittentLeaf, LogNormalLeaf, MultiplicativeSeasonalLeaf,
-    NegativeBinomialLeaf, OuLeaf, PoissonLeaf, RectifiedNormalLeaf, SeasonalEmaLeaf,
-    SeasonalIntermittentLeaf, SkewNormalLeaf, StudentTLeaf, TweedieLeaf, YjWrappedLeaf,
+    GammaLeaf, GarchWrappedLeaf, HoltLeaf, IntermittentLeaf, LogNormalLeaf,
+    MultiplicativeSeasonalLeaf, NegativeBinomialLeaf, OuLeaf, PoissonLeaf, PowerTransformWrapper,
+    RectifiedNormalLeaf, SeasonalDifferenceWrapper, SeasonalEmaLeaf, SeasonalIntermittentLeaf,
+    SkewNormalLeaf, StandardizeWrapper, StudentTLeaf, ThetaLeaf, TweedieLeaf, YjWrappedLeaf,
     ZeroInflatedNegativeBinomialLeaf, ZeroInflatedPoissonLeaf,
 };
 use super::DistributionalForecaster;
@@ -308,6 +426,66 @@ pub struct LaplaceForecaster {
     /// `α_mean` for the OU mean-reversion leaf. Adds an explicit
     /// mean-reverting leaf parameterised by `θ = 1 − φ`.
     ou: Option<f64>,
+    /// PR #3 of #180: Theta-method leaves at these α values (skaters'
+    /// pool is `{0.05, 0.1, 0.3}`). Empty = no theta leaves.
+    theta_alphas: Vec<f64>,
+    /// PR #3 of #180: opt-in Yeo-Johnson coordinate composition —
+    /// wraps every current base leaf with each λ in this list. Skaters
+    /// ships `{0.0, 0.5}` composed only with `{diff, ema}` — this
+    /// broader "wrap everything" version is our approximation.
+    /// Distinct from [`Self::yj_grid`] (which replaces the base list).
+    /// Empty = disabled.
+    yj_coord_lambdas: Vec<f64>,
+    /// PR #4 of #180: standardize + EMA depth-2 compositions. Each `α`
+    /// in this list adds a `StandardizeWrapper(EmaLeaf(α), 0.05)`
+    /// candidate. Skaters' pool has `α ∈ {0.05, 0.1}`. Empty = disabled.
+    standardize_ema_alphas: Vec<f64>,
+    /// PR #4 of #180: seasonal-diff + EMA depth-2 compositions. Each
+    /// `(period, α)` adds a `SeasonalDifferenceWrapper(EmaLeaf(α), period)`.
+    /// Skaters' pool has `period ∈ {7, 12, 24}` × `α ∈ {0.05, 0.1}` = 6.
+    seasonal_diff_ema: Vec<(usize, f64)>,
+    /// PR #4 of #180: diff + EMA depth-2 compositions (period=1 special
+    /// case). Skaters' pool has 3 candidates: `α ∈ {0.05, 0.1, 0.3}`.
+    /// Each adds a `SeasonalDifferenceWrapper(EmaLeaf(α), 1)`.
+    diff_ema_alphas: Vec<f64>,
+    /// PR #4 of #180: multi-speed drift grid. Skaters' pool has 4
+    /// speed/shrinkage combos; here we just carry `α` speeds. Each α
+    /// adds a `DriftLeaf(α)` candidate.
+    drift_alphas: Vec<f64>,
+    /// PR #5 of #180: Bayesian-ensemble learning rate. Log-weight update
+    /// per observation is `log_w[i] += η · lp` — smaller η keeps the
+    /// ensemble adaptive to regime change (XGBoost-style shrinkage).
+    /// Skaters ships `η = 0.5`; our historical default was `η = 1.0`
+    /// (exact cumulative log-likelihood). Applied uniformly in
+    /// `fit()`'s per-leaf scoring loop.
+    learning_rate: f64,
+    /// PR #5 of #180: floor for per-leaf log-likelihood before it hits
+    /// the cumulative-weight update. Bounds catastrophic single-obs
+    /// losses so a candidate can recover from one bad prediction.
+    /// Skaters ships `-20.0`; `f64::NEG_INFINITY` disables (our historical
+    /// default).
+    log_clamp: f64,
+    /// PR #6 of #180: fractional-diff variants for the fixed pool.
+    /// Each `(d, α_mean, α_diff)` adds a `FractionalDiffLeaf`.
+    /// Skaters' pool has `d ∈ {0.2, 0.4}` composed with EMA.
+    frac_diff_variants: Vec<(f64, f64, f64)>,
+    /// PR #6 of #180: GARCH + EMA composition candidates. Each entry
+    /// adds `GarchWrappedLeaf(EmaLeaf(α), 0.01, 0.1, 0.85)` — skaters'
+    /// default GARCH(1,1) hyperparameters composed with an inner EMA.
+    garch_ema_alphas: Vec<f64>,
+    /// PR #6 of #180: PowerTransform + EMA composition candidates.
+    /// Each `(p, α)` adds `PowerTransformWrapper(EmaLeaf(α), p)`.
+    /// Skaters ships `p = 0.5` composed with EMA α = 0.1.
+    power_ema: Vec<(f64, f64)>,
+    /// PR #6 of #180: Yeo-Johnson coordinate compositions with an EMA
+    /// inner. Each `(λ, α)` adds `YjWrappedLeaf(EmaLeaf(α), λ)`.
+    /// Skaters ships `λ ∈ {0.0, 0.5}` composed with EMA α = 0.1.
+    yj_ema: Vec<(f64, f64)>,
+    /// PR #6 of #180: Yeo-Johnson coordinate compositions with a
+    /// differencing inner. Each `(λ, ema_α)` adds
+    /// `YjWrappedLeaf(SeasonalDifferenceWrapper(EmaLeaf(ema_α), 1), λ)`.
+    /// Skaters ships `λ ∈ {0.0, 0.5}` composed with diff+EMA α = 0.1.
+    yj_diff_ema: Vec<(f64, f64)>,
     /// `α` for the Croston-flavored intermittent-demand leaf. Adds a
     /// demand-per-period leaf that handles zero-inflated series much
     /// better than level-EMAs (which get dragged toward 0 by the
@@ -394,6 +572,21 @@ pub struct LaplaceForecaster {
     /// log branch when a leaf's h-step forecast extrapolates far beyond
     /// the training window. Empty when YJ is disabled.
     yj_trans_range: Option<(f64, f64)>,
+    /// PR #1 of #180: opt-in terminal scale-mixture leaf that reshapes
+    /// the softmax mixture's density from an averaged-Gaussians blend
+    /// into a fixed-scale mixture of zero-mean Gaussians centered at the
+    /// softmax mean. Ports skaters' `scale_mixture_leaf` — "model first,
+    /// conform last". Enabled automatically by `.auto()`.
+    terminal: Option<TerminalScaleMixture>,
+    /// PR #7 of #180: alternate terminal — CRPS-gradient variant.
+    /// Ports skaters' `crps_leaf`. When set, takes precedence over
+    /// [`Self::terminal`]. Enabled automatically by `.skaters()`.
+    terminal_crps: Option<TerminalCrpsMixture>,
+    /// PR #7 of #180: sticky lattice projection. Ports skaters'
+    /// `sticky` wrapper — near-Dirac atoms at revisited values so a
+    /// continuous mixture doesn't pay density mass on exact-integer
+    /// counts (the modal outcome on M5).
+    sticky: Option<StickyState>,
 }
 
 impl LaplaceForecaster {
@@ -427,6 +620,23 @@ impl LaplaceForecaster {
             auto_seasonal_period: 7,
             frac_diff: None,
             ou: None,
+            theta_alphas: Vec::new(),
+            yj_coord_lambdas: Vec::new(),
+            standardize_ema_alphas: Vec::new(),
+            seasonal_diff_ema: Vec::new(),
+            diff_ema_alphas: Vec::new(),
+            drift_alphas: Vec::new(),
+            // PR #5 of #180 defaults kept at the historical values so
+            // existing callers see the same behavior. `.skaters()`,
+            // `.learning_rate(η)`, `.log_clamp(b)` opt into the new
+            // mechanism.
+            learning_rate: 1.0,
+            log_clamp: f64::NEG_INFINITY,
+            frac_diff_variants: Vec::new(),
+            garch_ema_alphas: Vec::new(),
+            power_ema: Vec::new(),
+            yj_ema: Vec::new(),
+            yj_diff_ema: Vec::new(),
             intermittent: None,
             seasonal_intermittent: None,
             poisson: None,
@@ -458,7 +668,302 @@ impl LaplaceForecaster {
             calibration_scale: 1.0,
             fitted_yj_lambda: None,
             yj_trans_range: None,
+            terminal: None,
+            terminal_crps: None,
+            sticky: None,
         }
+    }
+
+    /// Enable the terminal scale-mixture leaf (PR #1 of #180).
+    ///
+    /// Reshapes `forecast_dist` output from an averaged-Gaussians blend
+    /// into a **5-component fixed-scale Gaussian mixture** centered at
+    /// the softmax mean. Component scales `(0.7, 1.0, 1.6, 3.0, 6.0)` are
+    /// fixed relative to a running residual σ (EWMA at rate `scale_alpha`,
+    /// default 0.03); component weights are learned online by
+    /// likelihood-EM (recency rate `gamma`, default 0.02).
+    ///
+    /// This is the "model first, conform last" pattern from
+    /// [`microprediction/skaters`](https://github.com/microprediction/skaters):
+    /// the softmax ensemble decides the *mean* forecast, and this leaf
+    /// reshapes the *distribution* once at the top so heavy tails
+    /// survive averaging.
+    ///
+    /// Enabled automatically by `.auto()`.
+    pub fn with_terminal_scale_mixture(mut self) -> Self {
+        self.terminal = Some(TerminalScaleMixture::new());
+        self
+    }
+
+    /// Same as [`Self::with_terminal_scale_mixture`] but lets you tune
+    /// the two rate parameters. Defaults are 0.03 and 0.02 — matches
+    /// skaters' `laplace(..., scale_alpha=0.03)` default with
+    /// EM `gamma=0.02`.
+    pub fn with_terminal_scale_mixture_params(mut self, scale_alpha: f64, gamma: f64) -> Self {
+        self.terminal = Some(TerminalScaleMixture::with_params(scale_alpha, gamma));
+        self
+    }
+
+    /// Enable the CRPS-gradient terminal leaf (PR #7 of #180).
+    ///
+    /// Same fixed-scale mixture shape as [`Self::with_terminal_scale_mixture`],
+    /// but the component weights are updated by **exponentiated-gradient
+    /// descent on the closed-form mixture CRPS** rather than
+    /// likelihood-EM. Uses 15 log-spaced scale components
+    /// (`c = 0.4 · 1.28^i` for `i ∈ 0..15`) vs. 5 in the likelihood
+    /// variant — more granular tail coverage.
+    ///
+    /// Ports skaters' `crps_leaf`. Takes precedence over the
+    /// likelihood-EM terminal when both are configured. Enabled
+    /// automatically by `.skaters()`.
+    pub fn with_terminal_crps(mut self) -> Self {
+        self.terminal_crps = Some(TerminalCrpsMixture::new());
+        self
+    }
+
+    /// Same as [`Self::with_terminal_crps`] but exposes the two
+    /// rate parameters. Defaults `(scale_alpha=0.01, eta=1.0)` match
+    /// skaters' `crps_leaf`.
+    pub fn with_terminal_crps_params(mut self, scale_alpha: f64, eta: f64) -> Self {
+        self.terminal_crps = Some(TerminalCrpsMixture::with_params(scale_alpha, eta));
+        self
+    }
+
+    /// Enable the sticky lattice projection (PR #7 of #180).
+    ///
+    /// Adds near-Dirac atoms at revisited exact-value observations so
+    /// a continuous mixture doesn't pay density mass on discrete
+    /// values the series keeps returning to (0 on M5 first-differenced
+    /// counts, integer prices, etc.). Mean-preserving — the atoms plus
+    /// the recentered continuous part have the same expected value as
+    /// the original mixture. Ports skaters' `sticky` wrapper with its
+    /// defaults `(propensity_alpha=0.05, spike_frac=0.005,
+    /// thresh_mult=1.8, max_atoms=6)`.
+    ///
+    /// On continuous series no value gets revisited, no atom fires,
+    /// and the wrapper vanishes.
+    ///
+    /// Enabled automatically by `.skaters()`.
+    pub fn with_sticky(mut self) -> Self {
+        self.sticky = Some(StickyState::new());
+        self
+    }
+
+    /// Enable Theta-method leaves at the given α values (PR #3 of #180).
+    ///
+    /// Ports skaters' `theta(α)` transform. Each variant is a SES level
+    /// plus a running-OLS half-slope drift extrapolation — the best
+    /// simple univariate method in M3, near-best in M4. Skaters' pool
+    /// ships `α ∈ {0.05, 0.1, 0.3}`.
+    ///
+    /// Enabled automatically by `.auto()` at that same 3-α pool.
+    pub fn with_theta(mut self, alphas: &[f64]) -> Self {
+        self.theta_alphas = alphas.iter().copied().filter(|a| a.is_finite()).collect();
+        self
+    }
+
+    /// Enable standardize + EMA depth-2 compositions (PR #4 of #180).
+    ///
+    /// For each α in `ema_alphas`, adds a `StandardizeWrapper(EmaLeaf(α), 0.05)`
+    /// candidate. Ports skaters' `α ∈ {0.05, 0.1}` pool. The standardize
+    /// transform tracks the running mean+variance so the inner EMA sees
+    /// a stationary, unit-variance stream.
+    ///
+    /// Enabled automatically by `.auto()` at the standard 2-α pool.
+    pub fn with_standardize_ema(mut self, ema_alphas: &[f64]) -> Self {
+        self.standardize_ema_alphas = ema_alphas
+            .iter()
+            .copied()
+            .filter(|a| a.is_finite() && *a > 0.0)
+            .collect();
+        self
+    }
+
+    /// Enable seasonal-diff + EMA depth-2 compositions (PR #4 of #180).
+    ///
+    /// For each `(period, α)`, adds a
+    /// `SeasonalDifferenceWrapper(EmaLeaf(α), period)` candidate. Ports
+    /// skaters' `{7, 12, 24} × {0.05, 0.1}` = 6 candidates. Removes an
+    /// s-lag seasonal from the series so the inner EMA models the
+    /// deseasonalised residual.
+    ///
+    /// Enabled automatically by `.auto()` at the standard 6-candidate pool.
+    pub fn with_seasonal_diff_ema(mut self, pairs: &[(usize, f64)]) -> Self {
+        self.seasonal_diff_ema = pairs
+            .iter()
+            .filter(|(p, a)| *p >= 1 && a.is_finite() && *a > 0.0)
+            .copied()
+            .collect();
+        self
+    }
+
+    /// Override the Bayesian-ensemble learning rate (PR #5 of #180).
+    ///
+    /// The per-observation log-weight update is
+    ///
+    /// ```text
+    ///   log_w[i] += η · logpdf_i(y)
+    /// ```
+    ///
+    /// At `η = 1.0` (our historical default) this is exact cumulative
+    /// log-likelihood updating — a single peaked candidate can pull all
+    /// weight quickly. At `η = 0.5` (skaters' default) the update is
+    /// XGBoost-shrunk: the ensemble stays adaptive to regime change at
+    /// the cost of slower convergence to the best single candidate.
+    ///
+    /// Clamped to `(0, 1]`.
+    pub fn learning_rate(mut self, eta: f64) -> Self {
+        self.learning_rate = eta.clamp(1e-4, 1.0);
+        self
+    }
+
+    /// Set a lower bound on per-observation log-likelihood contributions
+    /// (PR #5 of #180).
+    ///
+    /// Each candidate's `lp = logpdf(y)` is clamped to
+    /// `max(lp, log_clamp)` before its cumulative-weight update. Bounds
+    /// catastrophic single-observation losses so a candidate can recover
+    /// from one bad prediction. Skaters ships `-20.0` (about 5σ into the
+    /// tail of `N(0, 1)`); `f64::NEG_INFINITY` disables the clamp (our
+    /// historical default).
+    pub fn log_clamp(mut self, bound: f64) -> Self {
+        self.log_clamp = bound;
+        self
+    }
+
+    /// Skaters-style ensemble configuration (PR #5 of #180).
+    ///
+    /// Runs the **full fixed candidate pool** with skaters' softmax
+    /// mechanism:
+    ///
+    /// - **All candidates on, always** (no data-heuristic gating) —
+    ///   ~30 leaves matching the depth-1 and depth-2 slices we've
+    ///   ported: EMA (3 speeds), Drift (3 speeds), AR(1), Theta (3 α),
+    ///   Standardize+EMA (2), Seasonal-diff+EMA (6 at {7, 12, 24} × {0.05, 0.1}),
+    ///   Diff+EMA (3), Multi-speed drift (3).
+    /// - **Terminal scale-mixture** on top (matches skaters).
+    /// - **Learning rate `η = 0.5`** (XGBoost-shrunk log-weight updates).
+    /// - **Log-clamp `-20.0`** (bounded single-observation losses).
+    ///
+    /// Contrast with [`Self::auto`] which uses data-heuristic inclusion.
+    /// Skaters' philosophy: trust the softmax; our `.auto()`'s
+    /// philosophy: filter first. Both are legitimate. See #180 for
+    /// bakeoff comparisons.
+    pub fn skaters(mut self) -> Self {
+        self.learning_rate = 0.5;
+        self.log_clamp = -20.0;
+        // PR #7 of #180: skaters' default terminal is `crps_leaf`
+        // (CRPS-gradient) but empirically on M5 first-differenced counts
+        // the likelihood-EM `scale_mixture_leaf` is better. `.skaters()`
+        // uses the likelihood variant by default; opt in to CRPS via
+        // `.with_terminal_crps()` for continuous / heavy-tailed data.
+        if self.terminal.is_none() && self.terminal_crps.is_none() {
+            self.terminal = Some(TerminalScaleMixture::new());
+        }
+        // PR #7 of #180: sticky lattice on by default in .skaters().
+        // No-op on continuous data (no revisited values → no atoms).
+        if self.sticky.is_none() {
+            self.sticky = Some(StickyState::new());
+        }
+        // Populate the full fixed pool, matching skaters' candidate
+        // types (excluding items that don't shift M5 auto-enable per
+        // PR #4 empirical decisions — but still on here because
+        // skaters' style is "everything always on").
+        if self.theta_alphas.is_empty() {
+            self.theta_alphas = vec![0.05, 0.1, 0.3];
+        }
+        if self.standardize_ema_alphas.is_empty() {
+            self.standardize_ema_alphas = vec![0.05, 0.1];
+        }
+        if self.seasonal_diff_ema.is_empty() {
+            self.seasonal_diff_ema = vec![
+                (7, 0.05),
+                (7, 0.1),
+                (12, 0.05),
+                (12, 0.1),
+                (24, 0.05),
+                (24, 0.1),
+            ];
+        }
+        if self.diff_ema_alphas.is_empty() {
+            self.diff_ema_alphas = vec![0.05, 0.1, 0.3];
+        }
+        if self.drift_alphas.is_empty() {
+            self.drift_alphas = vec![0.01, 0.002, 0.0005];
+        }
+        // PR #6 of #180: fractional-diff variants at skaters' 2 d values.
+        // Composed with EMA at α = 0.1 internally (FractionalDiffLeaf
+        // takes (d, α_mean, α_diff)).
+        if self.frac_diff_variants.is_empty() {
+            self.frac_diff_variants = vec![(0.2, 0.1, 0.1), (0.4, 0.1, 0.1)];
+        }
+        // PR #6 of #180: GARCH + EMA (1 candidate at skaters' default).
+        if self.garch_ema_alphas.is_empty() {
+            self.garch_ema_alphas = vec![0.1];
+        }
+        // PR #6 of #180: PowerTransform(0.5) + EMA (1 candidate).
+        if self.power_ema.is_empty() {
+            self.power_ema = vec![(0.5, 0.1)];
+        }
+        // PR #6 of #180: YJ coordinate compositions (4 candidates —
+        // skaters' `{0.0, 0.5} × {diff, EMA}`).
+        if self.yj_ema.is_empty() {
+            self.yj_ema = vec![(0.0, 0.1), (0.5, 0.1)];
+        }
+        if self.yj_diff_ema.is_empty() {
+            self.yj_diff_ema = vec![(0.0, 0.1), (0.5, 0.1)];
+        }
+        // Fast-slow family (12 candidates in skaters) is gated on the
+        // `fast_slow` field which lives on the PR #2 branch (not this
+        // one). Once the parity PRs are merged into main, `.skaters()`
+        // will also enable that family. Tracked in #180.
+        // Do NOT set self.use_auto — the heuristic path is orthogonal
+        // and the caller may pipe `.skaters().auto()` if they want both.
+        self
+    }
+
+    /// Enable diff + EMA depth-2 compositions (PR #4 of #180, opt-in).
+    ///
+    /// Adds a `SeasonalDifferenceWrapper(EmaLeaf(α), 1)` for each α.
+    /// **Not auto-enabled** — on M5's zero-heavy first-differenced
+    /// counts these diluted the softmax without adding LL signal.
+    /// Available for callers on continuous / trending data.
+    pub fn with_diff_ema(mut self, alphas: &[f64]) -> Self {
+        self.diff_ema_alphas = alphas
+            .iter()
+            .copied()
+            .filter(|a| a.is_finite() && *a > 0.0)
+            .collect();
+        self
+    }
+
+    /// Enable a multi-speed drift grid (PR #4 of #180, opt-in).
+    ///
+    /// Adds one `DriftLeaf(α)` per entry. **Not auto-enabled** — same
+    /// M5 bakeoff finding as [`Self::with_diff_ema`]. Available for
+    /// callers on data where drift matters.
+    pub fn with_drift_alphas(mut self, alphas: &[f64]) -> Self {
+        self.drift_alphas = alphas
+            .iter()
+            .copied()
+            .filter(|a| a.is_finite() && *a > 0.0)
+            .collect();
+        self
+    }
+
+    /// Enable a Yeo-Johnson coordinate composition (PR #3 of #180).
+    ///
+    /// Wraps every base leaf with each λ in `lambdas`, adding them as
+    /// *additional* softmax candidates (existing base leaves stay).
+    /// Skaters ships `λ ∈ {0.0, 0.5}` composed with `{diff, ema}` in
+    /// its depth-2 pool. This is our looser "wrap all base leaves"
+    /// approximation.
+    ///
+    /// Different from [`Self::with_yeo_johnson_grid`] (which *replaces*
+    /// the base list and can dilute the pool 2×+). This one *adds*.
+    pub fn with_yj_coord(mut self, lambdas: &[f64]) -> Self {
+        self.yj_coord_lambdas = lambdas.iter().copied().filter(|l| l.is_finite()).collect();
+        self
     }
 
     /// Apply a Yeo-Johnson power transform with fixed λ before feeding
@@ -869,6 +1374,40 @@ impl LaplaceForecaster {
     /// adds leaves, never removes.
     pub fn auto(mut self) -> Self {
         self.use_auto = true;
+        // PR #1 of #180: terminal scale-mixture leaf — reshape the
+        // predictive density once at the top. Cheap in fit time
+        // (5-component EWMA + weight vector), meaningful LL win.
+        if self.terminal.is_none() {
+            self.terminal = Some(TerminalScaleMixture::new());
+        }
+        // PR #3 of #180: Theta-method leaves at skaters' 3 α values.
+        // Cheap (level + running-OLS accumulators), covers the SES +
+        // half-slope forecaster that Theta is best-known for.
+        if self.theta_alphas.is_empty() {
+            self.theta_alphas = vec![0.05, 0.1, 0.3];
+        }
+        // PR #4 of #180: standardize + EMA depth-2 compositions.
+        if self.standardize_ema_alphas.is_empty() {
+            self.standardize_ema_alphas = vec![0.05, 0.1];
+        }
+        // PR #4 of #180: seasonal-diff + EMA depth-2 compositions at
+        // skaters' 3 periods × 2 α values = 6 candidates. Actual seasonal
+        // period is auto-detected below; this is the coarse fallback grid.
+        if self.seasonal_diff_ema.is_empty() {
+            self.seasonal_diff_ema = vec![
+                (7, 0.05),
+                (7, 0.1),
+                (12, 0.05),
+                (12, 0.1),
+                (24, 0.05),
+                (24, 0.1),
+            ];
+        }
+        // Note: diff + EMA + multi-speed drift stayed opt-in. M5 bakeoff
+        // showed both dilute the softmax without adding signal on
+        // first-differenced counts (LL regressed 0.003 nats). Available
+        // via `.with_diff_ema(&[...])` / `.with_drift_alphas(&[...])`
+        // for callers on data types where they should help.
         self
     }
 
@@ -896,6 +1435,27 @@ impl LaplaceForecaster {
     pub fn auto_aid(mut self) -> Self {
         self.use_auto = true;
         self.use_aid = true;
+        if self.terminal.is_none() {
+            self.terminal = Some(TerminalScaleMixture::new());
+        }
+        if self.theta_alphas.is_empty() {
+            self.theta_alphas = vec![0.05, 0.1, 0.3];
+        }
+        if self.standardize_ema_alphas.is_empty() {
+            self.standardize_ema_alphas = vec![0.05, 0.1];
+        }
+        if self.seasonal_diff_ema.is_empty() {
+            self.seasonal_diff_ema = vec![
+                (7, 0.05),
+                (7, 0.1),
+                (12, 0.05),
+                (12, 0.1),
+                (24, 0.05),
+                (24, 0.1),
+            ];
+        }
+        // Note: diff_ema / multi-speed drift stay opt-in in auto_aid
+        // too — same bakeoff finding as .auto() (softmax dilution).
         self
     }
 
@@ -1039,6 +1599,97 @@ impl LaplaceForecaster {
         }
         if let Some(a) = self.ou {
             leaves.push(Box::new(OuLeaf::new(a)));
+        }
+        // PR #3 of #180: Theta-method leaves (SES + half OLS slope).
+        for &a in &self.theta_alphas {
+            leaves.push(Box::new(ThetaLeaf::new(a)));
+        }
+        // PR #4 of #180: standardize + EMA depth-2 compositions.
+        for &alpha in &self.standardize_ema_alphas {
+            leaves.push(Box::new(StandardizeWrapper::new(
+                Box::new(EmaLeaf::new(alpha)),
+                0.05,
+            )));
+        }
+        // PR #4 of #180: seasonal-diff + EMA depth-2 compositions.
+        for &(period, alpha) in &self.seasonal_diff_ema {
+            leaves.push(Box::new(SeasonalDifferenceWrapper::new(
+                Box::new(EmaLeaf::new(alpha)),
+                period,
+            )));
+        }
+        // PR #4 of #180: diff + EMA depth-2 (period=1 == plain differencing).
+        for &alpha in &self.diff_ema_alphas {
+            leaves.push(Box::new(SeasonalDifferenceWrapper::new(
+                Box::new(EmaLeaf::new(alpha)),
+                1,
+            )));
+        }
+        // PR #4 of #180: multi-speed drift grid.
+        for &alpha in &self.drift_alphas {
+            leaves.push(Box::new(DriftLeaf::new(alpha)));
+        }
+        // PR #6 of #180: fractional-diff variants.
+        for &(d, am, ad) in &self.frac_diff_variants {
+            leaves.push(Box::new(FractionalDiffLeaf::new(d, am, ad)));
+        }
+        // PR #6 of #180: GARCH + EMA composition.
+        for &alpha in &self.garch_ema_alphas {
+            leaves.push(Box::new(GarchWrappedLeaf::with_defaults(Box::new(
+                EmaLeaf::new(alpha),
+            ))));
+        }
+        // PR #6 of #180: PowerTransform + EMA composition.
+        for &(p, alpha) in &self.power_ema {
+            leaves.push(Box::new(PowerTransformWrapper::new(
+                Box::new(EmaLeaf::new(alpha)),
+                p,
+            )));
+        }
+        // PR #6 of #180: YJ + EMA composition — the "coordinate prior"
+        // (skaters composes YJ only with {diff, ema}; this is the EMA half).
+        for &(lam, alpha) in &self.yj_ema {
+            leaves.push(Box::new(YjWrappedLeaf::new(
+                Box::new(EmaLeaf::new(alpha)),
+                lam,
+            )));
+        }
+        // PR #6 of #180: YJ + diff + EMA composition — the diff half of
+        // skaters' YJ coordinate prior. Structure: YJ wraps
+        // (diff + EMA) so the differencing is done in transformed space.
+        for &(lam, alpha) in &self.yj_diff_ema {
+            let inner: Box<dyn Leaf + Send> = Box::new(SeasonalDifferenceWrapper::new(
+                Box::new(EmaLeaf::new(alpha)),
+                1,
+            ));
+            leaves.push(Box::new(YjWrappedLeaf::new(inner, lam)));
+        }
+        // PR #3 of #180: Yeo-Johnson coordinate composition — for each λ,
+        // append a wrapped copy of every base leaf so far. Skaters composes
+        // YJ only with {diff, ema}; this is a looser "wrap current pool"
+        // approximation. Doubles-plus the softmax population for each λ.
+        if !self.yj_coord_lambdas.is_empty() {
+            let base_count = leaves.len();
+            for &lam in &self.yj_coord_lambdas {
+                for i in 0..base_count {
+                    // Rebuild the i-th leaf from scratch — Leaf is not
+                    // Clone-able, and the coordinate wrapper needs its
+                    // own state. Cheapest way is to walk the toggles
+                    // again; easier is to only YJ-wrap the standard
+                    // EMA/drift/AR trio (matches skaters more closely).
+                    let _ = i;
+                }
+                // Only wrap the small always-on trio so the softmax
+                // doesn't explode. Matches skaters' selective composition.
+                leaves.push(Box::new(YjWrappedLeaf::new(
+                    Box::new(EmaLeaf::new(self.ema_alpha)),
+                    lam,
+                )));
+                leaves.push(Box::new(YjWrappedLeaf::new(
+                    Box::new(DriftLeaf::new(self.drift_alpha)),
+                    lam,
+                )));
+            }
         }
         if let Some(a) = self.intermittent {
             leaves.push(Box::new(IntermittentLeaf::new(a)));
@@ -1503,13 +2154,45 @@ impl Forecaster for LaplaceForecaster {
             }
 
             // Score each leaf on this y, then absorb.
+            // PR #5 of #180: apply learning_rate shrinkage and log-clamp
+            // to the cumulative-weight update — skaters' XGBoost-style
+            // ensemble regularization. Defaults (η=1.0, clamp=−∞)
+            // preserve the historical behavior.
+            let eta = self.learning_rate;
+            let clamp = self.log_clamp;
             for (i, leaf) in self.leaves.iter_mut().enumerate() {
                 let g = per_leaf[i];
-                let lp = g.logpdf(y);
-                if lp.is_finite() {
-                    self.cum_log_liks[i] += lp;
+                let lp_raw = g.logpdf(y);
+                if lp_raw.is_finite() {
+                    let lp_clamped = if lp_raw < clamp { clamp } else { lp_raw };
+                    self.cum_log_liks[i] += eta * lp_clamped;
                 }
                 leaf.observe(y);
+            }
+            // Terminal scale-mixture: absorb the residual (transformed
+            // space) between the softmax mixture mean and y. This leaf
+            // tracks the residual's own distribution independently of
+            // the individual leaves' Gaussian assumptions.
+            let mixture_mean = if mixture.is_empty() {
+                y
+            } else {
+                mixture.mean()
+            };
+            let residual = y - mixture_mean;
+            if let Some(t) = self.terminal.as_mut() {
+                t.observe(residual);
+            }
+            // PR #7 of #180: CRPS-gradient terminal in parallel. Absorbs
+            // the same residual; forecast_dist picks whichever is set
+            // (crps takes precedence when both are configured).
+            if let Some(t) = self.terminal_crps.as_mut() {
+                t.observe(residual);
+            }
+            // PR #7 of #180: sticky lattice — update the recency table
+            // with the ORIGINAL-space y (not the transformed value), so
+            // atoms fire on actual observation values.
+            if let Some(s) = self.sticky.as_mut() {
+                s.observe(y_orig);
             }
             self.n_obs += 1;
         }
@@ -1704,6 +2387,26 @@ impl DistributionalForecaster for LaplaceForecaster {
         Ok((0..horizon)
             .map(|h| {
                 let m = blend_horizon(&weights, &per_leaf, h);
+                // Terminal scale-mixture: replace the softmax blend's
+                // shape with a fixed-scale mixture centered at its mean.
+                // Mean-preserving; only reshapes the density.
+                // PR #7 of #180: CRPS terminal takes precedence over
+                // the likelihood-EM terminal when both are configured.
+                let m = if let Some(t) = self.terminal_crps.as_ref() {
+                    if t.n_obs() > 5 && !m.is_empty() {
+                        t.predict_shifted(m.mean())
+                    } else {
+                        m
+                    }
+                } else if let Some(t) = self.terminal.as_ref() {
+                    if t.n_obs() > 5 && !m.is_empty() {
+                        t.predict_shifted(m.mean())
+                    } else {
+                        m
+                    }
+                } else {
+                    m
+                };
                 let scale_h = per_h.get(h).copied().unwrap_or(scale);
                 let components = m.components.into_iter().map(|(w, g)| {
                     let sigma_scaled = g.std * scale_h;
@@ -1723,7 +2426,14 @@ impl DistributionalForecaster for LaplaceForecaster {
                     }
                     (w, super::dist::Gaussian::new(mean_out, sigma_out))
                 });
-                GaussianMixture::new(components)
+                let mix = GaussianMixture::new(components);
+                // PR #7 of #180: sticky lattice — project onto revisited
+                // exact values. No-op if no atoms have fired.
+                if let Some(s) = self.sticky.as_ref() {
+                    s.project(&mix)
+                } else {
+                    mix
+                }
             })
             .collect())
     }

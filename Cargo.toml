@@ -359,3 +359,8 @@ required-features = ["distributional"]
 [[example]]
 name = "period_fix_check"
 path = "examples/period_fix_check.rs"
+
+[[example]]
+name = "m5_bakeoff_export"
+path = "examples/m5_bakeoff_export.rs"
+required-features = ["distributional"]
