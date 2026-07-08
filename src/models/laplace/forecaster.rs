@@ -342,8 +342,8 @@ use super::leaves::{
     GammaLeaf, GarchWrappedLeaf, HoltLeaf, IntermittentLeaf, LogNormalLeaf,
     MultiplicativeSeasonalLeaf, NegativeBinomialLeaf, OuLeaf, PoissonLeaf, PowerTransformWrapper,
     RectifiedNormalLeaf, SeasonalDifferenceWrapper, SeasonalEmaLeaf, SeasonalIntermittentLeaf,
-    SkewNormalLeaf, StandardizeWrapper, StudentTLeaf, ThetaLeaf, TweedieLeaf, YjWrappedLeaf,
-    ZeroInflatedNegativeBinomialLeaf, ZeroInflatedPoissonLeaf,
+    SkewNormalLeaf, SlowStandardizeWrapper, StandardizeWrapper, StudentTLeaf, ThetaLeaf,
+    TweedieLeaf, YjWrappedLeaf, ZeroInflatedNegativeBinomialLeaf, ZeroInflatedPoissonLeaf,
 };
 use super::DistributionalForecaster;
 
@@ -587,6 +587,12 @@ pub struct LaplaceForecaster {
     /// continuous mixture doesn't pay density mass on exact-integer
     /// counts (the modal outcome on M5).
     sticky: Option<StickyState>,
+    /// PR #2 of #180: fast-slow decomposition family. When enabled and
+    /// `N > 200`, appends 12 candidates (6 fast trackers × 2 slow scales)
+    /// to the softmax pool. Opt-in only — on M5 discrete counts the
+    /// terminal scale-mixture already covers residual spread; on
+    /// continuous FRED-style data it helps more.
+    fast_slow: bool,
 }
 
 impl LaplaceForecaster {
@@ -671,6 +677,7 @@ impl LaplaceForecaster {
             terminal: None,
             terminal_crps: None,
             sticky: None,
+            fast_slow: false,
         }
     }
 
@@ -746,6 +753,22 @@ impl LaplaceForecaster {
     /// Enabled automatically by `.skaters()`.
     pub fn with_sticky(mut self) -> Self {
         self.sticky = Some(StickyState::new());
+        self
+    }
+
+    /// Enable the fast-slow decomposition family (PR #2 of #180, opt-in).
+    ///
+    /// Appends 12 candidates when `N > 200` at fit time: 6 fast trackers
+    /// (EMA(0.3), EMA(0.5), Holt(0.4,0.2,0.98), AR(1)(0.3), Drift(0.05),
+    /// EMA(0.95) as differencing-equivalent) × 2 slow scales (α ∈ {0.02, 0.05}).
+    /// Each candidate wraps a fast mean tracker with a slow-EWMA residual
+    /// variance in a [`SlowStandardizeWrapper`].
+    ///
+    /// **Not auto-enabled** — on M5 discrete counts the added candidates
+    /// dilute the softmax without adding LL signal. Continuous FRED-style
+    /// data is the sweet spot.
+    pub fn with_fast_slow(mut self) -> Self {
+        self.fast_slow = true;
         self
     }
 
@@ -1745,7 +1768,7 @@ impl LaplaceForecaster {
         leaves
     }
 
-    fn init_leaves(&mut self) {
+    fn init_leaves(&mut self, n_train: usize) {
         let leaves = self.build_base_leaves();
         let mut leaves = if !self.yj_grid.is_empty() {
             // Coordinate grid: build one fresh base set per λ, wrap each
@@ -1763,9 +1786,25 @@ impl LaplaceForecaster {
         } else {
             leaves
         };
-        // Clear the old redundant setter path — keep `leaves` mut for
-        // the trailing existing logic (self.cum_log_liks / self.leaves).
-        let _ = &mut leaves;
+        // PR #2 of #180: fast-slow decomposition family. Only append
+        // when we have enough training obs for the slow EWMA to
+        // converge (> 200). 6 fast trackers × 2 slow scales = 12
+        // candidates. Skaters ships this same shape in its depth-2 pool.
+        if self.fast_slow && n_train > 200 {
+            for slow_alpha in [0.02, 0.05] {
+                let trackers: [Box<dyn Leaf + Send>; 6] = [
+                    Box::new(EmaLeaf::new(0.3)),
+                    Box::new(EmaLeaf::new(0.5)),
+                    Box::new(HoltLeaf::new(0.4, 0.2, 0.98)),
+                    Box::new(Ar1Leaf::new(0.3)),
+                    Box::new(DriftLeaf::new(0.05)),
+                    Box::new(EmaLeaf::new(0.95)),
+                ];
+                for t in trackers {
+                    leaves.push(Box::new(SlowStandardizeWrapper::new(t, slow_alpha)));
+                }
+            }
+        }
         self.cum_log_liks = vec![0.0; leaves.len()];
         self.leaves = leaves;
     }
@@ -2030,7 +2069,7 @@ impl Forecaster for LaplaceForecaster {
             }
         }
 
-        self.init_leaves();
+        self.init_leaves(values.len());
         self.training_values = values.to_vec();
         self.fitted_values = Vec::with_capacity(values.len());
         self.residuals = Vec::with_capacity(values.len());
