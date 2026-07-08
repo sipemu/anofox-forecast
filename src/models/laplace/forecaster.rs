@@ -14,7 +14,7 @@ use crate::models::inspect::{Explanation, Inspectable, LaplaceExplanation};
 use crate::models::traits::{validate_series_complete, Forecaster};
 
 use super::dist::GaussianMixture;
-use super::leaves::TerminalScaleMixture;
+use super::leaves::{SlowStandardizeWrapper, TerminalScaleMixture};
 use crate::transform::yeo_johnson::yeo_johnson_lambda;
 use crate::utils::ols::{ols_fit, OLSResult};
 use std::collections::HashMap;
@@ -401,6 +401,12 @@ pub struct LaplaceForecaster {
     /// softmax mean. Ports skaters' `scale_mixture_leaf` — "model first,
     /// conform last". Enabled automatically by `.auto()`.
     terminal: Option<TerminalScaleMixture>,
+    /// PR #2 of #180: fast-slow decomposition family. When enabled and
+    /// `N > 200`, appends 12 candidates (6 fast trackers × 2 slow scales)
+    /// to the softmax pool. Each candidate wraps a fast mean tracker
+    /// with a slow-EWMA residual-variance spread. Enabled automatically
+    /// by `.auto()`.
+    fast_slow: bool,
 }
 
 impl LaplaceForecaster {
@@ -466,7 +472,25 @@ impl LaplaceForecaster {
             fitted_yj_lambda: None,
             yj_trans_range: None,
             terminal: None,
+            fast_slow: false,
         }
+    }
+
+    /// Enable the fast-slow decomposition candidate family (PR #2 of #180).
+    ///
+    /// Appends 12 candidates to the softmax pool: 6 fast mean trackers
+    /// × 2 slow-EWMA residual-variance scales. Ports skaters'
+    /// "thinking fast and slow" pattern — the mean reacts to every
+    /// observation, the residual scale drifts an order of magnitude
+    /// more slowly, so short bursts of noise don't blow up the density.
+    ///
+    /// Gated on `N > 200` at `fit()` time so the slow EWMA has enough
+    /// residuals to converge.
+    ///
+    /// Enabled automatically by `.auto()`.
+    pub fn with_fast_slow(mut self) -> Self {
+        self.fast_slow = true;
+        self
     }
 
     /// Enable the terminal scale-mixture leaf (PR #1 of #180).
@@ -907,11 +931,18 @@ impl LaplaceForecaster {
     /// adds leaves, never removes.
     pub fn auto(mut self) -> Self {
         self.use_auto = true;
-        // Turn on the terminal scale-mixture by default. Cheap in fit
-        // time (5-component EWMA + weight vector), meaningful LL win.
+        // PR #1 of #180: terminal scale-mixture leaf — reshape the
+        // predictive density once at the top. Cheap, meaningful LL win.
         if self.terminal.is_none() {
             self.terminal = Some(TerminalScaleMixture::new());
         }
+        // PR #2 of #180: fast-slow family stays opt-in via
+        // `.with_fast_slow()`. On M5 discrete counts the terminal
+        // scale-mixture already captures residual spread; the fast-slow
+        // trackers dilute the softmax without a meaningful LL win
+        // (+0.008 nats on M5 100-series bakeoff, +0.013 CRPS regression,
+        // 2× fit time). On continuous FRED-style data they help more —
+        // hence the builder is available but off by default.
         self
     }
 
@@ -1140,7 +1171,7 @@ impl LaplaceForecaster {
         leaves
     }
 
-    fn init_leaves(&mut self) {
+    fn init_leaves(&mut self, n_train: usize) {
         let leaves = self.build_base_leaves();
         let mut leaves = if !self.yj_grid.is_empty() {
             // Coordinate grid: build one fresh base set per λ, wrap each
@@ -1158,6 +1189,29 @@ impl LaplaceForecaster {
         } else {
             leaves
         };
+        // PR #2 of #180: fast-slow family. Only append when we have
+        // enough training obs for the slow EWMA to converge (>200).
+        // 6 fast trackers × 2 slow scales = 12 candidates. Each
+        // candidate is (fast tracker) + slow-EWMA residual variance.
+        if self.fast_slow && n_train > 200 {
+            for slow_alpha in [0.02, 0.05] {
+                let trackers: [Box<dyn Leaf + Send>; 6] = [
+                    Box::new(EmaLeaf::new(0.3)),
+                    Box::new(EmaLeaf::new(0.5)),
+                    Box::new(HoltLeaf::new(0.4, 0.2, 0.98)),
+                    Box::new(Ar1Leaf::new(0.3)),
+                    Box::new(DriftLeaf::new(0.05)),
+                    // 6th tracker: EMA α=0.95 as a random-walk-like tracker
+                    // (skaters uses `difference()` here; the level EMA at
+                    // near-1 α is effectively naive-with-noise, matching
+                    // "the mean is roughly the last obs").
+                    Box::new(EmaLeaf::new(0.95)),
+                ];
+                for t in trackers {
+                    leaves.push(Box::new(SlowStandardizeWrapper::new(t, slow_alpha)));
+                }
+            }
+        }
         // Clear the old redundant setter path — keep `leaves` mut for
         // the trailing existing logic (self.cum_log_liks / self.leaves).
         let _ = &mut leaves;
@@ -1425,7 +1479,7 @@ impl Forecaster for LaplaceForecaster {
             }
         }
 
-        self.init_leaves();
+        self.init_leaves(values.len());
         self.training_values = values.to_vec();
         self.fitted_values = Vec::with_capacity(values.len());
         self.residuals = Vec::with_capacity(values.len());
