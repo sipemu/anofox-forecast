@@ -89,7 +89,16 @@ impl StickyState {
     /// Apply sticky-lattice projection to a Gaussian mixture. Returns
     /// a new mean-preserving mixture with atom spikes plus the
     /// original continuous mass, recentered so `E[out] == m.mean()`.
-    fn project(&self, m: &GaussianMixture) -> GaussianMixture {
+    ///
+    /// `h` is the forecast horizon (1-based). Fix A of the fev-27
+    /// follow-up: atom mass decays exponentially with `h`:
+    /// `p_atoms(h) = p_atoms · (1 - decay_per_step)^(h-1)`
+    /// with `decay_per_step = 0.05` (half-life ~14 steps). This models
+    /// the fact that revisited-value evidence gets stale as the
+    /// forecast moves further ahead — timeless atoms were the root of
+    /// the fev-27 continuous-panel WQL blowup (up to 1800× worse than
+    /// classical on `m1_yearly`).
+    fn project(&self, m: &GaussianMixture, h: usize) -> GaussianMixture {
         let atoms = self.atoms();
         if atoms.is_empty() || m.is_empty() {
             return m.clone();
@@ -98,8 +107,11 @@ impl StickyState {
         if sw <= 0.0 {
             return m.clone();
         }
+        // Fix A of fev-27 follow-up: horizon-decayed atom mass.
+        const DECAY_PER_STEP: f64 = 0.05;
+        let horizon_factor = (1.0 - DECAY_PER_STEP).powi(h.saturating_sub(1) as i32);
         // Cap total atom mass at 0.999 to keep some continuous coverage.
-        let p_atoms = sw.min(0.999);
+        let p_atoms = (sw * horizon_factor).min(0.999);
         let p_cont = 1.0 - p_atoms;
         let atom_mean = atoms.iter().map(|(v, w)| v * w).sum::<f64>() / sw;
         // Spike width from average predictive std.
@@ -2585,9 +2597,11 @@ impl DistributionalForecaster for LaplaceForecaster {
                 });
                 let mix = GaussianMixture::new(components);
                 // PR #7 of #180: sticky lattice — project onto revisited
-                // exact values. No-op if no atoms have fired.
+                // exact values. No-op if no atoms have fired. Fix A of
+                // fev-27 follow-up: horizon-decayed atom mass (`h + 1`
+                // since the closure's `h` is 0-based).
                 if let Some(s) = self.sticky.as_ref() {
-                    s.project(&mix)
+                    s.project(&mix, h + 1)
                 } else {
                     mix
                 }

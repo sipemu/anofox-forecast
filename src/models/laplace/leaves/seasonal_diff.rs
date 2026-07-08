@@ -54,21 +54,35 @@ impl Leaf for SeasonalDifferenceWrapper {
         // For h in 0..horizon, the anchor at prediction step h+1 is:
         //   - if h < s: the observation at buf[len - s + h]
         //   - else: the recovered mean at horizon h - s
+        //
+        // Fix B of the fev-27 follow-up (m4_hourly): at h >= s we
+        // *don't* add the inner leaf's residual mean to the anchor.
+        // The naive recursion `mean = residual_forecast + anchor` was
+        // compounding a non-zero-mean residual EMA (drift) across
+        // every period, giving `mean = (h/s) × drift + seasonal_naive`
+        // — divergent at long horizons on trending series like M4-hourly
+        // electricity load. At h >= s we pin to pure seasonal-naive
+        // (anchor only). The residual variance still contributes to
+        // spread, but the mean is trend-safe.
         let mut recovered_means: Vec<f64> = Vec::with_capacity(horizon);
         let mut out: Vec<Gaussian> = Vec::with_capacity(horizon);
         for h in 0..horizon {
-            let anchor = if h < s {
+            let g = inner[h];
+            let (anchor, mean_out) = if h < s {
                 let buf_idx = buf.len().saturating_sub(s).saturating_add(h);
-                if buf_idx < buf.len() {
+                let a = if buf_idx < buf.len() {
                     buf[buf_idx]
                 } else {
                     0.0
-                }
+                };
+                (a, g.mean + a)
             } else {
-                recovered_means[h - s]
+                let a = recovered_means[h - s];
+                // At h >= period, drop the residual to prevent drift
+                // compounding — pure seasonal-naive mean.
+                (a, a)
             };
-            let g = inner[h];
-            let mean_out = g.mean + anchor;
+            let _ = anchor;
             recovered_means.push(mean_out);
             out.push(Gaussian::new(mean_out, g.std));
         }
