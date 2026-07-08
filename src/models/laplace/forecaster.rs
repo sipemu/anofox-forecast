@@ -349,6 +349,27 @@ pub struct LaplaceForecaster {
     /// Skaters ships `-20.0`; `f64::NEG_INFINITY` disables (our historical
     /// default).
     log_clamp: f64,
+    /// PR #6 of #180: fractional-diff variants for the fixed pool.
+    /// Each `(d, α_mean, α_diff)` adds a `FractionalDiffLeaf`.
+    /// Skaters' pool has `d ∈ {0.2, 0.4}` composed with EMA.
+    frac_diff_variants: Vec<(f64, f64, f64)>,
+    /// PR #6 of #180: GARCH + EMA composition candidates. Each entry
+    /// adds `GarchWrappedLeaf(EmaLeaf(α), 0.01, 0.1, 0.85)` — skaters'
+    /// default GARCH(1,1) hyperparameters composed with an inner EMA.
+    garch_ema_alphas: Vec<f64>,
+    /// PR #6 of #180: PowerTransform + EMA composition candidates.
+    /// Each `(p, α)` adds `PowerTransformWrapper(EmaLeaf(α), p)`.
+    /// Skaters ships `p = 0.5` composed with EMA α = 0.1.
+    power_ema: Vec<(f64, f64)>,
+    /// PR #6 of #180: Yeo-Johnson coordinate compositions with an EMA
+    /// inner. Each `(λ, α)` adds `YjWrappedLeaf(EmaLeaf(α), λ)`.
+    /// Skaters ships `λ ∈ {0.0, 0.5}` composed with EMA α = 0.1.
+    yj_ema: Vec<(f64, f64)>,
+    /// PR #6 of #180: Yeo-Johnson coordinate compositions with a
+    /// differencing inner. Each `(λ, ema_α)` adds
+    /// `YjWrappedLeaf(SeasonalDifferenceWrapper(EmaLeaf(ema_α), 1), λ)`.
+    /// Skaters ships `λ ∈ {0.0, 0.5}` composed with diff+EMA α = 0.1.
+    yj_diff_ema: Vec<(f64, f64)>,
     /// `α` for the Croston-flavored intermittent-demand leaf. Adds a
     /// demand-per-period leaf that handles zero-inflated series much
     /// better than level-EMAs (which get dragged toward 0 by the
@@ -486,6 +507,11 @@ impl LaplaceForecaster {
             // mechanism.
             learning_rate: 1.0,
             log_clamp: f64::NEG_INFINITY,
+            frac_diff_variants: Vec::new(),
+            garch_ema_alphas: Vec::new(),
+            power_ema: Vec::new(),
+            yj_ema: Vec::new(),
+            yj_diff_ema: Vec::new(),
             intermittent: None,
             seasonal_intermittent: None,
             poisson: None,
@@ -683,6 +709,32 @@ impl LaplaceForecaster {
         if self.drift_alphas.is_empty() {
             self.drift_alphas = vec![0.01, 0.002, 0.0005];
         }
+        // PR #6 of #180: fractional-diff variants at skaters' 2 d values.
+        // Composed with EMA at α = 0.1 internally (FractionalDiffLeaf
+        // takes (d, α_mean, α_diff)).
+        if self.frac_diff_variants.is_empty() {
+            self.frac_diff_variants = vec![(0.2, 0.1, 0.1), (0.4, 0.1, 0.1)];
+        }
+        // PR #6 of #180: GARCH + EMA (1 candidate at skaters' default).
+        if self.garch_ema_alphas.is_empty() {
+            self.garch_ema_alphas = vec![0.1];
+        }
+        // PR #6 of #180: PowerTransform(0.5) + EMA (1 candidate).
+        if self.power_ema.is_empty() {
+            self.power_ema = vec![(0.5, 0.1)];
+        }
+        // PR #6 of #180: YJ coordinate compositions (4 candidates —
+        // skaters' `{0.0, 0.5} × {diff, EMA}`).
+        if self.yj_ema.is_empty() {
+            self.yj_ema = vec![(0.0, 0.1), (0.5, 0.1)];
+        }
+        if self.yj_diff_ema.is_empty() {
+            self.yj_diff_ema = vec![(0.0, 0.1), (0.5, 0.1)];
+        }
+        // Fast-slow family (12 candidates in skaters) is gated on the
+        // `fast_slow` field which lives on the PR #2 branch (not this
+        // one). Once the parity PRs are merged into main, `.skaters()`
+        // will also enable that family. Tracked in #180.
         // Do NOT set self.use_auto — the heuristic path is orthogonal
         // and the caller may pipe `.skaters().auto()` if they want both.
         self
@@ -1394,6 +1446,41 @@ impl LaplaceForecaster {
         // PR #4 of #180: multi-speed drift grid.
         for &alpha in &self.drift_alphas {
             leaves.push(Box::new(DriftLeaf::new(alpha)));
+        }
+        // PR #6 of #180: fractional-diff variants.
+        for &(d, am, ad) in &self.frac_diff_variants {
+            leaves.push(Box::new(FractionalDiffLeaf::new(d, am, ad)));
+        }
+        // PR #6 of #180: GARCH + EMA composition.
+        for &alpha in &self.garch_ema_alphas {
+            leaves.push(Box::new(GarchWrappedLeaf::with_defaults(Box::new(
+                EmaLeaf::new(alpha),
+            ))));
+        }
+        // PR #6 of #180: PowerTransform + EMA composition.
+        for &(p, alpha) in &self.power_ema {
+            leaves.push(Box::new(PowerTransformWrapper::new(
+                Box::new(EmaLeaf::new(alpha)),
+                p,
+            )));
+        }
+        // PR #6 of #180: YJ + EMA composition — the "coordinate prior"
+        // (skaters composes YJ only with {diff, ema}; this is the EMA half).
+        for &(lam, alpha) in &self.yj_ema {
+            leaves.push(Box::new(YjWrappedLeaf::new(
+                Box::new(EmaLeaf::new(alpha)),
+                lam,
+            )));
+        }
+        // PR #6 of #180: YJ + diff + EMA composition — the diff half of
+        // skaters' YJ coordinate prior. Structure: YJ wraps
+        // (diff + EMA) so the differencing is done in transformed space.
+        for &(lam, alpha) in &self.yj_diff_ema {
+            let inner: Box<dyn Leaf + Send> = Box::new(SeasonalDifferenceWrapper::new(
+                Box::new(EmaLeaf::new(alpha)),
+                1,
+            ));
+            leaves.push(Box::new(YjWrappedLeaf::new(inner, lam)));
         }
         // PR #3 of #180: Yeo-Johnson coordinate composition — for each λ,
         // append a wrapped copy of every base leaf so far. Skaters composes
