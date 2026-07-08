@@ -2195,6 +2195,26 @@ impl Forecaster for LaplaceForecaster {
             }
         }
 
+        // Fev-27 follow-up (#9): STL leaf detection — runs for ALL
+        // configurations (not just `.auto()`) so `.skaters()` also
+        // benefits when strong seasonality is present. `.new()` and
+        // manually-configured forecasters keep default (no STL) unless
+        // the user opts in.
+        if self.stl_period.is_none() && (self.use_auto || self.learning_rate < 1.0) {
+            // learning_rate < 1.0 means `.skaters()` was called
+            // (which sets it to 0.5). Enable STL detection there too.
+            let detected_period = detect_seasonal_period(values);
+            let effective_period = detected_period.unwrap_or(self.auto_seasonal_period);
+            if effective_period >= 2 && values.len() >= 3 * effective_period {
+                let chars = auto_characteristics(values, effective_period);
+                if chars.seasonality_strength > 0.30 {
+                    self.stl_period = Some(effective_period);
+                    // Re-init leaves so STL leaf gets added to the pool.
+                    self.init_leaves();
+                }
+            }
+        }
+
         // Auto-selector: inspect series characteristics before initialising
         // leaves and set the opt-in toggles from residual-slicing evidence.
         // User-configured toggles are respected — auto only adds.
