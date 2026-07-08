@@ -123,6 +123,17 @@ impl TerminalScaleMixture {
         let a = self.scale_alpha.max(1.0 / n);
         self.v = (1.0 - a) * self.v + a * r * r;
 
+        // Accuracy-audit #5: AR(1) autocorrelation EWMA. Update
+        // `phi ~= E[r_t * r_{t-1}] / E[r_t²]`. Clamped to (-0.9, 0.9)
+        // for stationarity. Only starts updating after we have a
+        // previous residual (n_obs >= 2).
+        if self.n_obs >= 2 && self.v > 1e-12 {
+            let rho = (r * self.prev_r) / self.v;
+            let phi_alpha = a; // Use same rate as variance EWMA.
+            self.phi = ((1.0 - phi_alpha) * self.phi + phi_alpha * rho).clamp(-0.9, 0.9);
+        }
+        self.prev_r = r;
+
         let sigma = if self.v.is_finite() && self.v > 0.0 {
             self.v.sqrt()
         } else {

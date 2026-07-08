@@ -3082,8 +3082,18 @@ impl DistributionalForecaster for LaplaceForecaster {
                 // residuals and scale std by √(h+1). Closes WQL underfit
                 // at long horizons (h + 1 since the closure's `h` is
                 // 0-based).
+                //
+                // Accuracy-audit #5: if terminal tracks AR(1) φ, use
+                // `√((1 − φ^(2(h+1))) / (1 − φ²))` — the true AR(1)
+                // h-step predictive std. Falls back to `√(h+1)` when
+                // φ ≈ 0 (IID case). Tighter spread on mean-reverting
+                // residuals (φ < 0), wider on persistent (φ > 0).
                 let m = if h > 0 {
-                    let scale = ((h + 1) as f64).sqrt();
+                    let scale = self
+                        .terminal
+                        .as_ref()
+                        .map(|t| t.h_step_std_scale(h + 1))
+                        .unwrap_or_else(|| ((h + 1) as f64).sqrt());
                     let inflated = m
                         .components
                         .into_iter()

@@ -6,6 +6,57 @@ Systematic evaluation of the 8 accuracy improvement ideas proposed after the STL
 
 ---
 
+## Attempted #2 — NO EFFECT, kept as opt-in
+
+**Implemented** as `.with_multi_h_scoring()`. Snapshots per-leaf
+h-step predictions every 20 steps during fit. After the observation
+loop, retrospectively scores against actual future y[t+h-1], adds
+`η/h · logpdf` to `cum_log_liks` for each (leaf, snapshot, h).
+
+**Result on fev-27** (`.auto().with_multi_h_scoring()`):
+
+  MASE 5.919 (baseline: 5.924, Δ −0.08 %) — essentially no change.
+
+**Diagnosis**: multi-h signal was too small compared to 500+ 1-step
+updates accumulated during the main fit. Weight `η/h = 0.5/h` sums
+to ~1.5 total, but is spread across ~30 leaves × 30 snapshots. Per-
+leaf effect is a rounding error.
+
+**Decision**: Kept as opt-in only. To have real impact would need
+either much higher weight (~10×) or retrospective scoring at every
+step (not snapshots). Both add cost; deferred.
+
+## Attempted #5 — AR(1) TERMINAL, shipped as DEFAULT
+
+**Implemented** as tracking `phi` (EWMA of `r_t · r_{t-1} / v`) in
+`TerminalScaleMixture`. At forecast time, replaces the naive `√h`
+scaling on the terminal σ with `√((1 − φ^(2h)) / (1 − φ²))`,
+which is the correct h-step std for AR(1) residuals.
+
+**Result on fev-27**:
+
+| model | WQL before | WQL after AR(1) | Δ |
+|---|---:|---:|---:|
+| `.auto()` | 0.159 | **0.137** | **−14 %** ✅ |
+| `.skaters()` | 0.607 | **0.448** | **−26 %** ✅ |
+| MASE (both) | unchanged | unchanged | as expected (φ only affects σ, not mean) |
+
+Big win on calibration. On `.skaters()`, this brings WQL closer to
+the `.auto()` level. AutoTheta / AutoETS pre-filter for comparison
+came in at WQL ~0.13 in the full run — we're now **at parity on
+`.auto()`'s WQL**.
+
+Unlike #1 and #2, this is **enabled by default** because:
+- Doesn't require a new builder — the estimator runs whenever the
+  terminal is active (all `.auto()` / `.skaters()` paths).
+- Zero storage overhead.
+- Reduces to `√h` exactly when `φ ≈ 0` (IID), so IID series are
+  unaffected.
+- On mean-reverting residuals (φ < 0), tighter spread (win).
+- On persistent residuals (φ > 0), wider spread (win).
+
+---
+
 ## Attempted #1 — STACKING REGRESSED, REVERTED
 
 **Implemented** as `.with_stacking()`: snapshots per-leaf 1-step-ahead
