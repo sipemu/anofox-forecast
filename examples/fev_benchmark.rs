@@ -513,14 +513,12 @@ fn run_dataset(ds: &Dataset, sample_per: usize, enabled: &[bool]) -> Option<Data
             fit_us_sum[1] += t0.elapsed().as_micros();
         }
         // Model 2: Laplace + auto — mixture quantiles for WQL.
-        // TEMP: testing .with_stacking() as an accuracy improvement.
         #[cfg(feature = "distributional")]
         if enabled[2] {
             use anofox_forecast::models::DistributionalForecaster;
             let t0 = Instant::now();
             let mut m = LaplaceForecaster::new()
                 .auto()
-                .with_stacking()
                 .auto_with_seasonal_period(ds.period.max(2));
             if m.fit(&train_ts).is_ok() {
                 if let Ok(mixtures) = m.forecast_dist(ds.horizon) {

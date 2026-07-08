@@ -6,6 +6,55 @@ Systematic evaluation of the 8 accuracy improvement ideas proposed after the STL
 
 ---
 
+## Attempted #1 — STACKING REGRESSED, REVERTED
+
+**Implemented** as `.with_stacking()`: snapshots per-leaf 1-step-ahead
+prediction means during fit, solves ridge OLS (λ=1e-4) via normal
+equations + Gaussian elimination, projects to non-negative simplex,
+uses those weights in `forecast_dist` for the mean blend.
+
+**Result on fev-27 with `.auto().with_stacking()`**: **REGRESSION**.
+
+| model | before | after stacking | Δ |
+|---|---:|---:|---:|
+| `.auto()` MASE | 5.924 | **6.519** | **+10 %** ❌ |
+| `.auto()` WQL | 0.159 | 0.168 | +5.7 % ❌ |
+
+**Diagnosis**:
+- Ridge too small: `1e-4 · effective_n` is negligible compared to
+  typical XᵀX magnitudes. Effectively unregularized OLS on highly
+  collinear leaf predictions (multiple EMAs at nearby α).
+- In-sample overfit: OLS on training predictions can't distinguish
+  "leaf that genuinely predicts" from "leaf that overfits training".
+  Softmax at least uses log-likelihood which is bounded, whereas OLS
+  on unbounded MSE can lock onto noise.
+- Missing holdout CV: proper stacking uses out-of-sample predictions
+  (K-fold or time-series CV). My in-sample impl is a known
+  anti-pattern.
+
+**Fix candidates** (untried):
+- Rolling-origin holdout: for each observation `y_t`, use leaves that
+  had NOT seen `y[t-1..t]` when they emitted their prediction. Since
+  our streaming leaves see each obs exactly once at `observe(y)`, and
+  the prediction at step t is made BEFORE observe(y_t), our
+  predictions ARE technically one-step-ahead — but the ensembled
+  prediction still overfits because all leaves have seen the same
+  training window.
+- Aggressive ridge: try λ = 0.1, 1.0, 10.0.
+- Blend stacking + softmax: `w_final = α · w_stacking + (1-α) · w_softmax`.
+- NNLS with sum-to-one via Lagrangian rather than simplex projection.
+
+**Code kept**: `.with_stacking()` builder + fields remain — opt-in only,
+not auto-enabled. Callers can experiment with `.with_stacking()` on
+their own data. See `predictions_history`, `stacking_weights`,
+`solve_stacking()`, `project_to_simplex()` in `forecaster.rs`.
+
+**Decision**: MOVE ON. Stacking as implemented doesn't work. Would
+need deeper thought — potentially rolling-origin CV or aggressive ridge
+tuning — before it's a real improvement.
+
+## Original evaluation of #1 (before implementation)
+
 ## #1 — Ensemble stacking with OLS/ridge on training predictions
 
 **Idea**: after fit, learn a linear blend of leaf forecasts by ridge against training values. Replace/augment the softmax blend at forecast time.
