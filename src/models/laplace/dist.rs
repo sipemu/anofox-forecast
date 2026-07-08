@@ -11,8 +11,9 @@ use std::f64::consts::{PI, SQRT_2};
 const SQRT_2PI: f64 = 2.506_628_274_631_000_7;
 /// Precomputed `0.5 · ln(2π)` — appears in `Gaussian::logpdf` and
 /// `GaussianMixture::logpdf`. Const so the compiler doesn't recompute
-/// via `(2·π).ln()` every call.
-const HALF_LN_2PI: f64 = 0.918_938_533_204_672_7;
+/// via `(2·π).ln()` every call. `pub(super)` so the fit-loop can
+/// inline `logpdf` in `forecaster.rs` without a helper call.
+pub(super) const HALF_LN_2PI: f64 = 0.918_938_533_204_672_7;
 
 /// Single normal component.
 #[derive(Debug, Clone, Copy, PartialEq)]

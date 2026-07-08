@@ -544,7 +544,7 @@ pub struct LaplaceForecaster {
     /// AID-flagged `NewProduct` observation. Default off.
     trim_new_product_prefix: bool,
 
-    leaves: Vec<Box<dyn Leaf + Send>>,
+    leaves: Vec<super::leaf_enum::LeafEnum>,
     cum_log_liks: Vec<f64>,
     n_obs: usize,
 
@@ -591,6 +591,10 @@ pub struct LaplaceForecaster {
     /// so the fit-loop's `predict_one` results aren't heap-allocated per
     /// observation. Sized once to `self.leaves.len()` at fit start.
     scratch_per_leaf: Vec<Gaussian>,
+    /// Perf: parallel scratch buffer of `ln(std)` for each entry of
+    /// [`Self::scratch_per_leaf`]. Precomputed once per obs so the
+    /// scoring loop's inlined `logpdf` has zero transcendentals.
+    scratch_ln_std: Vec<f64>,
     /// Perf: reusable scratch buffer for softmax weights so
     /// `self.weights()` doesn't allocate on the fit hot path.
     scratch_weights: Vec<f64>,
@@ -679,6 +683,7 @@ impl LaplaceForecaster {
             terminal_crps: None,
             sticky: None,
             scratch_per_leaf: Vec::new(),
+            scratch_ln_std: Vec::new(),
             scratch_weights: Vec::new(),
         }
     }
@@ -1565,216 +1570,217 @@ impl LaplaceForecaster {
 
     /// Build a fresh copy of the base leaf set (respecting user toggles).
     /// Used both for the single-shell path and per-λ in the YJ coord grid.
-    fn build_base_leaves(&self) -> Vec<Box<dyn Leaf + Send>> {
-        let mut leaves: Vec<Box<dyn Leaf + Send>> = if self.use_populations_wide {
+    fn build_base_leaves(&self) -> Vec<super::leaf_enum::LeafEnum> {
+        use super::leaf_enum::LeafEnum;
+        let mut leaves: Vec<LeafEnum> = if self.use_populations_wide {
             vec![
-                Box::new(EmaLeaf::new(0.02)),
-                Box::new(EmaLeaf::new(0.10)),
-                Box::new(EmaLeaf::new(0.25)),
-                Box::new(EmaLeaf::new(0.45)),
-                Box::new(EmaLeaf::new(0.60)),
-                Box::new(DriftLeaf::new(0.03)),
-                Box::new(DriftLeaf::new(0.10)),
-                Box::new(DriftLeaf::new(0.25)),
-                Box::new(Ar1Leaf::new(0.03)),
-                Box::new(Ar1Leaf::new(0.10)),
-                Box::new(Ar1Leaf::new(0.25)),
+                LeafEnum::Ema(EmaLeaf::new(0.02)),
+                LeafEnum::Ema(EmaLeaf::new(0.10)),
+                LeafEnum::Ema(EmaLeaf::new(0.25)),
+                LeafEnum::Ema(EmaLeaf::new(0.45)),
+                LeafEnum::Ema(EmaLeaf::new(0.60)),
+                LeafEnum::Drift(DriftLeaf::new(0.03)),
+                LeafEnum::Drift(DriftLeaf::new(0.10)),
+                LeafEnum::Drift(DriftLeaf::new(0.25)),
+                LeafEnum::Ar1(Ar1Leaf::new(0.03)),
+                LeafEnum::Ar1(Ar1Leaf::new(0.10)),
+                LeafEnum::Ar1(Ar1Leaf::new(0.25)),
             ]
         } else if self.use_populations {
             vec![
-                Box::new(EmaLeaf::new(0.05)),
-                Box::new(EmaLeaf::new(0.20)),
-                Box::new(EmaLeaf::new(0.50)),
-                Box::new(DriftLeaf::new(0.05)),
-                Box::new(DriftLeaf::new(0.15)),
-                Box::new(Ar1Leaf::new(0.05)),
-                Box::new(Ar1Leaf::new(0.15)),
+                LeafEnum::Ema(EmaLeaf::new(0.05)),
+                LeafEnum::Ema(EmaLeaf::new(0.20)),
+                LeafEnum::Ema(EmaLeaf::new(0.50)),
+                LeafEnum::Drift(DriftLeaf::new(0.05)),
+                LeafEnum::Drift(DriftLeaf::new(0.15)),
+                LeafEnum::Ar1(Ar1Leaf::new(0.05)),
+                LeafEnum::Ar1(Ar1Leaf::new(0.15)),
             ]
         } else {
             vec![
-                Box::new(EmaLeaf::new(self.ema_alpha)),
-                Box::new(DriftLeaf::new(self.drift_alpha)),
-                Box::new(Ar1Leaf::new(self.ar_alpha_mean)),
+                LeafEnum::Ema(EmaLeaf::new(self.ema_alpha)),
+                LeafEnum::Drift(DriftLeaf::new(self.drift_alpha)),
+                LeafEnum::Ar1(Ar1Leaf::new(self.ar_alpha_mean)),
             ]
         };
         if let Some((a, b, phi)) = self.holt {
-            leaves.push(Box::new(HoltLeaf::new(a, b, phi)));
+            leaves.push(LeafEnum::Holt(HoltLeaf::new(a, b, phi)));
         }
         if let Some(a) = self.ar2 {
-            leaves.push(Box::new(Ar2Leaf::new(a)));
+            leaves.push(LeafEnum::Ar2(Ar2Leaf::new(a)));
         }
         if let Some((d, am, ad)) = self.frac_diff {
-            leaves.push(Box::new(FractionalDiffLeaf::new(d, am, ad)));
+            leaves.push(LeafEnum::FracDiff(FractionalDiffLeaf::new(d, am, ad)));
         }
         if let Some(a) = self.ou {
-            leaves.push(Box::new(OuLeaf::new(a)));
+            leaves.push(LeafEnum::Ou(OuLeaf::new(a)));
         }
         // PR #3 of #180: Theta-method leaves (SES + half OLS slope).
         for &a in &self.theta_alphas {
-            leaves.push(Box::new(ThetaLeaf::new(a)));
+            leaves.push(LeafEnum::Theta(ThetaLeaf::new(a)));
         }
         // PR #4 of #180: standardize + EMA depth-2 compositions.
         for &alpha in &self.standardize_ema_alphas {
-            leaves.push(Box::new(StandardizeWrapper::new(
+            leaves.push(LeafEnum::Wrapped(Box::new(StandardizeWrapper::new(
                 Box::new(EmaLeaf::new(alpha)),
                 0.05,
-            )));
+            ))));
         }
         // PR #4 of #180: seasonal-diff + EMA depth-2 compositions.
         for &(period, alpha) in &self.seasonal_diff_ema {
-            leaves.push(Box::new(SeasonalDifferenceWrapper::new(
+            leaves.push(LeafEnum::Wrapped(Box::new(SeasonalDifferenceWrapper::new(
                 Box::new(EmaLeaf::new(alpha)),
                 period,
-            )));
+            ))));
         }
         // PR #4 of #180: diff + EMA depth-2 (period=1 == plain differencing).
         for &alpha in &self.diff_ema_alphas {
-            leaves.push(Box::new(SeasonalDifferenceWrapper::new(
+            leaves.push(LeafEnum::Wrapped(Box::new(SeasonalDifferenceWrapper::new(
                 Box::new(EmaLeaf::new(alpha)),
                 1,
-            )));
+            ))));
         }
         // PR #4 of #180: multi-speed drift grid.
         for &alpha in &self.drift_alphas {
-            leaves.push(Box::new(DriftLeaf::new(alpha)));
+            leaves.push(LeafEnum::Drift(DriftLeaf::new(alpha)));
         }
         // PR #6 of #180: fractional-diff variants.
         for &(d, am, ad) in &self.frac_diff_variants {
-            leaves.push(Box::new(FractionalDiffLeaf::new(d, am, ad)));
+            leaves.push(LeafEnum::FracDiff(FractionalDiffLeaf::new(d, am, ad)));
         }
         // PR #6 of #180: GARCH + EMA composition.
         for &alpha in &self.garch_ema_alphas {
-            leaves.push(Box::new(GarchWrappedLeaf::with_defaults(Box::new(
-                EmaLeaf::new(alpha),
-            ))));
+            leaves.push(LeafEnum::Wrapped(Box::new(
+                GarchWrappedLeaf::with_defaults(Box::new(EmaLeaf::new(alpha))),
+            )));
         }
         // PR #6 of #180: PowerTransform + EMA composition.
         for &(p, alpha) in &self.power_ema {
-            leaves.push(Box::new(PowerTransformWrapper::new(
+            leaves.push(LeafEnum::Wrapped(Box::new(PowerTransformWrapper::new(
                 Box::new(EmaLeaf::new(alpha)),
                 p,
-            )));
+            ))));
         }
         // PR #6 of #180: YJ + EMA composition — the "coordinate prior"
         // (skaters composes YJ only with {diff, ema}; this is the EMA half).
         for &(lam, alpha) in &self.yj_ema {
-            leaves.push(Box::new(YjWrappedLeaf::new(
+            leaves.push(LeafEnum::Wrapped(Box::new(YjWrappedLeaf::new(
                 Box::new(EmaLeaf::new(alpha)),
                 lam,
-            )));
+            ))));
         }
         // PR #6 of #180: YJ + diff + EMA composition — the diff half of
-        // skaters' YJ coordinate prior. Structure: YJ wraps
-        // (diff + EMA) so the differencing is done in transformed space.
+        // skaters' YJ coordinate prior.
         for &(lam, alpha) in &self.yj_diff_ema {
             let inner: Box<dyn Leaf + Send> = Box::new(SeasonalDifferenceWrapper::new(
                 Box::new(EmaLeaf::new(alpha)),
                 1,
             ));
-            leaves.push(Box::new(YjWrappedLeaf::new(inner, lam)));
+            leaves.push(LeafEnum::Wrapped(Box::new(YjWrappedLeaf::new(inner, lam))));
         }
         // PR #3 of #180: Yeo-Johnson coordinate composition — for each λ,
-        // append a wrapped copy of every base leaf so far. Skaters composes
-        // YJ only with {diff, ema}; this is a looser "wrap current pool"
-        // approximation. Doubles-plus the softmax population for each λ.
+        // append a wrapped copy of every base leaf so far.
         if !self.yj_coord_lambdas.is_empty() {
             let base_count = leaves.len();
             for &lam in &self.yj_coord_lambdas {
                 for i in 0..base_count {
-                    // Rebuild the i-th leaf from scratch — Leaf is not
-                    // Clone-able, and the coordinate wrapper needs its
-                    // own state. Cheapest way is to walk the toggles
-                    // again; easier is to only YJ-wrap the standard
-                    // EMA/drift/AR trio (matches skaters more closely).
                     let _ = i;
                 }
-                // Only wrap the small always-on trio so the softmax
-                // doesn't explode. Matches skaters' selective composition.
-                leaves.push(Box::new(YjWrappedLeaf::new(
+                leaves.push(LeafEnum::Wrapped(Box::new(YjWrappedLeaf::new(
                     Box::new(EmaLeaf::new(self.ema_alpha)),
                     lam,
-                )));
-                leaves.push(Box::new(YjWrappedLeaf::new(
+                ))));
+                leaves.push(LeafEnum::Wrapped(Box::new(YjWrappedLeaf::new(
                     Box::new(DriftLeaf::new(self.drift_alpha)),
                     lam,
-                )));
+                ))));
             }
         }
         if let Some(a) = self.intermittent {
-            leaves.push(Box::new(IntermittentLeaf::new(a)));
+            leaves.push(LeafEnum::Intermittent(IntermittentLeaf::new(a)));
         }
         if let Some((p, a)) = self.seasonal_intermittent {
-            leaves.push(Box::new(SeasonalIntermittentLeaf::new(p, a)));
+            leaves.push(LeafEnum::SeasonalIntermittent(
+                SeasonalIntermittentLeaf::new(p, a),
+            ));
         }
         if let Some(a) = self.poisson {
-            leaves.push(Box::new(PoissonLeaf::new(a)));
+            leaves.push(LeafEnum::Poisson(PoissonLeaf::new(a)));
         }
         if let Some(a) = self.neg_binomial {
-            leaves.push(Box::new(NegativeBinomialLeaf::new(a)));
+            leaves.push(LeafEnum::NegativeBinomial(NegativeBinomialLeaf::new(a)));
         }
         if let Some(a) = self.lognormal {
-            leaves.push(Box::new(LogNormalLeaf::new(a)));
+            leaves.push(LeafEnum::LogNormal(LogNormalLeaf::new(a)));
         }
         if let Some(a) = self.gamma {
-            leaves.push(Box::new(GammaLeaf::new(a)));
+            leaves.push(LeafEnum::Gamma(GammaLeaf::new(a)));
         }
         if let Some(a) = self.rectified_normal {
-            leaves.push(Box::new(RectifiedNormalLeaf::new(a)));
+            leaves.push(LeafEnum::RectifiedNormal(RectifiedNormalLeaf::new(a)));
         }
         if let Some(a) = self.zip {
-            leaves.push(Box::new(ZeroInflatedPoissonLeaf::new(a)));
+            leaves.push(LeafEnum::Zip(ZeroInflatedPoissonLeaf::new(a)));
         }
         if let Some(a) = self.zinb {
-            leaves.push(Box::new(ZeroInflatedNegativeBinomialLeaf::new(a)));
+            leaves.push(LeafEnum::Zinb(ZeroInflatedNegativeBinomialLeaf::new(a)));
         }
         if let Some(a) = self.student_t {
-            leaves.push(Box::new(StudentTLeaf::new(a)));
+            leaves.push(LeafEnum::StudentT(StudentTLeaf::new(a)));
         }
         if let Some(a) = self.beta {
-            leaves.push(Box::new(BetaLeaf::new(a)));
+            leaves.push(LeafEnum::Beta(BetaLeaf::new(a)));
         }
         if let Some((a, p)) = self.tweedie {
-            leaves.push(Box::new(TweedieLeaf::new(a, p)));
+            leaves.push(LeafEnum::Tweedie(TweedieLeaf::new(a, p)));
         }
         if let Some(a) = self.skew_normal {
-            leaves.push(Box::new(SkewNormalLeaf::new(a)));
+            leaves.push(LeafEnum::SkewNormal(SkewNormalLeaf::new(a)));
         }
         if self.discrete_uniform {
-            leaves.push(Box::new(DiscreteUniformLeaf::new()));
+            leaves.push(super::leaf_enum::LeafEnum::DiscreteUniform(
+                DiscreteUniformLeaf::new(),
+            ));
         }
         if let Some(p) = self.seasonal_period {
-            leaves.push(Box::new(SeasonalEmaLeaf::new(p, self.seasonal_alpha)));
+            leaves.push(super::leaf_enum::LeafEnum::SeasonalEma(
+                SeasonalEmaLeaf::new(p, self.seasonal_alpha),
+            ));
         }
         for &p in &self.seasonal_periods_multi {
-            leaves.push(Box::new(SeasonalEmaLeaf::new(p, self.seasonal_alpha)));
+            leaves.push(super::leaf_enum::LeafEnum::SeasonalEma(
+                SeasonalEmaLeaf::new(p, self.seasonal_alpha),
+            ));
         }
         if let Some((p, a)) = self.seasonal_mult {
-            leaves.push(Box::new(MultiplicativeSeasonalLeaf::new(p, a)));
+            leaves.push(super::leaf_enum::LeafEnum::SeasonalMult(
+                MultiplicativeSeasonalLeaf::new(p, a),
+            ));
         }
         leaves
     }
 
     fn init_leaves(&mut self) {
+        use super::leaf_enum::LeafEnum;
         let leaves = self.build_base_leaves();
-        let mut leaves = if !self.yj_grid.is_empty() {
-            // Coordinate grid: build one fresh base set per λ, wrap each
-            // element with YjWrappedLeaf(inner, λ). Every (leaf, λ)
-            // becomes its own softmax candidate.
-            let mut wrapped: Vec<Box<dyn Leaf + Send>> =
-                Vec::with_capacity(leaves.len() * self.yj_grid.len());
+        let leaves = if !self.yj_grid.is_empty() {
+            // Coordinate grid: wrap every base leaf per λ. Since the enum
+            // dispatch requires concrete types, we materialize each
+            // wrapped leaf through the `LeafEnum::Wrapped` escape hatch.
+            let mut wrapped: Vec<LeafEnum> = Vec::with_capacity(leaves.len() * self.yj_grid.len());
             for lam in self.yj_grid.clone() {
                 let per_lambda = self.build_base_leaves();
                 for l in per_lambda {
-                    wrapped.push(Box::new(YjWrappedLeaf::new(l, lam)));
+                    // Move the LeafEnum into a Box<dyn Leaf + Send> via the
+                    // Leaf impl on LeafEnum, then re-wrap.
+                    let boxed: Box<dyn Leaf + Send> = Box::new(l);
+                    wrapped.push(LeafEnum::Wrapped(Box::new(YjWrappedLeaf::new(boxed, lam))));
                 }
             }
             wrapped
         } else {
             leaves
         };
-        // Clear the old redundant setter path — keep `leaves` mut for
-        // the trailing existing logic (self.cum_log_liks / self.leaves).
-        let _ = &mut leaves;
         self.cum_log_liks = vec![0.0; leaves.len()];
         self.leaves = leaves;
     }

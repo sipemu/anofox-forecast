@@ -113,6 +113,7 @@ pub mod forecaster;
 pub mod global;
 pub mod hierarchical;
 pub mod leaf;
+mod leaf_enum;
 pub mod leaves;
 
 pub use dist::{Gaussian, GaussianMixture};
