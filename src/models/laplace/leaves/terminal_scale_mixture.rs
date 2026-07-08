@@ -43,6 +43,13 @@ pub struct TerminalScaleMixture {
     v: f64,
     w: [f64; 5],
     n_obs: usize,
+    /// Accuracy-audit #5: AR(1) residual autocorrelation φ estimator.
+    /// EWMA of `r_t · r_{t-1} / v`. Bounded to `(-0.9, 0.9)` for
+    /// stationarity. Used at forecast time to compute `√((1-φ^(2h)) /
+    /// (1-φ²))` scaling instead of `√h` (which assumes IID).
+    phi: f64,
+    /// Previous residual, kept for autocorrelation update.
+    prev_r: f64,
 }
 
 impl TerminalScaleMixture {
@@ -71,7 +78,32 @@ impl TerminalScaleMixture {
             v: 0.0,
             w,
             n_obs: 0,
+            phi: 0.0,
+            prev_r: 0.0,
         }
+    }
+
+    /// Autocorrelation φ estimate (accuracy-audit #5). Bounded to
+    /// `(-0.9, 0.9)` for stationarity.
+    pub fn phi(&self) -> f64 {
+        self.phi
+    }
+
+    /// Multi-horizon σ scaling factor for AR(1) residuals.
+    /// Returns `√((1 - φ^(2h)) / (1 - φ²))`. Equals `√h` when `φ=0`
+    /// (IID), less than `√h` for `φ<0`, more than `√h` for `φ>0`.
+    pub fn h_step_std_scale(&self, h: usize) -> f64 {
+        if h == 0 {
+            return 0.0;
+        }
+        let phi = self.phi.clamp(-0.9, 0.9);
+        let phi2 = phi * phi;
+        if phi2 < 1e-6 {
+            return (h as f64).sqrt();
+        }
+        let numer = 1.0 - phi2.powi(h as i32);
+        let denom = 1.0 - phi2;
+        (numer / denom).max(0.0).sqrt()
     }
 
     /// Absorb one residual `r = y - softmax_mixture_mean`.

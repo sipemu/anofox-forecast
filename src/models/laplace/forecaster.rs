@@ -846,6 +846,12 @@ pub struct LaplaceForecaster {
     /// Perf: reusable scratch buffer for softmax weights so
     /// `self.weights()` doesn't allocate on the fit hot path.
     scratch_weights: Vec<f64>,
+    /// Accuracy-audit #2 (multi-horizon scoring): when enabled, during
+    /// fit, periodically snapshot each leaf's h-step predictions and
+    /// retrospectively score them against the future y[t+h]. Adds the
+    /// h>1 log-likelihood contributions (weighted) to cum_log_liks so
+    /// the softmax reflects long-horizon accuracy, not just 1-step.
+    multi_h_scoring: bool,
     /// Accuracy-audit #1 (ensemble stacking): enable OLS-based blend
     /// weight learning at end of fit. When true and enough training data
     /// is available, `stacking_weights` is populated with per-leaf
@@ -953,6 +959,7 @@ impl LaplaceForecaster {
             stacking_enabled: false,
             stacking_weights: None,
             predictions_history: Vec::new(),
+            multi_h_scoring: false,
         }
     }
 
@@ -1051,6 +1058,22 @@ impl LaplaceForecaster {
         self.sticky = None;
         // Explicit user choice — honor it, don't auto-gate.
         self.sticky_auto_gate = false;
+        self
+    }
+
+    /// Enable multi-horizon retrospective scoring (accuracy-audit #2).
+    ///
+    /// During fit, periodically snapshots each leaf's h-step predictions.
+    /// After the observation loop, iterates the snapshots and adds a
+    /// weighted h-step log-likelihood contribution to `cum_log_liks`
+    /// for each leaf. Score at horizon h uses `y[snapshot_step + h - 1]`
+    /// against the leaf's h-step prediction from `snapshot_step`.
+    ///
+    /// The h-step contribution is weighted by `η · 1/h` so far horizons
+    /// don't dominate. Total effect: leaves that flat-line at long h
+    /// (e.g. slow EMAs) get down-weighted in the final softmax.
+    pub fn with_multi_h_scoring(mut self) -> Self {
+        self.multi_h_scoring = true;
         self
     }
 
@@ -2606,12 +2629,32 @@ impl Forecaster for LaplaceForecaster {
         let snapshot_stride = (values.len() / 30).clamp(1, 200);
         let per_h_horizon = self.per_h_horizon;
         let mut per_h_snapshots: Vec<(usize, Vec<(f64, f64)>)> = Vec::new();
+        // Accuracy-audit #2: multi-horizon retrospective scoring
+        // snapshots. Only populated when `self.multi_h_scoring` is on.
+        // Structure: (step, per_leaf_h_predictions[leaf_idx][h_idx]).
+        let mut mh_snapshots: Vec<(usize, Vec<Vec<Gaussian>>)> = Vec::new();
+        // Snapshot cadence: every 20 steps starting from step 60.
+        // Limited to `values.len() / 15` snapshots to bound cost.
+        let mh_stride: usize = 20;
+        let mh_horizon: usize = (per_h_horizon.min(24)).max(4);
 
         for (step, &y_orig) in values.iter().enumerate() {
             let y = match yj {
                 Some(l) => yj_forward(y_orig, l),
                 None => y_orig,
             };
+
+            // Accuracy-audit #2: multi-horizon scoring snapshot.
+            if self.multi_h_scoring
+                && step >= 60
+                && step % mh_stride == 0
+                && step + mh_horizon <= values.len()
+                && mh_snapshots.len() < 200
+            {
+                let per_leaf_h: Vec<Vec<Gaussian>> =
+                    self.leaves.iter().map(|l| l.predict(mh_horizon)).collect();
+                mh_snapshots.push((step, per_leaf_h));
+            }
 
             // Periodic snapshot: take before observing y at this step. Only
             // useful when the snapshot's H-step horizon fits inside training.
@@ -2757,6 +2800,44 @@ impl Forecaster for LaplaceForecaster {
                 s.observe(y_orig);
             }
             self.n_obs += 1;
+        }
+
+        // Accuracy-audit #2: multi-horizon retrospective scoring pass.
+        // For each snapshot at step t, score each leaf's h-step
+        // prediction against `values[t + h - 1]` (the actual). Weight
+        // the contribution by `η / h` so 1-step still dominates but
+        // long-horizon accuracy shifts the ensemble.
+        if self.multi_h_scoring && !mh_snapshots.is_empty() {
+            let eta = self.learning_rate;
+            let clamp = self.log_clamp;
+            for (step, per_leaf_h) in &mh_snapshots {
+                for h in 1..=mh_horizon {
+                    let target_step = step + h - 1;
+                    if target_step >= values.len() {
+                        break;
+                    }
+                    let y_target = match yj {
+                        Some(l) => yj_forward(values[target_step], l),
+                        None => values[target_step],
+                    };
+                    if !y_target.is_finite() {
+                        continue;
+                    }
+                    let h_weight = eta / h as f64;
+                    for (leaf_idx, preds) in per_leaf_h.iter().enumerate() {
+                        if leaf_idx >= self.cum_log_liks.len() {
+                            break;
+                        }
+                        if let Some(g) = preds.get(h - 1) {
+                            let lp = g.logpdf(y_target);
+                            if lp.is_finite() {
+                                let lp_c = if lp < clamp { clamp } else { lp };
+                                self.cum_log_liks[leaf_idx] += h_weight * lp_c;
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Accuracy-audit #1: ensemble stacking solve. If we collected
