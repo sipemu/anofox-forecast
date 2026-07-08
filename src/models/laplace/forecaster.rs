@@ -873,6 +873,33 @@ impl LaplaceForecaster {
         self
     }
 
+    /// Add an STL-decomposition leaf at the given period (opt-in).
+    ///
+    /// `StlDecompLeaf(period)` runs STL on a rolling buffer of the last
+    /// `10 * period` observations and extrapolates a linear trend plus
+    /// cyclic seasonal pattern. Useful when the series has strong
+    /// deterministic seasonality that our streaming leaves can't
+    /// capture cleanly (M-competition monthly / quarterly panels are
+    /// candidates).
+    ///
+    /// **NOT auto-enabled by `.auto()` or `.skaters()`.** An earlier
+    /// attempt to auto-enable it based on `seasonality_strength > 0.30`
+    /// caused a 31 % MASE regression on `tourism_monthly` in the fev-27
+    /// bakeoff: the STL leaf's linear-trend extrapolation is aggressive
+    /// at long horizons and compounds on short-history seasonal panels
+    /// (150-300 obs, H=24). Aggregate fev-27 also regressed 1.7 %
+    /// (geomean MASE 6.085 → 6.186). Documented in
+    /// `docs/SOTA_POSITIONING.md`.
+    ///
+    /// Use this only when you've verified STL helps on your specific
+    /// data.
+    pub fn with_stl(mut self, period: usize) -> Self {
+        if period >= 2 {
+            self.stl_period = Some(period);
+        }
+        self
+    }
+
     /// Enable Theta-method leaves at the given α values (PR #3 of #180).
     ///
     /// Ports skaters' `theta(α)` transform. Each variant is a SES level
@@ -2195,25 +2222,19 @@ impl Forecaster for LaplaceForecaster {
             }
         }
 
-        // Fev-27 follow-up (#9): STL leaf detection — runs for ALL
-        // configurations (not just `.auto()`) so `.skaters()` also
-        // benefits when strong seasonality is present. `.new()` and
-        // manually-configured forecasters keep default (no STL) unless
-        // the user opts in.
-        if self.stl_period.is_none() && (self.use_auto || self.learning_rate < 1.0) {
-            // learning_rate < 1.0 means `.skaters()` was called
-            // (which sets it to 0.5). Enable STL detection there too.
-            let detected_period = detect_seasonal_period(values);
-            let effective_period = detected_period.unwrap_or(self.auto_seasonal_period);
-            if effective_period >= 2 && values.len() >= 3 * effective_period {
-                let chars = auto_characteristics(values, effective_period);
-                if chars.seasonality_strength > 0.30 {
-                    self.stl_period = Some(effective_period);
-                    // Re-init leaves so STL leaf gets added to the pool.
-                    self.init_leaves();
-                }
-            }
-        }
+        // Fev-27 follow-up (#9): STL leaf auto-detection was REMOVED.
+        // Adding an auto-STL leaf caused a large tourism_monthly
+        // regression on the fev-27 panel (MASE 2.34 → 3.08, +31 %) —
+        // the STL leaf's linear-trend extrapolation is aggressive at
+        // long horizons, compounding on short-history seasonal panels
+        // (150-300 obs). Aggregate fev-27 also regressed (geomean
+        // MASE 6.085 → 6.186). See `docs/SOTA_POSITIONING.md`
+        // "Deferred / future work" for the full story.
+        //
+        // `StlDecompLeaf` and the `stl_period` field remain so
+        // callers can opt in via `.with_stl(period)` on data they
+        // know behaves well with STL. It is NOT auto-enabled by
+        // `.auto()` or `.skaters()`.
 
         // Auto-selector: inspect series characteristics before initialising
         // leaves and set the opt-in toggles from residual-slicing evidence.
@@ -2241,17 +2262,9 @@ impl Forecaster for LaplaceForecaster {
             if chars.seasonality_strength > 0.15 && self.seasonal_period.is_none() {
                 self.seasonal_period = Some(effective_period);
             }
-            // Fev-27 follow-up (#9): STL leaf on strong-seasonal series.
-            // Threshold higher than the plain seasonal-EMA gate — STL
-            // is expensive (O(N log N) per predict) so we reserve it
-            // for panels where seasonal decomposition really matters.
-            if chars.seasonality_strength > 0.30
-                && effective_period >= 2
-                && self.stl_period.is_none()
-                && values.len() >= 3 * effective_period
-            {
-                self.stl_period = Some(effective_period);
-            }
+            // Fev-27 follow-up (#9): STL leaf auto-detection REMOVED.
+            // See earlier note above and docs/SOTA_POSITIONING.md.
+            // Available opt-in via `.with_stl(period)`.
             // α-27 fix #1: enable the multiplicative seasonal leaf when
             // seasonality is present AND series is strictly positive
             // (tourism, retail-aggregate — where the peak-trough pattern

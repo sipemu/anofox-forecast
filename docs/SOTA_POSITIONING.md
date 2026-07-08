@@ -237,9 +237,33 @@ python3 scripts/m5_laplace_bakeoff.py --burn-in 300
 
 Datasets fetched from the Monash Time Series Forecasting Archive (Zenodo), autogluon/chronos_datasets (HuggingFace), and the M5 competition CSV.
 
+## What was tried and DIDN'T work (documented so we don't re-try)
+
+### STL-decomposition leaf (auto-enabled)
+
+Ported an `StlDecompLeaf(period)` that runs STL on a rolling buffer and extrapolates linear trend + cyclic seasonal at forecast time. Auto-enabled it when `seasonality_strength > 0.30` and training length ≥ 3 × period.
+
+**Result on fev-27 (SAMPLE_PER=500)**: NET REGRESSION.
+
+| dataset | before STL auto | with STL auto | Δ |
+|---|---:|---:|---:|
+| **tourism_monthly** | 2.344 | **3.077** | **+31 %** ❌ |
+| dominick | 0.966 | 1.024 | +6 % |
+| m5 | 1.045 | 1.065 | +2 % |
+| m4_monthly | 1.337 | 1.376 | +3 % |
+| geomean MASE | **6.085** | **6.186** | **+1.7 %** ❌ |
+| geomean WQL | **0.6695** | **0.7257** | **+8.4 %** ❌ |
+
+The STL leaf's linear-trend extrapolation compounds badly at long horizons on short-history seasonal panels (150-300 obs, H=24). Same failure mode as the seasonal-diff drift compounding I fixed in Fix B — but harder to gate cleanly.
+
+**Decision**: `StlDecompLeaf` remains available as opt-in via `LaplaceForecaster::new().with_stl(period)` for callers who verify it helps on their specific data. Not auto-enabled by any builder.
+
 ## Deferred / future work
 
-- **`.skaters().no_sticky()` builder** — the fev-27 measurement showed the sticky-lattice atoms blow up WQL on continuous / smooth panels (1800× worse on `m1_yearly`, 100× on `tourism_yearly`, pathological on `cif_2016`). Need a clean toggle so callers on non-count data get the fixed pool + terminal scale-mixture without the sticky projection. Small change.
+- **Multi-scale improvements** — `MultiScaleLaplace::with_period(p)` adds period-aligned strides. Only helps on long time series where decimation still leaves ≥100 samples. Not auto-enabled in `.skaters()`. Effort to make it universally safe: needs a proper skaters-style likelihood-blend across eligible scales + warmup handling for decimated forecasters on short data.
+- **Full autogluon/fev PyO3 bridge** — head-to-head submission to the [autogluon/fev leaderboard](https://huggingface.co/spaces/autogluon/fev-leaderboard). Effort: 3–5 days.
+- **Foundation model in pure Rust** — TabPFN-style prior-fitted network trained on synthetic time-series priors. Effort: 2-3 months, adds `candle` / `burn` dependency.
+- **Improve short-series behavior** — not through classical fallback (which we explicitly avoid — the shell should stay purely streaming), but through leaf-specific batch initialization tricks.
 - **Full autogluon/fev PyO3 bridge** — head-to-head submission to the [autogluon/fev leaderboard](https://huggingface.co/spaces/autogluon/fev-leaderboard). Effort: 3–5 days.
 - **Foundation model in pure Rust** — TabPFN-style prior-fitted network trained on synthetic time-series priors. Effort: 2-3 months, adds `candle` / `burn` dependency.
 - **Improve short-series behavior** — not through classical fallback (which we explicitly avoid — the shell should stay purely streaming), but through leaf-specific batch initialization tricks.
