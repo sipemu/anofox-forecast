@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2] - 2026-07-08
+
+Second CI-only patch, again with **no code changes vs. 0.13.0 / 0.13.1**. Same distributional shell, same benchmark numbers, same API surface.
+
+### Fixed
+
+- Package tarball no longer includes `validation/data/**/*.{tsf,csv,json,parquet}`, `tests/data/`, `docs/rendered/`, `target/`. Those directories held ~1.4 GB of benchmark datasets committed for local reproducibility. crates.io rejected 0.13.1 with a 413 Payload Too Large error (10 MB cap); this release finally uploads (~3.7 MB tarball).
+- Users who want to reproduce the benchmarks fetch datasets themselves; instructions are in the top-of-file doc comments of `examples/fev_benchmark.rs`, `examples/m5_wape.rs`, `examples/skaters_m5_full_auto.rs`.
+
 ## [0.13.1] - 2026-07-07
 
 CI-only patch to unblock the `Publish to crates.io` workflow. **No code changes vs. 0.13.0** — same distributional shell, same benchmark numbers, same API surface.

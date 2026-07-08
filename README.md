@@ -258,7 +258,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-anofox-forecast = "0.13.1"
+anofox-forecast = "0.13.2"
 ```
 
 ### Optional Features
@@ -266,22 +266,22 @@ anofox-forecast = "0.13.1"
 ```toml
 [dependencies]
 # Distributional forecasting shell (LaplaceForecaster, SmartForecaster, HierarchicalLaplace)
-anofox-forecast = { version = "0.13.1", features = ["distributional"] }
+anofox-forecast = { version = "0.13.2", features = ["distributional"] }
 
 # Forecastability analysis (MI, GCMI, distance correlation, fingerprint)
-anofox-forecast = { version = "0.13.1", features = ["forecastability"] }
+anofox-forecast = { version = "0.13.2", features = ["forecastability"] }
 
 # Forecastability + parallel (60× faster with rayon)
-anofox-forecast = { version = "0.13.1", features = ["forecastability", "parallel"] }
+anofox-forecast = { version = "0.13.2", features = ["forecastability", "parallel"] }
 
 # Parallel AutoARIMA (4-8x speedup via rayon, opt-in for embedding contexts like DuckDB)
-anofox-forecast = { version = "0.13.1", features = ["parallel"] }
+anofox-forecast = { version = "0.13.2", features = ["parallel"] }
 
 # Model serialization (save/load to JSON)
-anofox-forecast = { version = "0.13.1", features = ["serde"] }
+anofox-forecast = { version = "0.13.2", features = ["serde"] }
 
 # Probabilistic postprocessing (conformal, IDR, QRA — enabled by default)
-anofox-forecast = { version = "0.13.1", default-features = false }  # to disable
+anofox-forecast = { version = "0.13.2", default-features = false }  # to disable
 ```
 
 | Feature | Default | Description |
