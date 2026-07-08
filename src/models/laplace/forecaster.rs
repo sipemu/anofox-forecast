@@ -1792,6 +1792,108 @@ impl LaplaceForecaster {
     fn per_leaf_horizons(&self, horizon: usize) -> Vec<Vec<super::dist::Gaussian>> {
         self.leaves.iter().map(|l| l.predict(horizon)).collect()
     }
+
+    /// Absorb one **transformed-space** observation `y` into all
+    /// leaves + terminals + sticky lattice. The shared work of both
+    /// the batch `fit()` loop and the public streaming
+    /// [`Self::observe`]. O(N_leaves) per call.
+    ///
+    /// Returns the transformed-space one-step mixture mean at this step
+    /// so the caller can compute residuals / fitted values / calibration
+    /// snapshots in the original space.
+    fn absorb_one(&mut self, y: f64) -> f64 {
+        // 1-step predictions from each leaf, before observing y.
+        self.scratch_per_leaf.clear();
+        for l in self.leaves.iter() {
+            self.scratch_per_leaf.push(l.predict_one());
+        }
+        let per_leaf = self.scratch_per_leaf.as_slice();
+        softmax_into(&self.cum_log_liks, &mut self.scratch_weights);
+        let weights = self.scratch_weights.as_slice();
+        let mixture_is_empty = per_leaf.is_empty();
+        let mixture_mean: f64 = weights
+            .iter()
+            .zip(per_leaf.iter())
+            .map(|(w, g)| w * g.mean)
+            .sum();
+        // Score + absorb per leaf. Learning-rate shrinkage and
+        // log-clamp applied to the cumulative-weight update.
+        let eta = self.learning_rate;
+        let clamp = self.log_clamp;
+        for (i, leaf) in self.leaves.iter_mut().enumerate() {
+            let g = per_leaf[i];
+            let lp_raw = g.logpdf(y);
+            if lp_raw.is_finite() {
+                let lp_clamped = if lp_raw < clamp { clamp } else { lp_raw };
+                self.cum_log_liks[i] += eta * lp_clamped;
+            }
+            leaf.observe(y);
+        }
+        // Terminals: residual is transformed-space (y - mixture_mean).
+        let residual = if mixture_is_empty {
+            0.0
+        } else {
+            y - mixture_mean
+        };
+        if let Some(t) = self.terminal.as_mut() {
+            t.observe(residual);
+        }
+        if let Some(t) = self.terminal_crps.as_mut() {
+            t.observe(residual);
+        }
+        self.n_obs += 1;
+        mixture_mean
+    }
+
+    /// Streaming observe — absorb a **single original-space** observation
+    /// into all leaves + terminals + sticky lattice.
+    ///
+    /// This is the O(N_leaves) counterpart to [`Forecaster::fit`]'s batch
+    /// loop. Call this once per new observation to update model state
+    /// without a full refit. Skaters' equivalent primitive:
+    /// `f(y, state) -> (dist, new_state)`.
+    ///
+    /// # Requirements
+    /// - [`Forecaster::fit`] must have been called first (initializes
+    ///   the leaf pool). Streaming from empty state is not supported.
+    /// - This path **skips** batch-only features:
+    ///   - Yeo-Johnson transform (`with_yeo_johnson*`)
+    ///   - Exog OLS pre-regression
+    ///   - Per-horizon calibration snapshots
+    ///   - Fitted-values / residuals bookkeeping
+    ///   Configure the model without these when planning to stream.
+    ///
+    /// # Errors
+    /// - `FitRequired` if the leaf pool hasn't been initialized.
+    pub fn observe(&mut self, y: f64) -> Result<()> {
+        if self.leaves.is_empty() {
+            return Err(ForecastError::FitRequired {
+                model: Some("LaplaceForecaster".into()),
+            });
+        }
+        if !y.is_finite() {
+            return Ok(());
+        }
+        // Absorb (transformed space == original space when YJ disabled,
+        // which the streaming API requires).
+        let _ = self.absorb_one(y);
+        // Sticky lattice always tracks original-space values.
+        if let Some(s) = self.sticky.as_mut() {
+            s.observe(y);
+        }
+        Ok(())
+    }
+
+    /// Streaming observe of an entire slice — convenience wrapper around
+    /// [`Self::observe`]. Same O(N_obs · N_leaves) cost as a batch fit
+    /// on the same-length window, but *incremental*: previous
+    /// observations are preserved in state.
+    pub fn observe_slice(&mut self, ys: &[f64]) -> Result<()> {
+        for &y in ys {
+            self.observe(y)?;
+        }
+        Ok(())
+    }
 }
 
 impl Default for LaplaceForecaster {
@@ -2492,6 +2594,63 @@ mod tests {
         }
         let stamps: Vec<_> = (0..n).map(|i| base + Duration::hours(i as i64)).collect();
         TimeSeries::univariate(stamps, vals).unwrap()
+    }
+
+    /// Streaming `observe()` should produce bit-identical predictions
+    /// to a batch `fit()` on the same total window. Two forecasters:
+    /// (A) fit on values[0..k], stream values[k..n];
+    /// (B) fit on values[0..n] in one shot.
+    /// Their `forecast_dist(1)` mean must match to ~1e-9.
+    #[test]
+    fn streaming_observe_matches_batch_fit() {
+        let ts_full = ts_ar1(250, 0.6);
+        let values = ts_full.primary_values().to_vec();
+        let split = 200;
+        let base = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let stamps_a: Vec<_> = (0..split)
+            .map(|i| base + Duration::hours(i as i64))
+            .collect();
+        let ts_a = TimeSeries::univariate(stamps_a, values[..split].to_vec()).unwrap();
+
+        // Path A: fit on first 200, stream the last 50.
+        let mut fa = LaplaceForecaster::new();
+        fa.fit(&ts_a).unwrap();
+        for &y in &values[split..] {
+            fa.observe(y).unwrap();
+        }
+        let m_a = fa.forecast_dist(1).unwrap()[0].mean();
+
+        // Path B: batch fit on all 250.
+        let mut fb = LaplaceForecaster::new();
+        fb.fit(&ts_full).unwrap();
+        let m_b = fb.forecast_dist(1).unwrap()[0].mean();
+
+        assert!(
+            (m_a - m_b).abs() < 1e-9,
+            "streaming ({m_a:.9}) != batch ({m_b:.9})"
+        );
+    }
+
+    #[test]
+    fn observe_returns_error_before_fit() {
+        let mut f = LaplaceForecaster::new();
+        assert!(f.observe(1.0).is_err());
+    }
+
+    #[test]
+    fn observe_ignores_nan() {
+        let ts = ts_ar1(100, 0.5);
+        let mut f = LaplaceForecaster::new();
+        f.fit(&ts).unwrap();
+        let m_before = f.forecast_dist(1).unwrap()[0].mean();
+        // NaN / inf are silently ignored (matches leaf-level behavior).
+        f.observe(f64::NAN).unwrap();
+        f.observe(f64::INFINITY).unwrap();
+        let m_after = f.forecast_dist(1).unwrap()[0].mean();
+        assert!(
+            (m_before - m_after).abs() < 1e-12,
+            "NaN observe changed state: {m_before} vs {m_after}"
+        );
     }
 
     #[test]

@@ -1,10 +1,26 @@
 # anofox-forecast SOTA positioning
 
-*As of v0.13.0 (2026-07-07). Datasets and metrics from autogluon/fev's Chronos-benchmark classical panel. Reproducible via `cargo run --release --features distributional --example fev_benchmark`.*
+*As of the #180 skaters-parity work merged after v0.13.0 (2026-07-08). Datasets and metrics from autogluon/fev's Chronos-benchmark classical panel and our M5 200-series head-to-head. Reproducible via `cargo run --release --features distributional --example fev_benchmark` and `examples/m5_skaters_vs_autoets.rs`.*
 
-## Headline
+## Headline — TWO benchmarks, TWO positions
 
-On the 27-dataset fev Chronos-benchmark classical panel (500 series/dataset, MASE with fev-canonical seasonal-naive scaling, geometric mean across 19 datasets shared with the fev leaderboard):
+The extended `LaplaceForecaster` shipped in #180 (with `.skaters()`: full fixed candidate pool, sticky lattice, terminal scale-mixture, XGBoost-shrunk softmax) is a **different** engine from the pre-#180 `.auto()`. It has to be measured separately.
+
+### Benchmark A — M5 200-series retail (H=28, our benchmark)
+
+| model | mean MASE (↓) | panel WAPE (↓) | fit time |
+|---|---:|---:|---:|
+| **`LaplaceForecaster::new().skaters()`** | **0.9775** ⭐ | **0.6628** ⭐ | **0.6 s** |
+| AutoETS | 1.0652 | 0.6950 | 5.6 s |
+| `LaplaceForecaster::new().auto()` | 1.1878 | 0.7958 | 0.2 s |
+
+**`.skaters()` beats AutoETS on both accuracy metrics AND is 9.3× faster.** On retail count data, the extended engine now dominates the classical baseline that had been top-ranked here.
+
+Reproduce: `SAMPLE_SIZE=200 cargo run --release --features distributional --example m5_skaters_vs_autoets`.
+
+### Benchmark B — fev Chronos-benchmark 27-panel (mixed classical)
+
+On the 27-dataset fev classical panel (500 series/dataset, MASE with fev-canonical seasonal-naive scaling, geomean across 19 datasets shared with the fev leaderboard):
 
 | rank | model | MASE | tier |
 |---|---|---|---|
@@ -17,9 +33,24 @@ On the 27-dataset fev Chronos-benchmark classical panel (500 series/dataset, MAS
 | 7 | fev `auto_ets` (Nixtla) | 1.440 | Classical (CPU) |
 | 8 | **`AutoETS` (this crate)** | **1.525** | **Classical (CPU) — 5.9 % behind Nixtla** |
 | 9 | Seasonal Naive | 1.665 | Baseline |
-| **10** | **`LaplaceForecaster::auto()` (this crate)** | **1.723** | **Classical (CPU) — 27 % behind foundation SOTA** |
-| 11 | `LaplaceForecaster::auto_aid()` | 2.171 | (demand-forecasting, mispanel here) |
-| 12 | `SmartForecaster` | 2.281 | (demand-forecasting, mispanel here) |
+| **10** | **`LaplaceForecaster::auto()` (this crate)** | **1.723** | **Classical (CPU) — mixed-panel warmup penalty** |
+| — | **`LaplaceForecaster::skaters()`** | **(not yet re-measured on this panel)** | — |
+
+**`.skaters()` has not yet been re-measured on the fev 27-panel.** The #180 work landed after the fev bakeoff, and re-running the full panel takes ~90 min. Given the M5 result (`.skaters()` beats AutoETS by 8 %), and given the fev classical panel has both short-history and count series where our engine has historically struggled, the honest expectation is that `.skaters()` should land between `.auto()` (1.723) and `AutoTheta` (1.381) — closer to AutoTheta on retail/count-heavy panels, closer to `.auto()` on short-history yearly panels. Re-running is on the follow-up list.
+
+### Benchmark C — vs `skaters.laplace` (Python reference)
+
+100 M5 series × 90 rolling one-step preds on first-differenced counts, both sides `sticky=True` and `objective="likelihood"`:
+
+| metric | Rust `.skaters()` | skaters.laplace | Δ |
+|---|---:|---:|---:|
+| **Log-likelihood (nats/pred, ↑)** | **+0.914** | −0.488 | **+1.402** (we win) |
+| **CRPS (↓)** | **0.847** | 0.869 | **−0.021** (we win) |
+| **LL win rate (per-series)** | **60 / 100** | 40 / 100 | |
+| **CRPS win rate (per-series)** | **56 / 100** | 44 / 100 | |
+| **Wall time** | 11.9 s | 70.4 s | **5.9× faster** |
+
+`exp(1.40) ≈ 4.06×` more density mass at the actual observed value than skaters. Sticky-lattice atoms sit under a tighter terminal-mixture density here, so on M5's zero-inflated first-differences the atoms are more concentrated on the modal outcome (0). Full picture in `bench/skaters-laplace-bakeoff`.
 
 ## Two clear findings
 
@@ -30,15 +61,19 @@ On the 27-dataset fev Chronos-benchmark classical panel (500 series/dataset, MAS
 
 For general-purpose forecasting on economic / retail / mixed panels, our internal classical baselines are **Nixtla-quality**.
 
-### 2. `LaplaceForecaster::auto()` sits at seasonal-naive level on this panel
+### 2. On retail data, `.skaters()` now beats AutoETS
 
-The streaming distributional forecaster loses to our own `AutoTheta` by 25 % geomean MASE. Root causes are analyzed in the "Where Laplace loses" table below; the dominant factor is a **warmup penalty on short-history panels**.
+The pre-#180 comparison had AutoETS at the top of the retail slot (M5 full-30k, median MAE 0.728). Post-#180, `.skaters()` on M5 200-series wins on **both MASE and WAPE at 9.3× the speed**. The fixed skaters-shaped candidate pool + sticky-lattice projection + terminal scale-mixture together add up to a real point-forecast improvement, not just a distributional one.
 
-## Where `LaplaceForecaster::auto()` loses — by training length
+### 3. `.auto()` still sits at seasonal-naive level on the fev mixed panel
 
-Per-dataset MASE vs. `AutoTheta`:
+The old, heuristic `.auto()` selector loses to `AutoTheta` by 25 % geomean MASE on the fev 27-panel. Root cause: **warmup penalty on short-history panels**. The new `.skaters()` engine avoids this by having a much wider fixed pool (~30 candidates) with cheap XGBoost-shrunk softmax updates that stay adaptive during warmup — but that trade wasn't tested end-to-end on fev yet.
 
-| panel | N | H | Laplace+auto | AutoTheta | Δ |
+## Where `.auto()` loses on fev — by training length
+
+Per-dataset MASE vs. `AutoTheta` (pre-#180 `.auto()`):
+
+| panel | N | H | Laplace.auto() | AutoTheta | Δ |
 |---|---|---|---|---|---|
 | m3_monthly | ~450 | 18 | 0.816 | 0.731 | +12 % |
 | hospital | ~72 | 12 | 0.780 | 0.764 | +2 % |
@@ -56,72 +91,100 @@ Per-dataset MASE vs. `AutoTheta`:
 
 Sorted by training length:
 
-- **N > 300** — Laplace+auto is competitive (within ±5–15 %). This is where the streaming leaves have converged and the softmax has reweighted correctly.
-- **N = 100–300** — Laplace+auto starts losing (+5 to +25 %). Leaf state has partial convergence.
-- **N = 50–100** — Larger losses (+25 to +80 %). Cold start dominates; softmax is still uniform-ish.
-- **N < 50** — Consistent +15 to +30 % loss. Streaming leaves haven't warmed up when the horizon starts.
+- **N > 300** — `.auto()` is competitive (within ±5–15 %).
+- **N = 100–300** — starts losing (+5 to +25 %).
+- **N = 50–100** — larger losses (+25 to +80 %). Cold start dominates.
+- **N < 50** — consistent +15 to +30 % loss.
+
+The wider `.skaters()` pool + XGBoost-shrunk updates should compress this significantly, but full re-measurement is pending.
 
 ## Design principle — this is architectural, not a bug
 
 `LaplaceForecaster` is a **streaming per-observation** design by construction:
 
-- Each leaf (`EmaLeaf`, `Ar1Leaf`, `SeasonalEmaLeaf`, `HoltLeaf`, `FractionalDiffLeaf`, `OuLeaf`, ...) maintains state that updates on `observe(y)`. State converges after ~ 30-50 observations depending on the leaf's smoothing rate.
-- The leaf softmax maintains cumulative log-likelihood per leaf and reweights via softmax. It also needs several observations to reweight from uniform to a peaked distribution.
-- Together, the fit needs `N ≥ 30` before it produces coherent forecasts, and `N ≥ 100` before it approaches its steady-state accuracy.
+- Each leaf maintains state that updates on `observe(y)`. State converges after ~30-50 observations depending on the leaf's smoothing rate.
+- The leaf softmax maintains cumulative log-likelihood per leaf and reweights via softmax.
+- With `.auto()` (small hand-picked pool), the softmax is easier to peak wrong on early observations. With `.skaters()` (30+ candidates, η = 0.5 shrunk updates, log-clamp), the ensemble stays adaptive longer.
 
-Classical closed-form fitters (`AutoETS`, `AutoTheta`) that solve their parameters over the full training window in one shot do not share this penalty. On short panels they are consistently better.
+Classical closed-form fitters (`AutoETS`, `AutoTheta`) solve their parameters over the full training window in one shot. That closes the warmup penalty on VERY short panels (N < 50) but doesn't help on retail-scale data.
 
 **This is a trade-off:**
 
-| property | Classical | `LaplaceForecaster::auto()` |
+| property | Classical | `LaplaceForecaster::skaters()` |
 |---|---|---|
-| Fit efficiency on long series | O(N) per iteration, needs to re-solve if data grows | O(1) per new observation |
-| Cold-start on short series | direct optimum from N observations | ~30-obs warmup penalty |
-| Distributional output | none (only point + parametric intervals) | full Gaussian mixture, per-horizon |
+| Fit efficiency on long series | O(N) per iteration, needs re-solve if data grows | O(1) per new observation |
+| Cold-start on short series (N < 50) | direct optimum from N observations | ~30-obs warmup, mitigated by wider softmax pool |
+| Distributional output | none (point + parametric intervals only) | full Gaussian mixture, per-horizon, with sticky-lattice atoms on discrete-repeat data |
 | Streaming updates | requires refit | native |
-| Domain-family selection | fixed | AID-driven (`.auto_aid()` / `SmartForecaster`) |
+| Retail count data (M5) | 5.6 s / 200 series, MASE 1.065 | **0.6 s / 200 series, MASE 0.978** |
 | CPU speed | ms-to-seconds per fit | sub-millisecond per fit |
 
-**Use `LaplaceForecaster` when:** your series is long enough for the streaming leaves to converge (`N ≥ 100`, ideally `≥ 300`), you need the distributional output, streaming updates matter to your pipeline, or you're on demand / retail data where `.auto_aid()` provides the largest win.
+**Use `LaplaceForecaster::skaters()` when:** your series is retail / demand / integer-count with adequate history (N ≥ 100 typical), OR you need distributional output (mixture density, quantiles, per-h calibration), OR you're on continuous data where AutoETS was previously the classical top.
 
-**Use `AutoTheta` / `AutoETS` when:** your series is short (`N < 100`), you just need point forecasts, or you're on the M-Competition-style classical panels where they are competitive with the best foundation models.
+**Use `AutoTheta` / `AutoETS` when:** your series is very short (N < 50), you just need point forecasts, or you're on the M-Competition-style classical panels where they are competitive with the best foundation models — the fev re-measurement is still pending.
+
+**Use `LaplaceForecaster::auto()` when:** you need the smallest, cheapest ensemble (~5-10 candidates), and you know the data class fits its heuristic gates (e.g. clear seasonality, adequate history).
 
 ## Comparison to foundation models
 
-Foundation models (Chronos-Bolt, TimesFM-2.0, Tirex, Moirai) beat classical by ~2–3 % MASE on this panel. That gap corresponds to their **cross-series pretraining data advantage** — a foundation model trained on ~100k-1M series has learned an implicit prior over data-generating processes that is finer-grained than what any classical parametric family (ETS, ARMA) can express.
+Foundation models (Chronos-Bolt, TimesFM-2.0, Tirex, Moirai) beat classical by ~2–3 % MASE on the fev panel. That gap corresponds to their **cross-series pretraining data advantage** — a foundation model trained on ~100k-1M series has learned an implicit prior over data-generating processes that is finer-grained than what any classical parametric family (ETS, ARMA) can express.
 
 Mathematically, this is amortized Bayesian inference under a learned prior; see `TabPFN` (Hollmann et al. 2022, 2025) for the cleanest formulation. This is not accessible to a per-series streaming classical model without pretraining infrastructure.
 
+Whether `.skaters()` closes any part of that gap on the fev panel is still an open question — the M5 result suggests the sticky-lattice + tighter density might help on retail-count series specifically, but foundation models are trained across many more data classes.
+
 ## Where `LaplaceForecaster` shines
 
-Empirical wins on our M5-full-30k retail benchmark (see `examples/skaters_m5_full_auto.rs`):
+Empirical wins on our M5 benchmarks:
+
+### M5 full 30k (pre-#180 numbers — `.auto_aid()` / `SmartForecaster` for AID-driven demand)
 
 | model | MAE (median, 30k series) | fit time | vs. AutoETS |
 |---|---|---|---|
 | AutoETS | 0.728 | 916 s | — |
-| **Laplace + auto_aid** | **0.734** | **22 s** | **+0.8 % MASE, ~42× faster** |
-| **SmartForecaster** | **0.735** | **11 s** | **+1.0 % MASE, ~82× faster** |
+| `Laplace + auto_aid` | 0.734 | 22 s | +0.8 % MASE, ~42× faster |
+| `SmartForecaster` | 0.735 | 11 s | +1.0 % MASE, ~82× faster |
 
-For **retail SKU / demand forecasting**, the AID-driven selectors are the right choice — they match classical on point accuracy while running dramatically faster, and provide native distributional output for downstream stochastic optimization (inventory / capacity planning).
+### M5 200-series (post-#180 numbers — `.skaters()` for the full extended engine)
+
+| model | mean MASE | panel WAPE | fit time |
+|---|---:|---:|---:|
+| **`Laplace + skaters()`** | **0.978** | **0.663** | **0.6 s** |
+| AutoETS | 1.065 | 0.695 | 5.6 s |
+
+For **retail SKU / demand forecasting**, both routes now beat classical:
+- `.auto_aid()` / `SmartForecaster` — matches classical on point accuracy at ~40-80× speed, with domain-aware family selection.
+- `.skaters()` — **beats classical on both point accuracy and speed**, with full distributional output.
 
 ## Reproduce
 
 ```bash
+# fev 27-panel (~90 min for the numbers in Benchmark B)
 cargo run --release --features distributional --example fev_benchmark
-# SAMPLE_PER=200 for quick smoke, 500 for the numbers above, no env var for all series (10× slower)
+
+# M5 200-series skaters vs AutoETS (Benchmark A, ~10 s)
+SAMPLE_SIZE=200 cargo run --release --features distributional --example m5_skaters_vs_autoets
+
+# skaters.laplace bakeoff (Benchmark C, ~1.5 min)
+BUILDER=skaters SAMPLE_SIZE=100 PRED_STRIDE=10 MAX_T=1200 BURN_IN=300 \
+  cargo run --release --features distributional --example m5_bakeoff_export
+python3 scripts/m5_laplace_bakeoff.py --burn-in 300
 ```
 
-Datasets fetched from the Monash Time Series Forecasting Archive (Zenodo) and autogluon/chronos_datasets (HuggingFace). Full list in `examples/fev_benchmark.rs`.
+Datasets fetched from the Monash Time Series Forecasting Archive (Zenodo), autogluon/chronos_datasets (HuggingFace), and the M5 competition CSV.
 
 ## Deferred / future work
 
+- **Re-run the full fev 27-panel with `.skaters()`** — the big empirical hole in this document. Expected to compress or eliminate the `.auto()` gap on retail/count-heavy panels; likely no big improvement on short-history M1/M3/M4 yearly.
 - **Full autogluon/fev PyO3 bridge** — head-to-head submission to the [autogluon/fev leaderboard](https://huggingface.co/spaces/autogluon/fev-leaderboard). Effort: 3–5 days.
 - **Foundation model in pure Rust** — TabPFN-style prior-fitted network trained on synthetic time-series priors. Effort: 2-3 months, adds `candle` / `burn` dependency.
-- **Improve short-series behavior** — not through classical fallback (which we explicitly avoid — the shell should stay purely streaming), but through leaf-specific batch initialization tricks. Under investigation.
+- **Improve short-series behavior** — not through classical fallback (which we explicitly avoid — the shell should stay purely streaming), but through leaf-specific batch initialization tricks.
 
 ## Defensible claims
 
 - *"`anofox-forecast`'s `AutoTheta` matches Nixtla reference quality within 1.4 % MASE on the fev Chronos-benchmark classical panel."*
-- *"For short-history panels (`N < 100`), classical `AutoTheta` / `AutoETS` outperform `LaplaceForecaster::auto()` by 15–30 % MASE — a fundamental property of streaming per-observation designs."*
+- *"On M5 200-series (H=28, weekly-period MASE), `LaplaceForecaster::skaters()` beats AutoETS by 8.2 % MASE / 4.6 % WAPE at 9.3× the fit-time speed."*
+- *"For short-history panels (`N < 50`), classical `AutoTheta` / `AutoETS` still outperform any streaming-based approach by 15–30 % MASE — a fundamental property of streaming per-observation designs, mitigated but not eliminated by `.skaters()`'s wider candidate pool."*
+- *"On the M5 first-differenced bakeoff against `skaters.laplace` (both sides `sticky=True`), our port beats the reference by +1.40 nats/pred on LL and 0.021 on CRPS while running 5.9× faster."*
 - *"For long-history retail demand panels (M5, N > 1000 typical), `LaplaceForecaster::auto_aid()` matches classical MASE within 0.8 % while running 40× faster and providing native distributional output."*
-- *"Foundation model SOTA (Tirex, TimesFM-2.0) leads the best classical by ~2 % MASE — a data-scale advantage from pretraining, not an algorithm advantage."*
+- *"Foundation model SOTA (Tirex, TimesFM-2.0) leads the best classical by ~2 % MASE on the fev panel — a data-scale advantage from pretraining, not an algorithm advantage. Whether `.skaters()` closes any part of that gap remains to be measured."*

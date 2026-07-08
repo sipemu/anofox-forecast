@@ -245,8 +245,9 @@ const MODEL_NAMES: &[&str] = &[
     "Laplace+auto",
     "Laplace+auto_aid",
     "SmartForecaster",
+    "Laplace+skaters",
 ];
-const N_MODELS: usize = 5;
+const N_MODELS: usize = 6;
 
 /// Weighted Quantile Loss — fev's canonical probabilistic metric. For a
 /// predicted quantile `q_hat` at level `q`, the loss is
@@ -592,6 +593,35 @@ fn run_dataset(ds: &Dataset, sample_per: usize) -> Option<DatasetResult> {
                 }
             }
             fit_us_sum[4] += t0.elapsed().as_micros();
+        }
+        // Model 5: Laplace + skaters() — full extended engine.
+        // Fixed skaters-shaped candidate pool, sticky lattice, terminal
+        // scale-mixture, XGBoost-shrunk softmax updates. Post-#180.
+        #[cfg(feature = "distributional")]
+        {
+            use anofox_forecast::models::DistributionalForecaster;
+            let t0 = Instant::now();
+            let mut m = LaplaceForecaster::new()
+                .skaters()
+                .auto_with_seasonal_period(ds.period.max(2));
+            if m.fit(&train_ts).is_ok() {
+                if let Ok(mixtures) = m.forecast_dist(ds.horizon) {
+                    if mixtures.len() == test_v.len() {
+                        let p: Vec<f64> = mixtures.iter().map(|g| g.mean()).collect();
+                        mase_sum[5] += mae(&p, test_v) / scale;
+                        let matrix: Vec<Vec<f64>> = WQL_QUANTILES
+                            .iter()
+                            .map(|&q| mixtures.iter().map(|g| g.quantile(q)).collect())
+                            .collect();
+                        let w = wql_from_quantile_matrix(&matrix, test_v);
+                        if w.is_finite() {
+                            wql_sum[5] += w;
+                        }
+                        n_ok[5] += 1;
+                    }
+                }
+            }
+            fit_us_sum[5] += t0.elapsed().as_micros();
         }
     }
 

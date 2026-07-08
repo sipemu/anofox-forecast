@@ -364,3 +364,13 @@ path = "examples/period_fix_check.rs"
 name = "m5_bakeoff_export"
 path = "examples/m5_bakeoff_export.rs"
 required-features = ["distributional"]
+
+[[example]]
+name = "m5_skaters_vs_autoets"
+path = "examples/m5_skaters_vs_autoets.rs"
+required-features = ["distributional"]
+
+[[example]]
+name = "m5_streaming_vs_refit"
+path = "examples/m5_streaming_vs_refit.rs"
+required-features = ["distributional"]
