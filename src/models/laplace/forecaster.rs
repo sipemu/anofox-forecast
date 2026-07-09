@@ -1927,16 +1927,29 @@ impl LaplaceForecaster {
         self
     }
 
-    /// Override the seasonal period used by [`Self::auto`] (default 7,
-    /// weekly). Set to 12 for monthly, 24 for hourly-with-daily, etc.
+    /// Commit to a seasonal period used by BOTH [`Self::auto`] and
+    /// [`Self::skaters`]. Sets both:
     ///
-    /// Marks the seasonal period as **explicit** (caller-committed) —
-    /// enables batch initialisation of the seasonal-EMA / multiplicative
-    /// phase levels from the last training cycle. This closes the
-    /// softmax cold-start handicap on short-history seasonal panels
-    /// (documented on N=48 monthly).
+    /// - `auto_seasonal_period` — the fallback period `.auto()`'s ACF
+    ///   scan uses when it can't detect one from data.
+    /// - `seasonal_period` — the period consumed by the leaf-pool
+    ///   builder to add a [`super::leaves::SeasonalEmaLeaf`].
+    ///
+    /// Set to 12 for monthly, 24 for hourly-with-daily, 4 for
+    /// quarterly, etc. Values `< 2` set only the auto fallback (yearly
+    /// data has no per-cycle seasonality to model).
+    ///
+    /// Fix for issue #195: previously this only set the auto-selector
+    /// fallback, so `.skaters().auto_with_seasonal_period(12)` didn't
+    /// actually add a seasonal-EMA leaf to the pool. Level-tracker
+    /// leaves then dominated and the forecast collapsed to a flat line
+    /// on amplitude-declining series (bug reproducer:
+    /// `examples/issue_195_amplitude_decline.rs`).
     pub fn auto_with_seasonal_period(mut self, period: usize) -> Self {
         self.auto_seasonal_period = period.max(2);
+        if period >= 2 && self.seasonal_period.is_none() {
+            self.seasonal_period = Some(period);
+        }
         self
     }
 
@@ -2019,14 +2032,25 @@ impl LaplaceForecaster {
     /// mechanism behind reports of near-flat forecasts on N=48
     /// monthly (period=12) data despite obvious seasonal structure.
     ///
-    /// **Opt-in.** Not enabled by default. On trending seasonal
-    /// panels (M-competition tourism-shape), the batch-initialised
-    /// additive seasonal-EMA leaf tends to displace the
-    /// multiplicative-seasonal leaf, which fits trending × seasonal
-    /// data better. On stationary seasonal panels the effect is a
-    /// large MAE win — verified on the
-    /// `examples/monthly_48_seasonal_diagnostic.rs` synthetic
-    /// (MAE 2.184 → 0.072 on the strong-seasonal case).
+    /// **Opt-in.** Not enabled by default. Trade-offs, measured on
+    /// `examples/monthly_48_seasonal_diagnostic.rs` and
+    /// `examples/issue_195_amplitude_decline.rs`:
+    ///
+    /// - Constant / declining amplitude: large MAE win (2.18 → 0.07 on
+    ///   strong-seasonal N=48; 5.49× → 1.10× peak-ratio on regime-change).
+    /// - **Growing amplitude** (retail expanding): batch init makes the
+    ///   softmax switch from `seasonal_ema` to a differenced-EMA
+    ///   leaf, collapsing the forecast to flat. Do NOT enable on
+    ///   growing-amplitude series.
+    /// - **Phase-shifted seasonality**: same failure mode as growing —
+    ///   softmax abandons `seasonal_ema` for a level tracker.
+    /// - Trending panels (M-competition tourism-shape) unconditionally:
+    ///   the batch-initialised additive seasonal-EMA leaf tends to
+    ///   displace the multiplicative-seasonal leaf, which fits
+    ///   trending × seasonal data better.
+    ///
+    /// Rule of thumb: safe on stationary or declining-amplitude
+    /// seasonal series. Risky on growing / phase-shifting series.
     ///
     /// Requires a period to be set via [`Self::with_seasonal`],
     /// [`Self::auto_with_seasonal_period`],
@@ -2180,11 +2204,21 @@ impl LaplaceForecaster {
             ))));
         }
         // PR #4 of #180: diff + EMA depth-2 (period=1 == plain differencing).
-        for &alpha in &self.diff_ema_alphas {
-            leaves.push(LeafEnum::Wrapped(Box::new(SeasonalDifferenceWrapper::new(
-                Box::new(EmaLeaf::new(alpha)),
-                1,
-            ))));
+        //
+        // Fix for issue #195 fourth pathology (drift + seasonal): the
+        // period-1 diff-EMA family are excellent 1-step level trackers,
+        // and on a trending seasonal series they win the softmax by
+        // producing zero-mean differences → flat multi-step forecast
+        // ignoring the seasonal component. When the caller has
+        // committed to a seasonal period, exclude this family; the
+        // seasonal-EMA leaf below is what they wanted.
+        if self.seasonal_period.is_none() {
+            for &alpha in &self.diff_ema_alphas {
+                leaves.push(LeafEnum::Wrapped(Box::new(SeasonalDifferenceWrapper::new(
+                    Box::new(EmaLeaf::new(alpha)),
+                    1,
+                ))));
+            }
         }
         // PR #4 of #180: multi-speed drift grid.
         for &alpha in &self.drift_alphas {
@@ -2216,13 +2250,17 @@ impl LaplaceForecaster {
             ))));
         }
         // PR #6 of #180: YJ + diff + EMA composition — the diff half of
-        // skaters' YJ coordinate prior.
-        for &(lam, alpha) in &self.yj_diff_ema {
-            let inner: Box<dyn Leaf + Send> = Box::new(SeasonalDifferenceWrapper::new(
-                Box::new(EmaLeaf::new(alpha)),
-                1,
-            ));
-            leaves.push(LeafEnum::Wrapped(Box::new(YjWrappedLeaf::new(inner, lam))));
+        // skaters' YJ coordinate prior. Same gate as the plain diff-EMA
+        // family above: skip when the caller committed to a seasonal
+        // period (see issue #195 fourth pathology).
+        if self.seasonal_period.is_none() {
+            for &(lam, alpha) in &self.yj_diff_ema {
+                let inner: Box<dyn Leaf + Send> = Box::new(SeasonalDifferenceWrapper::new(
+                    Box::new(EmaLeaf::new(alpha)),
+                    1,
+                ));
+                leaves.push(LeafEnum::Wrapped(Box::new(YjWrappedLeaf::new(inner, lam))));
+            }
         }
         // PR #3 of #180: Yeo-Johnson coordinate composition — for each λ,
         // append a wrapped copy of every base leaf so far.
@@ -2724,6 +2762,43 @@ impl Forecaster for LaplaceForecaster {
             if chars.zero_fraction > 0.3 {
                 self.non_negative = true;
             }
+        }
+
+        // Fix for issue #195 third pathology: intermittent-bursty
+        // series (case study `FOODS_3_444_WI_2`: 37% zeros alternating
+        // with 400-1900 spikes) that .skaters() left un-Crostoned
+        // because the auto-selector doesn't run under .skaters(). Runs
+        // outside the `use_auto` gate so both paths benefit. Uses the
+        // same 0.4 threshold as .auto()'s existing zero_fraction gate.
+        if self.intermittent.is_none() && !values.is_empty() {
+            let zero_count = values.iter().filter(|y| y.abs() < 1e-9).count();
+            let zero_frac = zero_count as f64 / values.len() as f64;
+            if zero_frac > 0.4 {
+                self.intermittent = Some(0.1);
+            }
+            // If we've committed to a seasonal period, prefer the
+            // seasonal Croston variant which retains the phase shape.
+            if let Some(period) = self.seasonal_period {
+                if self.seasonal_intermittent.is_none() && zero_frac > 0.3 && period >= 2 {
+                    self.seasonal_intermittent = Some((period, 0.1));
+                }
+            }
+        }
+
+        // Fix for issue #195 second pathology: all-positive training
+        // data (retail counts, M5-monthly-shape series) auto-enables
+        // the non-negative clamp on the output mixture — regardless of
+        // whether `use_auto` is set, since `.skaters()` skips the auto
+        // block but is even more likely to produce negatives (measured:
+        // 1.9% of M5-monthly `.auto()` series produced ≥1 negative
+        // forecast; 5.0% for `.skaters()`). Runs on both `.auto()` and
+        // `.skaters()` paths.
+        if !self.non_negative
+            && !values.is_empty()
+            && values.iter().all(|y| y.is_finite() && *y >= 0.0)
+            && values.iter().any(|y| *y > 0.0)
+        {
+            self.non_negative = true;
         }
 
         // Seasonal batch init is opt-in via `.with_seasonal_batch_init()`.
