@@ -288,10 +288,7 @@ pub fn compare_models(
         }
         let fit_time_us = start.elapsed().as_micros() as u64;
 
-        let in_sample = match model.fitted_values() {
-            Some(fitted) => compute_in_sample(actual, fitted)?,
-            None => return None,
-        };
+        let in_sample = compute_in_sample(actual, model.fitted_values()?)?;
 
         let cv_metrics = if config.run_cv {
             run_cv_for_factory(factory.as_ref(), series, &config.cv_config)
@@ -372,10 +369,7 @@ pub fn compare_registry(
         }
         let fit_time_us = start.elapsed().as_micros() as u64;
 
-        let in_sample = match model.fitted_values() {
-            Some(fitted) => compute_in_sample(actual, fitted)?,
-            None => return None,
-        };
+        let in_sample = compute_in_sample(actual, model.fitted_values()?)?;
 
         let cv_metrics = if config.run_cv {
             let factory = || spec.create();
