@@ -2204,11 +2204,21 @@ impl LaplaceForecaster {
             ))));
         }
         // PR #4 of #180: diff + EMA depth-2 (period=1 == plain differencing).
-        for &alpha in &self.diff_ema_alphas {
-            leaves.push(LeafEnum::Wrapped(Box::new(SeasonalDifferenceWrapper::new(
-                Box::new(EmaLeaf::new(alpha)),
-                1,
-            ))));
+        //
+        // Fix for issue #195 fourth pathology (drift + seasonal): the
+        // period-1 diff-EMA family are excellent 1-step level trackers,
+        // and on a trending seasonal series they win the softmax by
+        // producing zero-mean differences → flat multi-step forecast
+        // ignoring the seasonal component. When the caller has
+        // committed to a seasonal period, exclude this family; the
+        // seasonal-EMA leaf below is what they wanted.
+        if self.seasonal_period.is_none() {
+            for &alpha in &self.diff_ema_alphas {
+                leaves.push(LeafEnum::Wrapped(Box::new(SeasonalDifferenceWrapper::new(
+                    Box::new(EmaLeaf::new(alpha)),
+                    1,
+                ))));
+            }
         }
         // PR #4 of #180: multi-speed drift grid.
         for &alpha in &self.drift_alphas {
@@ -2240,13 +2250,17 @@ impl LaplaceForecaster {
             ))));
         }
         // PR #6 of #180: YJ + diff + EMA composition — the diff half of
-        // skaters' YJ coordinate prior.
-        for &(lam, alpha) in &self.yj_diff_ema {
-            let inner: Box<dyn Leaf + Send> = Box::new(SeasonalDifferenceWrapper::new(
-                Box::new(EmaLeaf::new(alpha)),
-                1,
-            ));
-            leaves.push(LeafEnum::Wrapped(Box::new(YjWrappedLeaf::new(inner, lam))));
+        // skaters' YJ coordinate prior. Same gate as the plain diff-EMA
+        // family above: skip when the caller committed to a seasonal
+        // period (see issue #195 fourth pathology).
+        if self.seasonal_period.is_none() {
+            for &(lam, alpha) in &self.yj_diff_ema {
+                let inner: Box<dyn Leaf + Send> = Box::new(SeasonalDifferenceWrapper::new(
+                    Box::new(EmaLeaf::new(alpha)),
+                    1,
+                ));
+                leaves.push(LeafEnum::Wrapped(Box::new(YjWrappedLeaf::new(inner, lam))));
+            }
         }
         // PR #3 of #180: Yeo-Johnson coordinate composition — for each λ,
         // append a wrapped copy of every base leaf so far.
@@ -2747,6 +2761,27 @@ impl Forecaster for LaplaceForecaster {
             // - Any auto-detected intermittency implies non-negative output.
             if chars.zero_fraction > 0.3 {
                 self.non_negative = true;
+            }
+        }
+
+        // Fix for issue #195 third pathology: intermittent-bursty
+        // series (case study `FOODS_3_444_WI_2`: 37% zeros alternating
+        // with 400-1900 spikes) that .skaters() left un-Crostoned
+        // because the auto-selector doesn't run under .skaters(). Runs
+        // outside the `use_auto` gate so both paths benefit. Uses the
+        // same 0.4 threshold as .auto()'s existing zero_fraction gate.
+        if self.intermittent.is_none() && !values.is_empty() {
+            let zero_count = values.iter().filter(|y| y.abs() < 1e-9).count();
+            let zero_frac = zero_count as f64 / values.len() as f64;
+            if zero_frac > 0.4 {
+                self.intermittent = Some(0.1);
+            }
+            // If we've committed to a seasonal period, prefer the
+            // seasonal Croston variant which retains the phase shape.
+            if let Some(period) = self.seasonal_period {
+                if self.seasonal_intermittent.is_none() && zero_frac > 0.3 && period >= 2 {
+                    self.seasonal_intermittent = Some((period, 0.1));
+                }
             }
         }
 

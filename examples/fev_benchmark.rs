@@ -517,9 +517,10 @@ fn run_dataset(ds: &Dataset, sample_per: usize, enabled: &[bool]) -> Option<Data
         if enabled[2] {
             use anofox_forecast::models::DistributionalForecaster;
             let t0 = Instant::now();
-            let mut m = LaplaceForecaster::new()
-                .auto()
-                .auto_with_seasonal_period(ds.period.max(2));
+            let mut m = LaplaceForecaster::new().auto();
+            if ds.period >= 2 {
+                m = m.auto_with_seasonal_period(ds.period);
+            }
             if m.fit(&train_ts).is_ok() {
                 if let Ok(mixtures) = m.forecast_dist(ds.horizon) {
                     if mixtures.len() == test_v.len() {
@@ -544,9 +545,10 @@ fn run_dataset(ds: &Dataset, sample_per: usize, enabled: &[bool]) -> Option<Data
         if enabled[3] {
             use anofox_forecast::models::DistributionalForecaster;
             let t0 = Instant::now();
-            let mut m = LaplaceForecaster::new()
-                .auto_aid()
-                .auto_with_seasonal_period(ds.period.max(2));
+            let mut m = LaplaceForecaster::new().auto_aid();
+            if ds.period >= 2 {
+                m = m.auto_with_seasonal_period(ds.period);
+            }
             if m.fit(&train_ts).is_ok() {
                 if let Ok(mixtures) = m.forecast_dist(ds.horizon) {
                     if mixtures.len() == test_v.len() {
@@ -601,9 +603,10 @@ fn run_dataset(ds: &Dataset, sample_per: usize, enabled: &[bool]) -> Option<Data
         if enabled[5] {
             use anofox_forecast::models::DistributionalForecaster;
             let t0 = Instant::now();
-            let mut m = LaplaceForecaster::new()
-                .skaters()
-                .auto_with_seasonal_period(ds.period.max(2));
+            let mut m = LaplaceForecaster::new().skaters();
+            if ds.period >= 2 {
+                m = m.auto_with_seasonal_period(ds.period);
+            }
             if m.fit(&train_ts).is_ok() {
                 if let Ok(mixtures) = m.forecast_dist(ds.horizon) {
                     if mixtures.len() == test_v.len() {
