@@ -43,6 +43,84 @@ impl SeasonalEmaLeaf {
         }
     }
 
+    /// Batch-initialize `phase_level[k]` with the mean of same-phase
+    /// training observations. Skips the cold-start penalty where a
+    /// freshly-created leaf spends one full cycle producing
+    /// `global_ema`-fallback predictions and accumulates a permanent
+    /// handicap in the softmax `cum_log_liks`.
+    ///
+    /// Diagnosed on N=48 monthly (period=12) synthetic data: without
+    /// batch init the seasonal-EMA leaf never overtakes plain Drift/EMA
+    /// in the softmax and the forecast reads as a near-straight line.
+    /// With batch init, phases are calibrated from step 1 and the
+    /// leaf competes fairly on the first observation.
+    ///
+    /// Sets `phase_seen[k] = true` for every phase reached by the
+    /// training window. Also seeds `global_ema` to the training mean
+    /// (fallback for phases the training window never touched, if
+    /// `period > n`).
+    pub fn from_batch(period: usize, alpha: f64, values: &[f64]) -> Self {
+        let mut leaf = Self::new(period, alpha);
+        if values.is_empty() {
+            return leaf;
+        }
+        let p = leaf.period;
+        // Two-stage init:
+        // 1. Overall training mean for `global_ema` (fallback if a phase
+        //    was never touched in the training window).
+        // 2. Phase levels come from the LAST COMPLETE CYCLE only. On
+        //    trending series (real M-competition monthly / tourism)
+        //    averaging across all cycles blends stale early-cycle
+        //    values with recent ones and reads WORSE than a cold zero.
+        //    The last cycle is the state the streaming EWMA is about to
+        //    continue from — closest to the truth of "level at each
+        //    phase right now".
+        let total_cnt = values.iter().filter(|y| y.is_finite()).count();
+        let global = if total_cnt > 0 {
+            values.iter().filter(|y| y.is_finite()).sum::<f64>() / total_cnt as f64
+        } else {
+            0.0
+        };
+        leaf.global_ema = global;
+        // Pick the LAST FULL cycle from the training window: indices
+        // `[values.len() - period .. values.len()]`. Phase k in that
+        // window corresponds to phase `(values.len() - period + k) % p`,
+        // which simplifies to `k % p = k` since we take exactly p values.
+        if values.len() >= p {
+            let start = values.len() - p;
+            for k in 0..p {
+                let y = values[start + k];
+                if y.is_finite() {
+                    // Global phase = (start + k) % p, which equals k
+                    // when start is a multiple of p. Otherwise map
+                    // through the mod.
+                    let phase = (start + k) % p;
+                    leaf.phase_level[phase] = y;
+                    leaf.phase_seen[phase] = true;
+                }
+            }
+        } else {
+            // Short window: initialise only the phases we've seen.
+            for (i, &y) in values.iter().enumerate() {
+                if y.is_finite() {
+                    let phase = i % p;
+                    leaf.phase_level[phase] = y;
+                    leaf.phase_seen[phase] = true;
+                }
+            }
+        }
+        // Fill un-seen phases with the global mean fallback.
+        for k in 0..p {
+            if !leaf.phase_seen[k] {
+                leaf.phase_level[k] = global;
+            }
+        }
+        // Advance phase_step so the next `predict_one`/`observe` call
+        // corresponds to the phase after the last training observation.
+        leaf.phase_step = values.len() % p;
+        leaf
+    }
+
     pub fn period(&self) -> usize {
         self.period
     }

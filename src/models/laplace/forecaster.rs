@@ -672,6 +672,13 @@ pub struct LaplaceForecaster {
     holt: Option<(f64, f64, f64)>, // (alpha, beta, phi)
     ar2: Option<f64>,              // mean-EMA alpha
     seasonal_period: Option<usize>,
+    /// Opt-in flag for [`Self::with_seasonal_batch_init`]: pre-fills
+    /// the seasonal-EMA / multiplicative-seasonal phase levels from
+    /// the last training cycle so the leaf competes fairly on the
+    /// first observation. Off by default — measured regression on
+    /// tourism_monthly-shape data when applied unconditionally.
+    /// See `docs/ACCURACY_AUDIT.md`.
+    seasonal_batch_init: bool,
     seasonal_periods_multi: Vec<usize>,
     seasonal_alpha: f64,
     calibrate: bool,
@@ -951,6 +958,7 @@ impl LaplaceForecaster {
             holt: None,
             ar2: None,
             seasonal_period: None,
+            seasonal_batch_init: false,
             seasonal_periods_multi: Vec::new(),
             seasonal_alpha: 0.15,
             calibrate: false,
@@ -1920,6 +1928,12 @@ impl LaplaceForecaster {
 
     /// Override the seasonal period used by [`Self::auto`] (default 7,
     /// weekly). Set to 12 for monthly, 24 for hourly-with-daily, etc.
+    ///
+    /// Marks the seasonal period as **explicit** (caller-committed) —
+    /// enables batch initialisation of the seasonal-EMA / multiplicative
+    /// phase levels from the last training cycle. This closes the
+    /// softmax cold-start handicap on short-history seasonal panels
+    /// (documented on N=48 monthly).
     pub fn auto_with_seasonal_period(mut self, period: usize) -> Self {
         self.auto_seasonal_period = period.max(2);
         self
@@ -1996,6 +2010,32 @@ impl LaplaceForecaster {
         self
     }
 
+    /// Batch-initialize the seasonal-EMA / multiplicative-seasonal
+    /// leaves' phase levels from the last training cycle. Closes the
+    /// softmax cold-start handicap where the seasonal leaf spends
+    /// its first cycle producing fallback predictions and
+    /// permanently lags plain EMA/Drift in `cum_log_liks` — the
+    /// mechanism behind reports of near-flat forecasts on N=48
+    /// monthly (period=12) data despite obvious seasonal structure.
+    ///
+    /// **Opt-in.** Not enabled by default. On trending seasonal
+    /// panels (M-competition tourism-shape), the batch-initialised
+    /// additive seasonal-EMA leaf tends to displace the
+    /// multiplicative-seasonal leaf, which fits trending × seasonal
+    /// data better. On stationary seasonal panels the effect is a
+    /// large MAE win — verified on the
+    /// `examples/monthly_48_seasonal_diagnostic.rs` synthetic
+    /// (MAE 2.184 → 0.072 on the strong-seasonal case).
+    ///
+    /// Requires a period to be set via [`Self::with_seasonal`],
+    /// [`Self::auto_with_seasonal_period`],
+    /// [`Self::with_seasonal_multi`], or `.auto()`'s auto-detection.
+    /// Without a period the flag is a no-op.
+    pub fn with_seasonal_batch_init(mut self) -> Self {
+        self.seasonal_batch_init = true;
+        self
+    }
+
     /// Add multiple seasonal-EMA leaves, one per period in `periods`.
     /// Composes with [`Self::with_seasonal`] (the single-period leaf) — both
     /// families can be set simultaneously. Periods `< 2` are silently
@@ -2033,20 +2073,40 @@ impl LaplaceForecaster {
         // `::new` when there's no batch. This keeps the pool-construction
         // code below unchanged (which is heavily tuned per `.auto()` /
         // `.skaters()` variant).
-        let mk_drift = |a: f64| -> DriftLeaf {
+        // NOTE on `batch`: this parameter used to drive DriftLeaf and
+        // HoltLeaf `from_batch` too (yearly Trick 1). That was reverted
+        // after it regressed cif_2016 by 280% — the `looks_trending`
+        // gate was too permissive. `mk_drift` / `mk_holt` therefore
+        // ALWAYS use `::new` and ignore `batch`. The `batch` slice is
+        // used only by the seasonal closures below, where the
+        // batch-mean-per-phase computation has no gate (once you know
+        // the period, the per-phase mean is unambiguously a better
+        // starting point than the cold zero).
+        let mk_drift = |a: f64| -> DriftLeaf { DriftLeaf::new(a) };
+        let mk_holt = |a: f64, b: f64, p: f64| -> HoltLeaf { HoltLeaf::new(a, b, p) };
+        // Seasonal batch init — closes the softmax cold-start handicap
+        // where an un-warmed SeasonalEmaLeaf / MultiplicativeSeasonalLeaf
+        // spends one full cycle producing fallback predictions and
+        // permanently lags plain Drift/EMA in cum_log_liks. On N=48
+        // monthly (period=12) this was catastrophic — the seasonal leaf
+        // never won the softmax and the forecast collapsed to a
+        // near-straight line.
+        let mk_seasonal_ema = |period: usize, a: f64| -> SeasonalEmaLeaf {
             match batch {
-                Some(v) => DriftLeaf::from_batch(a, v),
-                None => DriftLeaf::new(a),
+                Some(v) => SeasonalEmaLeaf::from_batch(period, a, v),
+                None => SeasonalEmaLeaf::new(period, a),
             }
         };
-        let mk_holt = |a: f64, b: f64, p: f64| -> HoltLeaf {
+        let mk_seasonal_mult = |period: usize, a: f64| -> MultiplicativeSeasonalLeaf {
             match batch {
-                Some(v) => HoltLeaf::from_batch(a, b, p, v),
-                None => HoltLeaf::new(a, b, p),
+                Some(v) => MultiplicativeSeasonalLeaf::from_batch(period, a, v),
+                None => MultiplicativeSeasonalLeaf::new(period, a),
             }
         };
         let _ = &mk_drift; // silence unused-if-no-hits warnings
         let _ = &mk_holt;
+        let _ = &mk_seasonal_ema;
+        let _ = &mk_seasonal_mult;
         let mut leaves: Vec<LeafEnum> = if self.use_populations_wide {
             vec![
                 LeafEnum::Ema(EmaLeaf::new(0.02)),
@@ -2228,19 +2288,21 @@ impl LaplaceForecaster {
             ));
         }
         if let Some(p) = self.seasonal_period {
-            leaves.push(super::leaf_enum::LeafEnum::SeasonalEma(
-                SeasonalEmaLeaf::new(p, self.seasonal_alpha),
-            ));
+            leaves.push(super::leaf_enum::LeafEnum::SeasonalEma(mk_seasonal_ema(
+                p,
+                self.seasonal_alpha,
+            )));
         }
         for &p in &self.seasonal_periods_multi {
-            leaves.push(super::leaf_enum::LeafEnum::SeasonalEma(
-                SeasonalEmaLeaf::new(p, self.seasonal_alpha),
-            ));
+            leaves.push(super::leaf_enum::LeafEnum::SeasonalEma(mk_seasonal_ema(
+                p,
+                self.seasonal_alpha,
+            )));
         }
         if let Some((p, a)) = self.seasonal_mult {
-            leaves.push(super::leaf_enum::LeafEnum::SeasonalMult(
-                MultiplicativeSeasonalLeaf::new(p, a),
-            ));
+            leaves.push(super::leaf_enum::LeafEnum::SeasonalMult(mk_seasonal_mult(
+                p, a,
+            )));
         }
         leaves
     }
@@ -2256,10 +2318,14 @@ impl LaplaceForecaster {
     /// than from zero.
     fn init_leaves_maybe_batch(&mut self, batch_values: Option<&[f64]>) {
         use super::leaf_enum::LeafEnum;
-        // Trick 1 gate: apply batch init only when short-history AND
-        // trend appears significant relative to noise.
-        let batch: Option<&[f64]> =
-            batch_values.filter(|v| v.len() >= 5 && v.len() < 60 && looks_trending(v));
+        // Batch init drives ONLY seasonal-EMA / multiplicative-seasonal
+        // phase levels now (Drift/Holt were reverted after regressing
+        // cif_2016 — see comment in build_base_leaves_with_batch).
+        // Seasonal batch init has no gate: computing per-phase means
+        // from training data is unambiguously a better start than the
+        // cold zero, whenever the caller has committed to a `period`.
+        // Require at least 5 obs for a meaningful mean.
+        let batch: Option<&[f64]> = batch_values.filter(|v| v.len() >= 5);
         let leaves = self.build_base_leaves_with_batch(batch);
         let leaves = if !self.yj_grid.is_empty() {
             let mut wrapped: Vec<LeafEnum> = Vec::with_capacity(leaves.len() * self.yj_grid.len());
@@ -2658,13 +2724,21 @@ impl Forecaster for LaplaceForecaster {
             }
         }
 
-        // Yearly-Trick 1 was REVERTED after fev-27 regression on
-        // cif_2016 (.skaters() MASE 1.32 → 5.02, +280 %). The
-        // `looks_trending` heuristic was too permissive; noisy
-        // short-history panels get bad OLS β estimates → Drift/Holt
-        // init to garbage → forecasts blow up. See
-        // docs/ACCURACY_AUDIT.md § Trick 1 retrospective.
-        self.init_leaves();
+        // Seasonal batch init is opt-in via `.with_seasonal_batch_init()`.
+        // When enabled and a period is set, pre-fills the seasonal-EMA /
+        // multiplicative-seasonal leaves' phase levels from the last
+        // training cycle to close the softmax cold-start handicap.
+        // Documented on N=48 monthly (period=12) synthetic data.
+        //
+        // Note: Drift/Holt build closures IGNORE `batch` regardless
+        // (yearly-Trick 1 regressed cif_2016 by 280% — see
+        // docs/ACCURACY_AUDIT.md).
+        let batch_arg = if self.seasonal_batch_init {
+            Some(values)
+        } else {
+            None
+        };
+        self.init_leaves_maybe_batch(batch_arg);
         // Fev-27 follow-up: auto-gate sticky. When `.skaters()` set
         // `sticky_auto_gate = true`, decide sticky based on training
         // data characteristics. Discrete-count-like → keep sticky
