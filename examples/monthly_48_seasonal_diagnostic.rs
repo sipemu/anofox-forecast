@@ -134,42 +134,114 @@ fn run(label: &str, seasonal_amp: f64, noise_amp: f64) {
         mae(&means3, &truth)
     );
 
-    // Show truth vs each forecast for the first 6 horizons
+    // Peak / trough capture — the question aggregate MAE hides.
+    let range = |xs: &[f64]| -> (f64, f64) {
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for &v in xs {
+            if v < lo {
+                lo = v;
+            }
+            if v > hi {
+                hi = v;
+            }
+        }
+        (lo, hi)
+    };
+    let (t_lo, t_hi) = range(&truth);
+    let (a_lo, a_hi) = range(&means1);
+    let (b_lo, b_hi) = range(&means2);
+    let (c_lo, c_hi) = range(&means3);
     println!(
-        "  Truth  head-6: {}",
+        "  Truth  H=12 range     : lo={:+.2}  hi={:+.2}  swing={:.2}",
+        t_lo,
+        t_hi,
+        t_hi - t_lo
+    );
+    println!(
+        "  auto()                : lo={:+.2}  hi={:+.2}  swing={:.2}  (captures {:.0}% of truth swing)",
+        a_lo,
+        a_hi,
+        a_hi - a_lo,
+        100.0 * (a_hi - a_lo) / (t_hi - t_lo).max(1e-9)
+    );
+    println!(
+        "  auto(p)               : lo={:+.2}  hi={:+.2}  swing={:.2}  (captures {:.0}% of truth swing)",
+        b_lo,
+        b_hi,
+        b_hi - b_lo,
+        100.0 * (b_hi - b_lo) / (t_hi - t_lo).max(1e-9)
+    );
+    println!(
+        "  FIX                   : lo={:+.2}  hi={:+.2}  swing={:.2}  (captures {:.0}% of truth swing)",
+        c_lo,
+        c_hi,
+        c_hi - c_lo,
+        100.0 * (c_hi - c_lo) / (t_hi - t_lo).max(1e-9)
+    );
+
+    // Full H=12 cycle so peak + trough are both visible.
+    println!(
+        "  Truth  full-12: {}",
         truth
             .iter()
-            .take(6)
-            .map(|v| format!("{v:+.2}"))
+            .map(|v| format!("{v:+.1}"))
             .collect::<Vec<_>>()
             .join(" ")
     );
     println!(
-        "  auto() head-6: {}",
+        "  auto() full-12: {}",
         means1
             .iter()
-            .take(6)
-            .map(|v| format!("{v:+.2}"))
+            .map(|v| format!("{v:+.1}"))
             .collect::<Vec<_>>()
             .join(" ")
     );
     println!(
-        "  auto(p) head-6: {}",
-        means2
-            .iter()
-            .take(6)
-            .map(|v| format!("{v:+.2}"))
-            .collect::<Vec<_>>()
-            .join(" ")
-    );
-    println!(
-        "  FIX     head-6: {}",
+        "  FIX    full-12: {}",
         means3
             .iter()
-            .take(6)
-            .map(|v| format!("{v:+.2}"))
+            .map(|v| format!("{v:+.1}"))
             .collect::<Vec<_>>()
             .join(" ")
+    );
+
+    // Also run at H=24 to check the "H=24 straight line" symptom.
+    let mut m1b = LaplaceForecaster::new().auto();
+    let mut m3b = LaplaceForecaster::new()
+        .auto()
+        .auto_with_seasonal_period(PERIOD)
+        .with_seasonal_batch_init();
+    m1b.fit(&train).expect("fit fail");
+    m3b.fit(&train).expect("fit fail");
+    let means1_24: Vec<f64> = m1b
+        .forecast_dist(24)
+        .expect("predict fail")
+        .iter()
+        .map(|mix| mix.components.iter().map(|(w, g)| w * g.mean).sum::<f64>())
+        .collect();
+    let means3_24: Vec<f64> = m3b
+        .forecast_dist(24)
+        .expect("predict fail")
+        .iter()
+        .map(|mix| mix.components.iter().map(|(w, g)| w * g.mean).sum::<f64>())
+        .collect();
+    let truth24: Vec<f64> = (N..N + 24)
+        .map(|i| {
+            let phase = (i % PERIOD) as f64 * std::f64::consts::PI * 2.0 / PERIOD as f64;
+            10.0 + seasonal_amp * phase.sin()
+        })
+        .collect();
+    let (a24_lo, a24_hi) = range(&means1_24);
+    let (c24_lo, c24_hi) = range(&means3_24);
+    let (t24_lo, t24_hi) = range(&truth24);
+    println!(
+        "  --- H=24 (two cycles) ---   truth swing {:.2}  |  auto() swing {:.2} ({:.0}%)  |  FIX swing {:.2} ({:.0}%)",
+        t24_hi - t24_lo,
+        a24_hi - a24_lo,
+        100.0 * (a24_hi - a24_lo) / (t24_hi - t24_lo).max(1e-9),
+        c24_hi - c24_lo,
+        100.0 * (c24_hi - c24_lo) / (t24_hi - t24_lo).max(1e-9),
     );
 }
 
