@@ -28,6 +28,8 @@ compile_error!(
     "The 'parallel' feature is not supported on WASM targets. Build without --features parallel"
 );
 
+#[cfg(feature = "anomaly")]
+pub mod anomaly;
 pub mod batch;
 pub mod changepoint;
 pub mod core;

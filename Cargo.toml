@@ -37,6 +37,9 @@ forecastability = []
 seasonal-detection = ["dep:fdars-core"]
 serde = ["dep:serde", "dep:serde_json", "dep:bincode"]
 distributional = []
+# Streaming Mahalanobis anomaly detection (docs/ANOMALY_PLAN.md).
+# Port of microprediction/timemachines heads/mahalanobis.py.
+anomaly = ["distributional"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
