@@ -2750,6 +2750,22 @@ impl Forecaster for LaplaceForecaster {
             }
         }
 
+        // Fix for issue #195 second pathology: all-positive training
+        // data (retail counts, M5-monthly-shape series) auto-enables
+        // the non-negative clamp on the output mixture — regardless of
+        // whether `use_auto` is set, since `.skaters()` skips the auto
+        // block but is even more likely to produce negatives (measured:
+        // 1.9% of M5-monthly `.auto()` series produced ≥1 negative
+        // forecast; 5.0% for `.skaters()`). Runs on both `.auto()` and
+        // `.skaters()` paths.
+        if !self.non_negative
+            && !values.is_empty()
+            && values.iter().all(|y| y.is_finite() && *y >= 0.0)
+            && values.iter().any(|y| *y > 0.0)
+        {
+            self.non_negative = true;
+        }
+
         // Seasonal batch init is opt-in via `.with_seasonal_batch_init()`.
         // When enabled and a period is set, pre-fills the seasonal-EMA /
         // multiplicative-seasonal leaves' phase levels from the last
