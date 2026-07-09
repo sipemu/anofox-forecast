@@ -22,6 +22,7 @@
 use crate::models::laplace::dist::Gaussian;
 use crate::models::laplace::leaf::Leaf;
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DiscreteUniformLeaf {
     /// Running max over observed values; used to infer K.
     k_estimate: f64,

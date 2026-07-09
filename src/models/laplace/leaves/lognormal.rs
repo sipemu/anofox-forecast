@@ -24,6 +24,7 @@ fn log1p_nonneg(y: f64) -> f64 {
     y.max(0.0).ln_1p()
 }
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct LogNormalLeaf {
     alpha: f64,
     mu_log_ema: f64,

@@ -113,7 +113,9 @@ pub mod forecaster;
 pub mod global;
 pub mod hierarchical;
 pub mod leaf;
+mod leaf_enum;
 pub mod leaves;
+pub mod multiscale;
 
 pub use dist::{Gaussian, GaussianMixture};
 pub use forecaster::LaplaceForecaster;

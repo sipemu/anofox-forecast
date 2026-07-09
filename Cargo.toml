@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "anofox-forecast"
-version = "0.13.2"
+version = "0.14.0"
 edition = "2021"
 authors = ["Simon Müller"]
 description = "Time series forecasting library"
@@ -37,6 +37,9 @@ forecastability = []
 seasonal-detection = ["dep:fdars-core"]
 serde = ["dep:serde", "dep:serde_json", "dep:bincode"]
 distributional = []
+# Streaming Mahalanobis anomaly detection (docs/ANOMALY_PLAN.md).
+# Port of microprediction/timemachines heads/mahalanobis.py.
+anomaly = ["distributional"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
@@ -105,6 +108,11 @@ name = "comprehensive_benchmark"
 harness = false
 
 # Examples
+[[example]]
+name = "anomaly_detection"
+path = "examples/anomaly_detection.rs"
+required-features = ["anomaly"]
+
 [[example]]
 name = "quickstart"
 path = "examples/quickstart.rs"
@@ -363,4 +371,29 @@ path = "examples/period_fix_check.rs"
 [[example]]
 name = "m5_bakeoff_export"
 path = "examples/m5_bakeoff_export.rs"
+required-features = ["distributional"]
+
+[[example]]
+name = "m5_skaters_vs_autoets"
+path = "examples/m5_skaters_vs_autoets.rs"
+required-features = ["distributional"]
+
+[[example]]
+name = "m5_streaming_vs_refit"
+path = "examples/m5_streaming_vs_refit.rs"
+required-features = ["distributional"]
+
+[[example]]
+name = "m4_hourly_diagnostic"
+path = "examples/m4_hourly_diagnostic.rs"
+required-features = ["distributional"]
+
+[[example]]
+name = "fred_bakeoff_export"
+path = "examples/fred_bakeoff_export.rs"
+required-features = ["distributional"]
+
+[[example]]
+name = "multiscale_diagnostic"
+path = "examples/multiscale_diagnostic.rs"
 required-features = ["distributional"]

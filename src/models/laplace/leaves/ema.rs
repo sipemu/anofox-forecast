@@ -6,6 +6,7 @@
 use crate::models::laplace::dist::Gaussian;
 use crate::models::laplace::leaf::Leaf;
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EmaLeaf {
     alpha: f64,
     level: Option<f64>,
@@ -45,6 +46,11 @@ impl Leaf for EmaLeaf {
         (1..=horizon)
             .map(|h| Gaussian::new(level, base * (h as f64).sqrt()))
             .collect()
+    }
+
+    #[inline]
+    fn predict_one(&self) -> Gaussian {
+        Gaussian::new(self.level.unwrap_or(0.0), self.sigma())
     }
 
     fn observe(&mut self, y: f64) {

@@ -36,6 +36,7 @@ const DEFAULT_SCALES: [f64; 5] = [0.7, 1.0, 1.6, 3.0, 6.0];
 /// - `v`: EWMA of the squared residual at rate `scale_alpha` → σ
 /// - `w[i]`: EM-updated weight on scale `scales[i]`, recency rate `gamma`
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TerminalScaleMixture {
     scales: [f64; 5],
     scale_alpha: f64,
@@ -43,6 +44,13 @@ pub struct TerminalScaleMixture {
     v: f64,
     w: [f64; 5],
     n_obs: usize,
+    /// Accuracy-audit #5: AR(1) residual autocorrelation φ estimator.
+    /// EWMA of `r_t · r_{t-1} / v`. Bounded to `(-0.9, 0.9)` for
+    /// stationarity. Used at forecast time to compute `√((1-φ^(2h)) /
+    /// (1-φ²))` scaling instead of `√h` (which assumes IID).
+    phi: f64,
+    /// Previous residual, kept for autocorrelation update.
+    prev_r: f64,
 }
 
 impl TerminalScaleMixture {
@@ -71,7 +79,32 @@ impl TerminalScaleMixture {
             v: 0.0,
             w,
             n_obs: 0,
+            phi: 0.0,
+            prev_r: 0.0,
         }
+    }
+
+    /// Autocorrelation φ estimate (accuracy-audit #5). Bounded to
+    /// `(-0.9, 0.9)` for stationarity.
+    pub fn phi(&self) -> f64 {
+        self.phi
+    }
+
+    /// Multi-horizon σ scaling factor for AR(1) residuals.
+    /// Returns `√((1 - φ^(2h)) / (1 - φ²))`. Equals `√h` when `φ=0`
+    /// (IID), less than `√h` for `φ<0`, more than `√h` for `φ>0`.
+    pub fn h_step_std_scale(&self, h: usize) -> f64 {
+        if h == 0 {
+            return 0.0;
+        }
+        let phi = self.phi.clamp(-0.9, 0.9);
+        let phi2 = phi * phi;
+        if phi2 < 1e-6 {
+            return (h as f64).sqrt();
+        }
+        let numer = 1.0 - phi2.powi(h as i32);
+        let denom = 1.0 - phi2;
+        (numer / denom).max(0.0).sqrt()
     }
 
     /// Absorb one residual `r = y - softmax_mixture_mean`.
@@ -90,6 +123,17 @@ impl TerminalScaleMixture {
         // Residual-variance EWMA: `1/n` bootstrap for early obs.
         let a = self.scale_alpha.max(1.0 / n);
         self.v = (1.0 - a) * self.v + a * r * r;
+
+        // Accuracy-audit #5: AR(1) autocorrelation EWMA. Update
+        // `phi ~= E[r_t * r_{t-1}] / E[r_t²]`. Clamped to (-0.9, 0.9)
+        // for stationarity. Only starts updating after we have a
+        // previous residual (n_obs >= 2).
+        if self.n_obs >= 2 && self.v > 1e-12 {
+            let rho = (r * self.prev_r) / self.v;
+            let phi_alpha = a; // Use same rate as variance EWMA.
+            self.phi = ((1.0 - phi_alpha) * self.phi + phi_alpha * rho).clamp(-0.9, 0.9);
+        }
+        self.prev_r = r;
 
         let sigma = if self.v.is_finite() && self.v > 0.0 {
             self.v.sqrt()
@@ -144,6 +188,21 @@ impl TerminalScaleMixture {
 
     pub fn n_obs(&self) -> usize {
         self.n_obs
+    }
+
+    /// Warm-start the residual-variance EWMA with a robust batch
+    /// estimate (accuracy-audit #3a). Sets `v = sigma²` and
+    /// `n_obs = seed_n` so the subsequent `observe(r)` updates use
+    /// the configured EWMA rate rather than the `1/n` bootstrap.
+    ///
+    /// Callers should pass `sigma = 1.4826 · median(|r|)` (MAD scaled
+    /// to Gaussian σ) and `seed_n = 30` (or thereabouts) so the
+    /// bootstrap window ends immediately.
+    pub fn warm_start(&mut self, sigma: f64, seed_n: usize) {
+        if sigma.is_finite() && sigma > 0.0 {
+            self.v = sigma * sigma;
+            self.n_obs = seed_n.max(1);
+        }
     }
 }
 

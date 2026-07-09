@@ -30,6 +30,7 @@ use crate::models::laplace::leaf::Leaf;
 
 const ZERO_TOL: f64 = 1e-9;
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ZeroInflatedPoissonLeaf {
     alpha: f64,
     p_zero_ema: f64,

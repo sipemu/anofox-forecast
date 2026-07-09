@@ -24,6 +24,7 @@ use super::super::dist::Gaussian;
 use super::super::leaf::Leaf;
 
 /// SES + half-OLS-slope leaf with EWMA residual variance.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ThetaLeaf {
     alpha: f64,
     // SES level.
@@ -85,6 +86,16 @@ impl Leaf for ThetaLeaf {
                 Gaussian::new(mean, sigma)
             })
             .collect()
+    }
+
+    #[inline]
+    fn predict_one(&self) -> Gaussian {
+        let sigma_one = if self.var.is_finite() && self.var > 0.0 {
+            self.var.sqrt()
+        } else {
+            1.0
+        };
+        Gaussian::new(self.level + self.slope / 2.0, sigma_one.max(1e-9))
     }
 
     fn observe(&mut self, y: f64) {

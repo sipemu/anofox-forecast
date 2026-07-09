@@ -18,6 +18,7 @@ use crate::models::laplace::leaf::Leaf;
 
 const ZERO_TOL: f64 = 1e-9;
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct IntermittentLeaf {
     alpha: f64,
     demand_ema: f64,

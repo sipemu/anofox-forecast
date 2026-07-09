@@ -75,6 +75,16 @@ impl Leaf for PowerTransformWrapper {
             .collect()
     }
 
+    #[inline]
+    fn predict_one(&self) -> Gaussian {
+        let g = self.inner.predict_one();
+        let mean_orig = signed_pow(g.mean, self.inv_p);
+        let abs_mu = g.mean.abs().max(1e-6);
+        let jac = self.inv_p * abs_mu.powf(self.inv_p - 1.0);
+        let sigma = (g.std * jac.abs()).max(1e-9);
+        Gaussian::new(mean_orig, sigma)
+    }
+
     fn observe(&mut self, y: f64) {
         if !y.is_finite() {
             return;

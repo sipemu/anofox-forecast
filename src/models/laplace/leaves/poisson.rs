@@ -15,6 +15,7 @@
 use crate::models::laplace::dist::Gaussian;
 use crate::models::laplace::leaf::Leaf;
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PoissonLeaf {
     alpha: f64,
     lambda_ema: f64,

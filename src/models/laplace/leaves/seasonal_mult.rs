@@ -21,6 +21,7 @@ use crate::models::laplace::leaf::Leaf;
 
 const LEVEL_TOL: f64 = 1e-6;
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MultiplicativeSeasonalLeaf {
     period: usize,
     alpha: f64,

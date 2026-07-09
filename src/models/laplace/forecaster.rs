@@ -60,7 +60,7 @@ impl StickyState {
             }
         }
         self.counts.retain(|(_, w)| *w >= self.prune_eps);
-        if let Some(_) = existing {
+        if existing.is_some() {
             for (v, w) in self.counts.iter_mut() {
                 if (*v - y).abs() < 1e-12 {
                     *w += self.propensity_alpha;
@@ -89,7 +89,16 @@ impl StickyState {
     /// Apply sticky-lattice projection to a Gaussian mixture. Returns
     /// a new mean-preserving mixture with atom spikes plus the
     /// original continuous mass, recentered so `E[out] == m.mean()`.
-    fn project(&self, m: &GaussianMixture) -> GaussianMixture {
+    ///
+    /// `h` is the forecast horizon (1-based). Fix A of the fev-27
+    /// follow-up: atom mass decays exponentially with `h`:
+    /// `p_atoms(h) = p_atoms · (1 - decay_per_step)^(h-1)`
+    /// with `decay_per_step = 0.05` (half-life ~14 steps). This models
+    /// the fact that revisited-value evidence gets stale as the
+    /// forecast moves further ahead — timeless atoms were the root of
+    /// the fev-27 continuous-panel WQL blowup (up to 1800× worse than
+    /// classical on `m1_yearly`).
+    fn project(&self, m: &GaussianMixture, h: usize) -> GaussianMixture {
         let atoms = self.atoms();
         if atoms.is_empty() || m.is_empty() {
             return m.clone();
@@ -98,8 +107,11 @@ impl StickyState {
         if sw <= 0.0 {
             return m.clone();
         }
+        // Fix A of fev-27 follow-up: horizon-decayed atom mass.
+        const DECAY_PER_STEP: f64 = 0.05;
+        let horizon_factor = (1.0 - DECAY_PER_STEP).powi(h.saturating_sub(1) as i32);
         // Cap total atom mass at 0.999 to keep some continuous coverage.
-        let p_atoms = sw.min(0.999);
+        let p_atoms = (sw * horizon_factor).min(0.999);
         let p_cont = 1.0 - p_atoms;
         let atom_mean = atoms.iter().map(|(v, w)| v * w).sum::<f64>() / sw;
         // Spike width from average predictive std.
@@ -135,7 +147,7 @@ use crate::transform::yeo_johnson::yeo_johnson_lambda;
 use crate::utils::ols::{ols_fit, OLSResult};
 use std::collections::HashMap;
 
-use super::ensemble::{blend_horizon, softmax};
+use super::ensemble::{blend_horizon, softmax, softmax_into};
 
 /// Series characteristics used by the auto-selector.
 #[derive(Clone, Copy)]
@@ -196,6 +208,290 @@ pub(crate) fn detect_seasonal_period(train: &[f64]) -> Option<usize> {
     } else {
         None
     }
+}
+
+/// Fev-27 follow-up (#5): learning-rate warmup schedule.
+///
+/// For the first 30 observations, use `η=1.0` (fast — the softmax
+/// needs to move away from uniform quickly during warmup). Then
+/// linearly decay to the configured `learning_rate` over the next
+/// 70 observations. Beyond n=100, hold at `learning_rate`.
+///
+/// Prevents the short-history yearly regression that #180's Fix B
+/// introduced: with η=0.5 the whole way, on N=30 yearly panels the
+/// softmax doesn't reach a peaked distribution before we need to
+/// predict.
+#[inline]
+fn eta_schedule(base_eta: f64, n_obs: usize) -> f64 {
+    const WARMUP: usize = 30;
+    const DECAY_END: usize = 100;
+    if n_obs < WARMUP {
+        1.0
+    } else if n_obs < DECAY_END {
+        let t = (n_obs - WARMUP) as f64 / (DECAY_END - WARMUP) as f64;
+        1.0 + t * (base_eta - 1.0)
+    } else {
+        base_eta
+    }
+}
+
+/// Short-data softmax dampener (yearly Trick 3).
+///
+/// When the total training length is very short (M-competition yearly:
+/// N=24-33), the fit loop's η stays at 1.0 throughout warmup. Softmax
+/// accumulates full log-likelihood per step, which can lock the
+/// ensemble onto whichever leaf was best in the first few rounds —
+/// with only 30 obs behind the ranking of ~15 leaves, this "winner"
+/// is essentially noise.
+///
+/// Returns a multiplier `≤ 1.0` applied to the schedule's η. For
+/// `total_n ≥ 60` returns 1.0 (no dampening). Below that, scales
+/// linearly down to `0.4` at N=0 — mild flattening that leaves room
+/// for slower but more reliable ensemble averaging.
+#[inline]
+#[allow(dead_code)] // Kept for future Trick-3 iterations, see docs/ACCURACY_AUDIT.md.
+fn short_data_multiplier(total_n: usize) -> f64 {
+    if total_n >= 60 {
+        1.0
+    } else {
+        (total_n as f64 / 60.0).max(0.4)
+    }
+}
+
+/// Solve the ensemble stacking problem (accuracy-audit #1).
+///
+/// Given per-leaf 1-step prediction history and the target training
+/// values, solve:
+///   `min || y_train[burn..] − X · w ||² + λ · ||w||²`
+///   s.t. `w >= 0, Σ w_i = 1`
+///
+/// Uses ridge-regularized OLS via normal equations, then projects to
+/// the non-negative simplex.
+///
+/// The ridge term prevents blowup on collinear leaves (e.g.
+/// `EMA(0.05)` ≈ `EMA(0.1)` on smooth series). Simplex projection
+/// keeps the blend interpretable and non-degenerate.
+fn solve_stacking(
+    predictions: &[Vec<f64>], // [leaf_idx][step]
+    values: &[f64],
+    burn: usize,
+) -> Vec<f64> {
+    let n_leaves = predictions.len();
+    if n_leaves == 0 {
+        return Vec::new();
+    }
+    let n_steps = predictions[0].len().min(values.len());
+    if n_steps <= burn + n_leaves {
+        // Not enough data — fall back to uniform weights.
+        return vec![1.0 / n_leaves as f64; n_leaves];
+    }
+    let effective_n = n_steps - burn;
+    // Ridge parameter — small compared to typical MSE.
+    let ridge_lambda = 1e-4;
+    // Build X^T X (n_leaves × n_leaves) and X^T y (n_leaves).
+    let mut xtx = vec![vec![0.0f64; n_leaves]; n_leaves];
+    let mut xty = vec![0.0f64; n_leaves];
+    for step in burn..n_steps {
+        let y = values[step];
+        if !y.is_finite() {
+            continue;
+        }
+        for i in 0..n_leaves {
+            let xi = predictions[i][step];
+            if !xi.is_finite() {
+                continue;
+            }
+            xty[i] += xi * y;
+            for j in 0..n_leaves {
+                let xj = predictions[j][step];
+                if xj.is_finite() {
+                    xtx[i][j] += xi * xj;
+                }
+            }
+        }
+    }
+    // Add ridge to the diagonal.
+    for i in 0..n_leaves {
+        xtx[i][i] += ridge_lambda * effective_n as f64;
+    }
+    // Solve via Gaussian elimination (n_leaves is small, ~30).
+    let mut aug: Vec<Vec<f64>> = xtx
+        .iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let mut r = row.clone();
+            r.push(xty[i]);
+            r
+        })
+        .collect();
+    // Forward elimination.
+    for i in 0..n_leaves {
+        // Partial pivoting.
+        let mut max_row = i;
+        for k in i + 1..n_leaves {
+            if aug[k][i].abs() > aug[max_row][i].abs() {
+                max_row = k;
+            }
+        }
+        aug.swap(i, max_row);
+        let pivot = aug[i][i];
+        if pivot.abs() < 1e-12 {
+            // Singular — fall back to uniform.
+            return vec![1.0 / n_leaves as f64; n_leaves];
+        }
+        for k in i + 1..n_leaves {
+            let factor = aug[k][i] / pivot;
+            for j in i..=n_leaves {
+                aug[k][j] -= factor * aug[i][j];
+            }
+        }
+    }
+    // Back substitution.
+    let mut w = vec![0.0f64; n_leaves];
+    for i in (0..n_leaves).rev() {
+        let mut sum = aug[i][n_leaves];
+        for j in i + 1..n_leaves {
+            sum -= aug[i][j] * w[j];
+        }
+        w[i] = sum / aug[i][i];
+    }
+    // Simplex projection (Duchi 2008).
+    project_to_simplex(&mut w);
+    w
+}
+
+/// Project a vector onto the probability simplex (non-negative, sum-to-one).
+/// Uses the Duchi et al. (2008) algorithm — same as
+/// `ensemble::model::nnls_simplex`.
+fn project_to_simplex(w: &mut [f64]) {
+    let n = w.len();
+    if n == 0 {
+        return;
+    }
+    let mut sorted: Vec<f64> = w.to_vec();
+    sorted.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    let mut cumsum = 0.0;
+    let mut rho = 0;
+    for (j, &val) in sorted.iter().enumerate() {
+        cumsum += val;
+        if val - (cumsum - 1.0) / (j as f64 + 1.0) > 0.0 {
+            rho = j;
+        }
+    }
+    let theta = (sorted[..=rho].iter().sum::<f64>() - 1.0) / (rho as f64 + 1.0);
+    for w_i in w.iter_mut() {
+        *w_i = (*w_i - theta).max(0.0);
+    }
+    // Renormalize (should already sum to 1, but be safe).
+    let sum: f64 = w.iter().sum();
+    if sum > 0.0 {
+        for w_i in w.iter_mut() {
+            *w_i /= sum;
+        }
+    }
+}
+
+/// Heuristic: does the training window look **trending** enough that
+/// batch-initializing Drift + Holt with OLS β is a net win? (Yearly Trick 1.)
+///
+/// Returns `true` when `|β| > 0.5 · residual_σ / N`, i.e. the OLS
+/// slope is at least half the "noise slope" you'd get from N random-
+/// walk steps of size σ. Trend-strength threshold empirically tuned to
+/// avoid initializing zero-drift on flat-noise series (where init
+/// would hurt).
+fn looks_trending(values: &[f64]) -> bool {
+    let n = values.len();
+    if n < 5 {
+        return false;
+    }
+    let n_f = n as f64;
+    let mean_t = (n_f - 1.0) / 2.0;
+    let mean_y: f64 = values.iter().sum::<f64>() / n_f;
+    let mut num = 0.0;
+    let mut den = 0.0;
+    let mut ss = 0.0;
+    for (i, &y) in values.iter().enumerate() {
+        let dt = i as f64 - mean_t;
+        let dy = y - mean_y;
+        num += dt * dy;
+        den += dt * dt;
+        ss += dy * dy;
+    }
+    if den < 1e-12 || ss < 1e-12 {
+        return false;
+    }
+    let beta = num / den;
+    let sigma = (ss / n_f).sqrt();
+    // Trend contribution over the window: β · (N-1). Compare to the
+    // total "noise budget" σ · √N.
+    let trend_over_window = (beta * (n_f - 1.0)).abs();
+    let noise_budget = sigma * n_f.sqrt();
+    trend_over_window > 0.5 * noise_budget
+}
+
+/// Median-absolute-deviation robust σ estimator (accuracy-audit #3a).
+///
+/// Returns `1.4826 · median(|y_i − median(y)|)` — the MAD scaled to
+/// match a Gaussian σ. Used to warm-start the terminal scale-mixture
+/// so short-history panels don't spend 30 observations recalibrating.
+fn compute_mad(values: &[f64]) -> f64 {
+    if values.len() < 2 {
+        return 0.0;
+    }
+    let mut sorted: Vec<f64> = values.iter().copied().filter(|v| v.is_finite()).collect();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let mid = sorted.len() / 2;
+    let median = if sorted.len() % 2 == 0 {
+        0.5 * (sorted[mid - 1] + sorted[mid])
+    } else {
+        sorted[mid]
+    };
+    let mut abs_dev: Vec<f64> = sorted.iter().map(|v| (v - median).abs()).collect();
+    abs_dev.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let mad = if abs_dev.len() % 2 == 0 {
+        0.5 * (abs_dev[mid - 1] + abs_dev[mid])
+    } else {
+        abs_dev[mid]
+    };
+    1.4826 * mad
+}
+
+/// Heuristic: does the training window look **discrete-count-like**?
+/// Returns `true` if it does (few distinct near-integer values relative
+/// to sample size). Used to auto-gate sticky-lattice — atoms are
+/// meaningful only when the data actually revisits exact values.
+///
+/// Test: count distinct values in the first `N.min(1000)` observations
+/// after rounding to the nearest integer. If the ratio
+/// `distinct / total < 0.15` AND most values are within 0.05 of an
+/// integer, the data is discrete-count-like.
+fn looks_discrete_count(train: &[f64]) -> bool {
+    let n = train.len().min(1000);
+    if n < 20 {
+        return false;
+    }
+    let sample = &train[..n];
+    // Are most values integer-like?
+    let near_int = sample
+        .iter()
+        .filter(|y| y.is_finite() && (y.round() - **y).abs() < 0.05)
+        .count();
+    if (near_int as f64 / n as f64) < 0.8 {
+        return false;
+    }
+    // How many distinct integers?
+    let mut ints: Vec<i64> = sample
+        .iter()
+        .filter(|y| y.is_finite())
+        .map(|y| y.round() as i64)
+        .collect();
+    ints.sort_unstable();
+    ints.dedup();
+    let distinct = ints.len();
+    (distinct as f64 / n as f64) < 0.15
 }
 
 /// Compute (seasonality_strength_R², |ACF(1)|) on the training window.
@@ -342,8 +638,8 @@ use super::leaves::{
     GammaLeaf, GarchWrappedLeaf, HoltLeaf, IntermittentLeaf, LogNormalLeaf,
     MultiplicativeSeasonalLeaf, NegativeBinomialLeaf, OuLeaf, PoissonLeaf, PowerTransformWrapper,
     RectifiedNormalLeaf, SeasonalDifferenceWrapper, SeasonalEmaLeaf, SeasonalIntermittentLeaf,
-    SkewNormalLeaf, StandardizeWrapper, StudentTLeaf, ThetaLeaf, TweedieLeaf, YjWrappedLeaf,
-    ZeroInflatedNegativeBinomialLeaf, ZeroInflatedPoissonLeaf,
+    SkewNormalLeaf, StandardizeWrapper, StlDecompLeaf, StudentTLeaf, ThetaLeaf, TweedieLeaf,
+    YjWrappedLeaf, ZeroInflatedNegativeBinomialLeaf, ZeroInflatedPoissonLeaf,
 };
 use super::DistributionalForecaster;
 
@@ -364,6 +660,11 @@ use super::DistributionalForecaster;
 /// on series with weak or no trend). Seasonal and AR(2) are cheap wins
 /// on the panels where they apply, but the shell keeps them opt-in for
 /// symmetry with Holt and to preserve the alpha-2 3-leaf default.
+// Serde derives WIP — 27/33 leaves + terminals have derives, but the
+// six Box<dyn Leaf + Send> wrapper leaves + LeafEnum::Wrapped variant
+// need a manual impl (or refactor to Box<LeafEnum>). Removed from
+// LaplaceForecaster + LeafEnum + wrappers until that refactor lands
+// so cargo build --features serde succeeds. See Option A plan.
 pub struct LaplaceForecaster {
     ema_alpha: f64,
     drift_alpha: f64,
@@ -544,7 +845,7 @@ pub struct LaplaceForecaster {
     /// AID-flagged `NewProduct` observation. Default off.
     trim_new_product_prefix: bool,
 
-    leaves: Vec<Box<dyn Leaf + Send>>,
+    leaves: Vec<super::leaf_enum::LeafEnum>,
     cum_log_liks: Vec<f64>,
     n_obs: usize,
 
@@ -587,6 +888,52 @@ pub struct LaplaceForecaster {
     /// continuous mixture doesn't pay density mass on exact-integer
     /// counts (the modal outcome on M5).
     sticky: Option<StickyState>,
+    /// Fev-27 follow-up: auto-gate sticky based on data characteristics
+    /// at fit time. When true, sticky stays on only if the training
+    /// values look discrete-count-like (few distinct values → atoms
+    /// are meaningful). On continuous data, sticky is disabled at fit
+    /// time regardless of the initial `sticky` setting. `.skaters()`
+    /// sets this true; explicit `.with_sticky()` or `.no_sticky()`
+    /// leaves it false so the caller's choice is honored.
+    sticky_auto_gate: bool,
+    /// Fev-27 follow-up (#9): STL-decomposition leaf period.
+    /// When `Some(p)` with `p >= 2`, adds an `StlDecompLeaf(p)` to the
+    /// pool. Auto-enabled by `.auto()` / `.skaters()` when seasonality
+    /// detection returns a period.
+    stl_period: Option<usize>,
+    /// Perf: reusable scratch buffer for per-leaf `Gaussian` predictions
+    /// so the fit-loop's `predict_one` results aren't heap-allocated per
+    /// observation. Sized once to `self.leaves.len()` at fit start.
+    scratch_per_leaf: Vec<Gaussian>,
+    /// Perf: parallel scratch buffer of `ln(std)` for each entry of
+    /// [`Self::scratch_per_leaf`]. Precomputed once per obs so the
+    /// scoring loop's inlined `logpdf` has zero transcendentals.
+    #[allow(dead_code)] // Retained field; consumed by an inlined logpdf path.
+    scratch_ln_std: Vec<f64>,
+    /// Perf: reusable scratch buffer for softmax weights so
+    /// `self.weights()` doesn't allocate on the fit hot path.
+    scratch_weights: Vec<f64>,
+    /// Accuracy-audit #2 (multi-horizon scoring): when enabled, during
+    /// fit, periodically snapshot each leaf's h-step predictions and
+    /// retrospectively score them against the future y[t+h]. Adds the
+    /// h>1 log-likelihood contributions (weighted) to cum_log_liks so
+    /// the softmax reflects long-horizon accuracy, not just 1-step.
+    multi_h_scoring: bool,
+    /// Accuracy-audit #1 (ensemble stacking): enable OLS-based blend
+    /// weight learning at end of fit. When true and enough training data
+    /// is available, `stacking_weights` is populated with per-leaf
+    /// linear-combination weights minimising `||y_train - X · w||²`
+    /// (with non-negativity + simplex projection). Used at
+    /// `forecast_dist` time in place of softmax weights for the mean
+    /// blend.
+    stacking_enabled: bool,
+    /// Filled at end of fit when stacking is enabled and the training
+    /// window has enough observations. Length = `leaves.len()`.
+    stacking_weights: Option<Vec<f64>>,
+    /// Per-leaf, per-step 1-step-ahead prediction history collected
+    /// during fit — the design matrix for the stacking OLS. Only
+    /// populated when `stacking_enabled` is true.
+    predictions_history: Vec<Vec<f64>>,
 }
 
 impl LaplaceForecaster {
@@ -671,6 +1018,15 @@ impl LaplaceForecaster {
             terminal: None,
             terminal_crps: None,
             sticky: None,
+            sticky_auto_gate: false,
+            stl_period: None,
+            scratch_per_leaf: Vec::new(),
+            scratch_ln_std: Vec::new(),
+            scratch_weights: Vec::new(),
+            stacking_enabled: false,
+            stacking_weights: None,
+            predictions_history: Vec::new(),
+            multi_h_scoring: false,
         }
     }
 
@@ -746,6 +1102,92 @@ impl LaplaceForecaster {
     /// Enabled automatically by `.skaters()`.
     pub fn with_sticky(mut self) -> Self {
         self.sticky = Some(StickyState::new());
+        // Explicit user choice — honor it, don't auto-gate.
+        self.sticky_auto_gate = false;
+        self
+    }
+
+    /// Disable the sticky-lattice projection (PR #7 follow-up).
+    ///
+    /// Sticky is enabled by default in [`Self::skaters`] because it
+    /// dramatically improves LL / MASE on discrete-count panels (M5,
+    /// exchange_rate, dominick). On **continuous smooth panels** the
+    /// atoms are placed on spurious repeated values and quantile mass
+    /// concentrates in the wrong places — WQL blows up 100-1800× on
+    /// short-history yearly panels like `m1_yearly`, `tourism_yearly`,
+    /// `cif_2016` (fev-27 benchmark).
+    ///
+    /// Use `.skaters().no_sticky()` on continuous data — keeps the
+    /// fixed pool, terminal scale-mixture, and shrunk-softmax
+    /// mechanism, drops the atom projection. Call **after** `.skaters()`
+    /// since that builder turns sticky back on.
+    pub fn no_sticky(mut self) -> Self {
+        self.sticky = None;
+        // Explicit user choice — honor it, don't auto-gate.
+        self.sticky_auto_gate = false;
+        self
+    }
+
+    /// Enable multi-horizon retrospective scoring (accuracy-audit #2).
+    ///
+    /// During fit, periodically snapshots each leaf's h-step predictions.
+    /// After the observation loop, iterates the snapshots and adds a
+    /// weighted h-step log-likelihood contribution to `cum_log_liks`
+    /// for each leaf. Score at horizon h uses `y[snapshot_step + h - 1]`
+    /// against the leaf's h-step prediction from `snapshot_step`.
+    ///
+    /// The h-step contribution is weighted by `η · 1/h` so far horizons
+    /// don't dominate. Total effect: leaves that flat-line at long h
+    /// (e.g. slow EMAs) get down-weighted in the final softmax.
+    pub fn with_multi_h_scoring(mut self) -> Self {
+        self.multi_h_scoring = true;
+        self
+    }
+
+    /// Enable ensemble stacking on top of the softmax blend
+    /// (accuracy-audit #1).
+    ///
+    /// After the streaming fit completes, solves an OLS problem for
+    /// per-leaf blend weights `w` minimising `||y_train - X · w||²`
+    /// where `X[t][i] = leaf_i.predict_one_at_step(t)`. Weights are
+    /// projected onto the non-negative simplex via `nnls_simplex`.
+    /// At `forecast_dist` time these weights replace the softmax
+    /// weights for the mean blend (σ mixture still uses softmax).
+    ///
+    /// **Requires N ≥ 60 training obs**. Below that, softmax is used
+    /// throughout — the ridge would overfit on short series.
+    ///
+    /// **Cost**: N × N_leaves × 8 bytes storage during fit
+    /// (~300 KB on M5). O(N × N_leaves²) solve at end of fit.
+    pub fn with_stacking(mut self) -> Self {
+        self.stacking_enabled = true;
+        self
+    }
+
+    /// Add an STL-decomposition leaf at the given period (opt-in).
+    ///
+    /// `StlDecompLeaf(period)` runs STL on a rolling buffer of the last
+    /// `10 * period` observations and extrapolates a linear trend plus
+    /// cyclic seasonal pattern. Useful when the series has strong
+    /// deterministic seasonality that our streaming leaves can't
+    /// capture cleanly (M-competition monthly / quarterly panels are
+    /// candidates).
+    ///
+    /// **NOT auto-enabled by `.auto()` or `.skaters()`.** An earlier
+    /// attempt to auto-enable it based on `seasonality_strength > 0.30`
+    /// caused a 31 % MASE regression on `tourism_monthly` in the fev-27
+    /// bakeoff: the STL leaf's linear-trend extrapolation is aggressive
+    /// at long horizons and compounds on short-history seasonal panels
+    /// (150-300 obs, H=24). Aggregate fev-27 also regressed 1.7 %
+    /// (geomean MASE 6.085 → 6.186). Documented in
+    /// `docs/SOTA_POSITIONING.md`.
+    ///
+    /// Use this only when you've verified STL helps on your specific
+    /// data.
+    pub fn with_stl(mut self, period: usize) -> Self {
+        if period >= 2 {
+            self.stl_period = Some(period);
+        }
         self
     }
 
@@ -861,10 +1303,15 @@ impl LaplaceForecaster {
             self.terminal = Some(TerminalScaleMixture::new());
         }
         // PR #7 of #180: sticky lattice on by default in .skaters().
-        // No-op on continuous data (no revisited values → no atoms).
+        // Fev-27 follow-up: auto-gate at fit time — sticky stays on
+        // only if data looks discrete-count-like. On continuous
+        // panels (m1_yearly, cif_2016, tourism_yearly) sticky would
+        // otherwise blow up WQL. Callers can override with
+        // `.with_sticky()` (force on) or `.no_sticky()` (force off).
         if self.sticky.is_none() {
             self.sticky = Some(StickyState::new());
         }
+        self.sticky_auto_gate = true;
         // Populate the full fixed pool, matching skaters' candidate
         // types (excluding items that don't shift M5 auto-enable per
         // PR #4 empirical decisions — but still on here because
@@ -872,6 +1319,11 @@ impl LaplaceForecaster {
         if self.theta_alphas.is_empty() {
             self.theta_alphas = vec![0.05, 0.1, 0.3];
         }
+        // Accuracy-audit #4b: REVERTED. Added damped Holt(0.3, 0.1, 0.9)
+        // unconditionally in `.skaters()` — caused a +1.5 % geomean MASE
+        // regression on fev-27 (see docs/ACCURACY_AUDIT.md). Callers who
+        // want damped Holt in the skaters pool can add it explicitly via
+        // `.with_holt(0.3, 0.1, 0.9).skaters()`.
         if self.standardize_ema_alphas.is_empty() {
             self.standardize_ema_alphas = vec![0.05, 0.1];
         }
@@ -1374,6 +1826,13 @@ impl LaplaceForecaster {
     /// adds leaves, never removes.
     pub fn auto(mut self) -> Self {
         self.use_auto = true;
+        // Accuracy-audit #7: import the XGBoost-shrunk log-weight update
+        // from `.skaters()` — smaller η + log-clamp cap prevents the
+        // softmax from over-concentrating on a single winner when the
+        // pool has many correlated candidates. Historical defaults were
+        // `η=1.0, clamp=-∞` (exact cumulative log-likelihood).
+        self.learning_rate = 0.5;
+        self.log_clamp = -20.0;
         // PR #1 of #180: terminal scale-mixture leaf — reshape the
         // predictive density once at the top. Cheap in fit time
         // (5-component EWMA + weight vector), meaningful LL win.
@@ -1556,216 +2015,265 @@ impl LaplaceForecaster {
 
     /// Build a fresh copy of the base leaf set (respecting user toggles).
     /// Used both for the single-shell path and per-λ in the YJ coord grid.
-    fn build_base_leaves(&self) -> Vec<Box<dyn Leaf + Send>> {
-        let mut leaves: Vec<Box<dyn Leaf + Send>> = if self.use_populations_wide {
+    #[allow(dead_code)] // Retained: callers should use build_base_leaves_with_batch(None).
+    fn build_base_leaves(&self) -> Vec<super::leaf_enum::LeafEnum> {
+        self.build_base_leaves_with_batch(None)
+    }
+
+    /// Same as [`Self::build_base_leaves`] but optionally batch-inits
+    /// Drift + Holt candidates from the given training values (yearly
+    /// Trick 1). When `batch` is `Some`, Drift/Holt use `from_batch`
+    /// instead of `new`.
+    fn build_base_leaves_with_batch(
+        &self,
+        batch: Option<&[f64]>,
+    ) -> Vec<super::leaf_enum::LeafEnum> {
+        use super::leaf_enum::LeafEnum;
+        // Local shims: `mk_drift(α)` and `mk_holt(α, β, φ)` fall back to
+        // `::new` when there's no batch. This keeps the pool-construction
+        // code below unchanged (which is heavily tuned per `.auto()` /
+        // `.skaters()` variant).
+        let mk_drift = |a: f64| -> DriftLeaf {
+            match batch {
+                Some(v) => DriftLeaf::from_batch(a, v),
+                None => DriftLeaf::new(a),
+            }
+        };
+        let mk_holt = |a: f64, b: f64, p: f64| -> HoltLeaf {
+            match batch {
+                Some(v) => HoltLeaf::from_batch(a, b, p, v),
+                None => HoltLeaf::new(a, b, p),
+            }
+        };
+        let _ = &mk_drift; // silence unused-if-no-hits warnings
+        let _ = &mk_holt;
+        let mut leaves: Vec<LeafEnum> = if self.use_populations_wide {
             vec![
-                Box::new(EmaLeaf::new(0.02)),
-                Box::new(EmaLeaf::new(0.10)),
-                Box::new(EmaLeaf::new(0.25)),
-                Box::new(EmaLeaf::new(0.45)),
-                Box::new(EmaLeaf::new(0.60)),
-                Box::new(DriftLeaf::new(0.03)),
-                Box::new(DriftLeaf::new(0.10)),
-                Box::new(DriftLeaf::new(0.25)),
-                Box::new(Ar1Leaf::new(0.03)),
-                Box::new(Ar1Leaf::new(0.10)),
-                Box::new(Ar1Leaf::new(0.25)),
+                LeafEnum::Ema(EmaLeaf::new(0.02)),
+                LeafEnum::Ema(EmaLeaf::new(0.10)),
+                LeafEnum::Ema(EmaLeaf::new(0.25)),
+                LeafEnum::Ema(EmaLeaf::new(0.45)),
+                LeafEnum::Ema(EmaLeaf::new(0.60)),
+                LeafEnum::Drift(mk_drift(0.03)),
+                LeafEnum::Drift(mk_drift(0.10)),
+                LeafEnum::Drift(mk_drift(0.25)),
+                LeafEnum::Ar1(Ar1Leaf::new(0.03)),
+                LeafEnum::Ar1(Ar1Leaf::new(0.10)),
+                LeafEnum::Ar1(Ar1Leaf::new(0.25)),
             ]
         } else if self.use_populations {
             vec![
-                Box::new(EmaLeaf::new(0.05)),
-                Box::new(EmaLeaf::new(0.20)),
-                Box::new(EmaLeaf::new(0.50)),
-                Box::new(DriftLeaf::new(0.05)),
-                Box::new(DriftLeaf::new(0.15)),
-                Box::new(Ar1Leaf::new(0.05)),
-                Box::new(Ar1Leaf::new(0.15)),
+                LeafEnum::Ema(EmaLeaf::new(0.05)),
+                LeafEnum::Ema(EmaLeaf::new(0.20)),
+                LeafEnum::Ema(EmaLeaf::new(0.50)),
+                LeafEnum::Drift(mk_drift(0.05)),
+                LeafEnum::Drift(mk_drift(0.15)),
+                LeafEnum::Ar1(Ar1Leaf::new(0.05)),
+                LeafEnum::Ar1(Ar1Leaf::new(0.15)),
             ]
         } else {
             vec![
-                Box::new(EmaLeaf::new(self.ema_alpha)),
-                Box::new(DriftLeaf::new(self.drift_alpha)),
-                Box::new(Ar1Leaf::new(self.ar_alpha_mean)),
+                LeafEnum::Ema(EmaLeaf::new(self.ema_alpha)),
+                LeafEnum::Drift(mk_drift(self.drift_alpha)),
+                LeafEnum::Ar1(Ar1Leaf::new(self.ar_alpha_mean)),
             ]
         };
         if let Some((a, b, phi)) = self.holt {
-            leaves.push(Box::new(HoltLeaf::new(a, b, phi)));
+            leaves.push(LeafEnum::Holt(mk_holt(a, b, phi)));
         }
         if let Some(a) = self.ar2 {
-            leaves.push(Box::new(Ar2Leaf::new(a)));
+            leaves.push(LeafEnum::Ar2(Ar2Leaf::new(a)));
         }
         if let Some((d, am, ad)) = self.frac_diff {
-            leaves.push(Box::new(FractionalDiffLeaf::new(d, am, ad)));
+            leaves.push(LeafEnum::FracDiff(FractionalDiffLeaf::new(d, am, ad)));
         }
         if let Some(a) = self.ou {
-            leaves.push(Box::new(OuLeaf::new(a)));
+            leaves.push(LeafEnum::Ou(OuLeaf::new(a)));
         }
         // PR #3 of #180: Theta-method leaves (SES + half OLS slope).
         for &a in &self.theta_alphas {
-            leaves.push(Box::new(ThetaLeaf::new(a)));
+            leaves.push(LeafEnum::Theta(ThetaLeaf::new(a)));
+        }
+        // Fev-27 follow-up (#9): STL-decomposition leaf. Batch fitter
+        // dressed as a streaming leaf; runs STL on the rolling buffer
+        // at predict time. Closes the M-competition monthly/quarterly
+        // gap where our streaming leaves lose 30-50 % MASE to
+        // AutoTheta's proper seasonal decomposition.
+        if let Some(p) = self.stl_period {
+            if p >= 2 {
+                leaves.push(LeafEnum::Stl(StlDecompLeaf::new(p)));
+            }
         }
         // PR #4 of #180: standardize + EMA depth-2 compositions.
         for &alpha in &self.standardize_ema_alphas {
-            leaves.push(Box::new(StandardizeWrapper::new(
+            leaves.push(LeafEnum::Wrapped(Box::new(StandardizeWrapper::new(
                 Box::new(EmaLeaf::new(alpha)),
                 0.05,
-            )));
+            ))));
         }
         // PR #4 of #180: seasonal-diff + EMA depth-2 compositions.
         for &(period, alpha) in &self.seasonal_diff_ema {
-            leaves.push(Box::new(SeasonalDifferenceWrapper::new(
+            leaves.push(LeafEnum::Wrapped(Box::new(SeasonalDifferenceWrapper::new(
                 Box::new(EmaLeaf::new(alpha)),
                 period,
-            )));
+            ))));
         }
         // PR #4 of #180: diff + EMA depth-2 (period=1 == plain differencing).
         for &alpha in &self.diff_ema_alphas {
-            leaves.push(Box::new(SeasonalDifferenceWrapper::new(
+            leaves.push(LeafEnum::Wrapped(Box::new(SeasonalDifferenceWrapper::new(
                 Box::new(EmaLeaf::new(alpha)),
                 1,
-            )));
+            ))));
         }
         // PR #4 of #180: multi-speed drift grid.
         for &alpha in &self.drift_alphas {
-            leaves.push(Box::new(DriftLeaf::new(alpha)));
+            leaves.push(LeafEnum::Drift(mk_drift(alpha)));
         }
         // PR #6 of #180: fractional-diff variants.
         for &(d, am, ad) in &self.frac_diff_variants {
-            leaves.push(Box::new(FractionalDiffLeaf::new(d, am, ad)));
+            leaves.push(LeafEnum::FracDiff(FractionalDiffLeaf::new(d, am, ad)));
         }
         // PR #6 of #180: GARCH + EMA composition.
         for &alpha in &self.garch_ema_alphas {
-            leaves.push(Box::new(GarchWrappedLeaf::with_defaults(Box::new(
-                EmaLeaf::new(alpha),
-            ))));
+            leaves.push(LeafEnum::Wrapped(Box::new(
+                GarchWrappedLeaf::with_defaults(Box::new(EmaLeaf::new(alpha))),
+            )));
         }
         // PR #6 of #180: PowerTransform + EMA composition.
         for &(p, alpha) in &self.power_ema {
-            leaves.push(Box::new(PowerTransformWrapper::new(
+            leaves.push(LeafEnum::Wrapped(Box::new(PowerTransformWrapper::new(
                 Box::new(EmaLeaf::new(alpha)),
                 p,
-            )));
+            ))));
         }
         // PR #6 of #180: YJ + EMA composition — the "coordinate prior"
         // (skaters composes YJ only with {diff, ema}; this is the EMA half).
         for &(lam, alpha) in &self.yj_ema {
-            leaves.push(Box::new(YjWrappedLeaf::new(
+            leaves.push(LeafEnum::Wrapped(Box::new(YjWrappedLeaf::new(
                 Box::new(EmaLeaf::new(alpha)),
                 lam,
-            )));
+            ))));
         }
         // PR #6 of #180: YJ + diff + EMA composition — the diff half of
-        // skaters' YJ coordinate prior. Structure: YJ wraps
-        // (diff + EMA) so the differencing is done in transformed space.
+        // skaters' YJ coordinate prior.
         for &(lam, alpha) in &self.yj_diff_ema {
             let inner: Box<dyn Leaf + Send> = Box::new(SeasonalDifferenceWrapper::new(
                 Box::new(EmaLeaf::new(alpha)),
                 1,
             ));
-            leaves.push(Box::new(YjWrappedLeaf::new(inner, lam)));
+            leaves.push(LeafEnum::Wrapped(Box::new(YjWrappedLeaf::new(inner, lam))));
         }
         // PR #3 of #180: Yeo-Johnson coordinate composition — for each λ,
-        // append a wrapped copy of every base leaf so far. Skaters composes
-        // YJ only with {diff, ema}; this is a looser "wrap current pool"
-        // approximation. Doubles-plus the softmax population for each λ.
+        // append a wrapped copy of every base leaf so far.
         if !self.yj_coord_lambdas.is_empty() {
             let base_count = leaves.len();
             for &lam in &self.yj_coord_lambdas {
                 for i in 0..base_count {
-                    // Rebuild the i-th leaf from scratch — Leaf is not
-                    // Clone-able, and the coordinate wrapper needs its
-                    // own state. Cheapest way is to walk the toggles
-                    // again; easier is to only YJ-wrap the standard
-                    // EMA/drift/AR trio (matches skaters more closely).
                     let _ = i;
                 }
-                // Only wrap the small always-on trio so the softmax
-                // doesn't explode. Matches skaters' selective composition.
-                leaves.push(Box::new(YjWrappedLeaf::new(
+                leaves.push(LeafEnum::Wrapped(Box::new(YjWrappedLeaf::new(
                     Box::new(EmaLeaf::new(self.ema_alpha)),
                     lam,
-                )));
-                leaves.push(Box::new(YjWrappedLeaf::new(
+                ))));
+                leaves.push(LeafEnum::Wrapped(Box::new(YjWrappedLeaf::new(
                     Box::new(DriftLeaf::new(self.drift_alpha)),
                     lam,
-                )));
+                ))));
             }
         }
         if let Some(a) = self.intermittent {
-            leaves.push(Box::new(IntermittentLeaf::new(a)));
+            leaves.push(LeafEnum::Intermittent(IntermittentLeaf::new(a)));
         }
         if let Some((p, a)) = self.seasonal_intermittent {
-            leaves.push(Box::new(SeasonalIntermittentLeaf::new(p, a)));
+            leaves.push(LeafEnum::SeasonalIntermittent(
+                SeasonalIntermittentLeaf::new(p, a),
+            ));
         }
         if let Some(a) = self.poisson {
-            leaves.push(Box::new(PoissonLeaf::new(a)));
+            leaves.push(LeafEnum::Poisson(PoissonLeaf::new(a)));
         }
         if let Some(a) = self.neg_binomial {
-            leaves.push(Box::new(NegativeBinomialLeaf::new(a)));
+            leaves.push(LeafEnum::NegativeBinomial(NegativeBinomialLeaf::new(a)));
         }
         if let Some(a) = self.lognormal {
-            leaves.push(Box::new(LogNormalLeaf::new(a)));
+            leaves.push(LeafEnum::LogNormal(LogNormalLeaf::new(a)));
         }
         if let Some(a) = self.gamma {
-            leaves.push(Box::new(GammaLeaf::new(a)));
+            leaves.push(LeafEnum::Gamma(GammaLeaf::new(a)));
         }
         if let Some(a) = self.rectified_normal {
-            leaves.push(Box::new(RectifiedNormalLeaf::new(a)));
+            leaves.push(LeafEnum::RectifiedNormal(RectifiedNormalLeaf::new(a)));
         }
         if let Some(a) = self.zip {
-            leaves.push(Box::new(ZeroInflatedPoissonLeaf::new(a)));
+            leaves.push(LeafEnum::Zip(ZeroInflatedPoissonLeaf::new(a)));
         }
         if let Some(a) = self.zinb {
-            leaves.push(Box::new(ZeroInflatedNegativeBinomialLeaf::new(a)));
+            leaves.push(LeafEnum::Zinb(ZeroInflatedNegativeBinomialLeaf::new(a)));
         }
         if let Some(a) = self.student_t {
-            leaves.push(Box::new(StudentTLeaf::new(a)));
+            leaves.push(LeafEnum::StudentT(StudentTLeaf::new(a)));
         }
         if let Some(a) = self.beta {
-            leaves.push(Box::new(BetaLeaf::new(a)));
+            leaves.push(LeafEnum::Beta(BetaLeaf::new(a)));
         }
         if let Some((a, p)) = self.tweedie {
-            leaves.push(Box::new(TweedieLeaf::new(a, p)));
+            leaves.push(LeafEnum::Tweedie(TweedieLeaf::new(a, p)));
         }
         if let Some(a) = self.skew_normal {
-            leaves.push(Box::new(SkewNormalLeaf::new(a)));
+            leaves.push(LeafEnum::SkewNormal(SkewNormalLeaf::new(a)));
         }
         if self.discrete_uniform {
-            leaves.push(Box::new(DiscreteUniformLeaf::new()));
+            leaves.push(super::leaf_enum::LeafEnum::DiscreteUniform(
+                DiscreteUniformLeaf::new(),
+            ));
         }
         if let Some(p) = self.seasonal_period {
-            leaves.push(Box::new(SeasonalEmaLeaf::new(p, self.seasonal_alpha)));
+            leaves.push(super::leaf_enum::LeafEnum::SeasonalEma(
+                SeasonalEmaLeaf::new(p, self.seasonal_alpha),
+            ));
         }
         for &p in &self.seasonal_periods_multi {
-            leaves.push(Box::new(SeasonalEmaLeaf::new(p, self.seasonal_alpha)));
+            leaves.push(super::leaf_enum::LeafEnum::SeasonalEma(
+                SeasonalEmaLeaf::new(p, self.seasonal_alpha),
+            ));
         }
         if let Some((p, a)) = self.seasonal_mult {
-            leaves.push(Box::new(MultiplicativeSeasonalLeaf::new(p, a)));
+            leaves.push(super::leaf_enum::LeafEnum::SeasonalMult(
+                MultiplicativeSeasonalLeaf::new(p, a),
+            ));
         }
         leaves
     }
 
     fn init_leaves(&mut self) {
-        let leaves = self.build_base_leaves();
-        let mut leaves = if !self.yj_grid.is_empty() {
-            // Coordinate grid: build one fresh base set per λ, wrap each
-            // element with YjWrappedLeaf(inner, λ). Every (leaf, λ)
-            // becomes its own softmax candidate.
-            let mut wrapped: Vec<Box<dyn Leaf + Send>> =
-                Vec::with_capacity(leaves.len() * self.yj_grid.len());
+        self.init_leaves_maybe_batch(None);
+    }
+
+    /// Init with optional batch values for yearly-Trick 1 (batch OLS
+    /// initialization of Drift + Holt trends). When `Some(values)` is
+    /// passed AND the series appears trending AND is short (N < 60),
+    /// Drift/Holt candidates start from the OLS-fitted slope rather
+    /// than from zero.
+    fn init_leaves_maybe_batch(&mut self, batch_values: Option<&[f64]>) {
+        use super::leaf_enum::LeafEnum;
+        // Trick 1 gate: apply batch init only when short-history AND
+        // trend appears significant relative to noise.
+        let batch: Option<&[f64]> =
+            batch_values.filter(|v| v.len() >= 5 && v.len() < 60 && looks_trending(v));
+        let leaves = self.build_base_leaves_with_batch(batch);
+        let leaves = if !self.yj_grid.is_empty() {
+            let mut wrapped: Vec<LeafEnum> = Vec::with_capacity(leaves.len() * self.yj_grid.len());
             for lam in self.yj_grid.clone() {
-                let per_lambda = self.build_base_leaves();
+                let per_lambda = self.build_base_leaves_with_batch(batch);
                 for l in per_lambda {
-                    wrapped.push(Box::new(YjWrappedLeaf::new(l, lam)));
+                    let boxed: Box<dyn Leaf + Send> = Box::new(l);
+                    wrapped.push(LeafEnum::Wrapped(Box::new(YjWrappedLeaf::new(boxed, lam))));
                 }
             }
             wrapped
         } else {
             leaves
         };
-        // Clear the old redundant setter path — keep `leaves` mut for
-        // the trailing existing logic (self.cum_log_liks / self.leaves).
-        let _ = &mut leaves;
         self.cum_log_liks = vec![0.0; leaves.len()];
         self.leaves = leaves;
     }
@@ -1776,6 +2284,109 @@ impl LaplaceForecaster {
 
     fn per_leaf_horizons(&self, horizon: usize) -> Vec<Vec<super::dist::Gaussian>> {
         self.leaves.iter().map(|l| l.predict(horizon)).collect()
+    }
+
+    /// Absorb one **transformed-space** observation `y` into all
+    /// leaves + terminals + sticky lattice. The shared work of both
+    /// the batch `fit()` loop and the public streaming
+    /// [`Self::observe`]. O(N_leaves) per call.
+    ///
+    /// Returns the transformed-space one-step mixture mean at this step
+    /// so the caller can compute residuals / fitted values / calibration
+    /// snapshots in the original space.
+    fn absorb_one(&mut self, y: f64) -> f64 {
+        // 1-step predictions from each leaf, before observing y.
+        self.scratch_per_leaf.clear();
+        for l in self.leaves.iter() {
+            self.scratch_per_leaf.push(l.predict_one());
+        }
+        let per_leaf = self.scratch_per_leaf.as_slice();
+        softmax_into(&self.cum_log_liks, &mut self.scratch_weights);
+        let weights = self.scratch_weights.as_slice();
+        let mixture_is_empty = per_leaf.is_empty();
+        let mixture_mean: f64 = weights
+            .iter()
+            .zip(per_leaf.iter())
+            .map(|(w, g)| w * g.mean)
+            .sum();
+        // Score + absorb per leaf. Learning-rate shrinkage and
+        // log-clamp applied to the cumulative-weight update.
+        let eta = eta_schedule(self.learning_rate, self.n_obs);
+        let clamp = self.log_clamp;
+        for (i, leaf) in self.leaves.iter_mut().enumerate() {
+            let g = per_leaf[i];
+            let lp_raw = g.logpdf(y);
+            if lp_raw.is_finite() {
+                let lp_clamped = if lp_raw < clamp { clamp } else { lp_raw };
+                self.cum_log_liks[i] += eta * lp_clamped;
+            }
+            leaf.observe(y);
+        }
+        // Terminals: residual is transformed-space (y - mixture_mean).
+        let residual = if mixture_is_empty {
+            0.0
+        } else {
+            y - mixture_mean
+        };
+        if let Some(t) = self.terminal.as_mut() {
+            t.observe(residual);
+        }
+        if let Some(t) = self.terminal_crps.as_mut() {
+            t.observe(residual);
+        }
+        self.n_obs += 1;
+        mixture_mean
+    }
+
+    /// Streaming observe — absorb a **single original-space** observation
+    /// into all leaves + terminals + sticky lattice.
+    ///
+    /// This is the O(N_leaves) counterpart to [`Forecaster::fit`]'s batch
+    /// loop. Call this once per new observation to update model state
+    /// without a full refit. Skaters' equivalent primitive:
+    /// `f(y, state) -> (dist, new_state)`.
+    ///
+    /// # Requirements
+    /// - [`Forecaster::fit`] must have been called first (initializes
+    ///   the leaf pool). Streaming from empty state is not supported.
+    /// - This path **skips** batch-only features:
+    ///     - Yeo-Johnson transform (`with_yeo_johnson*`)
+    ///     - Exog OLS pre-regression
+    ///     - Per-horizon calibration snapshots
+    ///     - Fitted-values / residuals bookkeeping
+    ///
+    ///   Configure the model without these when planning to stream.
+    ///
+    /// # Errors
+    /// - `FitRequired` if the leaf pool hasn't been initialized.
+    pub fn observe(&mut self, y: f64) -> Result<()> {
+        if self.leaves.is_empty() {
+            return Err(ForecastError::FitRequired {
+                model: Some("LaplaceForecaster".into()),
+            });
+        }
+        if !y.is_finite() {
+            return Ok(());
+        }
+        // Absorb (transformed space == original space when YJ disabled,
+        // which the streaming API requires).
+        let _ = self.absorb_one(y);
+        // Sticky lattice always tracks original-space values.
+        if let Some(s) = self.sticky.as_mut() {
+            s.observe(y);
+        }
+        Ok(())
+    }
+
+    /// Streaming observe of an entire slice — convenience wrapper around
+    /// [`Self::observe`]. Same O(N_obs · N_leaves) cost as a batch fit
+    /// on the same-length window, but *incremental*: previous
+    /// observations are preserved in state.
+    pub fn observe_slice(&mut self, ys: &[f64]) -> Result<()> {
+        for &y in ys {
+            self.observe(y)?;
+        }
+        Ok(())
     }
 }
 
@@ -1953,6 +2564,20 @@ impl Forecaster for LaplaceForecaster {
             }
         }
 
+        // Fev-27 follow-up (#9): STL leaf auto-detection was REMOVED.
+        // Adding an auto-STL leaf caused a large tourism_monthly
+        // regression on the fev-27 panel (MASE 2.34 → 3.08, +31 %) —
+        // the STL leaf's linear-trend extrapolation is aggressive at
+        // long horizons, compounding on short-history seasonal panels
+        // (150-300 obs). Aggregate fev-27 also regressed (geomean
+        // MASE 6.085 → 6.186). See `docs/SOTA_POSITIONING.md`
+        // "Deferred / future work" for the full story.
+        //
+        // `StlDecompLeaf` and the `stl_period` field remain so
+        // callers can opt in via `.with_stl(period)` on data they
+        // know behaves well with STL. It is NOT auto-enabled by
+        // `.auto()` or `.skaters()`.
+
         // Auto-selector: inspect series characteristics before initialising
         // leaves and set the opt-in toggles from residual-slicing evidence.
         // User-configured toggles are respected — auto only adds.
@@ -1979,6 +2604,9 @@ impl Forecaster for LaplaceForecaster {
             if chars.seasonality_strength > 0.15 && self.seasonal_period.is_none() {
                 self.seasonal_period = Some(effective_period);
             }
+            // Fev-27 follow-up (#9): STL leaf auto-detection REMOVED.
+            // See earlier note above and docs/SOTA_POSITIONING.md.
+            // Available opt-in via `.with_stl(period)`.
             // α-27 fix #1: enable the multiplicative seasonal leaf when
             // seasonality is present AND series is strictly positive
             // (tourism, retail-aggregate — where the peak-trough pattern
@@ -2030,7 +2658,35 @@ impl Forecaster for LaplaceForecaster {
             }
         }
 
+        // Yearly-Trick 1 was REVERTED after fev-27 regression on
+        // cif_2016 (.skaters() MASE 1.32 → 5.02, +280 %). The
+        // `looks_trending` heuristic was too permissive; noisy
+        // short-history panels get bad OLS β estimates → Drift/Holt
+        // init to garbage → forecasts blow up. See
+        // docs/ACCURACY_AUDIT.md § Trick 1 retrospective.
         self.init_leaves();
+        // Fev-27 follow-up: auto-gate sticky. When `.skaters()` set
+        // `sticky_auto_gate = true`, decide sticky based on training
+        // data characteristics. Discrete-count-like → keep sticky
+        // (M5, dominick). Continuous smooth → disable (m1_yearly,
+        // tourism_*, cif_2016 all had catastrophic WQL blowups
+        // with sticky on).
+        if self.sticky_auto_gate && self.sticky.is_some() && !looks_discrete_count(values) {
+            self.sticky = None;
+        }
+        // Accuracy-audit #3a: warm-start the terminal σ from the
+        // training values' MAD (1.4826 × median absolute deviation
+        // from the median). Skips the terminal's 1/n bootstrap on
+        // short-history panels where the first 30 obs' EWMA would
+        // otherwise miscalibrate the mixture spread.
+        if values.len() >= 10 {
+            let mad = compute_mad(values);
+            if mad > 0.0 && mad.is_finite() {
+                if let Some(t) = self.terminal.as_mut() {
+                    t.warm_start(mad, 30);
+                }
+            }
+        }
         self.training_values = values.to_vec();
         self.fitted_values = Vec::with_capacity(values.len());
         self.residuals = Vec::with_capacity(values.len());
@@ -2085,12 +2741,32 @@ impl Forecaster for LaplaceForecaster {
         let snapshot_stride = (values.len() / 30).clamp(1, 200);
         let per_h_horizon = self.per_h_horizon;
         let mut per_h_snapshots: Vec<(usize, Vec<(f64, f64)>)> = Vec::new();
+        // Accuracy-audit #2: multi-horizon retrospective scoring
+        // snapshots. Only populated when `self.multi_h_scoring` is on.
+        // Structure: (step, per_leaf_h_predictions[leaf_idx][h_idx]).
+        let mut mh_snapshots: Vec<(usize, Vec<Vec<Gaussian>>)> = Vec::new();
+        // Snapshot cadence: every 20 steps starting from step 60.
+        // Limited to `values.len() / 15` snapshots to bound cost.
+        let mh_stride: usize = 20;
+        let mh_horizon: usize = per_h_horizon.clamp(4, 24);
 
         for (step, &y_orig) in values.iter().enumerate() {
             let y = match yj {
                 Some(l) => yj_forward(y_orig, l),
                 None => y_orig,
             };
+
+            // Accuracy-audit #2: multi-horizon scoring snapshot.
+            if self.multi_h_scoring
+                && step >= 60
+                && step % mh_stride == 0
+                && step + mh_horizon <= values.len()
+                && mh_snapshots.len() < 200
+            {
+                let per_leaf_h: Vec<Vec<Gaussian>> =
+                    self.leaves.iter().map(|l| l.predict(mh_horizon)).collect();
+                mh_snapshots.push((step, per_leaf_h));
+            }
 
             // Periodic snapshot: take before observing y at this step. Only
             // useful when the snapshot's H-step horizon fits inside training.
@@ -2119,19 +2795,48 @@ impl Forecaster for LaplaceForecaster {
             }
 
             // 1-step predictions from each leaf, before observing y.
-            let per_leaf: Vec<super::dist::Gaussian> =
-                self.leaves.iter().map(|l| l.predict(1)[0]).collect();
-            let weights = self.weights();
+            // Perf: fill the reusable scratch buffer (sized to leaf count
+            // in fit's initialization) instead of `collect`ing a fresh Vec.
+            self.scratch_per_leaf.clear();
+            for l in self.leaves.iter() {
+                self.scratch_per_leaf.push(l.predict_one());
+            }
+            let per_leaf = self.scratch_per_leaf.as_slice();
+            // Accuracy-audit #1: stacking history snapshot. Store each
+            // leaf's 1-step-ahead prediction MEAN for the OLS solve at
+            // end of fit. Skip on very short series (< 60 obs) where
+            // stacking would overfit.
+            if self.stacking_enabled && values.len() >= 60 {
+                if self.predictions_history.len() != per_leaf.len() {
+                    self.predictions_history.clear();
+                    self.predictions_history
+                        .resize(per_leaf.len(), Vec::with_capacity(values.len()));
+                }
+                for (i, g) in per_leaf.iter().enumerate() {
+                    self.predictions_history[i].push(g.mean);
+                }
+            }
+            // Perf: softmax weights into a reused scratch buffer to skip
+            // the per-iteration `Vec<f64>` alloc.
+            softmax_into(&self.cum_log_liks, &mut self.scratch_weights);
+            let weights = self.scratch_weights.as_slice();
 
-            let mixture =
-                GaussianMixture::new(weights.iter().zip(per_leaf.iter()).map(|(w, g)| (*w, *g)));
+            // Perf: inline mixture mean / variance instead of building a
+            // GaussianMixture struct — we only need mean/std/is_empty here,
+            // not the components vec.
+            let mixture_is_empty = per_leaf.is_empty();
+            let mixture_mean: f64 = weights
+                .iter()
+                .zip(per_leaf.iter())
+                .map(|(w, g)| w * g.mean)
+                .sum();
             // Fitted / residuals: expose in ORIGINAL space so downstream
             // consumers (Explanation, tests, callers computing MAE) see
             // the same scale as the training values.
-            let fitted_orig = if mixture.is_empty() {
+            let fitted_orig = if mixture_is_empty {
                 y_orig
             } else {
-                let m_trans = mixture.mean();
+                let m_trans = mixture_mean;
                 match yj {
                     Some(l) => yj_inverse_with_jac(m_trans, l).0,
                     None => m_trans,
@@ -2144,10 +2849,17 @@ impl Forecaster for LaplaceForecaster {
                 // leaves' Gaussian assumption lives there); stash both the
                 // transformed-space 1-step σ and the transformed-space
                 // residual so quantile-match sees matched-space `|z|`.
-                let (mu_trans, sigma_trans) = if mixture.is_empty() {
+                let (mu_trans, sigma_trans) = if mixture_is_empty {
                     (y, 1.0)
                 } else {
-                    (mixture.mean(), mixture.std())
+                    // Inline mixture variance to skip mixture allocation.
+                    let mu = mixture_mean;
+                    let var: f64 = weights
+                        .iter()
+                        .zip(per_leaf.iter())
+                        .map(|(w, g)| w * (g.std * g.std + (g.mean - mu).powi(2)))
+                        .sum();
+                    (mu, var.sqrt())
                 };
                 self.predictive_stds.push(sigma_trans);
                 self.predictive_residuals_trans.push(y - mu_trans);
@@ -2158,7 +2870,18 @@ impl Forecaster for LaplaceForecaster {
             // to the cumulative-weight update — skaters' XGBoost-style
             // ensemble regularization. Defaults (η=1.0, clamp=−∞)
             // preserve the historical behavior.
-            let eta = self.learning_rate;
+            // Fev-27 follow-up (#5): warmup schedule for η. For
+            // n < 30 obs we use η=1.0 (fast learning — the softmax
+            // needs to move away from uniform quickly). For
+            // 30 <= n < 100 linearly decay to self.learning_rate.
+            // For n >= 100 hold at self.learning_rate. Prevents the
+            // short-history yearly regression that Fix B introduced.
+            //
+            // Yearly-Trick 3 was REVERTED after cif_2016 regression
+            // caused by Trick 1. May have contributed independently
+            // to WQL regression; safer to revert together and revisit
+            // separately with proper isolation.
+            let eta = eta_schedule(self.learning_rate, self.n_obs);
             let clamp = self.log_clamp;
             for (i, leaf) in self.leaves.iter_mut().enumerate() {
                 let g = per_leaf[i];
@@ -2173,12 +2896,11 @@ impl Forecaster for LaplaceForecaster {
             // space) between the softmax mixture mean and y. This leaf
             // tracks the residual's own distribution independently of
             // the individual leaves' Gaussian assumptions.
-            let mixture_mean = if mixture.is_empty() {
-                y
+            let residual = if mixture_is_empty {
+                0.0
             } else {
-                mixture.mean()
+                y - mixture_mean
             };
-            let residual = y - mixture_mean;
             if let Some(t) = self.terminal.as_mut() {
                 t.observe(residual);
             }
@@ -2195,6 +2917,62 @@ impl Forecaster for LaplaceForecaster {
                 s.observe(y_orig);
             }
             self.n_obs += 1;
+        }
+
+        // Accuracy-audit #2: multi-horizon retrospective scoring pass.
+        // For each snapshot at step t, score each leaf's h-step
+        // prediction against `values[t + h - 1]` (the actual). Weight
+        // the contribution by `η / h` so 1-step still dominates but
+        // long-horizon accuracy shifts the ensemble.
+        if self.multi_h_scoring && !mh_snapshots.is_empty() {
+            let eta = self.learning_rate;
+            let clamp = self.log_clamp;
+            for (step, per_leaf_h) in &mh_snapshots {
+                for h in 1..=mh_horizon {
+                    let target_step = step + h - 1;
+                    if target_step >= values.len() {
+                        break;
+                    }
+                    let y_target = match yj {
+                        Some(l) => yj_forward(values[target_step], l),
+                        None => values[target_step],
+                    };
+                    if !y_target.is_finite() {
+                        continue;
+                    }
+                    let h_weight = eta / h as f64;
+                    for (leaf_idx, preds) in per_leaf_h.iter().enumerate() {
+                        if leaf_idx >= self.cum_log_liks.len() {
+                            break;
+                        }
+                        if let Some(g) = preds.get(h - 1) {
+                            let lp = g.logpdf(y_target);
+                            if lp.is_finite() {
+                                let lp_c = if lp < clamp { clamp } else { lp };
+                                self.cum_log_liks[leaf_idx] += h_weight * lp_c;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Accuracy-audit #1: ensemble stacking solve. If we collected
+        // per-leaf predictions during the fit loop and have enough
+        // observations, solve OLS for the blend weights and project
+        // onto the non-negative simplex.
+        if self.stacking_enabled && !self.predictions_history.is_empty() {
+            // Skip the first BURN steps so leaves have warmed up.
+            const BURN: usize = 30;
+            let n_leaves = self.predictions_history.len();
+            let n_steps = self.predictions_history[0].len();
+            if n_steps > BURN + n_leaves {
+                let stacking_weights = solve_stacking(&self.predictions_history, values, BURN);
+                self.stacking_weights = Some(stacking_weights);
+            }
+            // Free the history buffer — only needed once.
+            self.predictions_history.clear();
+            self.predictions_history.shrink_to_fit();
         }
 
         // Terminal calibration — quantile matching on |z| = |residual / σ|.
@@ -2377,7 +3155,15 @@ impl DistributionalForecaster for LaplaceForecaster {
         if horizon == 0 {
             return Ok(Vec::new());
         }
-        let weights = self.weights();
+        // Accuracy-audit #1: prefer stacking weights (learned by OLS
+        // on training predictions) over softmax when available.
+        // Stacking directly optimizes point-forecast MSE, closer to
+        // the MASE / WAPE metrics than softmax's 1-step-log-likelihood.
+        let weights = if let Some(sw) = self.stacking_weights.as_ref() {
+            sw.clone()
+        } else {
+            self.weights()
+        };
         let per_leaf = self.per_leaf_horizons(horizon);
         let scale = self.calibration_scale;
         let per_h = &self.calibration_scale_per_h;
@@ -2407,6 +3193,32 @@ impl DistributionalForecaster for LaplaceForecaster {
                 } else {
                     m
                 };
+                // Fev-27 follow-up (#3): multi-horizon terminal σ scaling.
+                // The terminal tracks 1-step residual variance; at h > 1
+                // the true predictive spread grows. Assume random-walk
+                // residuals and scale std by √(h+1). Closes WQL underfit
+                // at long horizons (h + 1 since the closure's `h` is
+                // 0-based).
+                //
+                // Accuracy-audit #5: if terminal tracks AR(1) φ, use
+                // `√((1 − φ^(2(h+1))) / (1 − φ²))` — the true AR(1)
+                // h-step predictive std. Falls back to `√(h+1)` when
+                // φ ≈ 0 (IID case). Tighter spread on mean-reverting
+                // residuals (φ < 0), wider on persistent (φ > 0).
+                let m = if h > 0 {
+                    let scale = self
+                        .terminal
+                        .as_ref()
+                        .map(|t| t.h_step_std_scale(h + 1))
+                        .unwrap_or_else(|| ((h + 1) as f64).sqrt());
+                    let inflated = m
+                        .components
+                        .into_iter()
+                        .map(|(w, g)| (w, super::dist::Gaussian::new(g.mean, g.std * scale)));
+                    GaussianMixture::new(inflated)
+                } else {
+                    m
+                };
                 let scale_h = per_h.get(h).copied().unwrap_or(scale);
                 let components = m.components.into_iter().map(|(w, g)| {
                     let sigma_scaled = g.std * scale_h;
@@ -2428,9 +3240,11 @@ impl DistributionalForecaster for LaplaceForecaster {
                 });
                 let mix = GaussianMixture::new(components);
                 // PR #7 of #180: sticky lattice — project onto revisited
-                // exact values. No-op if no atoms have fired.
+                // exact values. No-op if no atoms have fired. Fix A of
+                // fev-27 follow-up: horizon-decayed atom mass (`h + 1`
+                // since the closure's `h` is 0-based).
                 if let Some(s) = self.sticky.as_ref() {
-                    s.project(&mix)
+                    s.project(&mix, h + 1)
                 } else {
                     mix
                 }
@@ -2456,6 +3270,63 @@ mod tests {
         }
         let stamps: Vec<_> = (0..n).map(|i| base + Duration::hours(i as i64)).collect();
         TimeSeries::univariate(stamps, vals).unwrap()
+    }
+
+    /// Streaming `observe()` should produce bit-identical predictions
+    /// to a batch `fit()` on the same total window. Two forecasters:
+    /// (A) fit on values[0..k], stream values[k..n];
+    /// (B) fit on values[0..n] in one shot.
+    /// Their `forecast_dist(1)` mean must match to ~1e-9.
+    #[test]
+    fn streaming_observe_matches_batch_fit() {
+        let ts_full = ts_ar1(250, 0.6);
+        let values = ts_full.primary_values().to_vec();
+        let split = 200;
+        let base = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
+        let stamps_a: Vec<_> = (0..split)
+            .map(|i| base + Duration::hours(i as i64))
+            .collect();
+        let ts_a = TimeSeries::univariate(stamps_a, values[..split].to_vec()).unwrap();
+
+        // Path A: fit on first 200, stream the last 50.
+        let mut fa = LaplaceForecaster::new();
+        fa.fit(&ts_a).unwrap();
+        for &y in &values[split..] {
+            fa.observe(y).unwrap();
+        }
+        let m_a = fa.forecast_dist(1).unwrap()[0].mean();
+
+        // Path B: batch fit on all 250.
+        let mut fb = LaplaceForecaster::new();
+        fb.fit(&ts_full).unwrap();
+        let m_b = fb.forecast_dist(1).unwrap()[0].mean();
+
+        assert!(
+            (m_a - m_b).abs() < 1e-9,
+            "streaming ({m_a:.9}) != batch ({m_b:.9})"
+        );
+    }
+
+    #[test]
+    fn observe_returns_error_before_fit() {
+        let mut f = LaplaceForecaster::new();
+        assert!(f.observe(1.0).is_err());
+    }
+
+    #[test]
+    fn observe_ignores_nan() {
+        let ts = ts_ar1(100, 0.5);
+        let mut f = LaplaceForecaster::new();
+        f.fit(&ts).unwrap();
+        let m_before = f.forecast_dist(1).unwrap()[0].mean();
+        // NaN / inf are silently ignored (matches leaf-level behavior).
+        f.observe(f64::NAN).unwrap();
+        f.observe(f64::INFINITY).unwrap();
+        let m_after = f.forecast_dist(1).unwrap()[0].mean();
+        assert!(
+            (m_before - m_after).abs() < 1e-12,
+            "NaN observe changed state: {m_before} vs {m_after}"
+        );
     }
 
     #[test]

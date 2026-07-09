@@ -38,6 +38,7 @@ const SQRT_2: f64 = std::f64::consts::SQRT_2;
 
 /// Terminal scale-mixture with CRPS-gradient weight updates.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TerminalCrpsMixture {
     scales: [f64; N_SCALES],
     /// Pre-computed pairwise `A(0, √(c_a² + c_b²))` for the CRPS

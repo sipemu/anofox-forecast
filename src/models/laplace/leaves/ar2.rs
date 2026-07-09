@@ -28,6 +28,7 @@
 use crate::models::laplace::dist::Gaussian;
 use crate::models::laplace::leaf::Leaf;
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Ar2Leaf {
     alpha: f64, // EMA rate for all first- and second-moment estimates
     last: Option<f64>,
@@ -133,6 +134,15 @@ impl Leaf for Ar2Leaf {
                 Gaussian::new(mean, sigma * (h as f64).sqrt())
             })
             .collect()
+    }
+
+    #[inline]
+    fn predict_one(&self) -> Gaussian {
+        let mu = self.e_y;
+        let last = self.last.unwrap_or(mu);
+        let last2 = self.last2.unwrap_or(mu);
+        let y_h = self.phi1 * (last - mu) + self.phi2 * (last2 - mu);
+        Gaussian::new(mu + y_h, self.sigma())
     }
 
     fn observe(&mut self, y: f64) {

@@ -7,6 +7,7 @@
 use crate::models::laplace::dist::Gaussian;
 use crate::models::laplace::leaf::Leaf;
 
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Ar1Leaf {
     alpha_mean: f64,
     mean: Option<f64>,
@@ -67,6 +68,14 @@ impl Leaf for Ar1Leaf {
                 Gaussian::new(mean, sigma * var_scale.sqrt())
             })
             .collect()
+    }
+
+    #[inline]
+    fn predict_one(&self) -> Gaussian {
+        let mu = self.mean.unwrap_or(0.0);
+        let last = self.last.unwrap_or(mu);
+        let phi = self.phi.clamp(-0.999, 0.999);
+        Gaussian::new(mu + phi * (last - mu), self.sigma())
     }
 
     fn observe(&mut self, y: f64) {
