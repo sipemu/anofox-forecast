@@ -59,6 +59,54 @@ impl MultiplicativeSeasonalLeaf {
         (self.ss / (self.n as f64 - 1.0)).sqrt().max(1e-9)
     }
 
+    /// Batch-initialize `level` and per-phase `factor` from training
+    /// values. Sets `level = mean(values)` and `factor[k] = mean(y at
+    /// phase k) / level`. Skips the first-cycle handicap in the softmax
+    /// where an un-initialised leaf produces `1.0`-multiplier
+    /// predictions on unseen phases and accumulates a bad
+    /// `cum_log_liks`.
+    ///
+    /// Companion to [`super::SeasonalEmaLeaf::from_batch`]. Same
+    /// diagnosis on N=48 monthly data.
+    pub fn from_batch(period: usize, alpha: f64, values: &[f64]) -> Self {
+        let mut leaf = Self::new(period, alpha);
+        if values.is_empty() {
+            return leaf;
+        }
+        let p = leaf.period;
+        // Level: mean of last cycle (recent state, not stale early years).
+        let total_cnt = values.iter().filter(|y| y.is_finite()).count();
+        if total_cnt == 0 {
+            return leaf;
+        }
+        let level = if values.len() >= p {
+            let start = values.len() - p;
+            values[start..]
+                .iter()
+                .filter(|y| y.is_finite())
+                .sum::<f64>()
+                / p as f64
+        } else {
+            values.iter().filter(|y| y.is_finite()).sum::<f64>() / total_cnt as f64
+        };
+        leaf.level = level;
+        leaf.initialized_level = true;
+        // Factors: last-cycle value / level.
+        if values.len() >= p && level.abs() > LEVEL_TOL {
+            let start = values.len() - p;
+            for k in 0..p {
+                let y = values[start + k];
+                if y.is_finite() {
+                    let phase = (start + k) % p;
+                    leaf.factor[phase] = y / level;
+                    leaf.factor_seen[phase] = true;
+                }
+            }
+        }
+        leaf.phase_step = values.len() % p;
+        leaf
+    }
+
     fn factor_at(&self, phase: usize) -> f64 {
         if self.factor_seen[phase] {
             self.factor[phase]
