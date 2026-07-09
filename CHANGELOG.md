@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.2] - 2026-07-09
+
+Bug-fix release closing [#198](https://github.com/sipemu/anofox-forecast/issues/198) (LaplaceForecaster near-flat forecast on noisy established seasonal series). Zero breaking API changes; zero regression on fev-27 vs v0.15.1.
+
+### Changed
+
+- **`.with_seasonal(p)` now enables seasonal batch init by default** (was opt-in via `.with_seasonal_batch_init()` since v0.15.0). Closes [#198](https://github.com/sipemu/anofox-forecast/issues/198): on the reported 60-month noisy-established-seasonal synthetic, `.auto().with_seasonal(12)` now recovers the full 8.91× peak-to-trough ratio (was 2.11× flat-line). Opt out with the new `.no_seasonal_batch_init()` builder — recommended on growing-amplitude or phase-shifting series where the last-cycle prior misleads the softmax.
+  - **`.auto_with_seasonal_period(p)` is intentionally NOT auto-enabled.** Measured on fev-27: enabling batch init on the `auto_with_seasonal_period()` path regresses `.skaters()` WQL by 14.6 % aggregate, m4_quarterly WQL by 214 %, m4_daily WQL by 177 %. The auto path is used by benchmarks and heterogeneous panels where series characteristics vary; only the user's explicit `.with_seasonal(p)` commitment is a strong-enough signal.
+  - Investigation notes: an alternative architectural port of skaters' `precision_weighted_ensemble` (per-horizon MSE precision weights instead of the 1-step logpdf softmax) was prototyped and rejected. On the #198 synthetic it improved the ratio only to 2.54–3.27× (vs 8.91× via batch init) because seasonal_ema's per-horizon MSE only beats level trackers by ~1.8×, spreading the precision weight. Cold-start initialisation, not the weighting mechanism, is the root cause. The python skaters reference library (`search(k=12)`) itself flat-lines at 1.05× on the same synthetic — so this default puts us dramatically ahead of the reference implementation.
+
+### Added
+
+- **`LaplaceForecaster::no_seasonal_batch_init()`** — opt-out for the new default, for growing-amplitude / phase-shifting seasonal series.
+
 ## [0.15.1] - 2026-07-09
 
 Bug-fix release addressing four pathologies reported on issue #195 (`LaplaceForecaster` over-damps seasonality on amplitude-declining series). Zero breaking API changes; all fixes are additive auto-detections.

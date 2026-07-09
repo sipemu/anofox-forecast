@@ -430,6 +430,31 @@ fn looks_trending(values: &[f64]) -> bool {
     trend_over_window > 0.5 * noise_budget
 }
 
+/// Compute the sample lag-`p` autocorrelation of `values`. Retained
+/// for future issue #198 iterations — the naïve version of the
+/// boost caused a +43 % MASE regression on fev-27 because ACF-driven
+/// seasonal forcing overrode data-driven leaf ranking on datasets
+/// where seasonal_ema isn't the best fit. Returns 0.0 on degenerate
+/// inputs (fewer than `2*p+1` obs, zero variance).
+#[allow(dead_code)]
+fn lag_acf(values: &[f64], p: usize) -> f64 {
+    if p == 0 || values.len() < 2 * p + 1 {
+        return 0.0;
+    }
+    let n = values.len();
+    let mean: f64 = values.iter().sum::<f64>() / n as f64;
+    let var: f64 = values.iter().map(|y| (y - mean).powi(2)).sum::<f64>() / n as f64;
+    if var < 1e-12 {
+        return 0.0;
+    }
+    let mut cov = 0.0;
+    for i in p..n {
+        cov += (values[i] - mean) * (values[i - p] - mean);
+    }
+    let normalizer = (n - p) as f64 * var;
+    (cov / normalizer).clamp(-1.0, 1.0)
+}
+
 /// Median-absolute-deviation robust σ estimator (accuracy-audit #3a).
 ///
 /// Returns `1.4826 · median(|y_i − median(y)|)` — the MAD scaled to
@@ -2017,9 +2042,25 @@ impl LaplaceForecaster {
 
     /// Add a seasonal-EMA leaf with the caller-supplied period. A period
     /// of 0 or 1 is treated as "no seasonal leaf" — no runtime error.
+    ///
+    /// **Since v0.15.2**, also defaults [`Self::with_seasonal_batch_init`]
+    /// on. Reason: on committed-period series, batch init from the last
+    /// training cycle closes the cold-start handicap that was causing
+    /// near-flat forecasts on N=48-60 monthly series (issue #198). Opt
+    /// out with [`Self::no_seasonal_batch_init`] if your amplitude is
+    /// growing or the seasonal phase is shifting.
+    ///
+    /// **Contrast with [`Self::auto_with_seasonal_period`]**: that
+    /// builder does NOT enable batch init, because measurement showed it
+    /// regressed fev-27 (m4_quarterly WQL +214 %, `.skaters()` aggregate
+    /// WQL +14.6 %). The `auto_with_seasonal_period` path is used by
+    /// benchmarks and heterogeneous panels where the last-cycle prior
+    /// can be actively misleading; only the user's explicit
+    /// `.with_seasonal(p)` commitment is a strong-enough signal.
     pub fn with_seasonal(mut self, period: usize) -> Self {
         if period >= 2 {
             self.seasonal_period = Some(period);
+            self.seasonal_batch_init = true;
         }
         self
     }
@@ -2058,6 +2099,20 @@ impl LaplaceForecaster {
     /// Without a period the flag is a no-op.
     pub fn with_seasonal_batch_init(mut self) -> Self {
         self.seasonal_batch_init = true;
+        self
+    }
+
+    /// Opt out of seasonal batch initialisation.
+    ///
+    /// As of v0.15.2, [`Self::with_seasonal`] and
+    /// [`Self::auto_with_seasonal_period`] enable seasonal batch init
+    /// by default (closes issues #195/#198). Call this after those
+    /// builders to revert to cold-start behaviour — useful when the
+    /// series has **growing amplitude** or **shifting seasonal phase**,
+    /// where a last-cycle prior misleads the softmax into abandoning
+    /// the seasonal leaf.
+    pub fn no_seasonal_batch_init(mut self) -> Self {
+        self.seasonal_batch_init = false;
         self
     }
 
@@ -3310,7 +3365,7 @@ impl DistributionalForecaster for LaplaceForecaster {
         // on training predictions) over softmax when available.
         // Stacking directly optimizes point-forecast MSE, closer to
         // the MASE / WAPE metrics than softmax's 1-step-log-likelihood.
-        let weights = if let Some(sw) = self.stacking_weights.as_ref() {
+        let softmax_weights = if let Some(sw) = self.stacking_weights.as_ref() {
             sw.clone()
         } else {
             self.weights()
@@ -3323,7 +3378,7 @@ impl DistributionalForecaster for LaplaceForecaster {
         let non_negative = self.non_negative;
         Ok((0..horizon)
             .map(|h| {
-                let m = blend_horizon(&weights, &per_leaf, h);
+                let m = blend_horizon(&softmax_weights, &per_leaf, h);
                 // Terminal scale-mixture: replace the softmax blend's
                 // shape with a fixed-scale mixture centered at its mean.
                 // Mean-preserving; only reshapes the density.
