@@ -1927,16 +1927,29 @@ impl LaplaceForecaster {
         self
     }
 
-    /// Override the seasonal period used by [`Self::auto`] (default 7,
-    /// weekly). Set to 12 for monthly, 24 for hourly-with-daily, etc.
+    /// Commit to a seasonal period used by BOTH [`Self::auto`] and
+    /// [`Self::skaters`]. Sets both:
     ///
-    /// Marks the seasonal period as **explicit** (caller-committed) —
-    /// enables batch initialisation of the seasonal-EMA / multiplicative
-    /// phase levels from the last training cycle. This closes the
-    /// softmax cold-start handicap on short-history seasonal panels
-    /// (documented on N=48 monthly).
+    /// - `auto_seasonal_period` — the fallback period `.auto()`'s ACF
+    ///   scan uses when it can't detect one from data.
+    /// - `seasonal_period` — the period consumed by the leaf-pool
+    ///   builder to add a [`super::leaves::SeasonalEmaLeaf`].
+    ///
+    /// Set to 12 for monthly, 24 for hourly-with-daily, 4 for
+    /// quarterly, etc. Values `< 2` set only the auto fallback (yearly
+    /// data has no per-cycle seasonality to model).
+    ///
+    /// Fix for issue #195: previously this only set the auto-selector
+    /// fallback, so `.skaters().auto_with_seasonal_period(12)` didn't
+    /// actually add a seasonal-EMA leaf to the pool. Level-tracker
+    /// leaves then dominated and the forecast collapsed to a flat line
+    /// on amplitude-declining series (bug reproducer:
+    /// `examples/issue_195_amplitude_decline.rs`).
     pub fn auto_with_seasonal_period(mut self, period: usize) -> Self {
         self.auto_seasonal_period = period.max(2);
+        if period >= 2 && self.seasonal_period.is_none() {
+            self.seasonal_period = Some(period);
+        }
         self
     }
 
@@ -2019,14 +2032,25 @@ impl LaplaceForecaster {
     /// mechanism behind reports of near-flat forecasts on N=48
     /// monthly (period=12) data despite obvious seasonal structure.
     ///
-    /// **Opt-in.** Not enabled by default. On trending seasonal
-    /// panels (M-competition tourism-shape), the batch-initialised
-    /// additive seasonal-EMA leaf tends to displace the
-    /// multiplicative-seasonal leaf, which fits trending × seasonal
-    /// data better. On stationary seasonal panels the effect is a
-    /// large MAE win — verified on the
-    /// `examples/monthly_48_seasonal_diagnostic.rs` synthetic
-    /// (MAE 2.184 → 0.072 on the strong-seasonal case).
+    /// **Opt-in.** Not enabled by default. Trade-offs, measured on
+    /// `examples/monthly_48_seasonal_diagnostic.rs` and
+    /// `examples/issue_195_amplitude_decline.rs`:
+    ///
+    /// - Constant / declining amplitude: large MAE win (2.18 → 0.07 on
+    ///   strong-seasonal N=48; 5.49× → 1.10× peak-ratio on regime-change).
+    /// - **Growing amplitude** (retail expanding): batch init makes the
+    ///   softmax switch from `seasonal_ema` to a differenced-EMA
+    ///   leaf, collapsing the forecast to flat. Do NOT enable on
+    ///   growing-amplitude series.
+    /// - **Phase-shifted seasonality**: same failure mode as growing —
+    ///   softmax abandons `seasonal_ema` for a level tracker.
+    /// - Trending panels (M-competition tourism-shape) unconditionally:
+    ///   the batch-initialised additive seasonal-EMA leaf tends to
+    ///   displace the multiplicative-seasonal leaf, which fits
+    ///   trending × seasonal data better.
+    ///
+    /// Rule of thumb: safe on stationary or declining-amplitude
+    /// seasonal series. Risky on growing / phase-shifting series.
     ///
     /// Requires a period to be set via [`Self::with_seasonal`],
     /// [`Self::auto_with_seasonal_period`],
