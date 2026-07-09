@@ -245,6 +245,101 @@ fn run(label: &str, seasonal_amp: f64, noise_amp: f64) {
     );
 }
 
+/// Variable seasonal strength: amplitude scales linearly across cycles.
+/// `start_amp` is year-1 amplitude, `end_amp` is year-4 amplitude.
+/// Truth for horizon H uses the year-5 amplitude extrapolation.
+fn synth_variable(start_amp: f64, end_amp: f64, noise_amp: f64) -> Vec<f64> {
+    (0..N)
+        .map(|i| {
+            let seed = (i as u64)
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            let u = ((seed >> 33) as f64 / (1u64 << 31) as f64).clamp(1e-12, 1.0 - 1e-12);
+            let noise = noise_amp * (2.0 * (u - 0.5));
+            let phase = (i % PERIOD) as f64 * std::f64::consts::PI * 2.0 / PERIOD as f64;
+            let cycle_idx = (i / PERIOD) as f64;
+            let n_cycles = (N / PERIOD) as f64 - 1.0;
+            let t = if n_cycles > 0.0 {
+                cycle_idx / n_cycles
+            } else {
+                0.0
+            };
+            let amp = start_amp + t * (end_amp - start_amp);
+            10.0 + amp * phase.sin() + noise
+        })
+        .collect()
+}
+
+fn run_variable(label: &str, start_amp: f64, end_amp: f64, noise_amp: f64) {
+    println!("\n=== {label} ===");
+    println!("Amplitude cycle-1: {start_amp:.1}, cycle-4: {end_amp:.1}, noise ±{noise_amp:.1}");
+
+    let vals = synth_variable(start_amp, end_amp, noise_amp);
+    let train = ts(&vals);
+
+    // Truth at forecast time uses the SAME amplitude as year 4 (last
+    // observed), i.e. "what happens next month assuming trend levels
+    // off" — the standard forecasting question.
+    let truth: Vec<f64> = (N..N + 12)
+        .map(|i| {
+            let phase = (i % PERIOD) as f64 * std::f64::consts::PI * 2.0 / PERIOD as f64;
+            10.0 + end_amp * phase.sin()
+        })
+        .collect();
+
+    let cfgs: [(&str, Box<dyn Fn() -> LaplaceForecaster>); 2] = [
+        (
+            ".auto().auto_with_seasonal_period(12)",
+            Box::new(|| {
+                LaplaceForecaster::new()
+                    .auto()
+                    .auto_with_seasonal_period(PERIOD)
+            }),
+        ),
+        (
+            "  + .with_seasonal_batch_init() (FIX)",
+            Box::new(|| {
+                LaplaceForecaster::new()
+                    .auto()
+                    .auto_with_seasonal_period(PERIOD)
+                    .with_seasonal_batch_init()
+            }),
+        ),
+    ];
+    let (t_lo, t_hi) = truth
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |acc, &v| {
+            (acc.0.min(v), acc.1.max(v))
+        });
+    println!(
+        "  Truth swing (year-4 pattern): {:.2} (peak {:+.2}, trough {:+.2})",
+        t_hi - t_lo,
+        t_hi,
+        t_lo
+    );
+    for (name, make) in cfgs.iter() {
+        let mut m = make();
+        m.fit(&train).expect("fit fail");
+        let means: Vec<f64> = m
+            .forecast_dist(12)
+            .expect("predict fail")
+            .iter()
+            .map(|mix| mix.components.iter().map(|(w, g)| w * g.mean).sum::<f64>())
+            .collect();
+        let (lo, hi) = means
+            .iter()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |acc, &v| {
+                (acc.0.min(v), acc.1.max(v))
+            });
+        let m_mae = mae(&means, &truth);
+        println!(
+            "  {name:<40} MAE={m_mae:.3}  swing={:.2} ({:.0}% of truth)",
+            hi - lo,
+            100.0 * (hi - lo) / (t_hi - t_lo).max(1e-9)
+        );
+    }
+}
+
 fn main() {
     println!("N={N} obs (4 years of monthly), forecasting H={H} months, period={PERIOD}");
     println!("Threshold reminder: detect_seasonal_period uses |ACF| > 0.35 gate.");
@@ -253,4 +348,13 @@ fn main() {
     run("MEDIUM seasonal, medium noise", 2.0, 1.0);
     run("WEAK seasonal, high noise", 1.0, 2.0);
     run("SEASONAL DOMINATES noise", 5.0, 0.5);
+
+    println!("\n\n### VARIABLE SEASONAL STRENGTH ###");
+    println!("Amplitude changes linearly across the 4-year training window.");
+    println!("Truth for the forecast horizon uses the year-4 (most recent) amplitude,");
+    println!("which is what most callers actually want (\"assume today's pattern continues\").");
+    run_variable("Growing amplitude (retail expanding)", 1.0, 4.0, 0.3);
+    run_variable("Shrinking amplitude (dampening cycles)", 4.0, 1.0, 0.3);
+    run_variable("Anomalous LAST cycle (COVID-like)", 3.0, 0.5, 0.3);
+    run_variable("Stable amplitude (control)", 3.0, 3.0, 0.3);
 }
