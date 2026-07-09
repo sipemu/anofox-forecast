@@ -399,6 +399,7 @@ fn project_to_simplex(w: &mut [f64]) {
 /// walk steps of size σ. Trend-strength threshold empirically tuned to
 /// avoid initializing zero-drift on flat-noise series (where init
 /// would hurt).
+#[allow(dead_code)] // Retained for future Trick-1 iterations, see docs/ACCURACY_AUDIT.md.
 fn looks_trending(values: &[f64]) -> bool {
     let n = values.len();
     if n < 5 {
@@ -2307,6 +2308,7 @@ impl LaplaceForecaster {
         leaves
     }
 
+    #[allow(dead_code)] // Kept as a convenience for callers that hoist init out of fit().
     fn init_leaves(&mut self) {
         self.init_leaves_maybe_batch(None);
     }
