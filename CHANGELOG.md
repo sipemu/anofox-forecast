@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-07-09
+
+Small feature release: fixes a reported "near-flat forecast on N=48 monthly data" issue via a new opt-in seasonal-batch-init builder, plus a CI infrastructure fix that had blocked the v0.14.0 npm publish.
+
+### Added
+
+- **`LaplaceForecaster::with_seasonal_batch_init()`** — opt-in builder that pre-fills seasonal-EMA and multiplicative-seasonal phase levels from the **last training cycle** so the leaf competes fairly on the first observation. Closes a softmax cold-start handicap where the seasonal leaf spent one full cycle producing fallback predictions and permanently lagged plain EMA/Drift in `cum_log_liks`, causing near-flat forecasts on short-history seasonal panels.
+  - `SeasonalEmaLeaf::from_batch(period, alpha, values)` — new public constructor exposing the last-cycle init directly.
+  - `MultiplicativeSeasonalLeaf::from_batch(period, alpha, values)` — same for the multiplicative variant.
+  - Runnable demo: `cargo run --release --features distributional --example monthly_48_seasonal_diagnostic`.
+- **Opt-in gate rationale**: unconditional batch init regressed trending-seasonal panels on the fev-27 measurement (`tourism_monthly` +15 % MASE, `m4_hourly` +4 %) because the batch-initialised additive seasonal-EMA leaf then displaces the multiplicative-seasonal leaf that fits trending × seasonal data better. Data-driven auto-gates were tried and either missed tourism-shape drift or caught too much. Clean opt-in is honest.
+
+### Fixed
+
+- **CI: npm workflow now uses Node 22** (`.github/workflows/npm.yml`). The publish job pinned Node 20 and did `npm install -g npm@latest` for OIDC support — on 2026-07-09 npm@latest bumped to 12.0.0 requiring Node ≥ 22, which broke the v0.14.0 release-triggered publish with `EBADENGINE`. Node 20 is also past LTS.
+- **JS package versions** (`js/package.json`, `crates/anofox-forecast-js/Cargo.toml`) were left at `0.13.2` during the v0.14.0 release. Bumped to `0.15.0` alongside the main crate.
+
+### Diagnostic verification (`examples/monthly_48_seasonal_diagnostic.rs`)
+
+On N=48 monthly (period=12) synthetic data, forecasting the next 12 months:
+
+| case | default MAE | with_seasonal_batch_init() MAE |
+| :--- | ---: | ---: |
+| STRONG seasonal, low noise | 2.184 | **0.072** (−97 %) |
+| MEDIUM seasonal, medium noise | 0.420 | 0.359 (−15 %) |
+| WEAK seasonal, high noise | 0.576 | 0.686 (+19 %, edge case) |
+| SEASONAL DOMINATES noise | 3.657 | **0.179** (−95 %) |
+
+Peak-trough amplitude capture on the STRONG case:
+- Truth swing: 6.0; default swing: 0.33 (5 %); **fix swing: 5.97 (100 %)** — with the seasonal leaf now winning the softmax, `forecast_dist(24)` cycles through the phase pattern correctly instead of collapsing to a straight line.
+
+Trade-off documented on variable-amplitude cases:
+- Growing amplitude: 83 % of truth swing captured (net win)
+- Shrinking amplitude / anomalous last cycle: fix overshoots swing by 60–100 % but MAE still improves in every regime tested
+
+Two alternative init strategies (per-phase median across cycles, weighted-recent 0.5/0.3/0.2 blend) were prototyped and rejected — both regressed the shrinking / anomalous cases 1.8–2.9× vs last-cycle without helping any other regime. The overshoot is a streaming-EWMA memory effect (α = 0.5 is not aggressive enough to fully forget older cycles in 4 obs per phase), not an init-strategy problem.
+
+### Fev-27 aggregate
+
+`.auto()` default MASE **5.9239** — **bit-exact match to v0.14.0 baseline**. All new behaviour is behind the opt-in flag.
+
+### Compatibility
+
+- Zero breaking API changes. The new builder is additive.
+- `.with_seasonal_batch_init()` is off by default; existing callers see no behavioural change.
+- Minor version bump per semver (new public API).
+
 ## [0.14.0] - 2026-07-09
 
 Adds a **streaming Mahalanobis anomaly-detection module** (line-by-line port of `microprediction/timemachines`'s `mahalanobis` head) and ships **default-enabled accuracy improvements** to `LaplaceForecaster::auto()` / `.skaters()` that close the fev-27 WQL gap to AutoTheta.
