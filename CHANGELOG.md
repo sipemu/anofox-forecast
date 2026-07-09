@@ -7,6 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-07-09
+
+Adds a **streaming Mahalanobis anomaly-detection module** (line-by-line port of `microprediction/timemachines`'s `mahalanobis` head) and ships **default-enabled accuracy improvements** to `LaplaceForecaster::auto()` / `.skaters()` that close the fev-27 WQL gap to AutoTheta.
+
+### Added
+
+- **`anofox_forecast::anomaly` module** — feature-gated behind `--features anomaly`. Streaming multivariate anomaly detection on top of any distributional forecaster.
+  - `Parade` — ring-buffered PIT + standard-normal z-vector bookkeeping.
+  - `MahalanobisDetector` — running μ / Σ of z, Welch-Satterthwaite bulk + Peaks-Over-Threshold GPD tail p-value, Huberized updates + changepoint escape, Bonferroni-combined deep-evidence (`nlp`) channel.
+  - `MahalanobisScorer` — reusable scoring state (μ, Σ, m₂, v₂, POT excesses, nlp moments) exposed so custom wrappers can drive `score_z(z, nlp)` on their own z-source.
+  - `ZBankBuilder` / `ZBank` / `ZBankDetector` — multi-scale bank of engines at different `(scale_alpha, stride)` gridpoints via the phase-shift trick from `microprediction/skaters`' `multiscale` wrapper.
+  - Foundation math: `chi2_sf` / `chi2_ppf` (fractional dof supported), `gpd_fit_pwm` / `gpd_sf` (Hosking-Wallis 1987 probability-weighted moments), `standard_normal_quantile` (Wichura AS 241), small dense `k × k` linalg (Cholesky, Woodbury factor inverse, power-iteration leading eigenpair).
+  - Runnable demo: `cargo run --release --features anomaly --example anomaly_detection` on a synthetic stream with an injected 12σ spike + 5σ level shift, showing point-outlier vs. changepoint discrimination via the `run` counter.
+  - Full plan + rationale in `docs/ANOMALY_PLAN.md`.
+- **`LaplaceForecaster::with_stl(period)`** — opt-in STL-decomposition leaf. Extracted from an aborted auto-STL attempt (which regressed `tourism_monthly` by 31 %) and preserved for callers who verify STL helps on their specific data.
+- **`LaplaceForecaster::with_stacking()`** — opt-in ensemble stacking (ridge OLS + simplex projection of blend weights). Tested and shown to regress `.auto()` by 10 % MASE on fev-27; kept as opt-in for callers who want to experiment with different ridge / holdout tuning. Documented in `docs/ACCURACY_AUDIT.md`.
+- **`LaplaceForecaster::with_multi_h_scoring()`** — opt-in multi-horizon retrospective scoring. Adds weighted long-horizon log-likelihood contributions to `cum_log_liks` during fit. Neutral impact on fev-27; kept as opt-in.
+- **`DriftLeaf::from_batch(alpha, values)`** + **`HoltLeaf::from_batch(alpha, beta, phi, values)`** — public opt-in batch OLS initialisation. Not auto-enabled after an internal detector heuristic regressed `cif_2016`; documented in `docs/ACCURACY_AUDIT.md`.
+- **`MultiScaleLaplace::with_period(p)`** — period-aligned stride for the multi-scale wrapper, alongside the existing skaters `{1, ⌈√k⌉, k}` defaults.
+- **`MODELS=` env-var filter** in `examples/fev_benchmark.rs` — skip classical baselines (AutoETS eats ~90 % of runtime) when iterating on Laplace variants.
+
+### Changed
+
+- **`TerminalScaleMixture` tracks AR(1) residual autocorrelation `φ` by default.** New `phi()` accessor and `h_step_std_scale(h)` returning `√((1 − φ^(2h)) / (1 − φ²))` in place of the naive `√h` random-walk assumption. Reduces to `√h` exactly when `φ ≈ 0` (IID case) so IID series are unaffected. Fev-27 impact: `.auto()` WQL 0.159 → 0.137 (−14 %); `.skaters()` WQL 0.607 → 0.448 (−26 %). See `docs/ACCURACY_AUDIT.md` § "Attempted #5".
+- **`LaplaceForecaster::auto()` uses the XGBoost-shrunk log-weight update.** `η = 0.5, log_clamp = −20` (previously `η = 1.0, clamp = −∞`). The `.auto()` pool has grown to ~15-20 leaves; unshrunk cumulative log-likelihood over-concentrates on 1-step winners that underperform at H = 18-24. Fev-27 impact: `.auto()` MASE 6.436 → 5.924 (−8 %). See `docs/ACCURACY_AUDIT.md` § "#7".
+- **`.skaters()` warm-starts the terminal σ from MAD** (median absolute deviation × 1.4826, `seed_n = 30`). Skips the 30-obs bootstrap window on short-history panels. Fev-27 impact: `.skaters()` WQL 0.670 → 0.603 (−10 %). See `docs/ACCURACY_AUDIT.md` § "#3a".
+- **`.skaters()` auto-gates the sticky-lattice** based on discrete-count heuristic (`looks_discrete_count`). Sticky stays on for count-like panels (M5, dominick); disabled on continuous panels (m1_yearly, cif_2016, tourism_*) where it previously caused pathological WQL blowups. `.with_sticky()` / `.no_sticky()` still bypass the gate to honour explicit callers.
+- **`TerminalScaleMixture` multi-horizon σ scaling in `forecast_dist`.** Multiplies each mixture component's std by the AR(1) `h_step_std_scale` at h > 1 (falls back to `√(h+1)` when no terminal is present). Closes the WQL under-fit at long horizons documented in the fev-27 follow-up (α-27 fix #3).
+
+### Fixed
+
+- **m4_hourly seasonal-diff drift compounding** — `SeasonalDifferenceWrapper::predict` now pins to pure seasonal-naive at `h ≥ period`. See α-27 Fix B; MASE 5.53 → 2.33 on m4_hourly at H = 48.
+- **Sticky lattice horizon decay** — `StickyState::project(h)` now shrinks the atom mass by `(1 − 0.05)^(h−1)`, preventing the atom-projection from dominating far-horizon forecasts (α-27 Fix A).
+
+### Reverted
+
+The following were shipped, measured against fev-27, and reverted after regression. Documented in `docs/ACCURACY_AUDIT.md` so we don't retry them without knowing the failure mode.
+
+- **STL leaf auto-enable** — regressed `tourism_monthly` by 31 % and aggregate MASE by 1.7 %. Cause: linear-trend extrapolation compounds badly on short-history seasonal panels. `StlDecompLeaf` remains available as opt-in.
+- **Yearly tricks 1 (batch OLS init for Drift/Holt) + 3 (short-data η dampener)** — regressed `.skaters()` cif_2016 by 280 %. The `looks_trending` heuristic was too permissive; OLS β on noisy 50-obs monthly series is basically noise and Drift/Holt extrapolate it. `from_batch()` methods remain public opt-in.
+- **`.skaters()` unconditional damped Holt (`#4b`)** — no measurable effect on fev-27 (MASE ±0.1 %). Reverted to keep the pool clean.
+
+### Fev-27 aggregate
+
+Reference: fev-27 `SAMPLE_PER=500` series per dataset, geomean across 25 valid tasks.
+
+|                | pre-audit (v0.13.2) | v0.14.0 | Δ    |
+| :------------- | ------------------: | ------: | ---: |
+| `.auto()` MASE |               6.436 |   5.924 | −8 % |
+| `.auto()` WQL  |               0.164 |   0.137 | −17 % |
+| `.skaters()` MASE |            6.085 |   6.186 | +1.7 % |
+| `.skaters()` WQL |             0.670 |   0.448 | −33 % |
+
+`.auto()` now within 6 % MASE of AutoETS (5.57) and 13 % of AutoTheta (5.23), at 135× faster fit time. WQL at parity with AutoTheta. New recommended default configuration.
+
+### Compatibility
+
+- No breaking API changes. All new behaviour is additive or affects internal defaults of `.auto()` / `.skaters()`.
+- New `anomaly` feature is opt-in; existing binaries built without it see zero compile or size impact.
+- `LaplaceForecaster::with_sticky()` still bypasses the new auto-gate — callers relying on sticky-on for continuous data are unaffected.
+
 ## [0.13.2] - 2026-07-08
 
 Second CI-only patch, again with **no code changes vs. 0.13.0 / 0.13.1**. Same distributional shell, same benchmark numbers, same API surface.
