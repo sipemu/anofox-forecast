@@ -22,4 +22,7 @@
 pub mod chi2;
 pub mod gpd;
 pub mod linalg;
+pub mod parade;
 pub mod quantile;
+
+pub use parade::Parade;
