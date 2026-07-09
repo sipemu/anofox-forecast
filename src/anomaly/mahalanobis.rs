@@ -136,42 +136,43 @@ pub struct AnomalyOutput {
     pub run: usize,
 }
 
+/// Reusable scoring core — everything the Mahalanobis detector needs
+/// **except** the parade / z-source. Owns the streaming state and
+/// exposes [`Self::score_z`] which takes a pre-computed z-vector.
+///
+/// `MahalanobisDetector` composes a `MahalanobisScorer` + a `Parade`;
+/// `ZBankDetector` composes it with a `ZBank` instead. Both feed the
+/// scorer via `score_z`.
+pub struct MahalanobisScorer {
+    pub cfg: MahalanobisConfig,
+    /// EWMA of z-vector location, length k (`k = cfg.k` for a plain
+    /// parade; longer for a `ZBank`-fed scorer — see [`Self::with_k`]).
+    mu: Vec<f64>,
+    /// EWMA of z-vector scatter, k*k flat row-major.
+    sigma: Vec<f64>,
+    m2: f64,
+    v2: f64,
+    exc: VecDeque<f64>,
+    zeta: f64,
+    run: usize,
+    nm: f64,
+    nv: f64,
+    n_exc: VecDeque<f64>,
+    n_zeta: f64,
+    n_n: usize,
+    last: AnomalyOutput,
+    /// The effective z-vector length for this scorer. Equals `cfg.k`
+    /// for a plain parade wrap; larger for a bank.
+    k_effective: usize,
+}
+
 /// Streaming multivariate anomaly detector wrapping a
 /// [`LaplaceForecaster`] via a [`Parade`].
 pub struct MahalanobisDetector {
     parade: Parade,
-    cfg: MahalanobisConfig,
-    // ---- streaming state ----
-    /// EWMA of z-vector location, length k.
-    mu: Vec<f64>,
-    /// EWMA of z-vector scatter, k*k flat row-major.
-    sigma: Vec<f64>,
-    /// Bulk null: EWMA mean of d² (seeded at k, the exact chi²_k mean).
-    m2: f64,
-    /// Bulk null: EWMA variance of d² (seeded at 2k, the exact chi²_k variance).
-    v2: f64,
-    /// POT excesses buffer (bounded FIFO, cap 250).
-    exc: VecDeque<f64>,
-    /// EWMA of the exceedance indicator, seeded at 1 - pot_level.
-    zeta: f64,
-    /// Consecutive guarded ticks.
-    run: usize,
+    scorer: MahalanobisScorer,
     /// Deep-evidence (nlp) channel: previous tick's 1-step predictive.
-    /// Used to compute nlp = -logpdf(y). `None` before first predict.
     pend1: Option<GaussianMixture>,
-    /// nlp channel: EWMA mean of nlp.
-    nm: f64,
-    /// nlp channel: EWMA variance of nlp.
-    nv: f64,
-    /// nlp channel: excesses.
-    n_exc: VecDeque<f64>,
-    /// nlp channel: exceedance rate.
-    n_zeta: f64,
-    /// nlp channel: counter (min_exc gate).
-    n_n: usize,
-    /// Latest output.
-    last: AnomalyOutput,
-    /// Count of non-finite ticks (diagnostic).
     skipped: usize,
 }
 
@@ -181,15 +182,16 @@ const D2_EXCESS_CAP: f64 = 50.0;
 const NLP_EXCESS_CAP: f64 = 50.0;
 const NLP_WINSOR_SIGMAS: f64 = 6.0;
 
-impl MahalanobisDetector {
-    /// Fit the base forecaster on `series`, then wrap it. `cfg.k` is
-    /// the parade horizon.
-    pub fn fit_and_wrap(
-        base: LaplaceForecaster,
-        series: &TimeSeries,
-        cfg: MahalanobisConfig,
-    ) -> Result<Self> {
-        assert!(cfg.k >= 1);
+impl MahalanobisScorer {
+    /// Build a scorer whose z-vector length equals `cfg.k`.
+    pub fn new(cfg: MahalanobisConfig) -> Self {
+        Self::with_k(cfg.k, cfg)
+    }
+
+    /// Build a scorer whose z-vector length is `k_effective` (possibly
+    /// different from `cfg.k`). Used by `ZBankDetector` where the
+    /// concatenated z is `num_engines · k` long.
+    pub fn with_k(k_effective: usize, cfg: MahalanobisConfig) -> Self {
         assert!(cfg.alpha > 0.0 && cfg.alpha < 1.0);
         assert!(cfg.guard_p > 0.0 && cfg.guard_p < 1.0);
         assert!(cfg.pot_level > 0.0 && cfg.pot_level < 1.0);
@@ -197,84 +199,40 @@ impl MahalanobisDetector {
             cfg.min_exc >= 2,
             "min_exc < 2 divides by zero in the GPD fit"
         );
-        let parade = Parade::fit_and_wrap(base, series, cfg.k)?;
-        Ok(Self::from_parade(parade, cfg))
-    }
-
-    /// Wrap a pre-built `Parade` — useful when the parade needs custom
-    /// setup (e.g. warm-started from a saved state).
-    pub fn from_parade(parade: Parade, cfg: MahalanobisConfig) -> Self {
-        let k = cfg.k;
-        // Identity prior scatter — the parade standardises each margin
-        // so I is not arbitrary but the calibrated prior; shrink toward
-        // it is a principled Ledoit-Wolf-style target.
-        let mut sigma = vec![0.0f64; k * k];
-        for i in 0..k {
-            sigma[i * k + i] = 1.0;
+        let mut sigma = vec![0.0f64; k_effective * k_effective];
+        for i in 0..k_effective {
+            sigma[i * k_effective + i] = 1.0;
         }
         Self {
-            parade,
-            m2: k as f64,
-            v2: 2.0 * k as f64,
+            m2: k_effective as f64,
+            v2: 2.0 * k_effective as f64,
             zeta: 1.0 - cfg.pot_level,
             n_zeta: 1.0 - cfg.pot_level,
-            cfg,
-            mu: vec![0.0; k],
+            mu: vec![0.0; k_effective],
             sigma,
             exc: VecDeque::with_capacity(EXC_CAP),
             run: 0,
-            pend1: None,
             nm: 0.0,
             nv: 1.0,
             n_exc: VecDeque::with_capacity(EXC_CAP),
             n_n: 0,
             last: AnomalyOutput::default(),
-            skipped: 0,
+            k_effective,
+            cfg,
         }
     }
 
-    /// Absorb one observation and score it. `state()` yields the
-    /// updated `AnomalyOutput` afterward.
-    pub fn observe(&mut self, y: f64) -> Result<()> {
-        // Non-finite gate: hold state, no score.
-        if !y.is_finite() {
-            self.skipped += 1;
-            self.last.d2 = None;
-            self.last.p_value = None;
-            return Ok(());
-        }
-
-        // Deep-evidence: compute nlp of `y` under the 1-step predictive
-        // BEFORE the parade absorbs `y` (mustn't defend itself).
-        let nlp = self.pend1.as_ref().map(|d| {
-            let lp = d.logpdf(y);
-            if lp.is_finite() {
-                -lp
-            } else {
-                1e6
-            }
-        });
-
-        // Snapshot pend1 for next tick — done here so parade.observe
-        // below produces the new one.
-        // Advance the parade: it computes PIT/z and refreshes its
-        // internal 1-step predictive.
-        self.parade.observe(y)?;
-        // Refresh pend1 for the NEXT tick.
-        self.pend1 = self.parade.pending_one_step().cloned();
-
-        // If any horizon's z is unavailable, warmup — no score.
-        let z_opt = self.parade.z();
-        let z: Vec<f64> = if z_opt.iter().all(|v| v.is_some()) {
-            z_opt.iter().map(|v| v.unwrap()).collect()
-        } else {
-            self.last.d2 = None;
-            self.last.p_value = None;
-            return Ok(());
-        };
+    /// Score a fresh z-vector (with the current μ, Σ, null moments)
+    /// and update all state under the Huberized rate. Returns the
+    /// updated [`AnomalyOutput`].
+    ///
+    /// If `nlp` is `Some`, the deep-evidence channel updates too and
+    /// Bonferroni-combines with the Mahalanobis p-value.
+    pub fn score_z(&mut self, z: &[f64], nlp: Option<f64>) -> AnomalyOutput {
+        let k = self.k_effective;
+        assert_eq!(z.len(), k, "z length must match k_effective");
 
         // === Score BEFORE any update. ===
-        let k = self.cfg.k;
         let v: Vec<f64> = (0..k).map(|i| z[i] - self.mu[i]).collect();
         let d2 = self.compute_d2(&v);
         self.last.d2 = Some(d2);
@@ -352,7 +310,6 @@ impl MahalanobisDetector {
             self.n_n += 1;
             let ns = self.nv.max(1e-12).sqrt();
             let t_n = self.nm + NLP_Z_THRESH * ns;
-            // Winsorized moments: cap at NLP_WINSOR_SIGMAS σ above mean.
             let nw = nlp_val.min(self.nm + NLP_WINSOR_SIGMAS * ns);
             let dn = nw - self.nm;
             self.nm += self.cfg.alpha * dn;
@@ -382,26 +339,23 @@ impl MahalanobisDetector {
             }
         }
 
-        Ok(())
+        self.last
+    }
+
+    /// Blank the current-tick output (used by outer wrappers when a
+    /// warmup tick or non-finite value arrives).
+    pub fn blank(&mut self) {
+        self.last.d2 = None;
+        self.last.p_value = None;
     }
 
     /// Latest scoring output.
-    pub fn state(&self) -> &AnomalyOutput {
+    pub fn last(&self) -> &AnomalyOutput {
         &self.last
     }
 
-    /// Pass-through: latest k-vector forecast from the base forecaster.
-    pub fn forecast_dist(&self, h: usize) -> Result<Vec<GaussianMixture>> {
-        self.parade.forecast_dist(h)
-    }
-
-    /// Immutable access to the wrapped parade.
-    pub fn parade(&self) -> &Parade {
-        &self.parade
-    }
-
     fn compute_d2(&self, v: &[f64]) -> f64 {
-        let k = self.cfg.k;
+        let k = self.k_effective;
         match self.cfg.scatter {
             ScatterMode::Factor { factors, dfloor } => {
                 // Sigma ≈ Σⱼ λⱼ vⱼvⱼᵀ + D. Woodbury inverse.
@@ -453,6 +407,76 @@ impl MahalanobisDetector {
                 mahal2(&l, v, k)
             }
         }
+    }
+}
+
+impl MahalanobisDetector {
+    /// Fit the base forecaster on `series`, then wrap it. `cfg.k` is
+    /// the parade horizon.
+    pub fn fit_and_wrap(
+        base: LaplaceForecaster,
+        series: &TimeSeries,
+        cfg: MahalanobisConfig,
+    ) -> Result<Self> {
+        assert!(cfg.k >= 1);
+        let parade = Parade::fit_and_wrap(base, series, cfg.k)?;
+        Ok(Self::from_parade(parade, cfg))
+    }
+
+    /// Wrap a pre-built `Parade`.
+    pub fn from_parade(parade: Parade, cfg: MahalanobisConfig) -> Self {
+        let scorer = MahalanobisScorer::new(cfg);
+        Self {
+            parade,
+            scorer,
+            pend1: None,
+            skipped: 0,
+        }
+    }
+
+    /// Absorb one observation and score it.
+    pub fn observe(&mut self, y: f64) -> Result<()> {
+        if !y.is_finite() {
+            self.skipped += 1;
+            self.scorer.blank();
+            return Ok(());
+        }
+        // Deep-evidence: compute nlp under the previous 1-step
+        // predictive BEFORE the parade absorbs `y`.
+        let nlp = self.pend1.as_ref().map(|d| {
+            let lp = d.logpdf(y);
+            if lp.is_finite() {
+                -lp
+            } else {
+                1e6
+            }
+        });
+        self.parade.observe(y)?;
+        self.pend1 = self.parade.pending_one_step().cloned();
+        let z_opt = self.parade.z();
+        let z: Vec<f64> = if z_opt.iter().all(|v| v.is_some()) {
+            z_opt.iter().map(|v| v.unwrap()).collect()
+        } else {
+            self.scorer.blank();
+            return Ok(());
+        };
+        self.scorer.score_z(&z, nlp);
+        Ok(())
+    }
+
+    /// Latest scoring output.
+    pub fn state(&self) -> &AnomalyOutput {
+        self.scorer.last()
+    }
+
+    /// Pass-through: latest k-vector forecast from the base forecaster.
+    pub fn forecast_dist(&self, h: usize) -> Result<Vec<GaussianMixture>> {
+        self.parade.forecast_dist(h)
+    }
+
+    /// Immutable access to the wrapped parade.
+    pub fn parade(&self) -> &Parade {
+        &self.parade
     }
 }
 

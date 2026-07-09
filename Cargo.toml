@@ -109,6 +109,11 @@ harness = false
 
 # Examples
 [[example]]
+name = "anomaly_detection"
+path = "examples/anomaly_detection.rs"
+required-features = ["anomaly"]
+
+[[example]]
 name = "quickstart"
 path = "examples/quickstart.rs"
 
