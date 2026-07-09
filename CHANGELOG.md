@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-07-09
+
+Bug-fix release addressing four pathologies reported on issue #195 (`LaplaceForecaster` over-damps seasonality on amplitude-declining series). Zero breaking API changes; all fixes are additive auto-detections.
+
+### Fixed
+
+- **`LaplaceForecaster::auto_with_seasonal_period(p)` on `.skaters()`** now actually adds a `SeasonalEmaLeaf` to the pool. Previously only set the fallback period `.auto()`'s ACF scan uses; `seasonal_period` itself stayed `None`, so `.skaters().auto_with_seasonal_period(12)` never got a seasonal leaf and level-tracker leaves (`ema@sd1@yj0.50`, `ar1`) dominated the softmax → flat forecast. Now sets both fields (gated on `p ≥ 2`).
+- **Negative forecasts on non-negative counts series** — measured 1.9 % of `.auto()`, 5.0 % of `.skaters()` M5 monthly series produced ≥ 1 negative forecast (case study `FOODS_3_281_CA_3` went to −341 on a counts series). Auto-enables `non_negative = true` when the training window has all-positive values (any > 0). Continuous panels with legitimate negative values (fred_md, exchange_rate) are unaffected — verified bit-exact.
+- **Intermittent auto-gate on `.skaters()`** — `.auto()` enables `IntermittentLeaf` when `zero_fraction > 0.4`, but `.skaters()` skipped the auto block, leaving bursty-intermittent series (case study `FOODS_3_444_WI_2`) with a flat forecast. Hoisted the detection outside the `use_auto` block; also triggers `seasonal_intermittent` when a seasonal period is set.
+- **Drift + seasonal collapsing to a flat forecast** — the Yeo-Johnson-wrapped period-1 diff-EMA family (`ema@sd1@yj0.00`, `ema@sd1@yj0.50`) are excellent 1-step predictors but produce flat multi-step forecasts (compound zero-mean differences); on drift + seasonal data they beat `seasonal_ema` on the 1-step softmax objective and collapsed the forecast. When the caller commits to a seasonal period, the pool now skips the `diff_ema_alphas` and `yj_diff_ema` families. Extended-panel case: forecast peak/trough ratio went from **1.00× (fully flat)** to **2.90× (real swing)**.
+
+### Documented
+
+- **`with_seasonal_batch_init()` trade-off** — the extended-panel test in `examples/issue_195_amplitude_decline.rs` showed the v0.15.0 opt-in fix REGRESSES growing-amplitude and phase-shifted seasonality (batch init causes the softmax to switch from `seasonal_ema` to a differenced-EMA leaf, collapsing the forecast). Docstring updated with rule of thumb: safe on stationary or declining amplitude; risky on growing / phase-shifting.
+
+### Fev-27 aggregate vs v0.15.0 baseline
+
+|                    | v0.15.0 | 0.15.1 | Δ |
+| :----------------- | ------: | -----: | ---: |
+| `.auto()` MASE     |  5.9239 | 5.9335 | +0.2 % (noise) |
+| `.auto()` WQL      |  0.1371 | 0.1375 | +0.3 % (noise) |
+| **`.skaters()` MASE**  |  6.1858 | **6.0372** | **−2.4 %** |
+| **`.skaters()` WQL**   |  0.4480 | **0.3976** | **−11.3 %** |
+
+Biggest per-dataset `.skaters()` MASE wins:
+- `tourism_monthly`: 3.077 → 2.370 (**−23.0 %**)
+- `m4_hourly`: 2.329 → 1.974 (**−15.2 %**)
+- `tourism_quarterly`: 3.346 → 3.071 (−8.2 %)
+- `m3_quarterly`: 1.504 → 1.403 (−6.7 %)
+- `m1_monthly`: 1.387 → 1.324 (−4.5 %)
+
+One regression: `m4_quarterly` MASE +7.9 % (1.312 → 1.415). Deferred as follow-up.
+
+### Also
+
+- New test scaffolding: `examples/issue_195_amplitude_decline.rs` (reproducer + 6-scenario extended panel) and `examples/issue_195_intermittent.rs` (bursty-intermittent synthetic).
+- `fev_benchmark` harness fix: replaced `.auto_with_seasonal_period(ds.period.max(2))` with `if ds.period >= 2 { m = m.auto_with_seasonal_period(ds.period) }`. The `.max(2)` was defensive but incorrect after the semantics change above.
+
+### Compatibility
+
+Zero breaking API changes. All four fixes are additive auto-detections triggered by the training data or the caller's explicit period commitment. Patch bump per semver.
+
 ## [0.15.0] - 2026-07-09
 
 Small feature release: fixes a reported "near-flat forecast on N=48 monthly data" issue via a new opt-in seasonal-batch-init builder, plus a CI infrastructure fix that had blocked the v0.14.0 npm publish.
