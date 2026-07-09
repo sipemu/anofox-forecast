@@ -22,7 +22,9 @@
 pub mod chi2;
 pub mod gpd;
 pub mod linalg;
+pub mod mahalanobis;
 pub mod parade;
 pub mod quantile;
 
+pub use mahalanobis::{AnomalyOutput, MahalanobisConfig, MahalanobisDetector, ScatterMode};
 pub use parade::Parade;

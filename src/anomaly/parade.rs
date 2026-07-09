@@ -184,6 +184,13 @@ impl Parade {
     pub fn base(&self) -> &LaplaceForecaster {
         &self.base
     }
+
+    /// The 1-step-ahead predictive issued at the previous tick — the
+    /// input to the deep-evidence (nlp) channel of the Mahalanobis
+    /// detector. `None` before the parade has emitted any prediction.
+    pub fn pending_one_step(&self) -> Option<&GaussianMixture> {
+        self.pending.back().and_then(|k_vec| k_vec.first())
+    }
 }
 
 /// Cheap mixture moments: mean = Σ w_i · μ_i, std = √(Σ w_i · (σ_i² + μ_i²) − mean²).
