@@ -9,6 +9,11 @@
 //!
 //! Reference: Wichura, M.J. (1988). "Algorithm AS 241: The Percentage
 //! Points of the Normal Distribution". *Applied Statistics*, 37, 477-484.
+//!
+//! Coefficient tables below use the full precision from Wichura's
+//! paper; Rust's parser rounds to the closest f64.
+
+#![allow(clippy::excessive_precision)]
 
 /// Standard-normal quantile at `p`. Returns `f64::NEG_INFINITY` if
 /// `p ≤ 0`, `f64::INFINITY` if `p ≥ 1`. Callers should clamp `p` away

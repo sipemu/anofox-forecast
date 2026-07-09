@@ -62,7 +62,7 @@
 //!
 //! # Configuration
 //!
-//! [`MahalanobisConfig::new(k)`] returns defaults matching the Python
+//! [`MahalanobisConfig::new`] returns defaults matching the Python
 //! reference exactly:
 //!
 //! | field | default | meaning |

@@ -60,7 +60,7 @@ impl StickyState {
             }
         }
         self.counts.retain(|(_, w)| *w >= self.prune_eps);
-        if let Some(_) = existing {
+        if existing.is_some() {
             for (v, w) in self.counts.iter_mut() {
                 if (*v - y).abs() < 1e-12 {
                     *w += self.propensity_alpha;
@@ -249,6 +249,7 @@ fn eta_schedule(base_eta: f64, n_obs: usize) -> f64 {
 /// linearly down to `0.4` at N=0 — mild flattening that leaves room
 /// for slower but more reliable ensemble averaging.
 #[inline]
+#[allow(dead_code)] // Kept for future Trick-3 iterations, see docs/ACCURACY_AUDIT.md.
 fn short_data_multiplier(total_n: usize) -> f64 {
     if total_n >= 60 {
         1.0
@@ -907,6 +908,7 @@ pub struct LaplaceForecaster {
     /// Perf: parallel scratch buffer of `ln(std)` for each entry of
     /// [`Self::scratch_per_leaf`]. Precomputed once per obs so the
     /// scoring loop's inlined `logpdf` has zero transcendentals.
+    #[allow(dead_code)] // Retained field; consumed by an inlined logpdf path.
     scratch_ln_std: Vec<f64>,
     /// Perf: reusable scratch buffer for softmax weights so
     /// `self.weights()` doesn't allocate on the fit hot path.
@@ -2013,6 +2015,7 @@ impl LaplaceForecaster {
 
     /// Build a fresh copy of the base leaf set (respecting user toggles).
     /// Used both for the single-shell path and per-λ in the YJ coord grid.
+    #[allow(dead_code)] // Retained: callers should use build_base_leaves_with_batch(None).
     fn build_base_leaves(&self) -> Vec<super::leaf_enum::LeafEnum> {
         self.build_base_leaves_with_batch(None)
     }
@@ -2347,10 +2350,11 @@ impl LaplaceForecaster {
     /// - [`Forecaster::fit`] must have been called first (initializes
     ///   the leaf pool). Streaming from empty state is not supported.
     /// - This path **skips** batch-only features:
-    ///   - Yeo-Johnson transform (`with_yeo_johnson*`)
-    ///   - Exog OLS pre-regression
-    ///   - Per-horizon calibration snapshots
-    ///   - Fitted-values / residuals bookkeeping
+    ///     - Yeo-Johnson transform (`with_yeo_johnson*`)
+    ///     - Exog OLS pre-regression
+    ///     - Per-horizon calibration snapshots
+    ///     - Fitted-values / residuals bookkeeping
+    ///
     ///   Configure the model without these when planning to stream.
     ///
     /// # Errors
@@ -2744,7 +2748,7 @@ impl Forecaster for LaplaceForecaster {
         // Snapshot cadence: every 20 steps starting from step 60.
         // Limited to `values.len() / 15` snapshots to bound cost.
         let mh_stride: usize = 20;
-        let mh_horizon: usize = (per_h_horizon.min(24)).max(4);
+        let mh_horizon: usize = per_h_horizon.clamp(4, 24);
 
         for (step, &y_orig) in values.iter().enumerate() {
             let y = match yj {
