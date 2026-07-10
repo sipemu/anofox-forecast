@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.3] - 2026-07-10
+
+Feature release adding two opt-in scoring knobs to `LaplaceForecaster`. Combined, they cut fev-27 geomean MASE by **−8.9 %** on the leaderboard-comparable 23-dataset subset, moving the crate from ~rank 10 to ~rank 8 on the classical panel — competitive with Nixtla `auto_ets` (1.440) and ahead of Seasonal Naive (1.665) and this crate's own `AutoETS` (1.525). Zero breaking API changes.
+
+### Added
+
+- **`LaplaceForecaster::with_scoring_horizon(h)`** — score the softmax on `h`-step LL rather than 1-step, where `h` matches the caller's forecast horizon. Bypasses the default `per_h_horizon.clamp(4, 24)` depth. Leaves that flat-line at long horizons get down-weighted, closing the multi-step objective mismatch that was hurt by cumulative 1-step scoring.
+- **`LaplaceForecaster::with_scoring_window(w)`** — replace the cumulative sum in `cum_log_liks[i]` with a moving sum over the last `w` `logpdf` values via a per-leaf ring buffer. Softmax weights reflect only recent leaf accuracy; older observations (potentially absorbed under a different noise scale) no longer lock the softmax onto the wrong leaf. Learning-rate decay (`.learning_rate(η)`) is bypassed in this mode.
+
+Both features are opt-in and compose. Combining them compounds the effect.
+
+### Measurement (fev-27, 500 series/dataset, 23-set leaderboard subset)
+
+| Config | geomean MASE | Δ vs `.auto()` baseline |
+| :--- | ---: | ---: |
+| `.auto()` (v0.15.2 baseline) | 1.6457 | — |
+| `.skaters()` (v0.15.2, opt-in) | 1.6771 | +1.9 % |
+| `.auto().with_scoring_window(7)` | 1.5613 | −5.1 % |
+| **`.auto().with_scoring_horizon(H).with_scoring_window(7)`** | **1.5153** | **−7.9 %** |
+| **`.skaters().with_scoring_horizon(H).with_scoring_window(14)`** | **1.4994** | **−8.9 %** |
+
+Biggest per-dataset MASE wins on the combined config (skater + scH + scW=14):
+- `m4_hourly`: 1.948 → 1.417 (**−27.3 %**)
+- `tourism_monthly`: 2.013 → 1.600 (**−20.5 %**)
+- `cif_2016`: 1.157 → 0.950 (**−17.9 %**)
+- `tourism_quarterly`: 2.476 → 2.116 (**−14.5 %**)
+- `dominick`: 1.022 → 0.903 (−11.6 %)
+- `fred_md`: 0.658 → 0.589 (**−10.5 %**)
+
+Small losses on long-N stationary panels: `m5` (+2 %), `m4_daily` (+3 %), `exchange_rate` (+7 %) — recent-only scoring drops old signal that stabilises the softmax there. Rule of thumb: prefer larger `w` on long-N stationary panels; the m5-alone optimum is `w=448`, aggregate optimum is `w=7-14`.
+
+### Ship policy
+
+Both features **opt-in**, not default-on. Aggregate optimum regresses long-N stationary panels; adaptive `w = f(N, H)` is a natural follow-up but not blocking this release. Users on committed-horizon panels should try `.with_scoring_horizon(H).with_scoring_window(2*H)` as a safe first cut.
+
+### Investigation notes (not shipped)
+
+- Ridge lambda sweep on `.with_stacking()` (1e-6 to 1e8 grid, env-driven): no λ made stacking non-regressive on fev-27. `.with_stacking()` remains experimental.
+- Sparse stacking (L1 / elastic-net) and hierarchical prior on leaf families: also considered but not pursued given the stacking baseline itself regresses at every tested λ.
+
 ## [0.15.2] - 2026-07-09
 
 Bug-fix release closing [#198](https://github.com/sipemu/anofox-forecast/issues/198) (LaplaceForecaster near-flat forecast on noisy established seasonal series). Zero breaking API changes; zero regression on fev-27 vs v0.15.1.
