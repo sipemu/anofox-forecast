@@ -952,6 +952,16 @@ pub struct LaplaceForecaster {
     /// h>1 log-likelihood contributions (weighted) to cum_log_liks so
     /// the softmax reflects long-horizon accuracy, not just 1-step.
     multi_h_scoring: bool,
+    /// Explicit scoring horizon for multi-h scoring; overrides the
+    /// default `per_h_horizon.clamp(4, 24)`. Set by `with_scoring_horizon`.
+    scoring_horizon: Option<usize>,
+    /// Sliding-window LL: when `Some(w)`, `cum_log_liks[i]` is a moving
+    /// sum of the last `w` `logpdf` values instead of a cumulative sum.
+    /// Set by `with_scoring_window`.
+    scoring_window: Option<usize>,
+    /// Per-leaf ring buffer of the last `w` `logpdf` values, used to
+    /// implement `scoring_window`.
+    scoring_window_hist: Vec<std::collections::VecDeque<f64>>,
     /// Accuracy-audit #1 (ensemble stacking): enable OLS-based blend
     /// weight learning at end of fit. When true and enough training data
     /// is available, `stacking_weights` is populated with per-leaf
@@ -1061,6 +1071,9 @@ impl LaplaceForecaster {
             stacking_weights: None,
             predictions_history: Vec::new(),
             multi_h_scoring: false,
+            scoring_horizon: None,
+            scoring_window: None,
+            scoring_window_hist: Vec::new(),
         }
     }
 
@@ -1175,6 +1188,28 @@ impl LaplaceForecaster {
     /// (e.g. slow EMAs) get down-weighted in the final softmax.
     pub fn with_multi_h_scoring(mut self) -> Self {
         self.multi_h_scoring = true;
+        self
+    }
+
+    /// Score the softmax on h-step LL where `h` equals the caller's
+    /// forecast horizon. Enables multi-h scoring and overrides the
+    /// default `per_h_horizon.clamp(4, 24)` depth. Useful when
+    /// `forecast_dist(H)` is called at a specific known H and you want
+    /// the leaf weights driven by H-step accuracy, not 1-step LL.
+    pub fn with_scoring_horizon(mut self, horizon: usize) -> Self {
+        self.scoring_horizon = Some(horizon.max(1));
+        self.multi_h_scoring = true;
+        self
+    }
+
+    /// Replace the cumulative softmax score with a **sliding-window
+    /// sum** of the last `w` 1-step log-likelihoods. Each new
+    /// observation adds its `logpdf`, and once the window fills, the
+    /// oldest `logpdf` is subtracted off. Softmax weights then reflect
+    /// only recent leaf performance instead of the entire training
+    /// history. Zero `learning_rate` decay is applied in this mode.
+    pub fn with_scoring_window(mut self, window: usize) -> Self {
+        self.scoring_window = Some(window.max(1));
         self
     }
 
@@ -2474,12 +2509,31 @@ impl LaplaceForecaster {
         // log-clamp applied to the cumulative-weight update.
         let eta = eta_schedule(self.learning_rate, self.n_obs);
         let clamp = self.log_clamp;
+        let sw = self.scoring_window;
+        if let Some(w_size) = sw {
+            if self.scoring_window_hist.len() != self.leaves.len() {
+                self.scoring_window_hist = (0..self.leaves.len())
+                    .map(|_| std::collections::VecDeque::with_capacity(w_size + 1))
+                    .collect();
+            }
+        }
         for (i, leaf) in self.leaves.iter_mut().enumerate() {
             let g = per_leaf[i];
             let lp_raw = g.logpdf(y);
             if lp_raw.is_finite() {
                 let lp_clamped = if lp_raw < clamp { clamp } else { lp_raw };
-                self.cum_log_liks[i] += eta * lp_clamped;
+                if let Some(w_size) = sw {
+                    let hist = &mut self.scoring_window_hist[i];
+                    hist.push_back(lp_clamped);
+                    self.cum_log_liks[i] += lp_clamped;
+                    if hist.len() > w_size {
+                        if let Some(old) = hist.pop_front() {
+                            self.cum_log_liks[i] -= old;
+                        }
+                    }
+                } else {
+                    self.cum_log_liks[i] += eta * lp_clamped;
+                }
             }
             leaf.observe(y);
         }
@@ -2954,7 +3008,9 @@ impl Forecaster for LaplaceForecaster {
         // Snapshot cadence: every 20 steps starting from step 60.
         // Limited to `values.len() / 15` snapshots to bound cost.
         let mh_stride: usize = 20;
-        let mh_horizon: usize = per_h_horizon.clamp(4, 24);
+        let mh_horizon: usize = self
+            .scoring_horizon
+            .unwrap_or_else(|| per_h_horizon.clamp(4, 24));
 
         for (step, &y_orig) in values.iter().enumerate() {
             let y = match yj {
@@ -3089,12 +3145,31 @@ impl Forecaster for LaplaceForecaster {
             // separately with proper isolation.
             let eta = eta_schedule(self.learning_rate, self.n_obs);
             let clamp = self.log_clamp;
+            let sw = self.scoring_window;
+            if let Some(w_size) = sw {
+                if self.scoring_window_hist.len() != self.leaves.len() {
+                    self.scoring_window_hist = (0..self.leaves.len())
+                        .map(|_| std::collections::VecDeque::with_capacity(w_size + 1))
+                        .collect();
+                }
+            }
             for (i, leaf) in self.leaves.iter_mut().enumerate() {
                 let g = per_leaf[i];
                 let lp_raw = g.logpdf(y);
                 if lp_raw.is_finite() {
                     let lp_clamped = if lp_raw < clamp { clamp } else { lp_raw };
-                    self.cum_log_liks[i] += eta * lp_clamped;
+                    if let Some(w_size) = sw {
+                        let hist = &mut self.scoring_window_hist[i];
+                        hist.push_back(lp_clamped);
+                        self.cum_log_liks[i] += lp_clamped;
+                        if hist.len() > w_size {
+                            if let Some(old) = hist.pop_front() {
+                                self.cum_log_liks[i] -= old;
+                            }
+                        }
+                    } else {
+                        self.cum_log_liks[i] += eta * lp_clamped;
+                    }
                 }
                 leaf.observe(y);
             }
