@@ -7,6 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.6] - 2026-07-14
+
+Skaters-parity v2: numerical stability, feature completeness, adversarial test coverage. Ports five items from microprediction/skaters#103 (their Rust port PR). Zero behavior change on fev-27 — bit-identical MASE/WQL vs v0.15.5 on both `.auto()` and `.skaters()`.
+
+### Added
+
+- **`dist::fsum`** — Neumaier-compensated summation matching CPython 3.12+'s `sum()` and skaters' `mathx::fsum`. Wired into `GaussianMixture::new` (weight normalisation), `mean()`, and `variance()`. Fixes a subtle ~2-ULP drift on 20+ component mixtures that cascades into quantile-bisection differences (skaters flagged this as a source of prune tie-break divergence).
+- **`GaussianMixture::prune(max_components)`** — closest-mean pair merger, port of skaters' `Dist::prune`. Wired into `MultiScaleLaplace::forecast_dist` at `max_components=20` (matching skaters' `multiscale`). Previously the multi-scale blend could emit 60-90 components per horizon; pruning bounds quantile-bisection cost without meaningfully changing the density.
+- **`SplicedGaussianMixture`** type in `gpd_tails.rs` — full port of skaters' `SplicedDist`. Provides `.cdf`, `.pdf`, `.logpdf`, `.quantile`, plus numeric `.mean` / `.var` / `.std` / `.crps` via a cached 65-node quantile grid. New accessor `GpdTailsForecaster::spliced_mixtures(H) -> Vec<SplicedGaussianMixture>` completes the tail-splice API (previously only `.quantile_spliced()` was exposed).
+- **Serde bit-identity tests** on `Gaussian`, `GaussianMixture`, and `GpdTailParams` (also added missing `#[cfg_attr(serde, derive(...))]` on `GpdTailParams`). Skaters caught a real `serde_json` float roundtrip divergence via the same gate; we replicate the check.
+- **`tests/laplace_robustness.rs`** — port of skaters' `rust/tests/robustness.rs`. 8 adversarial tests (constant / lattice / monster-spike / extreme-tick / scale-collapse / vol-whiplash + two bitwise-determinism runs) exercising `LaplaceForecaster` on deliberately-hostile series. Each asserts finite `logpdf`, `cdf ∈ [0, 1]`, monotone finite quantiles at p ∈ {0.001, 0.25, 0.5, 0.75, 0.999}. Catches numerical regressions the fev-27 benchmark alone doesn't cover.
+
+### Fev-27 no-regression check (SAMPLE_PER=500)
+
+| Config | v0.15.5 | v0.15.6 | Δ |
+| :--- | ---: | ---: | ---: |
+| `.auto()` MASE | 5.9335 | 5.9335 | **0.0 %** (bit-identical) |
+| `.auto()` WQL | 0.1375 | 0.1375 | **0.0 %** |
+| `.skaters()` MASE | 5.9658 | 5.9658 | **0.0 %** |
+| `.skaters()` WQL | 0.3005 | 0.3005 | **0.0 %** |
+
+fsum changes only summation order (semantically identical), and prune only fires in the `MultiScaleLaplace` mixture-of-mixtures path.
+
+### Test-suite
+
+- Unit tests: 3006 → **3062** (added 6 dist / gpd_tails tests + 50 pre-existing serde-feature tests that now run under `--features serde`)
+- Integration tests: **+8** in `laplace_robustness.rs`
+- Clippy `--all-features -- -D warnings` clean
+
+### Documented in PR body as future work (deferred from skaters#103)
+
+- **Unified `Sk` enum** — architectural, ~1000 LOC. Enables full-forecaster serde, single composable product type. v0.16 candidate.
+- **`laplace(k)` auto-composer** — single-call builder returning pre-composed forecaster (CRPS + sticky + multiscale + tails). UX affordance.
+- **Acklam `phi_inv` + `libm` for cross-platform bit-parity** — small numerical improvements.
+- **PyO3 Python bindings** — separate crate. Only if there's Python demand.
+
+### Explicitly not planned
+
+- `spec` grammar (rejected v0.15.4 review)
+- Adaptive `search` (different design philosophy from our `.auto()` heuristic)
+- `cov/` (we're univariate)
+- `grouped_ar` (uncertain value)
+
 ## [0.15.5] - 2026-07-14
 
 Patch release to unblock the v0.15.4 crates.io publish, which was

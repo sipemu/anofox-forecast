@@ -1,6 +1,6 @@
 [package]
 name = "anofox-forecast-js"
-version = "0.15.5"
+version = "0.15.6"
 edition = "2021"
 authors = ["Simon M"]
 description = "WebAssembly bindings for anofox-forecast time series forecasting library"
