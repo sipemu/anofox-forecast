@@ -320,7 +320,13 @@ impl DistributionalForecaster for MultiScaleLaplace {
                     comps.push((scale_w * w, *g));
                 }
             }
-            out.push(GaussianMixture::new(comps));
+            // Prune the mixture-of-mixtures: each eligible scale
+            // contributes its full mixture components (up to ~30 per
+            // scale for .skaters()). Blended, that's easily 60-90
+            // components per horizon. Skaters' multiscale uses
+            // `max_components=20`; matching keeps quantile() bisection
+            // time bounded without meaningfully changing the density.
+            out.push(GaussianMixture::new(comps).prune(20));
         }
         Ok(out)
     }

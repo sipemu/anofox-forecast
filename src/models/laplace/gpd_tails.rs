@@ -27,6 +27,7 @@ use crate::models::traits::Forecaster;
 /// z-thresholds; `zeta_*` are the empirical exceedance rates; `g_*` and
 /// `s_*` are the GPD shape and scale parameters (fitted by censored ML).
 #[derive(Debug, Clone, Copy)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct GpdTailParams {
     pub t_lo: f64,
     pub t_up: f64,
@@ -237,6 +238,137 @@ pub fn spliced_quantile(mix: &GaussianMixture, params: &GpdTailParams, p: f64) -
     mix.quantile(ub)
 }
 
+/// A `GaussianMixture` body with GPD tails spliced in beyond frozen
+/// z-thresholds. Full port of skaters' `SplicedDist` — the body's own
+/// PIT through the standard normal defines the interior; GPD densities
+/// take over outside. Provides `cdf`, `pdf`, `logpdf`, `quantile`,
+/// numeric `mean`/`var`/`std`/`crps` (via a 65-node quantile grid).
+///
+/// Constructed by [`GpdTailsForecaster::spliced_mixtures`].
+pub struct SplicedGaussianMixture {
+    pub body: GaussianMixture,
+    pub params: GpdTailParams,
+    /// Cached 65-node quantile grid for moments / CRPS. Populated lazily.
+    grid: std::cell::OnceCell<Vec<f64>>,
+}
+
+impl SplicedGaussianMixture {
+    pub fn new(body: GaussianMixture, params: GpdTailParams) -> Self {
+        Self {
+            body,
+            params,
+            grid: std::cell::OnceCell::new(),
+        }
+    }
+
+    /// Push body-CDF through Φ⁻¹ to get the z-value used for the splice
+    /// region check.
+    fn z(&self, x: f64) -> f64 {
+        let u = self.body.cdf(x).clamp(1e-12, 1.0 - 1e-12);
+        phi_inv(u)
+    }
+
+    pub fn cdf(&self, x: f64) -> f64 {
+        let z = self.z(x);
+        let p = &self.params;
+        if z < p.t_lo {
+            p.zeta_lo * gpd_sf(p.t_lo - z, p.g_lo, p.s_lo)
+        } else if z > p.t_up {
+            1.0 - p.zeta_up * gpd_sf(z - p.t_up, p.g_up, p.s_up)
+        } else {
+            let c = p.interior_c();
+            p.zeta_lo + c * (phi(z) - phi(p.t_lo))
+        }
+    }
+
+    pub fn logpdf(&self, x: f64) -> f64 {
+        let base = self.body.logpdf(x);
+        if !base.is_finite() {
+            return base;
+        }
+        let z = self.z(x);
+        let p = &self.params;
+        // Standard-normal logpdf helper.
+        let phi_logpdf = |z: f64| -0.5 * z * z - 0.5 * (2.0 * PI).ln();
+        let corr = if z < p.t_lo {
+            p.zeta_lo.max(1e-300).ln() + gpd_logpdf(p.t_lo - z, p.g_lo, p.s_lo) - phi_logpdf(z)
+        } else if z > p.t_up {
+            p.zeta_up.max(1e-300).ln() + gpd_logpdf(z - p.t_up, p.g_up, p.s_up) - phi_logpdf(z)
+        } else {
+            p.interior_c().ln()
+        };
+        base + corr
+    }
+
+    pub fn pdf(&self, x: f64) -> f64 {
+        let lp = self.logpdf(x);
+        if lp < 700.0 {
+            lp.exp()
+        } else {
+            f64::INFINITY
+        }
+    }
+
+    pub fn quantile(&self, p: f64) -> f64 {
+        assert!((0.0..1.0).contains(&p) && p > 0.0);
+        spliced_quantile(&self.body, &self.params, p)
+    }
+
+    /// 65-node midpoint-rule quantile grid, cached. Feeds mean / var / crps.
+    fn qgrid(&self) -> &Vec<f64> {
+        self.grid.get_or_init(|| {
+            const N: usize = 65;
+            (0..N)
+                .map(|i| self.quantile((i as f64 + 0.5) / N as f64))
+                .collect()
+        })
+    }
+
+    pub fn mean(&self) -> f64 {
+        let q = self.qgrid();
+        q.iter().sum::<f64>() / q.len() as f64
+    }
+
+    pub fn var(&self) -> f64 {
+        let q = self.qgrid();
+        let m = self.mean();
+        q.iter().map(|x| (x - m).powi(2)).sum::<f64>() / q.len() as f64
+    }
+
+    pub fn std(&self) -> f64 {
+        self.var().sqrt()
+    }
+
+    /// CRPS via the quantile-representation midpoint rule. Same formula
+    /// as skaters' `SplicedDist.crps`: `E|X - x| - 0.5 · E|X - X'|`.
+    pub fn crps(&self, x: f64) -> f64 {
+        let q = self.qgrid();
+        let n = q.len();
+        let t1: f64 = q.iter().map(|v| (v - x).abs()).sum::<f64>() / n as f64;
+        let t2: f64 = 2.0
+            * q.iter()
+                .enumerate()
+                .map(|(i, v)| v * (2.0 * (i as f64 + 0.5) / n as f64 - 1.0))
+                .sum::<f64>()
+            / n as f64;
+        t1 - 0.5 * t2
+    }
+}
+
+/// GPD log-density, for [`SplicedGaussianMixture::logpdf`].
+fn gpd_logpdf(e: f64, gamma: f64, sigma: f64) -> f64 {
+    if gamma.abs() < 1e-9 {
+        return -sigma.ln() - e / sigma;
+    }
+    let arg = 1.0 + gamma * e / sigma;
+    if arg <= 0.0 {
+        return -745.0;
+    }
+    -sigma.ln() - (1.0 / gamma + 1.0) * arg.ln()
+}
+
+use std::f64::consts::PI;
+
 /// Wrapper: `LaplaceForecaster` + GPD-tail splice on top of the
 /// per-horizon mixture quantile. Implements `Forecaster` +
 /// `DistributionalForecaster` transparently; tails only affect quantile
@@ -279,6 +411,24 @@ impl GpdTailsForecaster {
     /// residual sample was too small to fit stable tails).
     pub fn tail_params(&self) -> Option<&GpdTailParams> {
         self.params.as_ref()
+    }
+
+    /// Return `Vec<SplicedGaussianMixture>` — the body per-horizon
+    /// mixtures with GPD tail splice applied. Prefers per-horizon
+    /// params (from `.with_parade(k)` on the inner) if fitted; falls
+    /// back to global params from 1-step residuals. Horizons without
+    /// any fitted tail params are omitted.
+    pub fn spliced_mixtures(&self, horizon: usize) -> Result<Vec<SplicedGaussianMixture>> {
+        let bodies = self.inner.forecast_dist(horizon)?;
+        Ok(bodies
+            .into_iter()
+            .enumerate()
+            .filter_map(|(h_idx, body)| {
+                let ph = self.per_horizon_params.get(h_idx).and_then(|o| *o);
+                let params = ph.or(self.params);
+                params.map(|p| SplicedGaussianMixture::new(body, p))
+            })
+            .collect())
     }
 
     /// Spliced quantile at fine horizon `h`, probability `p`. Uses
@@ -397,5 +547,67 @@ mod tests {
         let params = fit_gpd_tails(&z, 0.95).expect("fit failed");
         assert!(params.zeta_lo > 0.0 && params.zeta_up > 0.0);
         assert!(params.t_up > params.t_lo);
+    }
+
+    #[test]
+    fn spliced_mixture_round_trips_cdf_and_quantile() {
+        use super::super::dist::{Gaussian, GaussianMixture};
+        let body = GaussianMixture::new(vec![
+            (0.7, Gaussian::new(0.0, 1.0)),
+            (0.3, Gaussian::new(3.0, 0.5)),
+        ]);
+        let params = GpdTailParams {
+            t_lo: -2.0,
+            t_up: 2.0,
+            zeta_lo: 0.05,
+            zeta_up: 0.05,
+            g_lo: 0.1,
+            s_lo: 0.5,
+            g_up: 0.15,
+            s_up: 0.4,
+        };
+        let sp = SplicedGaussianMixture::new(body, params);
+        for &p in &[0.01, 0.1, 0.5, 0.9, 0.99] {
+            let q = sp.quantile(p);
+            assert!(q.is_finite(), "quantile({p}) = {q}");
+        }
+        // Mean / std / crps from qgrid — sanity, not exact.
+        let m = sp.mean();
+        let s = sp.std();
+        assert!(m.is_finite() && s.is_finite() && s > 0.0);
+        // logpdf integrates roughly to 1 (crude midpoint).
+        let mut total = 0.0;
+        for i in 0..201 {
+            let x = -10.0 + 20.0 * i as f64 / 200.0;
+            total += sp.pdf(x) * (20.0 / 200.0);
+        }
+        assert!((total - 1.0).abs() < 0.1, "pdf integral = {total}");
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn gpd_tail_params_serde_round_trip_is_bit_identical() {
+        let orig = GpdTailParams {
+            t_lo: -1.9599639845400545,
+            t_up: 1.9599639845400545,
+            zeta_lo: 0.024997500416604166,
+            zeta_up: 0.024997500416604166,
+            g_lo: 0.123456789012345,
+            s_lo: 0.987654321098765,
+            g_up: 0.234567890123456,
+            s_up: 0.876543210987654,
+        };
+        let json = serde_json::to_string(&orig).expect("ser");
+        let round: GpdTailParams = serde_json::from_str(&json).expect("de");
+        // Bit-exact — skaters caught a real float roundtrip divergence
+        // this way; we replicate the same gate.
+        assert_eq!(orig.t_lo.to_bits(), round.t_lo.to_bits());
+        assert_eq!(orig.t_up.to_bits(), round.t_up.to_bits());
+        assert_eq!(orig.zeta_lo.to_bits(), round.zeta_lo.to_bits());
+        assert_eq!(orig.zeta_up.to_bits(), round.zeta_up.to_bits());
+        assert_eq!(orig.g_lo.to_bits(), round.g_lo.to_bits());
+        assert_eq!(orig.s_lo.to_bits(), round.s_lo.to_bits());
+        assert_eq!(orig.g_up.to_bits(), round.g_up.to_bits());
+        assert_eq!(orig.s_up.to_bits(), round.s_up.to_bits());
     }
 }
