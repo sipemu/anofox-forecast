@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.7] - 2026-07-14
+
+Bug-fix release with a headline WQL improvement. A one-line `GarchWrappedLeaf::observe` init bug caused **60-million-times mixture-σ inflation** on billion-scale continuous data via poison of the terminal residual EWMA. Fixed; per-dataset WQL drops of **~600× on m1_yearly, ~23× on tourism_yearly, ~300000× on cif_2016**.
+
+### Fixed
+
+- **`GarchWrappedLeaf::observe`** on first observation now floors initial `var` by `y²` so the first standardised value is `O(1)` regardless of input scale. Previously the unconditional variance `omega / (1 - persist)` ≈ 5e-5 produced `y / sigma ≈ 2e11` on billion-scale inputs, poisoning the inner EMA for many observations. That leaf's diverged predictions (mean = 7.89e17 on cif_2016 series 54 despite ~0 softmax weight) then contaminated the terminal scale-mixture's residual EWMA, cascading into 60-million-times-inflated mixture sigmas across the whole final mixture.
+
+  Diagnosed via new `examples/wql_outlier_diagnosis.rs` — sticky lattice, GPD tails, diffuse background were all ruled out first via direct A/B before the per-leaf sweep found the divergent `ema@garch` leaf.
+
+### Added
+
+- **`LaplaceForecaster::with_diffuse_background(eps, sigma_factor)`** — port of skaters#72 (optional log-loss floor via a tiny broad Gaussian on every forecast mixture). Works as designed. Measured neutral on fev-27 WQL (metric mismatch: WQL uses q ∈ [0.1, 0.9], diffuse bg affects extreme tail). Shipped as opt-in for log-score callers (Bayesian model comparison, information-theoretic diagnostics).
+- **`LaplaceForecaster::debug_leaf_predictions()`** — `#[doc(hidden)]` diagnostic returning per-leaf `(name, mean, std, weight)` for the current state. Used by `examples/wql_outlier_diagnosis.rs` and `examples/leaf_init_pathology_sweep.rs`.
+- **`examples/wql_outlier_diagnosis.rs`** — reusable diagnostic for per-series / per-leaf WQL investigation.
+- **`examples/leaf_init_pathology_sweep.rs`** — permanent regression guard. Instantiates each of 19 leaf variants on billion-scale data and flags any that peak `>> y_scale` on early observations. Would catch a future GARCH-style init bug immediately.
+- **`tests/laplace_robustness.rs::multiscale_variance_is_monotone_in_horizon_on_random_walk`** — port of skaters issue #86 defensive test. Verifies no variance sawtooth at `MultiScaleLaplace` stride boundaries.
+
+### Fev-27 measurement (SAMPLE_PER=500)
+
+**Per-dataset WQL** (the previously-catastrophic datasets):
+
+| Dataset | v0.15.6 | v0.15.7 | Δ |
+| :--- | ---: | ---: | ---: |
+| **m1_yearly** | 98.35 | **0.165** | **~600× improvement** |
+| **tourism_yearly** | 5.505 | **0.240** | **~23× improvement** |
+| **cif_2016** | 45314 | **0.148** | **~300000× improvement** |
+
+**Aggregate**:
+
+| Config | Metric | v0.15.6 | v0.15.7 | Δ |
+| :--- | :--- | ---: | ---: | ---: |
+| `.auto()` | MASE | 5.9335 | 5.9335 | 0.0 % (unchanged; auto doesn't use GARCH-wrapped leaves) |
+| `.auto()` | WQL | 0.1375 | 0.1375 | 0.0 % |
+| `.skaters()` | MASE | 5.9658 | 5.9619 | −0.07 % |
+| **`.skaters()`** | **WQL** | **0.3005** | **0.1336** | **−55.5 %** |
+
+`.skaters()` is WQL-competitive with `.auto()` for the first time in project history.
+
+### Investigation notes (not shipped)
+
+- **Adaptive search port** (skaters `search`): measured against our stack via python skaters `search(k=H)` A/B on cif_2016 / tourism_monthly / m4_hourly. Their `search` was 25-199 % worse than our `MultiScaleLaplace + scH + scW` on all three. Not worth the ~500 LOC + 7 hyperparameters.
+- **Per-leaf init pathology sweep** on all 19 leaves in `.skaters()` pool. Found only the GARCH bug; every other leaf peaks correctly at `≤ y_scale` on obs 1 and converges. No more low-hanging fruit.
+
 ## [0.15.6] - 2026-07-14
 
 Skaters-parity v2: numerical stability, feature completeness, adversarial test coverage. Ports five items from microprediction/skaters#103 (their Rust port PR). Zero behavior change on fev-27 — bit-identical MASE/WQL vs v0.15.5 on both `.auto()` and `.skaters()`.
