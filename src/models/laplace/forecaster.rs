@@ -664,8 +664,9 @@ use super::leaves::{
     GammaLeaf, GarchWrappedLeaf, HoltLeaf, IntermittentLeaf, LogNormalLeaf,
     MultiplicativeSeasonalLeaf, NegativeBinomialLeaf, OuLeaf, PoissonLeaf, PowerTransformWrapper,
     RectifiedNormalLeaf, SeasonalDifferenceWrapper, SeasonalEmaLeaf, SeasonalIntermittentLeaf,
-    SkewNormalLeaf, StandardizeWrapper, StlDecompLeaf, StudentTLeaf, ThetaLeaf, TweedieLeaf,
-    YjWrappedLeaf, ZeroInflatedNegativeBinomialLeaf, ZeroInflatedPoissonLeaf,
+    SkewNormalLeaf, SlowStandardizeWrapper, StandardizeWrapper, StlDecompLeaf, StudentTLeaf,
+    ThetaLeaf, TweedieLeaf, YjWrappedLeaf, ZeroInflatedNegativeBinomialLeaf,
+    ZeroInflatedPoissonLeaf,
 };
 use super::DistributionalForecaster;
 
@@ -774,6 +775,13 @@ pub struct LaplaceForecaster {
     /// in this list adds a `StandardizeWrapper(EmaLeaf(α), 0.05)`
     /// candidate. Skaters' pool has `α ∈ {0.05, 0.1}`. Empty = disabled.
     standardize_ema_alphas: Vec<f64>,
+    /// v0.15.4: fast_slow pool — "thinking fast and slow" combos. Each
+    /// entry is `slow_alpha` for `SlowStandardizeWrapper`. For each,
+    /// wraps 5 fast trackers (EMA 0.3, EMA 0.5, Holt(0.4, 0.2, 1.0),
+    /// AR1(0.1), Drift(0.05)) → 5·|slow_alphas| leaves. Ports skaters'
+    /// `fast_slow` block from `api.py::_build_candidates`.
+    /// Enabled by `.skaters()` with `[0.02, 0.05]` (10 leaves).
+    fast_slow_slow_alphas: Vec<f64>,
     /// PR #4 of #180: seasonal-diff + EMA depth-2 compositions. Each
     /// `(period, α)` adds a `SeasonalDifferenceWrapper(EmaLeaf(α), period)`.
     /// Skaters' pool has `period ∈ {7, 12, 24}` × `α ∈ {0.05, 0.1}` = 6.
@@ -962,6 +970,16 @@ pub struct LaplaceForecaster {
     /// Per-leaf ring buffer of the last `w` `logpdf` values, used to
     /// implement `scoring_window`.
     scoring_window_hist: Vec<std::collections::VecDeque<f64>>,
+    /// Parade PIT tracking: when `Some(k)`, each fit() collects
+    /// per-horizon PIT values by snapshotting the k-step predictive
+    /// distribution before each observation is absorbed, and resolving
+    /// horizon-`h` predictions against observations `h` steps later.
+    /// Output: `parade_pit[h-1]` — the PIT vector for horizon `h`.
+    /// Used by [`GpdTailsForecaster`] for per-horizon tail fits.
+    parade_horizon: Option<usize>,
+    /// Filled by fit() when parade_horizon is set.
+    /// Length `parade_horizon`; each element is `~ N_train - h` PITs.
+    parade_pit: Vec<Vec<f64>>,
     /// Accuracy-audit #1 (ensemble stacking): enable OLS-based blend
     /// weight learning at end of fit. When true and enough training data
     /// is available, `stacking_weights` is populated with per-leaf
@@ -1014,6 +1032,7 @@ impl LaplaceForecaster {
             theta_alphas: Vec::new(),
             yj_coord_lambdas: Vec::new(),
             standardize_ema_alphas: Vec::new(),
+            fast_slow_slow_alphas: Vec::new(),
             seasonal_diff_ema: Vec::new(),
             diff_ema_alphas: Vec::new(),
             drift_alphas: Vec::new(),
@@ -1074,6 +1093,8 @@ impl LaplaceForecaster {
             scoring_horizon: None,
             scoring_window: None,
             scoring_window_hist: Vec::new(),
+            parade_horizon: None,
+            parade_pit: Vec::new(),
         }
     }
 
@@ -1211,6 +1232,28 @@ impl LaplaceForecaster {
     pub fn with_scoring_window(mut self, window: usize) -> Self {
         self.scoring_window = Some(window.max(1));
         self
+    }
+
+    /// Enable parade PIT tracking during `fit()` — per-horizon
+    /// probability-integral-transform values needed by
+    /// [`super::gpd_tails::GpdTailsForecaster`] for per-horizon tail fits.
+    ///
+    /// After fit, `parade_pit()` returns a length-`k` vector where element
+    /// `h-1` is the collected PIT sample for horizon `h`. Storage cost:
+    /// `O(N_train × k × 8 bytes)` — 800 kB for m4-hourly-like series.
+    pub fn with_parade(mut self, horizon: usize) -> Self {
+        self.parade_horizon = Some(horizon.max(1));
+        self
+    }
+
+    /// Per-horizon PIT values collected during fit. `None` unless
+    /// [`Self::with_parade`] was set; `Some(&[Vec<f64>; k])` after fit.
+    pub fn parade_pit(&self) -> Option<&[Vec<f64>]> {
+        if self.parade_horizon.is_some() && !self.parade_pit.is_empty() {
+            Some(&self.parade_pit)
+        } else {
+            None
+        }
     }
 
     /// Enable ensemble stacking on top of the softmax blend
@@ -1434,10 +1477,12 @@ impl LaplaceForecaster {
         if self.yj_diff_ema.is_empty() {
             self.yj_diff_ema = vec![(0.0, 0.1), (0.5, 0.1)];
         }
-        // Fast-slow family (12 candidates in skaters) is gated on the
-        // `fast_slow` field which lives on the PR #2 branch (not this
-        // one). Once the parity PRs are merged into main, `.skaters()`
-        // will also enable that family. Tracked in #180.
+        // Fast-slow family (10 candidates — skaters' 12 minus the two
+        // `difference()` trackers we can't compose 3-deep yet). Ports
+        // `_build_candidates`'s `fast_slow` group from skaters' api.py.
+        if self.fast_slow_slow_alphas.is_empty() {
+            self.fast_slow_slow_alphas = vec![0.02, 0.05];
+        }
         // Do NOT set self.use_auto — the heuristic path is orthogonal
         // and the caller may pipe `.skaters().auto()` if they want both.
         self
@@ -2286,6 +2331,33 @@ impl LaplaceForecaster {
                 0.05,
             ))));
         }
+        // v0.15.4: fast_slow family — fast tracker (EMA/Holt/AR1/Drift)
+        // wrapped by SlowStandardizeWrapper (slow residual variance).
+        // Ports skaters' `fast_slow` group. 5 fast trackers × N slow
+        // alphas. Difference-based fast tracker skipped (needs a
+        // 3-deep composition we don't have as a single leaf yet).
+        for &slow_alpha in &self.fast_slow_slow_alphas {
+            leaves.push(LeafEnum::Wrapped(Box::new(SlowStandardizeWrapper::new(
+                Box::new(EmaLeaf::new(0.3)),
+                slow_alpha,
+            ))));
+            leaves.push(LeafEnum::Wrapped(Box::new(SlowStandardizeWrapper::new(
+                Box::new(EmaLeaf::new(0.5)),
+                slow_alpha,
+            ))));
+            leaves.push(LeafEnum::Wrapped(Box::new(SlowStandardizeWrapper::new(
+                Box::new(HoltLeaf::new(0.4, 0.2, 1.0)),
+                slow_alpha,
+            ))));
+            leaves.push(LeafEnum::Wrapped(Box::new(SlowStandardizeWrapper::new(
+                Box::new(Ar1Leaf::new(0.1)),
+                slow_alpha,
+            ))));
+            leaves.push(LeafEnum::Wrapped(Box::new(SlowStandardizeWrapper::new(
+                Box::new(DriftLeaf::new(0.05)),
+                slow_alpha,
+            ))));
+        }
         // PR #4 of #180: seasonal-diff + EMA depth-2 compositions.
         for &(period, alpha) in &self.seasonal_diff_ema {
             leaves.push(LeafEnum::Wrapped(Box::new(SeasonalDifferenceWrapper::new(
@@ -3012,6 +3084,16 @@ impl Forecaster for LaplaceForecaster {
             .scoring_horizon
             .unwrap_or_else(|| per_h_horizon.clamp(4, 24));
 
+        // Parade PIT snapshots: at every step, snapshot the current
+        // parade_horizon-step mixture (mean, std). At step `t + h`, resolve
+        // the snapshot from step `t` at position h against the observation.
+        let parade_h = self.parade_horizon.unwrap_or(0);
+        let mut parade_snap: std::collections::VecDeque<Vec<(f64, f64)>> =
+            std::collections::VecDeque::with_capacity(parade_h + 1);
+        if parade_h > 0 {
+            self.parade_pit = vec![Vec::with_capacity(values.len()); parade_h];
+        }
+
         for (step, &y_orig) in values.iter().enumerate() {
             let y = match yj {
                 Some(l) => yj_forward(y_orig, l),
@@ -3028,6 +3110,48 @@ impl Forecaster for LaplaceForecaster {
                 let per_leaf_h: Vec<Vec<Gaussian>> =
                     self.leaves.iter().map(|l| l.predict(mh_horizon)).collect();
                 mh_snapshots.push((step, per_leaf_h));
+            }
+
+            // Parade: before observing y, resolve any matured snapshot for
+            // horizon h=1..=parade_h, then take a fresh k-horizon snapshot.
+            if parade_h > 0 {
+                // Resolve: parade_snap[i] was taken (i+1) steps ago; its
+                // element at index i predicts THIS observation at horizon (i+1).
+                for (i, snap) in parade_snap.iter().enumerate() {
+                    let h_idx = i;
+                    if h_idx >= parade_h || h_idx >= snap.len() {
+                        continue;
+                    }
+                    let (mu, sigma) = snap[h_idx];
+                    if !mu.is_finite() || !sigma.is_finite() || sigma <= 0.0 {
+                        continue;
+                    }
+                    // Normal CDF of y under N(mu, sigma).
+                    let z = (y - mu) / sigma;
+                    let pit =
+                        0.5 * (1.0 + super::gpd_tails::erf_local_pub(z / std::f64::consts::SQRT_2));
+                    if pit.is_finite() {
+                        self.parade_pit[h_idx].push(pit.clamp(1e-12, 1.0 - 1e-12));
+                    }
+                }
+                // Snapshot new k-step mixture.
+                let weights_now = self.weights();
+                let per_leaf_h: Vec<Vec<super::dist::Gaussian>> =
+                    self.leaves.iter().map(|l| l.predict(parade_h)).collect();
+                let mixtures: Vec<(f64, f64)> = (0..parade_h)
+                    .map(|h| {
+                        let m = blend_horizon(&weights_now, &per_leaf_h, h);
+                        if m.is_empty() {
+                            (0.0, 1.0)
+                        } else {
+                            (m.mean(), m.std())
+                        }
+                    })
+                    .collect();
+                parade_snap.push_back(mixtures);
+                if parade_snap.len() > parade_h {
+                    parade_snap.pop_front();
+                }
             }
 
             // Periodic snapshot: take before observing y at this step. Only
