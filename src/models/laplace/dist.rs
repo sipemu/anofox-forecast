@@ -9,6 +9,30 @@
 use std::f64::consts::{PI, SQRT_2};
 
 const SQRT_2PI: f64 = 2.506_628_274_631_000_7;
+
+/// Neumaier-compensated sum. Bit-identical to CPython 3.12+'s built-in
+/// `sum()` on floats and to skaters' `mathx::fsum`. Reduces rounding
+/// error accumulation in mixture normalisation and weighted means; on
+/// long-tailed weighted sums (Gaussian mixtures with 20+ components)
+/// the plain `+=` accumulator can drift by a few ULPs, which cascades
+/// into mixture-quantile bisection differences.
+///
+/// Public so callers accumulating their own weighted sums (per-horizon
+/// blends, ensemble weights) can match the crate's numerical convention.
+pub fn fsum<I: IntoIterator<Item = f64>>(values: I) -> f64 {
+    let mut s = 0.0_f64;
+    let mut c = 0.0_f64;
+    for x in values {
+        let t = s + x;
+        if s.abs() >= x.abs() {
+            c += (s - t) + x;
+        } else {
+            c += (x - t) + s;
+        }
+        s = t;
+    }
+    s + c
+}
 /// Precomputed `0.5 · ln(2π)` — appears in `Gaussian::logpdf` and
 /// `GaussianMixture::logpdf`. Const so the compiler doesn't recompute
 /// via `(2·π).ln()` every call. `pub(super)` so the fit-loop can
@@ -78,13 +102,86 @@ impl GaussianMixture {
             .into_iter()
             .filter(|(w, _)| w.is_finite() && *w > 0.0)
             .collect();
-        let sum: f64 = kept.iter().map(|(w, _)| *w).sum();
+        // Neumaier-compensated normalisation. On 20-component mixtures
+        // the plain `+=` accumulator drifts ~2 ULPs, which cascades into
+        // downstream quantile-bisection differences. Matches skaters'
+        // `mathx::fsum` semantics.
+        let sum: f64 = fsum(kept.iter().map(|(w, _)| *w));
         if sum > 0.0 {
             for (w, _) in &mut kept {
                 *w /= sum;
             }
         }
         Self { components: kept }
+    }
+
+    /// Reduce component count by merging the closest-mean pair, weighting
+    /// by their masses, until `len <= max_components`. Mirrors skaters'
+    /// `Dist::prune` (ulp-tolerant pair selection over sorted components).
+    ///
+    /// Useful after a mixture-of-mixtures blend (e.g.
+    /// `MultiScaleLaplace::forecast_dist` concatenates each scale's
+    /// components with adjusted weights → the fine-horizon mixture can
+    /// have 50+ components). Pruning keeps quantile-bisection time
+    /// bounded without meaningfully changing the density.
+    pub fn prune(&self, max_components: usize) -> Self {
+        let max_components = max_components.max(1);
+        if self.components.len() <= max_components {
+            return self.clone();
+        }
+        // Stable sort by (mean, std, weight) — mirrors Python tuple sort.
+        let mut comps = self.components.clone();
+        comps.sort_by(|a, b| {
+            a.1.mean
+                .partial_cmp(&b.1.mean)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(
+                    a.1.std
+                        .partial_cmp(&b.1.std)
+                        .unwrap_or(std::cmp::Ordering::Equal),
+                )
+                .then(a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
+        });
+        let scale =
+            comps.first().unwrap().1.mean.abs() + comps.last().unwrap().1.mean.abs() + 1e-12;
+        while comps.len() > max_components {
+            // Best (smallest) inter-mean distance across all pairs.
+            let mut best_dist = f64::INFINITY;
+            for i in 0..comps.len() {
+                for j in (i + 1)..comps.len() {
+                    let d = (comps[i].1.mean - comps[j].1.mean).abs();
+                    if d < best_dist {
+                        best_dist = d;
+                    }
+                }
+            }
+            let thresh = best_dist + 1e-9 * scale;
+            let mut best_pair: Option<(usize, usize)> = None;
+            'outer: for i in 0..comps.len() {
+                for j in (i + 1)..comps.len() {
+                    if (comps[i].1.mean - comps[j].1.mean).abs() <= thresh {
+                        best_pair = Some((i, j));
+                        break 'outer;
+                    }
+                }
+            }
+            let (bi, bj) = best_pair.unwrap_or((0, 1));
+            let (wi, gi) = comps[bi];
+            let (wj, gj) = comps[bj];
+            let w_new = wi + wj;
+            let (m_new, s_new) = if w_new < 1e-300 {
+                (0.5 * (gi.mean + gj.mean), gi.std.max(gj.std).max(1e-12))
+            } else {
+                let m = (wi * gi.mean + wj * gj.mean) / w_new;
+                let v = (wi * (gi.variance() + (gi.mean - m).powi(2))
+                    + wj * (gj.variance() + (gj.mean - m).powi(2)))
+                    / w_new;
+                (m, v.max(0.0).sqrt())
+            };
+            comps[bi] = (w_new, Gaussian::new(m_new, s_new));
+            comps.remove(bj);
+        }
+        Self { components: comps }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -95,18 +192,19 @@ impl GaussianMixture {
         self.components.len()
     }
 
-    /// Mixture mean: `Σ w_i · μ_i`.
+    /// Mixture mean: `Σ w_i · μ_i`. Uses Neumaier-compensated summation.
     pub fn mean(&self) -> f64 {
-        self.components.iter().map(|(w, g)| w * g.mean).sum()
+        fsum(self.components.iter().map(|(w, g)| w * g.mean))
     }
 
-    /// Mixture variance: `Σ w_i (σ_i² + (μ_i − μ_mix)²)`.
+    /// Mixture variance: `Σ w_i (σ_i² + (μ_i − μ_mix)²)`. Neumaier-summed.
     pub fn variance(&self) -> f64 {
         let mu = self.mean();
-        self.components
-            .iter()
-            .map(|(w, g)| w * (g.variance() + (g.mean - mu).powi(2)))
-            .sum()
+        fsum(
+            self.components
+                .iter()
+                .map(|(w, g)| w * (g.variance() + (g.mean - mu).powi(2))),
+        )
     }
 
     pub fn std(&self) -> f64 {
@@ -208,6 +306,75 @@ fn inv_erf(x: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fsum_matches_naive_on_small_input() {
+        let xs = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let naive: f64 = xs.iter().sum();
+        let compensated = fsum(xs.iter().copied());
+        assert_eq!(naive, compensated);
+    }
+
+    #[test]
+    fn fsum_beats_naive_on_cancellation_stress() {
+        // Classic cancellation: 1e20, 1.0, -1e20 → naive gives 0, compensated gives 1.
+        let xs = [1e20, 1.0, -1e20];
+        let naive: f64 = xs.iter().sum();
+        let compensated = fsum(xs.iter().copied());
+        assert_eq!(naive, 0.0);
+        assert_eq!(compensated, 1.0);
+    }
+
+    #[test]
+    fn mixture_prune_reduces_component_count() {
+        let m = GaussianMixture::new(vec![
+            (0.1, Gaussian::new(0.0, 1.0)),
+            (0.1, Gaussian::new(0.05, 1.0)), // very close to previous
+            (0.1, Gaussian::new(1.0, 1.0)),
+            (0.1, Gaussian::new(1.02, 1.0)), // very close to previous
+            (0.1, Gaussian::new(2.0, 1.0)),
+            (0.5, Gaussian::new(5.0, 2.0)),
+        ]);
+        let pruned = m.prune(3);
+        assert!(pruned.len() <= 3);
+        // Mean should be preserved approximately (mixture mean is invariant
+        // under mean-preserving component merges, up to numerical error).
+        assert!((pruned.mean() - m.mean()).abs() < 0.1);
+    }
+
+    #[test]
+    fn mixture_prune_is_noop_when_under_cap() {
+        let m = GaussianMixture::new(vec![
+            (0.5, Gaussian::new(0.0, 1.0)),
+            (0.5, Gaussian::new(1.0, 1.0)),
+        ]);
+        let pruned = m.prune(20);
+        assert_eq!(pruned.len(), 2);
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn gaussian_serde_round_trip_is_bit_identical() {
+        let g = Gaussian::new(-3.141_592_653_589_793, 2.718_281_828_459_045);
+        let json = serde_json::to_string(&g).unwrap();
+        let round: Gaussian = serde_json::from_str(&json).unwrap();
+        assert_eq!(g.mean.to_bits(), round.mean.to_bits());
+        assert_eq!(g.std.to_bits(), round.std.to_bits());
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn gaussian_mixture_serde_round_trip_preserves_mean_and_std() {
+        let m = GaussianMixture::new(vec![
+            (0.4, Gaussian::new(-1.234, 0.5)),
+            (0.6, Gaussian::new(2.345, 1.5)),
+        ]);
+        let json = serde_json::to_string(&m).unwrap();
+        let round: GaussianMixture = serde_json::from_str(&json).unwrap();
+        assert_eq!(m.len(), round.len());
+        assert_eq!(m.mean().to_bits(), round.mean().to_bits());
+        assert_eq!(m.std().to_bits(), round.std().to_bits());
+    }
 
     #[test]
     fn standard_normal_pdf_cdf_quantile() {
