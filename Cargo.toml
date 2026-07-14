@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "anofox-forecast"
-version = "0.15.4"
+version = "0.15.5"
 edition = "2021"
 authors = ["Simon Müller"]
 description = "Time series forecasting library"
