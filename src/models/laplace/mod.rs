@@ -122,6 +122,7 @@ pub use forecaster::LaplaceForecaster;
 pub use global::{GlobalLaplace, MetaLearnerScaffold};
 pub use hierarchical::HierarchicalLaplace;
 pub use leaf::Leaf;
+pub use multiscale::MultiScaleLaplace;
 
 use crate::error::Result;
 
