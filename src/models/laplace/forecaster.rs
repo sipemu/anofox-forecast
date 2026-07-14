@@ -664,8 +664,9 @@ use super::leaves::{
     GammaLeaf, GarchWrappedLeaf, HoltLeaf, IntermittentLeaf, LogNormalLeaf,
     MultiplicativeSeasonalLeaf, NegativeBinomialLeaf, OuLeaf, PoissonLeaf, PowerTransformWrapper,
     RectifiedNormalLeaf, SeasonalDifferenceWrapper, SeasonalEmaLeaf, SeasonalIntermittentLeaf,
-    SkewNormalLeaf, StandardizeWrapper, StlDecompLeaf, StudentTLeaf, ThetaLeaf, TweedieLeaf,
-    YjWrappedLeaf, ZeroInflatedNegativeBinomialLeaf, ZeroInflatedPoissonLeaf,
+    SkewNormalLeaf, SlowStandardizeWrapper, StandardizeWrapper, StlDecompLeaf, StudentTLeaf,
+    ThetaLeaf, TweedieLeaf, YjWrappedLeaf, ZeroInflatedNegativeBinomialLeaf,
+    ZeroInflatedPoissonLeaf,
 };
 use super::DistributionalForecaster;
 
@@ -774,6 +775,13 @@ pub struct LaplaceForecaster {
     /// in this list adds a `StandardizeWrapper(EmaLeaf(α), 0.05)`
     /// candidate. Skaters' pool has `α ∈ {0.05, 0.1}`. Empty = disabled.
     standardize_ema_alphas: Vec<f64>,
+    /// v0.15.4: fast_slow pool — "thinking fast and slow" combos. Each
+    /// entry is `slow_alpha` for `SlowStandardizeWrapper`. For each,
+    /// wraps 5 fast trackers (EMA 0.3, EMA 0.5, Holt(0.4, 0.2, 1.0),
+    /// AR1(0.1), Drift(0.05)) → 5·|slow_alphas| leaves. Ports skaters'
+    /// `fast_slow` block from `api.py::_build_candidates`.
+    /// Enabled by `.skaters()` with `[0.02, 0.05]` (10 leaves).
+    fast_slow_slow_alphas: Vec<f64>,
     /// PR #4 of #180: seasonal-diff + EMA depth-2 compositions. Each
     /// `(period, α)` adds a `SeasonalDifferenceWrapper(EmaLeaf(α), period)`.
     /// Skaters' pool has `period ∈ {7, 12, 24}` × `α ∈ {0.05, 0.1}` = 6.
@@ -1014,6 +1022,7 @@ impl LaplaceForecaster {
             theta_alphas: Vec::new(),
             yj_coord_lambdas: Vec::new(),
             standardize_ema_alphas: Vec::new(),
+            fast_slow_slow_alphas: Vec::new(),
             seasonal_diff_ema: Vec::new(),
             diff_ema_alphas: Vec::new(),
             drift_alphas: Vec::new(),
@@ -1434,10 +1443,12 @@ impl LaplaceForecaster {
         if self.yj_diff_ema.is_empty() {
             self.yj_diff_ema = vec![(0.0, 0.1), (0.5, 0.1)];
         }
-        // Fast-slow family (12 candidates in skaters) is gated on the
-        // `fast_slow` field which lives on the PR #2 branch (not this
-        // one). Once the parity PRs are merged into main, `.skaters()`
-        // will also enable that family. Tracked in #180.
+        // Fast-slow family (10 candidates — skaters' 12 minus the two
+        // `difference()` trackers we can't compose 3-deep yet). Ports
+        // `_build_candidates`'s `fast_slow` group from skaters' api.py.
+        if self.fast_slow_slow_alphas.is_empty() {
+            self.fast_slow_slow_alphas = vec![0.02, 0.05];
+        }
         // Do NOT set self.use_auto — the heuristic path is orthogonal
         // and the caller may pipe `.skaters().auto()` if they want both.
         self
@@ -2284,6 +2295,33 @@ impl LaplaceForecaster {
             leaves.push(LeafEnum::Wrapped(Box::new(StandardizeWrapper::new(
                 Box::new(EmaLeaf::new(alpha)),
                 0.05,
+            ))));
+        }
+        // v0.15.4: fast_slow family — fast tracker (EMA/Holt/AR1/Drift)
+        // wrapped by SlowStandardizeWrapper (slow residual variance).
+        // Ports skaters' `fast_slow` group. 5 fast trackers × N slow
+        // alphas. Difference-based fast tracker skipped (needs a
+        // 3-deep composition we don't have as a single leaf yet).
+        for &slow_alpha in &self.fast_slow_slow_alphas {
+            leaves.push(LeafEnum::Wrapped(Box::new(SlowStandardizeWrapper::new(
+                Box::new(EmaLeaf::new(0.3)),
+                slow_alpha,
+            ))));
+            leaves.push(LeafEnum::Wrapped(Box::new(SlowStandardizeWrapper::new(
+                Box::new(EmaLeaf::new(0.5)),
+                slow_alpha,
+            ))));
+            leaves.push(LeafEnum::Wrapped(Box::new(SlowStandardizeWrapper::new(
+                Box::new(HoltLeaf::new(0.4, 0.2, 1.0)),
+                slow_alpha,
+            ))));
+            leaves.push(LeafEnum::Wrapped(Box::new(SlowStandardizeWrapper::new(
+                Box::new(Ar1Leaf::new(0.1)),
+                slow_alpha,
+            ))));
+            leaves.push(LeafEnum::Wrapped(Box::new(SlowStandardizeWrapper::new(
+                Box::new(DriftLeaf::new(0.05)),
+                slow_alpha,
             ))));
         }
         // PR #4 of #180: seasonal-diff + EMA depth-2 compositions.
