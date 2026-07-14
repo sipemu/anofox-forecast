@@ -14,11 +14,12 @@
 use super::dist::Gaussian;
 use super::leaf::Leaf;
 use super::leaves::{
-    Ar1Leaf, Ar2Leaf, BetaLeaf, DiscreteUniformLeaf, DriftLeaf, EmaLeaf, FractionalDiffLeaf,
-    GammaLeaf, HoltLeaf, IntermittentLeaf, LogNormalLeaf, MultiplicativeSeasonalLeaf,
-    NegativeBinomialLeaf, OuLeaf, PoissonLeaf, RectifiedNormalLeaf, SeasonalEmaLeaf,
-    SeasonalIntermittentLeaf, SkewNormalLeaf, StlDecompLeaf, StudentTLeaf, ThetaLeaf, TweedieLeaf,
-    ZeroInflatedNegativeBinomialLeaf, ZeroInflatedPoissonLeaf,
+    AdidaLeaf, Ar1Leaf, Ar2Leaf, BetaLeaf, DiscreteUniformLeaf, DriftLeaf, EmaLeaf,
+    FractionalDiffLeaf, GammaLeaf, HoltLeaf, ImapaLeaf, IntermittentLeaf, LogNormalLeaf,
+    MultiplicativeSeasonalLeaf, NegativeBinomialLeaf, OuLeaf, PoissonLeaf, RectifiedNormalLeaf,
+    SbaLeaf, SeasonalEmaLeaf, SeasonalIntermittentLeaf, SkewNormalLeaf, StlDecompLeaf,
+    StudentTLeaf, ThetaLeaf, TsbLeaf, TweedieLeaf, ZeroInflatedNegativeBinomialLeaf,
+    ZeroInflatedPoissonLeaf,
 };
 
 /// Concrete leaf variant for the fit-loop pool.
@@ -39,6 +40,10 @@ pub enum LeafEnum {
     SeasonalIntermittent(SeasonalIntermittentLeaf),
     SeasonalMult(MultiplicativeSeasonalLeaf),
     Intermittent(IntermittentLeaf),
+    Sba(SbaLeaf),
+    Tsb(TsbLeaf),
+    Adida(AdidaLeaf),
+    Imapa(ImapaLeaf),
     Poisson(PoissonLeaf),
     NegativeBinomial(NegativeBinomialLeaf),
     LogNormal(LogNormalLeaf),
@@ -75,6 +80,10 @@ macro_rules! dispatch {
             LeafEnum::SeasonalIntermittent(l) => l.$method($($arg),*),
             LeafEnum::SeasonalMult(l) => l.$method($($arg),*),
             LeafEnum::Intermittent(l) => l.$method($($arg),*),
+            LeafEnum::Sba(l) => l.$method($($arg),*),
+            LeafEnum::Tsb(l) => l.$method($($arg),*),
+            LeafEnum::Adida(l) => l.$method($($arg),*),
+            LeafEnum::Imapa(l) => l.$method($($arg),*),
             LeafEnum::Poisson(l) => l.$method($($arg),*),
             LeafEnum::NegativeBinomial(l) => l.$method($($arg),*),
             LeafEnum::LogNormal(l) => l.$method($($arg),*),
