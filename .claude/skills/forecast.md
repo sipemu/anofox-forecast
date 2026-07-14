@@ -103,6 +103,26 @@ Croston::new()
 TSB::new()
 ```
 
+### Distributional (streaming, mixture output — `distributional` feature)
+
+`LaplaceForecaster` is a streaming per-observation ensemble that emits a `Vec<GaussianMixture>` per forecast. See the dedicated **[laplace-distributional skill](laplace-distributional.md)** for the full API surface — quick pointer:
+
+```rust
+use anofox_forecast::models::laplace::{LaplaceForecaster, MultiScaleLaplace};
+use anofox_forecast::models::{Forecaster, DistributionalForecaster};
+
+// Baseline
+let mut f = LaplaceForecaster::new().auto();
+f.fit(&ts)?;
+let dists = f.forecast_dist(12)?;                     // Vec<GaussianMixture>
+
+// v0.15.4 best-tuned config on fev-27 (moves us competitive with Nixtla auto_ets)
+let mut f = MultiScaleLaplace::skaters(H)
+    .with_scoring_horizon()
+    .with_scoring_window(14);
+if period >= 2 { f = f.with_period(period); }
+```
+
 ## Forecaster Trait (all models implement this)
 
 ```rust
