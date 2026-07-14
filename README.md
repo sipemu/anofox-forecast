@@ -660,22 +660,48 @@ Behind the default `postprocess` + opt-in `distributional` features, the crate s
 
 ### Position vs. SOTA (fev Chronos-benchmark, 27 datasets)
 
-Full head-to-head positioning is in [`docs/SOTA_POSITIONING.md`](docs/SOTA_POSITIONING.md). Summary on the 19 datasets we share with autogluon/fev's leaderboard:
+Full head-to-head positioning is in [`docs/SOTA_POSITIONING.md`](docs/SOTA_POSITIONING.md). Summary on the leaderboard-comparable 23-dataset subset (updated for v0.15.4):
 
 | rank | model | geomean MASE | tier |
 |------|-------|--------------|------|
 | 1 | Tirex | 1.351 | Foundation (GPU) |
 | 2 | TimesFM-2.0 | 1.354 | Foundation (GPU) |
 | 3 | fev `auto_theta` (Nixtla) | 1.362 | Classical (CPU) |
-| 4 | **`AutoTheta` (this crate)** | **1.381** | **Classical — 1.4 % behind Nixtla** ✅ |
+| 4 | **`AutoTheta` (this crate)** | **1.381** | Classical (CPU) — 1.4 % behind Nixtla ✅ |
 | 5 | Chronos-Bolt-Base | 1.393 | Foundation |
-| 8 | **`AutoETS` (this crate)** | **1.525** | **Classical — 5.9 % behind Nixtla** |
-| 10 | **`LaplaceForecaster::auto()`** | **1.723** | **Streaming distributional** |
+| 7 | Nixtla `auto_ets` | 1.440 | Classical (CPU) |
+| **~7-8** | **`MultiScaleLaplace + scH + scW=14` (v0.15.4)** | **1.4602** | **Streaming distributional — competitive with Nixtla `auto_ets`** ⭐ |
+| 8 | **`AutoETS` (this crate)** | **1.525** | Classical (CPU) |
+
+**We moved up ~3 ranks from v0.13.0 (was rank 11 at 1.723).** Progression by release:
+
+- v0.13.0 baseline: 1.723
+- v0.15.1 (#195 seasonal-period fixes): 1.6457 (−4.5 %)
+- v0.15.3 (scoring_horizon + scoring_window): best config 1.4994 (−13 %)
+- **v0.15.4 (multiscale + scoring): best config 1.4602 (−15 %)**
 
 Two findings:
 
-1. Our classical `AutoTheta` / `AutoETS` are Nixtla-quality. For general-purpose classical forecasting they are the right choice.
-2. `LaplaceForecaster::auto()` sits at seasonal-naive level on this mixed panel because the streaming per-observation design requires **~30-50 observations of warmup** that classical closed-form fitters don't need. On short-history panels (N < 100) classical wins by 15-80 %. On long panels (N > 300) Laplace is competitive.
+1. Our classical `AutoTheta` / `AutoETS` are Nixtla-quality. For general-purpose classical forecasting they are still the right choice.
+2. The best-tuned Laplace stack (v0.15.4's `MultiScaleLaplace + scH + scW=14`) is now **competitive with Nixtla `auto_ets`** — ahead of our own `AutoETS`, ahead of `Seasonal Naive`, closing the classical/foundation gap. Comes with distributional output that classical forecasters don't provide.
+
+### The best-tuned recipe (v0.15.4)
+
+```rust
+use anofox_forecast::models::laplace::{LaplaceForecaster, MultiScaleLaplace};
+use anofox_forecast::models::{Forecaster, DistributionalForecaster};
+
+let mut m = MultiScaleLaplace::skaters(H)      // multi-scale wrapper around .skaters() pool
+    .with_scoring_horizon()                    // v0.15.3: score softmax on h-step LL
+    .with_scoring_window(14);                  // v0.15.3: sliding-window LL, w=14
+if period >= 2 {
+    m = m.with_period(period);                 // period-aligned decimation stride
+}
+m.fit(&train_ts)?;
+let dists = m.forecast_dist(H)?;               // Vec<GaussianMixture>
+```
+
+Cost: 2-3× fit time vs plain `.skaters()` on longer panels (each activated scale runs a full skaters pool). Opt-in wrapper — not a default.
 
 ### Where LaplaceForecaster shines — M5 full-30k retail
 

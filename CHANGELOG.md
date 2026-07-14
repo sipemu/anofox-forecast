@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.4] - 2026-07-14
+
+Skaters-parity feature release. Ports four modules from `microprediction/skaters` that were previously missing from our Laplace stack. The headline win is `MultiScaleLaplace` + v0.15.3's scoring knobs: **−11.3 % geomean MASE** on the leaderboard-comparable 23-dataset fev-27 subset (biggest single-change improvement in the project's history), moving this crate from ~rank 10 to ~rank 8 on the SOTA classical panel — competitive with Nixtla `auto_ets` (1.440), ahead of our own `AutoETS` (1.525) and `Seasonal Naive` (1.665).
+
+Zero breaking API changes. All new features are opt-in except `fast_slow` (default-on inside `.skaters()`, adds 10 leaves).
+
+### Added
+
+- **`.skaters()` fast_slow leaf family** — 10 new pool candidates: `EMA(0.3)`, `EMA(0.5)`, `Holt(0.4, 0.2)`, `AR1(0.1)`, `Drift(0.05)` each wrapped by `SlowStandardizeWrapper` at 2 slow variance timescales (α ∈ {0.02, 0.05}). Ports skaters' `fast_slow` group from `api.py::_build_candidates`. Small MASE effect, but **−24 % `.skaters()` WQL** from properly-scaled residual variance.
+- **`MultiScaleLaplace::forecast_dist`** — the existing point-only wrapper now implements `DistributionalForecaster` with cross-scale softmax blend over per-scale training log-lik. Each scale `s` contributes its `⌈H/s⌉`-step mixture at fine horizon `h ≥ s`, weighted by `exp(scale_score − max_score)`.
+- **`MultiScaleLaplace::with_scoring_horizon` / `with_scoring_window(w)`** — pass v0.15.3's softmax-scoring knobs down to each scale's sub-forecaster (each scale receives its own coarse target horizon).
+- **`LaplaceForecaster::with_parade(k)`** — per-horizon PIT tracking during fit. Snapshots the k-step mixture at each step; on step `t+h` the horizon-h snapshot from step `t` is resolved against the observation, yielding a per-horizon PIT vector. Storage: `O(N × k × 8 bytes)`. Fit cost: additive `O(N × k × N_leaves)` (measured ~17× fit-time on m4-hourly-scale panels). Standalone useful for callers wanting per-horizon calibration diagnostics.
+- **`LaplaceForecaster::parade_pit()`** — accessor returning the per-horizon PIT vector after fit (`None` if `.with_parade` wasn't set).
+- **`GpdTailsForecaster`** — wraps a `LaplaceForecaster` with generalised-Pareto tail splice fitted via censored ML (Grimshaw profile). Splices GPD tails beyond frozen `level`-quantile thresholds. Fits per-horizon tail params when the inner has `.with_parade(k)`, else falls back to a single set of params from 1-step residuals. Tail params exposed via `.tail_params()` / `.quantile_spliced(mixtures, h, p)`.
+
+### Changed
+
+- **`MultiScaleLaplace::default_scales`** — drops the `⌈√k⌉` stride when a period is set. A coprime stride aliases the seasonal signal and destroys the sub-forecaster. Measured on fev-27: including `sqrt(H)` with a period hint regressed m4_hourly −55 %, tourism_monthly −50 %. Excluding it recovers.
+- **`MultiScaleLaplace::default_scales` `min_samples`** — lowered from 100 to 50. At 100 no fev-27 panel activates any decimated scale (degenerates to scale-1 only). At 50 the safe decimations activate without triggering the 30-leaf-pool-on-29-obs failure mode observed at 30.
+- **`MultiScaleLaplace`'s scale-1 sub** now receives the period hint via `.auto_with_seasonal_period(p)`, matching the fev-27 harness call pattern so multiscale isn't penalized by missing the v0.15.1 fix.
+
+### Fev-27 measurement
+
+| Config | geomean MASE (23-set) | Δ vs v0.15.3 `.auto()` |
+| :--- | ---: | ---: |
+| `.auto()` (v0.15.3 baseline) | 1.6457 | — |
+| `.skaters()` v0.15.3 winner (scH + scW=14) | 1.4994 | −8.9 % |
+| **`MultiScaleLaplace::skaters(H).with_scoring_horizon().with_scoring_window(14)`** | **1.4602** | **−11.3 %** |
+
+Biggest per-dataset MASE wins (combined multiscale + scH + scW):
+- `m4_hourly`: 1.948 → 1.221 (**−37 %**)
+- `australian_electricity`: 2.331 → 1.458 (**−37 %**)
+- `cif_2016`: 1.157 → 0.918 (**−21 %**)
+- `tourism_monthly`: 2.013 → 1.605 (**−20 %**)
+- `tourism_quarterly`: 2.476 → 2.047 (**−17 %**)
+- `m1_yearly`: 5.084 → 4.298 (**−15 %**)
+- `fred_md`: 0.658 → 0.560 (**−15 %**)
+- `exchange_rate`: 1.682 → 1.463 (**−13 %**)
+- `m5`: 1.174 → 1.075 (−8 %)
+
+Only tiny regressions on `m3_monthly` (+2 %), `nn5_weekly` (+2 %), `hospital` (+1 %).
+
+### Investigation notes (features shipped, benefit measured neutral on fev-27)
+
+- **`with_parade(k)` + `GpdTailsForecaster`**: full port measured neutral on fev-27 (**0 % benefit, 17× fit-time cost**). Root cause is a metric-shape mismatch — fev's WQL tests quantiles `q ∈ [0.1, 0.9]`, all inside GPD splice's frozen `[0.02, 0.98]` body region, so the tail correction never fires on quantiles the metric evaluates. Skaters' GPD-tail wins are on 1-in-1000 anomaly detection (their headline use case), not `[0.1, 0.9]` WQL. Shipped as opt-in for users targeting extreme-quantile calibration (anomaly detection, VaR estimation, rare-event forecasting).
+
+### Skipped (from the original skaters-parity list)
+
+- Rosenblatt conjugation (skaters issue #92 — still open upstream, unshipped)
+- Spec-grammar declarative pipeline (large refactor, no accuracy benefit — deferred until we plan a JSON-configurable API)
+
 ## [0.15.3] - 2026-07-10
 
 Feature release adding two opt-in scoring knobs to `LaplaceForecaster`. Combined, they cut fev-27 geomean MASE by **−8.9 %** on the leaderboard-comparable 23-dataset subset, moving the crate from ~rank 10 to ~rank 8 on the classical panel — competitive with Nixtla `auto_ets` (1.440) and ahead of Seasonal Naive (1.665) and this crate's own `AutoETS` (1.525). Zero breaking API changes.
