@@ -179,6 +179,55 @@ fn bitwise_determinism_on_fit_forecast() {
     assert_eq!(run(), run(), "two identical fit+forecast runs diverged");
 }
 
+/// Port of skaters issue microprediction/skaters#86:
+/// for integrated transforms, predictive variance should be nondecreasing
+/// in horizon `h`. `MultiScaleLaplace` mixes coarse-clock forecasts at
+/// stride boundaries `{1, period, k}` — verify no "variance sawtooth"
+/// on a random walk (worst-case integrated series).
+#[test]
+fn multiscale_variance_is_monotone_in_horizon_on_random_walk() {
+    use anofox_forecast::models::laplace::MultiScaleLaplace;
+    // 500 obs of a Gaussian random walk — variance should scale as h.
+    let mut r = Lcg(53);
+    let mut lvl = 0.0;
+    let ys: Vec<f64> = (0..500)
+        .map(|_| {
+            lvl += r.gauss();
+            lvl
+        })
+        .collect();
+    let ts = build_ts(ys);
+    const H: usize = 30;
+    let mut m = MultiScaleLaplace::skaters(H);
+    m.fit(&ts).expect("fit");
+    let dists = m.forecast_dist(H).expect("forecast");
+    assert_eq!(dists.len(), H);
+    // Weak monotonicity — allow a small numerical epsilon at scale
+    // boundaries but flag anything egregious.
+    let vars: Vec<f64> = dists.iter().map(|d| d.variance()).collect();
+    let mut violations: Vec<String> = Vec::new();
+    for h in 1..H {
+        let ratio = vars[h] / vars[h - 1];
+        // Downward jumps of more than 5% at a boundary = sawtooth
+        if ratio < 0.95 {
+            violations.push(format!(
+                "  h={}: var[{}]={:.3} > var[{}]={:.3} (ratio={:.3})",
+                h,
+                h - 1,
+                vars[h - 1],
+                h,
+                vars[h],
+                ratio
+            ));
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "MultiScaleLaplace variance sawtooth on random walk (skaters#86):\n{}",
+        violations.join("\n")
+    );
+}
+
 #[test]
 fn bitwise_determinism_on_skaters_pool() {
     // Same but with the wider .skaters() pool + our v0.15.3/4 knobs.

@@ -980,6 +980,15 @@ pub struct LaplaceForecaster {
     /// Filled by fit() when parade_horizon is set.
     /// Length `parade_horizon`; each element is `~ N_train - h` PITs.
     parade_pit: Vec<Vec<f64>>,
+    /// v0.15.7: optional diffuse background component (skaters#72).
+    /// `Some((eps, sigma_factor))` means every forecast mixture gains a
+    /// tiny broad Gaussian `(eps · sigma_factor · residuals_std)` centred
+    /// on the mixture mean. Floors worst-case log-loss on outliers
+    /// without touching interior densities on continuous series.
+    diffuse_background: Option<(f64, f64)>,
+    /// Sigma of the diffuse background, computed at fit time from
+    /// `sigma_factor * std(training residuals)`.
+    diffuse_sigma_bg: Option<f64>,
     /// Accuracy-audit #1 (ensemble stacking): enable OLS-based blend
     /// weight learning at end of fit. When true and enough training data
     /// is available, `stacking_weights` is populated with per-leaf
@@ -1095,6 +1104,8 @@ impl LaplaceForecaster {
             scoring_window_hist: Vec::new(),
             parade_horizon: None,
             parade_pit: Vec::new(),
+            diffuse_background: None,
+            diffuse_sigma_bg: None,
         }
     }
 
@@ -1246,6 +1257,26 @@ impl LaplaceForecaster {
         self
     }
 
+    /// Debug: per-leaf `(name, mean, std, weight)` at h=1 after fit.
+    /// Weight is the current softmax weight; mean/std are the leaf's
+    /// own `predict_one()` output, BEFORE terminal / YJ / sticky
+    /// post-processing. Used by
+    /// `examples/wql_outlier_diagnosis.rs` to identify numerical
+    /// divergence in individual leaves.
+    #[doc(hidden)]
+    pub fn debug_leaf_predictions(&self) -> Vec<(&'static str, f64, f64, f64)> {
+        let weights = self.weights();
+        self.leaves
+            .iter()
+            .enumerate()
+            .map(|(i, l)| {
+                let g = l.predict_one();
+                let w = weights.get(i).copied().unwrap_or(0.0);
+                (l.name(), g.mean, g.std, w)
+            })
+            .collect()
+    }
+
     /// Per-horizon PIT values collected during fit. `None` unless
     /// [`Self::with_parade`] was set; `Some(&[Vec<f64>; k])` after fit.
     pub fn parade_pit(&self) -> Option<&[Vec<f64>]> {
@@ -1254,6 +1285,35 @@ impl LaplaceForecaster {
         } else {
             None
         }
+    }
+
+    /// Optional diffuse background component (skaters#72).
+    ///
+    /// Adds a tiny broad Gaussian to every `forecast_dist(h)` mixture:
+    /// weight `eps`, mean = mixture mean, sigma = `sigma_factor · σ_residuals`.
+    /// After the mixture re-normalises, the background's weight is
+    /// `eps / (1 + eps)`, so continuous-series densities are essentially
+    /// unchanged (default `eps = 1e-4` costs < 1e-4 nats on the bulk).
+    ///
+    /// **Effect on outliers**: worst-case `logpdf(y)` is now bounded
+    /// below by `log(eps) + logN(y | μ, σ_bg)`. On a series where a
+    /// mixture component's tight scale would otherwise produce a
+    /// catastrophic `logpdf ≈ −1e10` on an off-grid outcome, the loss
+    /// is capped at ~`log(eps) − 0.5(y − μ)² / σ_bg² − log(σ_bg)`
+    /// (typically −10 to −20 nats), rescuing the mean log-loss and
+    /// per-series WQL scores.
+    ///
+    /// Target: our known WQL outlier catastrophes on continuous smooth
+    /// panels (m1_yearly 98× baseline, tourism_yearly 100×, cif_2016
+    /// 45000×) — sticky-lattice atoms placed on continuous data cause
+    /// exactly the "one off-grid outcome dominates" pathology this
+    /// backstop is designed for.
+    ///
+    /// **Defaults**: `eps = 1e-4`, `sigma_factor = 10.0`. Opt-in only;
+    /// no effect until `.with_diffuse_background(_, _)` is called.
+    pub fn with_diffuse_background(mut self, eps: f64, sigma_factor: f64) -> Self {
+        self.diffuse_background = Some((eps.max(1e-12), sigma_factor.max(1e-3)));
+        self
     }
 
     /// Enable ensemble stacking on top of the softmax blend
@@ -3456,6 +3516,22 @@ impl Forecaster for LaplaceForecaster {
             }
             self.calibration_scale_per_h = per_h;
         }
+        // Diffuse-background fit-time init (skaters#72): compute σ_bg
+        // from training-residual RMS × user's sigma_factor. Used by
+        // `forecast_dist` to append the tiny broad component to each
+        // per-horizon mixture.
+        if let Some((_, sigma_factor)) = self.diffuse_background {
+            let n = self.residuals.len().max(1) as f64;
+            let mean: f64 = self.residuals.iter().copied().sum::<f64>() / n;
+            let var: f64 = self
+                .residuals
+                .iter()
+                .map(|r| (r - mean).powi(2))
+                .sum::<f64>()
+                / n;
+            let sigma = var.sqrt().max(1e-9) * sigma_factor;
+            self.diffuse_sigma_bg = Some(sigma);
+        }
         Ok(())
     }
 
@@ -3648,8 +3724,29 @@ impl DistributionalForecaster for LaplaceForecaster {
                 // exact values. No-op if no atoms have fired. Fix A of
                 // fev-27 follow-up: horizon-decayed atom mass (`h + 1`
                 // since the closure's `h` is 0-based).
-                if let Some(s) = self.sticky.as_ref() {
+                let mix = if let Some(s) = self.sticky.as_ref() {
                     s.project(&mix, h + 1)
+                } else {
+                    mix
+                };
+                // Skaters#72 diffuse-background floor: append a tiny
+                // broad Gaussian at the mixture mean with sigma =
+                // sigma_factor · σ_residuals. Weight after re-normalise
+                // is eps/(1+eps) — negligible on the bulk, but places
+                // a hard floor of log(eps) − 0.5·(y − μ)²/σ_bg² −
+                // log(σ_bg) on the tail log-loss. Zero-cost when
+                // `.with_diffuse_background(...)` wasn't called.
+                if let (Some((eps, _)), Some(sigma_bg)) =
+                    (self.diffuse_background, self.diffuse_sigma_bg)
+                {
+                    if !mix.is_empty() {
+                        let mu = mix.mean();
+                        let mut comps = mix.components.clone();
+                        comps.push((eps, super::dist::Gaussian::new(mu, sigma_bg)));
+                        GaussianMixture::new(comps)
+                    } else {
+                        mix
+                    }
                 } else {
                     mix
                 }

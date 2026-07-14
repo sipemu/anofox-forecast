@@ -97,11 +97,20 @@ impl Leaf for GarchWrappedLeaf {
         if !self.initialized {
             // Bootstrap: use unconditional variance if stationary.
             let persist = self.alpha + self.beta;
-            self.var = if persist < 1.0 {
+            let unconditional = if persist < 1.0 {
                 self.omega / (1.0 - persist)
             } else {
                 self.omega
             };
+            // FLOOR by y² so the very first standardized value stays
+            // O(1) regardless of input scale. Without this floor,
+            // `omega/(1-persist)` is a tiny constant (~5e-5) that on
+            // billion-scale input produces `y / sigma ≈ 2e11`,
+            // poisoning the inner EMA for many observations. Diagnosed
+            // on cif_2016 series 54 where this cascaded into a
+            // 60-million-times mixture-σ inflation via the terminal
+            // residual EWMA.
+            self.var = unconditional.max(y * y);
             self.last_y = y;
             self.initialized = true;
             let sigma = self.conditional_sigma();
