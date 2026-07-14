@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.8] - 2026-07-14
+
+Feature release adding the four missing Croston-variant intermittent-demand methods alongside the existing `IntermittentLeaf` (plain Croston 1972). All four are **opt-in** — measured neutral on fev-27's m5, kept out of the auto-gate.
+
+### Added
+
+- **`SbaLeaf`** — Syntetos-Boylan Approximation. Croston × `(1 − α/2)` bias correction. Builder: `.with_sba(α)`.
+- **`TsbLeaf`** — Teunter-Syntetos-Babai. Tracks demand PROBABILITY every period instead of Croston's inter-arrival intervals. **Can forecast → 0 on obsolescent SKUs** (Croston fundamentally can't — interval EMA never resets). Builder: `.with_tsb(α_size, α_prob)`.
+- **`AdidaLeaf`** — Aggregate-Disaggregate. Bucket observations by size `k`, apply SES on the aggregate, disaggregate back (equal weights). Reduces intermittency artificially. Builder: `.with_adida(α, k)`.
+- **`ImapaLeaf`** — Meta-ensemble of ADIDA at `k ∈ {1,2,3,4,6,8,12}` — Petropoulos & Kourentzes' choice. Uniform average across levels. Builder: `.with_imapa(α)`.
+
+### Measurement (m5, SAMPLE_PER=500)
+
+| Config | MASE | WQL |
+| :--- | ---: | ---: |
+| `.skaters()` baseline | 5.9619 | 0.1336 |
+| `.skaters()` + auto-gated Croston family | 5.9620 | 0.1336 |
+
+Bit-identical → **not auto-gated**. Reason: m5 is stationary daily-count intermittent where Croston, SBA, TSB, IMAPA all converge to similar demand-per-period estimates. Variants only differ from Croston on:
+
+- Obsolescent SKUs (TSB — Croston can't decay to zero)
+- Strong within-week cadence with irregular timing (ADIDA k=7)
+- Multi-cadence intermittent panels (IMAPA over single-k ADIDA)
+
+None of these are present in fev-27; users with those specific scenarios should add the variants explicitly via the builder methods.
+
+### Tests
+
+- +7 unit tests (SBA bias-correction, TSB obsolescence trend-to-zero, ADIDA aggregation, IMAPA between-level averaging + cold-start)
+- 3069/3069 unit tests + 9/9 robustness tests pass
+- Clippy `--all-features -- -D warnings` clean
+
+### Compatibility
+
+Zero breaking API changes. Purely additive.
+
 ## [0.15.7] - 2026-07-14
 
 Bug-fix release with a headline WQL improvement. A one-line `GarchWrappedLeaf::observe` init bug caused **60-million-times mixture-σ inflation** on billion-scale continuous data via poison of the terminal residual EWMA. Fixed; per-dataset WQL drops of **~600× on m1_yearly, ~23× on tourism_yearly, ~300000× on cif_2016**.
