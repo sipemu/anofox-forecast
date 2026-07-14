@@ -19,7 +19,7 @@ use super::dist::GaussianMixture;
 use super::forecaster::LaplaceForecaster;
 use super::DistributionalForecaster;
 use crate::core::{Forecast, TimeSeries};
-use crate::error::{ForecastError, Result};
+use crate::error::Result;
 use crate::models::traits::Forecaster;
 
 /// Fitted GPD-tail parameters for a body predictive whose PIT push-through
@@ -96,8 +96,10 @@ fn phi_inv(p: f64) -> f64 {
     0.5 * (lo + hi)
 }
 
-/// GPD survival function `1 - F(e | γ, σ)`.
-fn gpd_sf(e: f64, gamma: f64, sigma: f64) -> f64 {
+/// GPD survival function `1 - F(e | γ, σ)`. Public for users who
+/// want to compute exceedance survival probabilities on top of a
+/// fitted [`GpdTailParams`]; complements [`gpd_isf`].
+pub fn gpd_sf(e: f64, gamma: f64, sigma: f64) -> f64 {
     if e <= 0.0 {
         return 1.0;
     }
@@ -112,7 +114,7 @@ fn gpd_sf(e: f64, gamma: f64, sigma: f64) -> f64 {
 }
 
 /// Inverse GPD survival function.
-fn gpd_isf(p: f64, gamma: f64, sigma: f64) -> f64 {
+pub fn gpd_isf(p: f64, gamma: f64, sigma: f64) -> f64 {
     let p = p.clamp(1e-300, 1.0);
     if gamma.abs() < 1e-9 {
         return -sigma * p.ln();
