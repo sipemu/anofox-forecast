@@ -2,6 +2,25 @@
 
 *Updated 2026-07-14 for v0.15.4 (skaters-parity port: fast_slow + multiscale + parade + GPD tails). Datasets and metrics from autogluon/fev's Chronos-benchmark classical panel and our M5 200-series head-to-head. Reproducible via `cargo run --release --features distributional --example fev_benchmark` and `examples/m5_skaters_vs_autoets.rs`.*
 
+## ⚠ Read this first — different benchmarks want different recipes
+
+**The v0.15.4 winning recipe (`MultiScaleLaplace + scH + scW=14`) is a fev-27 win but REGRESSES on M5 retail.** Measured on M5 200-series:
+
+| Model | mean MASE | panel WAPE | fit time |
+|---|---:|---:|---:|
+| `Laplace + skaters()` | **0.9962** | **0.6868** | 0.8 s |
+| MultiScale + scH + scW=14 (v0.15.4 fev-27 winner) | 1.0833 (**+8.7 %**) | 0.7521 (**+9.5 %**) | 1.1 s |
+
+Selector by data type:
+
+| Data type | Recipe |
+|---|---|
+| **Continuous / M-competition / economic (fev-27-like)** | `MultiScaleLaplace::skaters(H).with_scoring_horizon().with_scoring_window(14)` |
+| **Retail SKU / demand / count data** | `LaplaceForecaster::new().auto_aid()` or `SmartForecaster::new()` (with `postprocess` feature) |
+| **Short-history (N < 100)** | `AutoTheta` / `AutoETS` from `crate::models::exponential` / `crate::models::theta` |
+
+Root cause of the M5 regression: M5 is intermittent count data where AID-selected Poisson / NegBin / Croston-family leaves are the right marginals — Gaussian mixtures aren't. MultiScaleLaplace wraps `.skaters()` (Gaussian pool), which is off the right selector for this data. **The two benchmark stories are structurally different tasks.**
+
 ## v0.15.4 headline — MultiScaleLaplace closes the gap to Nixtla classical
 
 The best config on the fev-27 leaderboard-comparable 23-dataset subset is now:

@@ -703,6 +703,8 @@ let dists = m.forecast_dist(H)?;               // Vec<GaussianMixture>
 
 Cost: 2-3× fit time vs plain `.skaters()` on longer panels (each activated scale runs a full skaters pool). Opt-in wrapper — not a default.
 
+> ⚠ **This recipe is a fev-27 (mixed-classical) win, not universal.** Measured on M5 200-series retail post-release: MultiScaleLaplace + scH + scW=14 **regresses vs plain `.skaters()`** by +8.7 % MASE / +9.5 % WAPE. Retail SKU / demand data still wants `.auto_aid()` or `SmartForecaster` (AID-selected count-distribution marginals) — see rules of thumb below.
+
 ### Where LaplaceForecaster shines — M5 full-30k retail
 
 | model | median MAE | fit time | vs. AutoETS |

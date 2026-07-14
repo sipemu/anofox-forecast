@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documented
+
+- **M5 caveat for v0.15.4's winning recipe** — measured post-release on M5 200-series retail: `MultiScaleLaplace + scH + scW=14` **regresses vs plain `.skaters()`** by +8.7 % MASE / +9.5 % WAPE. The v0.15.4 wins are fev-27 (mixed classical) wins, not retail. Retail SKU / demand data still wants `.auto_aid()` or `SmartForecaster` (AID-selected count-distribution marginals). Documented in `docs/SOTA_POSITIONING.md` and README's rule-of-thumb table.
+
 ## [0.15.4] - 2026-07-14
 
 Skaters-parity feature release. Ports four modules from `microprediction/skaters` that were previously missing from our Laplace stack. The headline win is `MultiScaleLaplace` + v0.15.3's scoring knobs: **−11.3 % geomean MASE** on the leaderboard-comparable 23-dataset fev-27 subset (biggest single-change improvement in the project's history), moving this crate from ~rank 10 to ~rank 8 on the SOTA classical panel — competitive with Nixtla `auto_ets` (1.440), ahead of our own `AutoETS` (1.525) and `Seasonal Naive` (1.665).
