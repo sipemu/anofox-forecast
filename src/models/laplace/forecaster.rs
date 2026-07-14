@@ -660,13 +660,13 @@ fn yj_inverse_with_jac(y: f64, lambda: f64) -> (f64, f64) {
 }
 use super::leaf::Leaf;
 use super::leaves::{
-    Ar1Leaf, Ar2Leaf, BetaLeaf, DiscreteUniformLeaf, DriftLeaf, EmaLeaf, FractionalDiffLeaf,
-    GammaLeaf, GarchWrappedLeaf, HoltLeaf, IntermittentLeaf, LogNormalLeaf,
-    MultiplicativeSeasonalLeaf, NegativeBinomialLeaf, OuLeaf, PoissonLeaf, PowerTransformWrapper,
-    RectifiedNormalLeaf, SeasonalDifferenceWrapper, SeasonalEmaLeaf, SeasonalIntermittentLeaf,
-    SkewNormalLeaf, SlowStandardizeWrapper, StandardizeWrapper, StlDecompLeaf, StudentTLeaf,
-    ThetaLeaf, TweedieLeaf, YjWrappedLeaf, ZeroInflatedNegativeBinomialLeaf,
-    ZeroInflatedPoissonLeaf,
+    AdidaLeaf, Ar1Leaf, Ar2Leaf, BetaLeaf, DiscreteUniformLeaf, DriftLeaf, EmaLeaf,
+    FractionalDiffLeaf, GammaLeaf, GarchWrappedLeaf, HoltLeaf, ImapaLeaf, IntermittentLeaf,
+    LogNormalLeaf, MultiplicativeSeasonalLeaf, NegativeBinomialLeaf, OuLeaf, PoissonLeaf,
+    PowerTransformWrapper, RectifiedNormalLeaf, SbaLeaf, SeasonalDifferenceWrapper,
+    SeasonalEmaLeaf, SeasonalIntermittentLeaf, SkewNormalLeaf, SlowStandardizeWrapper,
+    StandardizeWrapper, StlDecompLeaf, StudentTLeaf, ThetaLeaf, TsbLeaf, TweedieLeaf,
+    YjWrappedLeaf, ZeroInflatedNegativeBinomialLeaf, ZeroInflatedPoissonLeaf,
 };
 use super::DistributionalForecaster;
 
@@ -838,6 +838,20 @@ pub struct LaplaceForecaster {
     /// intermittent series with weekly / periodic non-zero clusters
     /// (SKU weekend spikes) get the phase shape right.
     seasonal_intermittent: Option<(usize, f64)>,
+    /// `α` for the SBA (Syntetos-Boylan) bias-corrected Croston leaf.
+    /// Adds `IntermittentLeaf`-style demand-per-period leaf, corrected
+    /// for Croston's ~α/2 upward bias.
+    sba: Option<f64>,
+    /// `(α_size, α_prob)` for the TSB (Teunter-Syntetos-Babai)
+    /// obsolescence-aware leaf. Tracks demand probability every period
+    /// so forecast trends to zero on obsolescent SKUs (unlike Croston).
+    tsb: Option<(f64, f64)>,
+    /// `(α, k)` for ADIDA (Aggregate-Disaggregate) leaf. Aggregates
+    /// into buckets of size k, forecasts, disaggregates. Reduces
+    /// intermittency artificially.
+    adida: Option<(f64, usize)>,
+    /// `α` for IMAPA — meta-ensemble of ADIDA at {1,2,3,4,6,8,12}.
+    imapa: Option<f64>,
     /// `α` for the Poisson-family count leaf.
     poisson: Option<f64>,
     /// `α` for the Negative-Binomial count leaf.
@@ -1058,6 +1072,10 @@ impl LaplaceForecaster {
             yj_diff_ema: Vec::new(),
             intermittent: None,
             seasonal_intermittent: None,
+            sba: None,
+            tsb: None,
+            adida: None,
+            imapa: None,
             poisson: None,
             neg_binomial: None,
             lognormal: None,
@@ -1665,6 +1683,41 @@ impl LaplaceForecaster {
         if period >= 2 {
             self.seasonal_intermittent = Some((period, alpha));
         }
+        self
+    }
+
+    /// Add the SBA (Syntetos-Boylan) bias-corrected Croston leaf. SBA
+    /// multiplies Croston's forecast by `(1 - α/2)` to remove the
+    /// leading-order upward bias. Slightly better MASE than plain
+    /// Croston on the M4 competition intermittent panel.
+    pub fn with_sba(mut self, alpha: f64) -> Self {
+        self.sba = Some(alpha);
+        self
+    }
+
+    /// Add the TSB (Teunter-Syntetos-Babai) obsolescence-aware leaf.
+    /// Unlike Croston, TSB tracks demand PROBABILITY every period so the
+    /// forecast trends to zero on obsolescent SKUs. `α_size` (usually
+    /// 0.1-0.3), `α_prob` (usually 0.02-0.1, smaller than α_size).
+    pub fn with_tsb(mut self, alpha_size: f64, alpha_prob: f64) -> Self {
+        self.tsb = Some((alpha_size, alpha_prob));
+        self
+    }
+
+    /// Add an ADIDA (Aggregate-Disaggregate) leaf. Aggregates
+    /// observations into buckets of size `k`, applies SES on the
+    /// aggregated series, disaggregates back (equal weights). Reduces
+    /// intermittency artificially so continuous-scale SES works. Best
+    /// `k` matches the natural demand cadence (7 daily→weekly, etc).
+    pub fn with_adida(mut self, alpha: f64, k: usize) -> Self {
+        self.adida = Some((alpha, k.max(1)));
+        self
+    }
+
+    /// Add IMAPA — meta-ensemble of ADIDA at `{1,2,3,4,6,8,12}`. No `k`
+    /// choice required; uniform average across levels.
+    pub fn with_imapa(mut self, alpha: f64) -> Self {
+        self.imapa = Some(alpha);
         self
     }
 
@@ -2510,6 +2563,18 @@ impl LaplaceForecaster {
                 SeasonalIntermittentLeaf::new(p, a),
             ));
         }
+        if let Some(a) = self.sba {
+            leaves.push(LeafEnum::Sba(SbaLeaf::new(a)));
+        }
+        if let Some((asize, aprob)) = self.tsb {
+            leaves.push(LeafEnum::Tsb(TsbLeaf::new(asize, aprob)));
+        }
+        if let Some((a, k)) = self.adida {
+            leaves.push(LeafEnum::Adida(AdidaLeaf::new(a, k)));
+        }
+        if let Some(a) = self.imapa {
+            leaves.push(LeafEnum::Imapa(ImapaLeaf::new(a)));
+        }
         if let Some(a) = self.poisson {
             leaves.push(LeafEnum::Poisson(PoissonLeaf::new(a)));
         }
@@ -3024,6 +3089,13 @@ impl Forecaster for LaplaceForecaster {
                     self.seasonal_intermittent = Some((period, 0.1));
                 }
             }
+            // Note: SBA / TSB / ADIDA / IMAPA are NOT auto-gated on
+            // zero_frac. Measured neutral on fev-27's m5 (existing
+            // IntermittentLeaf already captures the intermittent signal;
+            // Croston-family variants converge to similar predictions on
+            // stationary intermittent data). Users with obsolescent SKUs
+            // (TSB), strong within-week cadence (ADIDA), or multi-scale
+            // intermittency (IMAPA) should add them explicitly.
         }
 
         // Fix for issue #195 second pathology: all-positive training
