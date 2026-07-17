@@ -108,6 +108,114 @@ The fev-27 winner `MultiScaleLaplace + scH + scW=14` **regresses on M5 retail** 
 
 **Lesson**: fev-27 (mixed classical) and M5 (retail counts) are structurally different tasks with different best selectors. **No single recipe wins everywhere.** The v0.15.4 improvements are fev-27 improvements, not universal ones. For retail, `.auto_aid()` or `SmartForecaster` remain recommended (v0.13.0 era, unchanged).
 
+## Skaters-issue verification tests (2026-07-17)
+
+After v0.15.8, three open skaters issues (#86, #82, #84) each proposed a
+one-off invariant that our implementation should satisfy. We wrote them
+up as tests in `tests/laplace_robustness.rs` rather than shipping any
+new feature — the goal is to confirm/refute each claim against our
+current code and log the numbers. All three passed on first run.
+
+### #86 — variance monotonicity across horizons
+
+Skaters proposition: for integrated transforms, predictive variance must
+be nondecreasing in `h`. Multiscale mixtures may violate this at stride
+boundaries where softmax dominance shifts between scales.
+
+Tests: `multiscale_variance_is_monotone_in_horizon_on_random_walk`
+(existing, extended to H=60) and a new sibling
+`skaters_variance_is_monotone_in_horizon_on_random_walk` covering the
+production `.skaters()` path (H=30). Both check the worst adjacent
+downward ratio against a 5 % sawtooth threshold.
+
+**Result**:
+
+| Path | H | Worst `var[h]/var[h-1]` |
+|---|---:|---:|
+| `MultiScaleLaplace::skaters(60)` | 60 | 1.0000 |
+| `LaplaceForecaster::new().skaters()` | 30 | 1.0000 |
+
+Fully monotone on a Gaussian random walk. No sawtooth at any stride
+boundary. The `MultiScaleLaplace` cross-scale softmax blend in
+`src/models/laplace/multiscale.rs` and the `.skaters()` mixture emitted
+by `forecast_dist` are both variance-coherent by construction. Nothing
+to fix.
+
+### #82 — mid-PIT limit under parade over sticky
+
+Skaters proposition: `sticky` represents an atom of mass `w` at value
+`v` as `N(v, ε)`. Evaluating the mixture CDF at `v` gives `F(v-) + w/2`
+in the `ε → 0` limit — the canonical Czado–Gneiting–Held mid-PIT.
+Naive `parade(sticky(...))` should therefore yield a PIT mean of 0.5 on
+lattice data without any explicit correction.
+
+Test: `parade_pit_mean_on_lattice_series_near_half`. Random walk driven
+by ±1 steps that stall with probability 0.5 (heavy repeat pattern), 600
+observations, `.skaters().with_parade(4)`, check `mean(parade_pit[h=1])`
+against a 0.10 tolerance around 0.5.
+
+**Result**: PIT mean = 0.5250 on n=599 samples. Passes with slack.
+
+**Caveat specific to us**: our parade computes PIT via
+`Φ((y − μ)/σ)` — the mixture reduced to its first two moments — not the
+full mixture CDF with sticky atoms. Skaters' exact mid-PIT identity
+therefore doesn't apply verbatim to our implementation; the near-0.5
+mean here reflects a symmetric random walk plus enough leaf averaging
+to smear the atom, not the atom-projected mixture CDF construction.
+Shipping the atom-projected PIT would be a code change (route the
+parade through `forecast_dist` post-processing instead of raw mixture
+`(mean, std)`), tracked as a future consideration if the strict
+mid-PIT property matters to a downstream user.
+
+### #84 — parade z-std as copula-deficit diagnostic
+
+Skaters proposition: variance additivity across horizons is a copula
+assumption (independence of forecast errors). Under regime drift the
+h-step error terms share the post-origin information deficit, positively
+correlate, and additivity understates long-horizon variance. Parade's
+`z` at horizon m directly measures this: iid increments → std ≈ 1,
+regime-switching → std > 1.
+
+Test: `parade_z_std_at_long_h_larger_on_regime_switches_than_iid`. Two
+800-observation panels — (a) iid Gaussian noise, (b) random walk with
+vol σ toggling between 1.0 and 6.0 every 150 steps. `.skaters()` +
+`with_parade(12)` on each. PIT converted to z via a local bisection
+`phi_inv`. Assert both are non-collapsed (std > 0.3) AND that
+regime-switch strictly dominates iid.
+
+**Result** at h=12 (n=788 samples per panel):
+
+| Panel | z-std at h=12 |
+|---|---:|
+| iid Gaussian | 1.112 |
+| regime-switching σ ∈ {1, 6} | 1.501 |
+
+iid comes in at 1.11 (near the theoretical 1.0), regime-switch comes in
+at 1.50 (well above). Ordering holds decisively — the copula-deficit
+signal survives our pipeline even though `.skaters()` already includes
+GARCH cascades and terminal scale-mixture, which model heteroskedastic
+residuals and are expected to attenuate this signal.
+
+The elevated iid value (1.11 vs a theoretical 1.0) is consistent with
+the mean/std reduction bias flagged under #82: reducing a heavy-tailed
+mixture to a single Gaussian for the PIT slightly inflates the reported
+z-std on any panel where the true mixture has excess kurtosis.
+
+### Summary of the sweep
+
+All three passed. No code fix needed for #86 (perfectly monotone) or
+#84 (copula deficit signal is real and ordered correctly). #82 passed
+under a loose tolerance because our parade uses a mean/std reduction
+rather than the atom-projected mixture CDF from skaters' formulation —
+the "mid-PIT for free" identity is stricter than what our parade
+literally computes; a future issue could route parade through the full
+`forecast_dist` post-processing if a downstream user needs exact
+mid-PIT.
+
+The tests are cheap (< 1 second total) and act as regression guards
+against future changes to multiscale variance mixing, parade
+implementation, or the sticky-lattice atom width.
+
 ## Meta-lessons — patterns to watch for
 
 ### 1. Measure the feature's *active region* before implementing
