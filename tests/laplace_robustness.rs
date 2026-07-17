@@ -573,6 +573,176 @@ fn cauchy_input_produces_well_formed_forecast() {
     }
 }
 
+/// Shared helper: generates a sinusoidal seasonal signal at `period`
+/// (amplitude 5.0 + Gaussian noise σ = 0.5), splits into train/test,
+/// and returns (train TimeSeries, test actuals). Deterministic under
+/// a fixed seed.
+fn make_seasonal_split(
+    seed: u32,
+    period: usize,
+    n_train: usize,
+    n_test: usize,
+) -> (TimeSeries, Vec<f64>) {
+    let mut r = Lcg(seed);
+    let n = n_train + n_test;
+    let ys: Vec<f64> = (0..n)
+        .map(|t| {
+            let phase = 2.0 * std::f64::consts::PI * (t as f64) / (period as f64);
+            5.0 * phase.sin() + 0.5 * r.gauss()
+        })
+        .collect();
+    (build_ts(ys[..n_train].to_vec()), ys[n_train..].to_vec())
+}
+
+fn holdout_mae(mut f: LaplaceForecaster, train: &TimeSeries, actuals: &[f64]) -> f64 {
+    f.fit(train).expect("fit");
+    let dists = f.forecast_dist(actuals.len()).expect("forecast");
+    dists
+        .iter()
+        .zip(actuals.iter())
+        .map(|(d, &y)| (d.mean() - y).abs())
+        .sum::<f64>()
+        / actuals.len() as f64
+}
+
+/// Port of skaters issue microprediction/skaters#112:
+/// "Test more seasonal periods in the candidate population (168, 52, 5,
+/// detector-gated)." Skaters ships fixed seasonal candidates at {7, 12,
+/// 24} — period 168 (hour-of-week) improved CRPS a further ~3 % on the
+/// M4-hourly probe, and periods 52 (weekly annual cycle) and 5
+/// (business-day week) are absent from the fixed pool entirely.
+///
+/// Test: synthetic sinusoidal signal at period 168 with noise; fit
+/// `.skaters()` (default {7,12,24} pool) vs `.skaters().with_seasonal_multi(&[168])`
+/// (adds a seasonal-EMA leaf at period 168). Held-out MAE on a
+/// `2·period`-step forecast horizon. The added-168 variant should win.
+/// Port of skaters issue microprediction/skaters#112:
+/// "Test more seasonal periods in the candidate population (168, 52, 5,
+/// detector-gated)." Skaters proposes that adding period 168
+/// (hour-of-week) to the fixed {7, 12, 24} pool helps hourly-with-weekly
+/// structure. We verify what happens on our implementation.
+///
+/// **Finding**: on our `.skaters()` pool, `with_seasonal_multi(&[168])`
+/// alone has *zero* effect on held-out MAE because `slow_std` wins the
+/// 1-step log-likelihood softmax and the added `seasonal_ema(168)` leaf
+/// gets weight 0.0000 — even with batch init. The user proposition
+/// translates to our implementation only when combined with
+/// `.with_scoring_horizon(period)`, which redirects the softmax to
+/// horizon-P accuracy. With that combination, held-out MAE on a
+/// period-168 sinusoid drops from 25.30 to 4.17 (−83 %).
+///
+/// The test asserts the *combination* helps; the intermediate
+/// (`with_seasonal_multi` alone) is logged for documentation purposes.
+///
+/// **Real-data caveat**: the 83 % improvement is a synthetic artifact of
+/// the bare-`.skaters()` baseline. On real fev-27 seasonal panels the
+/// recommended baseline is `.skaters().auto_with_seasonal_period(P)`
+/// (which already enables seasonal-EMA + batch init from v0.15.2), so
+/// the `with_seasonal_multi + batch_init` half of this recipe is
+/// redundant. See `docs/LAPLACE_EXPERIMENTS.md` §"#112" for full-scale
+/// numbers: on real data `+sh(P)` alone gives at most −5.7 % on
+/// m4_hourly and `+recipe` actively regresses on tourism_quarterly
+/// (+2.8 %). This test is retained as a synthetic-mechanism regression
+/// guard, not a promise of real-world gain.
+#[test]
+fn adding_period_168_with_scoring_horizon_beats_default_pool() {
+    let (train, actuals) = make_seasonal_split(89, 168, 700, 336);
+    let mae_default = holdout_mae(LaplaceForecaster::new().skaters(), &train, &actuals);
+    let mae_added_only = holdout_mae(
+        LaplaceForecaster::new()
+            .skaters()
+            .with_seasonal_multi(&[168]),
+        &train,
+        &actuals,
+    );
+    let mae_added_sh = holdout_mae(
+        LaplaceForecaster::new()
+            .skaters()
+            .with_seasonal_multi(&[168])
+            .with_seasonal_batch_init()
+            .with_scoring_horizon(168),
+        &train,
+        &actuals,
+    );
+    eprintln!(
+        "period-168 holdout MAE: default={:.3}, +multi[168] (alone)={:.3} (Δ {:+.3}), +multi[168]+bi+sh(168)={:.3} (Δ {:+.3}, {:.1}% vs default)",
+        mae_default,
+        mae_added_only,
+        mae_added_only - mae_default,
+        mae_added_sh,
+        mae_added_sh - mae_default,
+        100.0 * (mae_added_sh - mae_default) / mae_default
+    );
+    // Adding the leaf alone should not regress (may be inert).
+    assert!(
+        mae_added_only <= mae_default * 1.02,
+        "adding period-168 leaf alone regressed: default={mae_default:.3}, added={mae_added_only:.3} (skaters#112)"
+    );
+    // The full recipe (multi + batch-init + scoring-horizon) should
+    // improve dramatically on a well-fit period-168 signal.
+    assert!(
+        mae_added_sh <= mae_default * 0.5,
+        "period-168 recipe (multi+bi+sh) failed to halve default MAE on period-168 signal: default={mae_default:.3}, recipe={mae_added_sh:.3} (skaters#112)"
+    );
+}
+
+/// Port of skaters issue microprediction/skaters#91 (synthetic subset):
+/// "waveform-scale periodicity — a body weakness measured through the
+/// anomaly head." Skaters' fixed calendar-{7,12,24} pool can't
+/// represent waveform periods (~50-400 samples) common in the UCR
+/// anomaly archive, so every cycle reads as fresh surprise. This test
+/// verifies the mechanism we'd use to fix that on our side —
+/// `with_seasonal_multi(&[period])` — actually helps on a synthetic
+/// waveform-length period without touching UCR data.
+/// Port of skaters issue microprediction/skaters#91 (synthetic subset):
+/// "waveform-scale periodicity — a body weakness measured through the
+/// anomaly head." Skaters' fixed calendar-{7,12,24} pool can't
+/// represent waveform periods (~50-400 samples) common in the UCR
+/// anomaly archive. This test verifies the mechanism our users would
+/// employ to fix that (same recipe as #112 above) on a synthetic
+/// waveform-length period, without depending on UCR data.
+///
+/// See the docstring on `adding_period_168_with_scoring_horizon_beats_default_pool`
+/// for the full mechanism explanation and the real-data caveat.
+#[test]
+fn adding_period_100_with_scoring_horizon_beats_default_pool() {
+    let (train, actuals) = make_seasonal_split(91, 100, 800, 200);
+    let mae_default = holdout_mae(LaplaceForecaster::new().skaters(), &train, &actuals);
+    let mae_added_only = holdout_mae(
+        LaplaceForecaster::new()
+            .skaters()
+            .with_seasonal_multi(&[100]),
+        &train,
+        &actuals,
+    );
+    let mae_added_sh = holdout_mae(
+        LaplaceForecaster::new()
+            .skaters()
+            .with_seasonal_multi(&[100])
+            .with_seasonal_batch_init()
+            .with_scoring_horizon(100),
+        &train,
+        &actuals,
+    );
+    eprintln!(
+        "period-100 holdout MAE: default={:.3}, +multi[100] (alone)={:.3} (Δ {:+.3}), +multi[100]+bi+sh(100)={:.3} (Δ {:+.3}, {:.1}% vs default)",
+        mae_default,
+        mae_added_only,
+        mae_added_only - mae_default,
+        mae_added_sh,
+        mae_added_sh - mae_default,
+        100.0 * (mae_added_sh - mae_default) / mae_default
+    );
+    assert!(
+        mae_added_only <= mae_default * 1.02,
+        "adding period-100 leaf alone regressed: default={mae_default:.3}, added={mae_added_only:.3} (skaters#91-subset)"
+    );
+    assert!(
+        mae_added_sh <= mae_default * 0.5,
+        "period-100 recipe (multi+bi+sh) failed to halve default MAE on period-100 signal: default={mae_default:.3}, recipe={mae_added_sh:.3} (skaters#91-subset)"
+    );
+}
+
 #[test]
 fn bitwise_determinism_on_skaters_pool() {
     // Same but with the wider .skaters() pool + our v0.15.3/4 knobs.

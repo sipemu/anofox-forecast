@@ -315,6 +315,141 @@ scored leaves' cumulative log-lik diverges to −∞; that would require
 CRPS-objective scoring (skaters ships this as `objective="crps"`; we
 don't). Deferred as out of scope for a verification test.
 
+### #112 — extra seasonal periods in the candidate pool
+
+Skaters proposition: adding period 168 (hour-of-week) beyond the fixed
+`{7, 12, 24}` seasonal candidates helps hourly-with-weekly data by ~3 %
+CRPS on skaters' M4-hourly probe; periods 52 and 5 are absent from the
+fixed pool entirely.
+
+**Two-stage evaluation**: synthetic first (unit tests), then real
+benchmark data (17 fev-27 seasonal panels + M5 subset). The synthetic
+result was dramatic; the real-data result is much more modest.
+
+#### Stage 1: synthetic tests (unit tests)
+
+Tests: `adding_period_168_with_scoring_horizon_beats_default_pool`
+(period 168 sinusoid, 700 train / 336 test) and
+`adding_period_100_with_scoring_horizon_beats_default_pool` (period 100
+sinusoid, 800 train / 200 test). Both compare bare `.skaters()` vs the
+full recipe `.skaters().with_seasonal_multi(&[P]).with_seasonal_batch_init().with_scoring_horizon(P)`.
+
+| Signal | Bare `.skaters()` | +multi[P] alone | +full recipe |
+|---|---:|---:|---:|
+| period 168 sinusoid | 25.304 | 25.304 (Δ 0.000) | **4.170** (−83.5 %) |
+| period 100 sinusoid | 36.137 | 36.137 (Δ 0.000) | **0.429** (−98.8 %) |
+
+Key mechanism: `with_seasonal_multi(&[P])` alone is inert — the added
+seasonal-EMA leaf gets softmax weight 0.0000 because `slow_std` wins
+the 1-step log-likelihood competition. The full recipe works because
+`.with_scoring_horizon(P)` redirects softmax to horizon-P accuracy,
+at which point `theta` wins and captures the seasonal structure.
+
+#### Stage 2: real fev-27 + M5 (`scratchpad/recipe_probe`, 22 s)
+
+The **synthetic baseline was bare `.skaters()`** — but the fev-27
+harness (and any reasonable user with a known period) uses
+`.skaters().auto_with_seasonal_period(P)` instead, which already
+enables `seasonal_period = Some(P)` + batch init from v0.15.2. So on
+real benchmarks the baseline is stronger and the delta shrinks.
+
+Full-scale numbers (SAMPLE_PER = 300 for fev, 500 for M5):
+
+| Dataset | n | Baseline | +sh(P) | +recipe | Δ sh | Δ recipe |
+|---|---:|---:|---:|---:|---:|---:|
+| m3_monthly       | 300 | 0.7457 | 0.7461 | 0.7459 | +0.05 % | +0.03 % |
+| m1_monthly       | 300 | 1.3231 | 1.3261 | 1.3448 | +0.23 % | **+1.64 %** |
+| m4_monthly       | 300 | 1.2550 | 1.2543 | 1.2669 | −0.06 % | +0.95 % |
+| tourism_monthly  | 300 | 2.5209 | 2.4546 | 2.5181 | **−2.63 %** | −0.11 % |
+| cif_2016         |  69 | 1.3689 | 1.3675 | 1.3615 | −0.10 % | −0.54 % |
+| fred_md          | 107 | 0.5222 | 0.5093 | 0.5093 | **−2.47 %** | **−2.47 %** |
+| hospital         | 300 | 0.7808 | 0.7818 | 0.7806 | +0.13 % | −0.03 % |
+| car_parts¹       | 300 | 2 252 253 | 2 252 253 | 2 252 253 | +0.00 % | +0.00 % |
+| m3_quarterly     | 300 | 1.5893 | 1.5893 | 1.5722 | −0.00 % | −1.08 % |
+| m1_quarterly     | 173 | 1.9929 | 1.9928 | 1.9838 | −0.00 % | −0.45 % |
+| m4_quarterly     | 300 | 1.3474 | 1.3480 | 1.3479 | +0.04 % | +0.04 % |
+| tourism_quarterly | 300 | 2.5723 | 2.5781 | 2.6453 | +0.22 % | **+2.84 %** |
+| m4_daily         | 300 | 1.1967 | 1.1978 | 1.1978 | +0.10 % | +0.10 % |
+| m4_hourly        | 300 | 2.1583 | 2.0351 | 2.1944 | **−5.71 %** | +1.67 % |
+| australian_electricity² | 5 | 2.3314 | 2.3314 | 2.3314 | +0.00 % | +0.00 % |
+| exchange_rate²   |   8 | 1.6815 | 1.6815 | 1.6815 | +0.00 % | −0.00 % |
+| **m5_top1000**   | **500** | **1.0239** | **1.0198** | **1.0204** | **−0.40 %** | **−0.34 %** |
+
+¹ *car_parts is spare-parts intermittent data: near-zero seasonal-naive
+denominator makes MASE explode identically for all variants — not a
+signal.*
+² *length filter kept only 5–8 series; noise-only sample.*
+
+**Mean per-dataset Δ MASE**: `+sh(P)` **−0.62 %**, `+recipe` **+0.13 %**.
+**Win rate**: `+sh(P)` beats baseline on 8/17, `+recipe` on 8/17.
+**M5 is flat** (−0.4 % and −0.3 %).
+
+#### Interpretation
+
+The synthetic tests overstate. Three reasons:
+
+1. **The synthetic baseline was bare `.skaters()`, not the recommended
+   `.skaters().auto_with_seasonal_period(P)`.** `.auto_with_seasonal_period(P)`
+   already enables the seasonal-EMA leaf with batch init (v0.15.2 fix),
+   so the whole `+multi + batch_init` half of the "full recipe" is
+   redundant on the correct baseline.
+
+2. **`+recipe` actively regresses on some panels**: tourism_quarterly
+   (+2.84 %), m1_monthly (+1.64 %), m4_hourly (+1.67 % vs baseline,
+   even though `+sh(P)` alone gave −5.71 %). The double-add of a
+   seasonal_ema leaf (once via `auto_with_seasonal_period`, once via
+   `with_seasonal_multi`) is a footgun.
+
+3. **`+sh(P)` alone is the useful ingredient**, not the seasonal-multi
+   layer. It gives real single-digit-percent gains on the panels where
+   long-horizon accuracy diverges from 1-step LL (m4_hourly −5.71 %,
+   tourism_monthly −2.63 %, fred_md −2.47 %) and is neutral or
+   slightly negative elsewhere.
+
+#### Recommendations
+
+**Do not ship** `with_seasonal_multi(&[P]) + with_seasonal_batch_init +
+with_scoring_horizon(P)` as a "recipe" — it regresses on real data.
+
+**For users** with a strong long-horizon accuracy requirement (e.g.
+hourly panels with hour-of-day cycles):
+```rust
+.skaters().auto_with_seasonal_period(P).with_scoring_horizon(P)
+```
+Expect roughly a 2–6 % MASE improvement on the panels where the
+current baseline under-uses the seasonal signal (m4_hourly-shaped
+data), neutral-to-mildly-negative elsewhere. Optional and case-by-case,
+not a default.
+
+**Do NOT combine with `with_seasonal_multi(&[P])`** when `auto_with_seasonal_period(P)`
+is already in play — the double leaf-add hurts on tourism_quarterly
+and m1_monthly.
+
+**M5 unaffected either way.** Consistent with the existing v0.15.4
+finding that M5 has different needs (AID-selected count leaves via
+`.auto_aid()` / `SmartForecaster`).
+
+**Synthetic-test caveat**: the two `adding_period_*` tests still pass,
+but their assertion of a 50 %+ MAE reduction is a synthetic artifact
+of the bare-`.skaters()` baseline. The tests remain useful as
+regression guards for the seasonal-batch-init + scoring-horizon path,
+but their headline numbers should not be quoted as expected real-data
+gains.
+
+### #91-subset — waveform-scale periodicity
+
+Same recipe as #112 above; the period-100 test doubles as a synthetic
+subset of the UCR-anomaly-archive waveform case. Same synthetic gain
+(−98.8 % MAE), same real-data caveat (fev-27 result is at most −5.7 %
+on m4_hourly, and only via `+sh(P)` alone, not the full recipe).
+
+The larger #91 claim (failure appears via the anomaly head on
+250-series UCR panels) still needs a full UCR-archive run and is out
+of scope for a unit-test suite. If the UCR forecasting benefit
+mirrors the fev-27 finding (single-digit percent, not 80 %+), the
+practical answer is the same: `.auto_with_seasonal_period(P).with_scoring_horizon(P)`
+with the caller supplying the detected period.
+
 ## Meta-lessons — patterns to watch for
 
 ### 1. Measure the feature's *active region* before implementing
@@ -370,6 +505,10 @@ Ordered by expected impact-per-effort based on what we've measured:
 
 ## Cross-references
 
+- **`docs/LAPLACE_PARAMETER_GUIDE.md`** — prescriptive decision tree for
+  humans + AI, keyed on observable data properties → concrete builder
+  chains. Distills the recommendations from this post-mortem into
+  actionable rules with evidence pointers.
 - `CHANGELOG.md` — chronological per-release notes
 - `docs/SOTA_POSITIONING.md` — current leaderboard position + M5 caveat preamble + release-by-release progression table
 - `README.md` — user-facing rules of thumb + v0.15.4 recipe warning box
