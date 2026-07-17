@@ -428,6 +428,151 @@ fn parade_z_std_at_long_h_larger_on_regime_switches_than_iid() {
     );
 }
 
+/// Port of skaters issue microprediction/skaters#107:
+/// on tick-grid data (e.g. futures prices quoted on a 0.25 grid), a real
+/// user reported the `.skaters()` 98 % band achieving only ~94 %
+/// coverage on ~925 k ES-futures points, with the miss attributed to
+/// sticky-lattice atoms concentrating probability on grid values while
+/// the *bands* between grid values are underweighted. The author asks
+/// whether `sticky=False` is the recommended setting for such data.
+///
+/// This test measures the same question on a synthetic tick-grid random
+/// walk with a *walk-forward* refit loop against `forecast_dist(1)` (not
+/// via parade — our parade snapshots the raw mixture pre-post-processing
+/// and therefore never sees the sticky atom overlay, so a parade-based
+/// comparison would be trivially identical). Sticky-on vs no-sticky
+/// coverage of the 98 % quantile band is computed over `WF_STEPS`
+/// out-of-sample 1-step forecasts. The user's ES data shows sticky-on
+/// undercovering; our test asks the same question of our implementation.
+///
+/// Kept small (100 walk-forward steps × 2 refits) to hold the test
+/// under ~10 seconds. Assertions are weak — both coverages must land
+/// in a plausible range, no directional claim is enforced — because
+/// the answer for our implementation is the *finding*, not a fixture.
+#[test]
+fn sticky_vs_no_sticky_coverage_on_tick_grid_data() {
+    fn tick_grid_walk(seed: u32, n: usize, tick: f64) -> Vec<f64> {
+        // Random walk with Gaussian increments snapped to a `tick` grid.
+        // Tick = 1.0 with Gaussian(0,1) increments matches the ES regime:
+        // increment vol comparable to tick size, ~38 % of steps revisit
+        // the previous value, so sticky has a chance to fire.
+        let mut r = Lcg(seed);
+        let mut lvl = 0.0f64;
+        (0..n)
+            .map(|_| {
+                lvl += r.gauss();
+                (lvl / tick).round() * tick
+            })
+            .collect()
+    }
+    enum Variant {
+        Default, // .skaters() — auto-gate decides
+        Forced,  // .skaters().with_sticky() — bypass auto-gate, force on
+        Off,     // .skaters().no_sticky() — force off
+    }
+    fn walk_forward_coverage(ys: &[f64], warm: usize, v: Variant) -> (f64, usize) {
+        let mut hits = 0usize;
+        let mut n = 0usize;
+        for cut in warm..ys.len() {
+            let prefix: Vec<f64> = ys[..cut].to_vec();
+            let ts = build_ts(prefix);
+            let mut f = match v {
+                Variant::Default => LaplaceForecaster::new().skaters(),
+                Variant::Forced => LaplaceForecaster::new().skaters().with_sticky(),
+                Variant::Off => LaplaceForecaster::new().skaters().no_sticky(),
+            };
+            f.fit(&ts).expect("fit");
+            let d = &f.forecast_dist(1).expect("forecast")[0];
+            let q_lo = d.quantile(0.01);
+            let q_hi = d.quantile(0.99);
+            if ys[cut] >= q_lo && ys[cut] <= q_hi {
+                hits += 1;
+            }
+            n += 1;
+        }
+        (hits as f64 / n.max(1) as f64, n)
+    }
+    let ys = tick_grid_walk(79, 500, 1.0);
+    let warm = 400;
+    let (cov_def, n_def) = walk_forward_coverage(&ys, warm, Variant::Default);
+    let (cov_forced, n_forced) = walk_forward_coverage(&ys, warm, Variant::Forced);
+    let (cov_off, n_off) = walk_forward_coverage(&ys, warm, Variant::Off);
+    eprintln!(
+        "tick=1.0 walk-forward 98%-band coverage: default={:.3} (n={}), forced-sticky={:.3} (n={}), no-sticky={:.3} (n={})",
+        cov_def, n_def, cov_forced, n_forced, cov_off, n_off
+    );
+    for (label, cov) in [
+        ("default", cov_def),
+        ("forced", cov_forced),
+        ("off", cov_off),
+    ] {
+        assert!(
+            (0.70..=1.0).contains(&cov),
+            "{label} coverage {cov:.3} outside [0.70, 1.00] — pool broken"
+        );
+    }
+}
+
+/// Port of skaters issue microprediction/skaters#85:
+/// "CRPS objective is well-posed under fat tails (first moment only);
+/// likelihood needs a second moment." On symmetric α-stable input
+/// (infinite variance) the log-lik-scored leaves' scale estimate should
+/// diverge, but the CRPS objective — a Cramér-distance projection —
+/// only needs `E|X| < ∞`, so the ensemble output must remain
+/// well-formed as long as `terminal_crps` (present in our `.skaters()`
+/// pool) can carry it.
+///
+/// This test uses Cauchy (α=1) input, sampled via the inverse-CDF
+/// `tan(π(u - ½))`. Cauchy is the canonical infinite-variance case: no
+/// second moment, first moment ill-defined (but the median is), and
+/// realisations can be arbitrarily large. If any leaf overflows or the
+/// final mixture becomes non-finite, the test fails — that is precisely
+/// the "log-lik objective is not even defined in the limit" regime the
+/// author cites.
+#[test]
+fn cauchy_input_produces_well_formed_forecast() {
+    let mut r = Lcg(83);
+    let ys: Vec<f64> = (0..500)
+        .map(|_| {
+            // Cauchy(0,1) via inverse CDF; guard the uniform away from
+            // the exact endpoints so tan doesn't literally return ±∞.
+            let mut u = r.next();
+            if u <= 1e-9 {
+                u = 1e-9;
+            } else if u >= 1.0 - 1e-9 {
+                u = 1.0 - 1e-9;
+            }
+            (std::f64::consts::PI * (u - 0.5)).tan()
+        })
+        .collect();
+    // Diagnostic: report the empirical scale so a reader understands the
+    // regime — a Cauchy sample of length 500 typically has a few |y| in
+    // the 1e2–1e4 range which would blow up a naive variance estimator.
+    let max_abs = ys.iter().copied().fold(0.0f64, |a, b| a.max(b.abs()));
+    eprintln!("cauchy sample max |y|: {max_abs:.3e}");
+    let last = *ys.last().unwrap();
+    let ts = build_ts(ys);
+    let mut f = LaplaceForecaster::new().skaters();
+    f.fit(&ts).expect("fit on Cauchy input");
+    let dists = f.forecast_dist(3).expect("forecast");
+    assert_eq!(dists.len(), 3);
+    // Full well-formedness — mean and std finite, quantiles finite and
+    // monotone — is the invariant skaters#85 predicts should hold via the
+    // CRPS terminal even when log-lik-scored leaves would diverge.
+    for (h, d) in dists.iter().enumerate() {
+        let label = format!("cauchy h={}", h + 1);
+        assert!(d.mean().is_finite(), "{label}: mean = {}", d.mean());
+        assert!(
+            d.std().is_finite() && d.std() > 0.0,
+            "{label}: std = {}",
+            d.std()
+        );
+        // Use a near-the-data probe rather than 0.3 so the assertion
+        // stresses the region the data actually occupied.
+        assert_wellformed(d, last, &label);
+    }
+}
+
 #[test]
 fn bitwise_determinism_on_skaters_pool() {
     // Same but with the wider .skaters() pool + our v0.15.3/4 knobs.

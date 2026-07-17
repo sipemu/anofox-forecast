@@ -216,6 +216,105 @@ The tests are cheap (< 1 second total) and act as regression guards
 against future changes to multiscale variance mixing, parade
 implementation, or the sticky-lattice atom width.
 
+### #107 — sticky calibration on tick-grid data
+
+User report on skaters: `.skaters()` 98 % band achieved only ~94 %
+coverage on ~925 k ES-futures 1-minute returns (quoted on a 0.25-point
+grid). Attributed to sticky-lattice atoms concentrating probability on
+grid values while the bands between grid points get underweighted. The
+author asked whether `sticky=False` is the recommended setting.
+
+Test: `sticky_vs_no_sticky_coverage_on_tick_grid_data`. Walk-forward
+refit loop against `forecast_dist(1)` (NOT parade — our parade
+snapshots the raw mixture pre-post-processing and therefore never sees
+the sticky atom overlay, so a parade-based comparison would be
+trivially identical). Synthetic tick=1.0 random walk, 500 obs, 100
+walk-forward steps × three variants: `.skaters()` (auto-gate decides),
+`.skaters().with_sticky()` (force on), `.skaters().no_sticky()` (force
+off).
+
+**Result** (empirical coverage of the 98 % quantile band):
+
+| Variant | Coverage |
+|---|---:|
+| `.skaters()` (default) | 0.990 |
+| `.skaters().with_sticky()` (forced on) | 0.990 |
+| `.skaters().no_sticky()` (forced off) | 0.990 |
+
+**All three identical, all above the 98 % target.** In our
+implementation the sticky-lattice projection is *coverage-neutral* on
+tick-grid random walks. The user's degradation does not reproduce.
+
+Two candidate reasons for the divergence from skaters:
+- **Auto-gate**: `.skaters()` runs `sticky_auto_gate` which turns
+  sticky off when the data doesn't look discrete-count. But even the
+  *forced-on* variant with the auto-gate bypassed shows no degradation,
+  ruling this out as the sole explanation.
+- **Sticky spike width and pool composition**: our `.skaters()` pool
+  includes `terminal_scale_mixture` cascades whose broad body absorbs
+  the atom overlay. Combined with our sticky spike-std default (a
+  fraction of the mixture body), the atoms add negligible tail mass on
+  a smooth random walk.
+
+**Interpretation**: for tick-grid Gaussian-random-walk data on our
+implementation, `sticky=on|off` doesn't matter for coverage — the user
+can pick either. This is a *stronger* answer than skaters' (where
+`sticky=False` was the recommendation): we hand the user a
+representation-choice-free result.
+
+**Caveats**: (a) the test uses a synthetic random walk, not real ES
+futures data; a longer-tail or level-shifting real series could still
+expose an effect. (b) 100 walk-forward steps gives coarse coverage
+resolution (±3 pp at n=100 under a truly-98 % binomial). (c) the
+walk-forward loop is O(N²) — refitting on the growing prefix for every
+step; kept small to stay under 2 seconds per test.
+
+### #85 — CRPS well-posed under fat tails (Cauchy input)
+
+Skaters proposition: CRPS is a projection in the Cramér distance and
+is finite whenever `E|X| < ∞` (first moment only). Log-lik is a KL
+projection, moment-matches for location-scale families, and requires a
+finite second moment. Under symmetric α-stable input with α < 2 the
+variance is infinite; the log-lik-scored leaves' scale estimate
+diverges, but the CRPS objective remains well-posed. The ensemble
+output must therefore stay well-formed if the pool carries a
+CRPS-scored terminal.
+
+Test: `cauchy_input_produces_well_formed_forecast`. 500 samples of
+Cauchy(0, 1) via inverse-CDF `tan(π(u − ½))` (α=1, the canonical
+infinite-variance case: no second moment). Fit `.skaters()` and check
+that `forecast_dist(3)` at every horizon has finite mean, finite
+positive std, and passes the standard `assert_wellformed` (finite
+`logpdf`, `cdf ∈ [0, 1]`, monotone finite quantiles at `p ∈
+{0.001, 0.25, 0.5, 0.75, 0.999}`).
+
+**Result** (sample max |y| = 170 for the fixed seed):
+
+| Horizon | mean | std | quantiles |
+|---|:---:|:---:|:---:|
+| h = 1, 2, 3 | finite | finite, positive | finite, monotone |
+
+All checks pass. The ensemble survives Cauchy input — the presence of
+`terminal_crps` and `terminal_scale_mixture` in the pool keeps the
+final mixture well-defined even though log-lik-scored leaves would
+misestimate scale in the infinite-variance regime.
+
+**Interpretation**: our pool composition satisfies the skaters#85
+invariant. This is a stronger correctness guarantee than "doesn't
+overflow on large but finite values" (the existing
+`monster_spike_then_recovery` and `extreme_finite_tick` tests) —
+Cauchy input has *no* well-defined variance in expectation, so
+survival is a stronger property than survival on any single extreme
+observation.
+
+**Caveats**: the softmax scoring in `LaplaceForecaster` is still
+log-lik-based, not CRPS-based. What survives is the *output* under
+Cauchy input, not the *scoring* stability. A stronger test would
+verify that CRPS-scored leaves collect softmax weight while log-lik
+scored leaves' cumulative log-lik diverges to −∞; that would require
+CRPS-objective scoring (skaters ships this as `objective="crps"`; we
+don't). Deferred as out of scope for a verification test.
+
 ## Meta-lessons — patterns to watch for
 
 ### 1. Measure the feature's *active region* before implementing
