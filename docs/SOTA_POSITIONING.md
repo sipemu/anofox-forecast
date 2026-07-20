@@ -40,7 +40,8 @@ MultiScaleLaplace::skaters(H)
 | 5 | Chronos-Bolt-Base | 1.393 | Foundation (CPU-optimized) |
 | 6 | Moirai-Base | 1.423 | Foundation (GPU) |
 | 7 | Nixtla `auto_ets` | 1.440 | Classical (CPU) |
-| **~7-8** | **this crate: `MultiScaleLaplace + scH + scW=14` (v0.15.4)** | **1.4602** | **Classical (CPU), streaming shell** |
+| **~7-8** | **this crate: `MultiScaleLaplace + scH + scW=14` (v0.15.4)** | **1.4572** | **Classical (CPU), streaming shell** |
+| **~7-8** | **this crate: `.skaters() + scH(P) + scW=14` (v0.15.3)** | **1.4655** | **Same tier, simpler recipe (2026-07-20 A/B)** |
 | 8 | this crate: `AutoETS` | 1.525 | Classical (CPU) |
 | 9 | Seasonal Naive | 1.665 | Baseline |
 | ~10 | this crate: `LaplaceForecaster::auto()` (v0.15.4) | 1.6457 | Streaming |
@@ -48,14 +49,34 @@ MultiScaleLaplace::skaters(H)
 
 **We moved up ~3 ranks from v0.13.0 (was rank 11 at 1.723). Now competitive with Nixtla `auto_ets` (1.440) and ahead of our own `AutoETS` (1.525).**
 
+**⚠ Attribution note (measured 2026-07-20)**: MultiScale's marginal
+contribution over the plain-`.skaters()` recipe with the same scoring
+knobs is only **0.57 %** geomean MASE (1.4572 vs 1.4655). Wins the
+geomean by a hair, loses the win-rate (8/23 vs 10/23). The bulk of the
+v0.15.4 −15.3 % headline is really v0.15.3's `scoring_window(14)`; the
+MultiScale wrapping added on top is a small, situational refinement,
+not the "biggest single-change improvement" the original narrative
+suggested. Users who want the last 0.6 % of accuracy or already have
+MultiScale in their stack — use it. Users who want the simpler API and
+15 % lower fit time — use the plain-`.skaters()` recipe. See
+[`docs/LAPLACE_PARAMETER_GUIDE.md`](LAPLACE_PARAMETER_GUIDE.md) §"Step 4"
+for the full breakdown.
+
 Progression by release on the same 23-set geomean MASE:
 
 | Release | `.auto()` | winning opt-in config | Δ vs v0.13.0 |
 |---|---:|---:|---:|
 | v0.13.0 (baseline) | 1.723 | — | — |
 | v0.15.1 (#195 fixes) | 1.6457 | — | −4.5 % |
-| v0.15.3 (scH + scW) | 1.6457 | `.skaters()` + scH + scW=14: **1.4994** | −13.0 % |
-| **v0.15.4 (multiscale)** | 1.6457 | `MultiScaleLaplace + scH + scW=14`: **1.4602** | **−15.3 %** |
+| v0.15.3 (scH + scW) | 1.6457 | `.skaters()` + scH + scW=14: **1.4655**† | **−15.0 %** |
+| v0.15.4 (multiscale) | 1.6457 | `MultiScaleLaplace + scH + scW=14`: **1.4572**† | **−15.5 %** |
+
+† *Both remeasured 2026-07-20 on the same 23-set subset with SAMPLE_PER=500.
+Original v0.15.4 release-time value was 1.4602; the 2026-07-20 rerun
+gets 1.4572 (matches within 0.2 %). Original v0.15.3 value was 1.4994;
+the difference now to 1.4655 is that the v0.15.3 measurement did not
+include the `.auto_with_seasonal_period(P)` baseline that we now use
+universally.*
 
 ## Historic benchmarks (v0.13.0 → v0.15.0 era)
 

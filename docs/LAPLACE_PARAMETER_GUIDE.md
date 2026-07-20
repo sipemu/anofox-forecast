@@ -131,14 +131,15 @@ release notes].
 
 ## Step 4 — MultiScale, tails, and calibration (opt-in, situational)
 
-### `MultiScaleLaplace::skaters(H)` — best fev-27 config
+### `MultiScaleLaplace::skaters(H)` — best fev-27 config (marginal over `+sw14`)
 
 Wraps `.skaters()` at multiple decimation strides ({1, period, k}).
-Best-known fev-27 recipe.
+Best-known fev-27 geomean MASE.
 
 - **[SETTLED]** Use when: continuous / economic panels + horizon-focused
-  MASE optimization. **−11.3 % MASE on fev-27 leaderboard subset**
-  [`docs/SOTA_POSITIONING.md`].
+  MASE optimization + you want the last 0.6 % of accuracy.
+  **Geomean MASE 1.4572 on the 23-set leaderboard subset** (reproduced
+  2026-07-20; documented value 1.4602 from v0.15.4 release).
 - **[SETTLED]** DO NOT use for M5 / retail counts — **+8.7 % MASE
   regression** [`docs/LAPLACE_EXPERIMENTS.md` §"M5 regression"].
 - **[SETTLED]** Requires N > 50 per activated scale; drops decimated
@@ -151,6 +152,35 @@ let mut m = MultiScaleLaplace::skaters(H)
     .with_scoring_window(14);
 if period >= 2 { m = m.with_period(period); }
 ```
+
+**⚠ Attribution note (measured 2026-07-20)**: on the 23-set leaderboard
+subset, MultiScale's marginal contribution over the plain-`.skaters()`
+recipe with the same scoring knobs is only **0.57 %** geomean MASE
+(1.4572 vs 1.4655). The bulk of the historical −11.3 % v0.15.4 headline
+gain is actually from `.with_scoring_window(14)` (v0.15.3), not from
+the MultiScale wrapping. See the lighter alternative below.
+
+### Simpler alternative: `.skaters() + scoring_horizon(P) + scoring_window(14)` — 99 % of MultiScale's gain
+
+Same accuracy tier, ~15 % faster fit, no MultiScale wrapping, no per-scale
+sub-forecaster book-keeping.
+
+```rust
+LaplaceForecaster::new()
+    .skaters()
+    .auto_with_seasonal_period(P)
+    .with_scoring_horizon(P)
+    .with_scoring_window(14)
+```
+
+- **[SETTLED]** Geomean MASE **1.4655** on the 23-set leaderboard
+  subset — 0.57 % behind MultiScale, but wins **10/23** datasets vs
+  MultiScale's 8/23. Directly competitive.
+- **[SETTLED]** Total fit time 9.6 s vs MultiScale's 11.5 s on the same
+  panel (~15 % lighter). No MultiScale complexity.
+- **[SETTLED]** Same M5 rule applies — do not use for retail counts.
+- **[HEURISTIC]** Recommended default for fev-27-shaped work when
+  simplicity matters more than the last 0.6 %.
 
 ### `.with_parade(k) + GpdTailsForecaster` — extreme quantiles
 

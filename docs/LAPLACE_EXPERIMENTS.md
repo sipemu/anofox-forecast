@@ -37,15 +37,48 @@ The single biggest surprise. Replaces the cumulative `Σ logpdf` in `cum_log_lik
 
 Optimum is aggressive (W = 7–14). Larger windows monotonically approach the cumulative baseline.
 
-### `MultiScaleLaplace + scH + scW=14` — the star (v0.15.4)
+### `MultiScaleLaplace + scH + scW=14` — the "star" that's mostly `scW=14` (v0.15.4)
 
-Combining v0.15.3's scoring knobs with a multi-scale wrapper (each scale runs `.skaters()` on decimated data, blended per-horizon via softmax over per-scale training log-lik) gave **−11.3 % MASE** on the leaderboard-comparable subset. Biggest single-change improvement in project history.
+Combining v0.15.3's scoring knobs with a multi-scale wrapper (each scale runs `.skaters()` on decimated data, blended per-horizon via softmax over per-scale training log-lik) gave **−11.3 % MASE** on the leaderboard-comparable subset. Originally framed as the biggest single-change improvement in project history.
 
 **Key tuning parameters** — all discovered by measurement:
 - `min_samples = 50` (dropped from 100). At 100 no fev-27 panel activates any decimated scale (degenerates to scale-1). At 30 m4_hourly's stride 24 activates with only 29 obs and the 30-leaf sub-pool can't fit → catastrophic regression.
 - Drop the `⌈√k⌉` stride when a period is set. A coprime stride aliases the seasonal signal; measured on fev-27 as −55 % m4_hourly / −50 % tourism_monthly regression at v1 of the port.
 - Scale-1 sub-forecaster receives the period hint via `.auto_with_seasonal_period(p)` — matches the fev-27 harness call pattern so multiscale isn't handicapped by missing the v0.15.1 seasonal-period fix.
 - Sub-forecasters wrap `.skaters()`, not `.auto()` — the wider pool wins on m4_hourly and long-N panels.
+
+**⚠ Attribution correction (measured 2026-07-20 on full fev-27, SAMPLE_PER=500)**:
+The v0.15.4 headline of "biggest single-change improvement" was
+overstated. On the 23-set leaderboard subset, the marginal contribution
+of MultiScale over the plain-`.skaters()` recipe with the same scoring
+knobs is only **0.57 %** geomean MASE:
+
+| Recipe | Geomean MASE (23-set) | Win-rate |
+|---|---:|---:|
+| `.skaters().auto_with_seasonal_period(P)` (baseline) | 1.6526 | 3/23 |
+| `+scoring_horizon(P)` alone (no `scW=14`) | 1.6411 | 1/23 |
+| `+scoring_horizon(P) + scoring_window(14)` | 1.4655 | 10/23 ⭐ |
+| `MultiScale + scH + scW=14` (v0.15.4 "winner") | 1.4572 | 8/23 |
+| `MultiScale + scH` (no `scW=14`) | 1.6410 | 1/23 |
+
+The bulk of the gain (−11.3 % of the −11.7 % over baseline) is from
+`.with_scoring_window(14)`, which was **v0.15.3**. MultiScale on top
+adds 0.57 % geomean and *loses* the win-rate. The v0.15.4 story is
+best rewritten as: **v0.15.3's `scoring_window(14)` was the star;
+v0.15.4's MultiScale wrapping is a small, situational refinement that
+buys the last 0.6 % at ~15 % higher fit-time cost.**
+
+Practical implication for users: pick MultiScale if you already have
+the wrapper for other reasons or want the last 0.5 %. Otherwise, the
+plain-`.skaters().auto_with_seasonal_period(P).with_scoring_horizon(P).with_scoring_window(14)`
+recipe is 99 % as good, simpler API, faster. See
+`docs/LAPLACE_PARAMETER_GUIDE.md` §"Step 4" for the current guidance.
+
+**Meta-lesson**: attribution matters. When a compound recipe wins,
+run the "just the last knob" A/B before crediting the outermost
+wrapper. In v0.15.4 we bundled MultiScale + scH + scW together and
+credited MultiScale; the honest attribution was to scoring_window (an
+earlier feature) and the wrapper contributed marginal refinement.
 
 ## What didn't work (and why)
 
