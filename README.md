@@ -658,6 +658,8 @@ println!("Upper: {:?}", intervals.upper());
 
 Behind the default `postprocess` + opt-in `distributional` features, the crate ships a streaming distributional-forecasting shell (`LaplaceForecaster`) inspired by [skaters](https://github.com/microprediction/skaters) and integrated with the `anofox-regression` AID (Automatic Identification of Demand) classifier. Three zero-config selectors are available; **which one wins depends on your panel type**.
 
+> **Picking parameters?** See [`docs/LAPLACE_PARAMETER_GUIDE.md`](docs/LAPLACE_PARAMETER_GUIDE.md) — a prescriptive decision tree keyed on observable data properties (continuous / count / intermittent / tick-grid / short-history) that hands back concrete builder chains, with every recommendation grounded in measured fev-27 or M5 evidence. Designed for both humans and AI to consult before touching the API.
+
 ### Position vs. SOTA (fev Chronos-benchmark, 27 datasets)
 
 Full head-to-head positioning is in [`docs/SOTA_POSITIONING.md`](docs/SOTA_POSITIONING.md). Summary on the leaderboard-comparable 23-dataset subset (updated for v0.15.4):

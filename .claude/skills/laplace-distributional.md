@@ -8,6 +8,12 @@ user_invocable: true
 
 Streaming per-observation ensemble that emits a `Vec<GaussianMixture>` per forecast. Ported from and interoperable with [microprediction/skaters](https://github.com/microprediction/skaters).
 
+**Picking parameters?** For rule-based decision trees keyed on your data
+type (continuous / count / intermittent / tick-grid / short-history),
+see `docs/LAPLACE_PARAMETER_GUIDE.md`. That guide is the source of
+truth for *which* builder chain to use; this skill covers *how* to use
+the resulting API.
+
 Requires the `distributional` cargo feature:
 
 ```toml
