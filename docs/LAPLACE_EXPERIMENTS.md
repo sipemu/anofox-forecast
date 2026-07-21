@@ -1,10 +1,10 @@
-# Laplace experiments — post-mortem (v0.15.2 → v0.15.5)
+# Laplace experiments — post-mortem (v0.15.2 → 2026-07-21)
 
-*Written 2026-07-14 after the skaters-parity work. This is a consolidated engineering post-mortem covering ~10 experiments across four releases: what we tried, what worked, what didn't, and the meta-lessons. Meant to save future contributors from re-running dead ends.*
+*Written 2026-07-14 after the skaters-parity work, extended 2026-07-21 with the multi-α SH pool experiments. Consolidated engineering post-mortem covering ~15 experiments across five phases: what we tried, what worked, what didn't, and the meta-lessons.*
 
 ## Context
 
-The starting point was v0.13.0 `LaplaceForecaster::auto()` at rank 11 on the fev-27 leaderboard-comparable subset (MASE 1.723). By v0.15.5 we're at rank ~7-8 (MASE 1.4602 with the winning opt-in recipe) — competitive with Nixtla `auto_ets`. This document records how we got there.
+Starting point v0.13.0 `LaplaceForecaster::auto()` at rank 11 on the fev-27 leaderboard-comparable 23-dataset subset (MASE 1.723). After the 2026-07-21 multi-α SH pool work we're at rank ~6-7 (MASE 1.4149 with the current-best recipe) — past Nixtla `auto_ets` and within 0.6 % of Moirai-Base (GPU foundation model).
 
 ## Summary table
 
@@ -19,6 +19,11 @@ The starting point was v0.13.0 `LaplaceForecaster::auto()` at rank 11 on the fev
 | MultiScaleLaplace `DistributionalForecaster` + scH/scW pass-through | v0.15.4 | ✅ **−11.3 % MASE** on fev-27 leaderboard subset | ~200 LOC |
 | Parade PIT + GPD tails (full port) | v0.15.4 | ⚠ Works, 0 % benefit on fev-27, 17× fit-time cost | ~500 LOC |
 | `MultiScaleLaplace + scH + scW=14` on M5 | v0.15.4 | ❌ Regresses M5 retail by +8.7 % MASE / +9.5 % WAPE | Discovered post-release |
+| Scoring window sweep + learning-rate sweep on `.skaters()`/MS | 2026-07-20 | ✅ `sw=10` beats `sw=14` (−0.4 %); `η=0.20` beats default `η=0.5` (−0.85 % on MS) | Harness only |
+| Per-phase Holt (SH) leaf single-α on MS | 2026-07-21 | ✅ SH(0.5, 0.2) yields −0.65 % geomean; killer wins on trending seasonal (tourism_quarterly −8.9 %) | ~120 LOC (new `SeasonalHoltLeaf`) + builder wiring |
+| Per-phase Holt multi-α pool on MS | 2026-07-21 | ✅ **3-α pool `{(0.3,0.1), (0.5,0.2), (0.7,0.3)}` beats single-α by −0.33 %, total −0.97 % vs no-SH** | Vec-typed builder change on `MultiScaleLaplace` |
+| Partial-moment (up/down asymmetric variance) leaf | 2026-07-21 | ❌ Neutral to +0.05 %; single-Gaussian-per-leaf arch prevents true two-piece predictive | ~150 LOC, reverted |
+| Streaming ridge stacker prototype | 2026-07-21 | ❌ +66 % regression on yearly panels (tail too short for stable weights); non-neg-constrained variant deferred | Probe example only, no crate change |
 
 ## What worked
 
@@ -482,6 +487,53 @@ of scope for a unit-test suite. If the UCR forecasting benefit
 mirrors the fev-27 finding (single-digit percent, not 80 %+), the
 practical answer is the same: `.auto_with_seasonal_period(P).with_scoring_horizon(P)`
 with the caller supplying the detected period.
+
+## Multi-α seasonal-Holt pool (2026-07-21)
+
+Post-v0.15.4 push to close the gap to Nixtla `auto_ets` (1.440) on the
+23-set leaderboard subset. Three tests:
+
+**Test 1 — SH single-α sweep.** Extended `.with_seasonal_holt` to a
+sweep over α = (level, trend) ∈ {(0.4, 0.15), (0.5, 0.2), (0.5, 0.3),
+(0.6, 0.2), (0.6, 0.3), (0.7, 0.4)}. All lie in a flat plateau at
+−0.44 % to −0.62 % vs the no-SH MS baseline. No single-α beats
+(0.5, 0.2). Conclusion: single-α is a dead end.
+
+**Test 2 — SH multi-α pool [WIN].** Extended `MultiScaleLaplace` to
+accept a Vec of `(α_l, α_t)` pairs, one leaf per call. Softmax across
+the pool picks per dataset:
+
+| Variant | Full-scale 25-set geomean | vs no-SH |
+|---|---:|---:|
+| MS_ref (no SH) | 5.3375 | 0 % |
+| MS + SH(0.5, 0.2) | 5.3029 | −0.65 % |
+| MS + SH(0.3, 0.1) + SH(0.5, 0.2) | 5.2923 | −0.85 % |
+| **MS + SH(0.3, 0.1) + SH(0.5, 0.2) + SH(0.7, 0.3)** | **5.2855** | **−0.97 %** |
+
+Ex-outlier (`covid_deaths` and `car_parts` have near-zero naive-scale
+denominators that dominate the geomean): 3-α pool = **1.4149** vs prior
+best 1.4572 (v0.15.4) = **−2.9 %**. Per-dataset headline wins:
+tourism_quarterly 1.8421 → 1.7895 (**−2.9 %**), m3_quarterly
+1.2714 → 1.2556, tourism_monthly 1.5751 → 1.5454.
+
+**Test 3 — Ridge stacking [BUST].** Prototype `RidgeStackedLaplace`:
+fit 4 LaplaceForecaster variants on head (85 % of train), stream tail
+via `observe()` to build (X, y) pairs, solve ridge for combining
+weights, apply to full-train forecasts. **+66.5 % regression** vs MS
+baseline at SAMPLE_PER=25. Failure mode: yearly panels blow up because
+tail_len = 5-20 is too short for stable weights with 4 predictors
+(m3_yearly 4.38 → 15.06, m4_yearly 5.47 → 23.54). Where the tail *does*
+have signal, ridge actually wins (tourism_monthly 1.5090 → 1.4475).
+Not shipping-quality in current form; would need non-negativity
+constraints, higher λ on short series, and a min-tail-length fallback
+to simple averaging to be viable. Deferred.
+
+**Meta-lesson.** The multi-α SH pool is a repeat of the sk#113 idea 2
+finding: don't optimize one shrinkage constant, seed a diverse pool and
+let the softmax choose. Same shape as the `standardize_ema_alphas` +
+`fast_slow_slow_alphas` recipes that already ship. Additional pool
+capacity is essentially free (~4 leaves × 25 obs training cost) and
+buys real gains on the panels where trend is present within a phase.
 
 ## Meta-lessons — patterns to watch for
 

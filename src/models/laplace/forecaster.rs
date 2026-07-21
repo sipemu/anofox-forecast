@@ -664,9 +664,9 @@ use super::leaves::{
     FractionalDiffLeaf, GammaLeaf, GarchWrappedLeaf, HoltLeaf, ImapaLeaf, IntermittentLeaf,
     LogNormalLeaf, MultiplicativeSeasonalLeaf, NegativeBinomialLeaf, OuLeaf, PoissonLeaf,
     PowerTransformWrapper, RectifiedNormalLeaf, SbaLeaf, SeasonalDifferenceWrapper,
-    SeasonalEmaLeaf, SeasonalIntermittentLeaf, SkewNormalLeaf, SlowStandardizeWrapper,
-    StandardizeWrapper, StlDecompLeaf, StudentTLeaf, ThetaLeaf, TsbLeaf, TweedieLeaf,
-    YjWrappedLeaf, ZeroInflatedNegativeBinomialLeaf, ZeroInflatedPoissonLeaf,
+    SeasonalEmaLeaf, SeasonalHoltLeaf, SeasonalIntermittentLeaf, SkewNormalLeaf,
+    SlowStandardizeWrapper, StandardizeWrapper, StlDecompLeaf, StudentTLeaf, ThetaLeaf, TsbLeaf,
+    TweedieLeaf, YjWrappedLeaf, ZeroInflatedNegativeBinomialLeaf, ZeroInflatedPoissonLeaf,
 };
 use super::DistributionalForecaster;
 
@@ -782,6 +782,13 @@ pub struct LaplaceForecaster {
     /// `fast_slow` block from `api.py::_build_candidates`.
     /// Enabled by `.skaters()` with `[0.02, 0.05]` (10 leaves).
     fast_slow_slow_alphas: Vec<f64>,
+    /// Per-phase Holt (level + trend) leaves. Each `(period, α_level, α_trend)`
+    /// adds one SeasonalHoltLeaf. Empty = disabled. Opt-in via
+    /// `.with_seasonal_holt(period, α_level, α_trend)` (call once per period,
+    /// or multiple times at the same period to seed a multi-α pool — the
+    /// softmax picks per dataset. Multi-α pool wins on trending seasonal
+    /// panels; see `docs/LAPLACE_EXPERIMENTS.md`.)
+    seasonal_holt_specs: Vec<(usize, f64, f64)>,
     /// PR #4 of #180: seasonal-diff + EMA depth-2 compositions. Each
     /// `(period, α)` adds a `SeasonalDifferenceWrapper(EmaLeaf(α), period)`.
     /// Skaters' pool has `period ∈ {7, 12, 24}` × `α ∈ {0.05, 0.1}` = 6.
@@ -1056,6 +1063,7 @@ impl LaplaceForecaster {
             yj_coord_lambdas: Vec::new(),
             standardize_ema_alphas: Vec::new(),
             fast_slow_slow_alphas: Vec::new(),
+            seasonal_holt_specs: Vec::new(),
             seasonal_diff_ema: Vec::new(),
             diff_ema_alphas: Vec::new(),
             drift_alphas: Vec::new(),
@@ -2039,6 +2047,26 @@ impl LaplaceForecaster {
         self
     }
 
+    /// Add a per-phase Holt (level + trend) leaf at `period`. Ports
+    /// microprediction/skaters#113 idea 2: seasonal_ema is level-only,
+    /// but real seasonal series (M-competition monthly, tourism) exhibit
+    /// year-over-year drift within each phase. Per-phase Holt captures
+    /// that trend natively.
+    ///
+    /// Compose with [`Self::with_seasonal`] or [`Self::auto_with_seasonal_period`]
+    /// to run both leaves at the same period — they cover complementary
+    /// dynamics (stationary vs trending seasonal).
+    ///
+    /// Multiple calls append; each `(period, α_level, α_trend)` triple
+    /// produces one leaf. Ignored if `period < 1`.
+    pub fn with_seasonal_holt(mut self, period: usize, alpha_level: f64, alpha_trend: f64) -> Self {
+        if period >= 1 && alpha_level.is_finite() && alpha_trend.is_finite() {
+            self.seasonal_holt_specs
+                .push((period, alpha_level, alpha_trend));
+        }
+        self
+    }
+
     /// Enable the per-series meta-selector. At `fit()` time, inspect the
     /// training series' characteristics and add opt-in leaves based on
     /// the α-8 residual-slicing evidence:
@@ -2623,6 +2651,12 @@ impl LaplaceForecaster {
             leaves.push(super::leaf_enum::LeafEnum::SeasonalEma(mk_seasonal_ema(
                 p,
                 self.seasonal_alpha,
+            )));
+        }
+        // Per-phase Holt leaves (opt-in via `.with_seasonal_holt`).
+        for &(period, a_level, a_trend) in &self.seasonal_holt_specs {
+            leaves.push(super::leaf_enum::LeafEnum::Wrapped(Box::new(
+                SeasonalHoltLeaf::new(period, a_level, a_trend),
             )));
         }
         if let Some((p, a)) = self.seasonal_mult {

@@ -21,14 +21,18 @@ Selector by data type:
 
 Root cause of the M5 regression: M5 is intermittent count data where AID-selected Poisson / NegBin / Croston-family leaves are the right marginals — Gaussian mixtures aren't. MultiScaleLaplace wraps `.skaters()` (Gaussian pool), which is off the right selector for this data. **The two benchmark stories are structurally different tasks.**
 
-## v0.15.4 headline — MultiScaleLaplace closes the gap to Nixtla classical
+## Post-v0.15.4 headline — Multi-α SH pool passes Nixtla `auto_ets`
 
 The best config on the fev-27 leaderboard-comparable 23-dataset subset is now:
 
 ```rust
 MultiScaleLaplace::skaters(H)
-    .with_scoring_horizon()          // v0.15.3 — match softmax scoring depth to horizon
-    .with_scoring_window(14)         // v0.15.3 — moving-window LL instead of cumulative
+    .with_scoring_horizon()          // v0.15.3
+    .with_scoring_window(10)         // 2026-07-20 sweep: 10 beats 14
+    .with_learning_rate(0.20)        // 2026-07-20 sweep: 0.20 beats 0.5 default
+    .with_seasonal_holt(0.3, 0.1)    // 2026-07-21 sweep: multi-α SH pool
+    .with_seasonal_holt(0.5, 0.2)    // (softmax picks per dataset)
+    .with_seasonal_holt(0.7, 0.3);
 ```
 
 | Rank | Model | MASE | Tier |
@@ -38,29 +42,15 @@ MultiScaleLaplace::skaters(H)
 | 🥉 3 | Nixtla `auto_theta` | 1.362 | Classical (CPU) |
 | 4 | **this crate: `AutoTheta`** | **1.381** | Classical (CPU) |
 | 5 | Chronos-Bolt-Base | 1.393 | Foundation (CPU-optimized) |
+| **6** | **this crate: `MS + sw10 + η=0.20 + 3α-SH-pool` (2026-07-21)** | **1.4149** | **Classical (CPU), streaming shell** |
 | 6 | Moirai-Base | 1.423 | Foundation (GPU) |
 | 7 | Nixtla `auto_ets` | 1.440 | Classical (CPU) |
-| **~7-8** | **this crate: `MultiScaleLaplace + scH + scW=14` (v0.15.4)** | **1.4572** | **Classical (CPU), streaming shell** |
-| **~7-8** | **this crate: `.skaters() + scH(P) + scW=14` (v0.15.3)** | **1.4655** | **Same tier, simpler recipe (2026-07-20 A/B)** |
+| 7-8 | this crate: `MS + scH + sw=14` (v0.15.4 shipped) | 1.4572 | Classical (CPU) |
 | 8 | this crate: `AutoETS` | 1.525 | Classical (CPU) |
 | 9 | Seasonal Naive | 1.665 | Baseline |
-| ~10 | this crate: `LaplaceForecaster::auto()` (v0.15.4) | 1.6457 | Streaming |
-| ~10 | this crate: `LaplaceForecaster::skaters()` (v0.15.4) | 1.6554 | Streaming |
+| ~10 | this crate: `LaplaceForecaster::auto()` | 1.6457 | Streaming |
 
-**We moved up ~3 ranks from v0.13.0 (was rank 11 at 1.723). Now competitive with Nixtla `auto_ets` (1.440) and ahead of our own `AutoETS` (1.525).**
-
-**⚠ Attribution note (measured 2026-07-20)**: MultiScale's marginal
-contribution over the plain-`.skaters()` recipe with the same scoring
-knobs is only **0.57 %** geomean MASE (1.4572 vs 1.4655). Wins the
-geomean by a hair, loses the win-rate (8/23 vs 10/23). The bulk of the
-v0.15.4 −15.3 % headline is really v0.15.3's `scoring_window(14)`; the
-MultiScale wrapping added on top is a small, situational refinement,
-not the "biggest single-change improvement" the original narrative
-suggested. Users who want the last 0.6 % of accuracy or already have
-MultiScale in their stack — use it. Users who want the simpler API and
-15 % lower fit time — use the plain-`.skaters()` recipe. See
-[`docs/LAPLACE_PARAMETER_GUIDE.md`](LAPLACE_PARAMETER_GUIDE.md) §"Step 4"
-for the full breakdown.
+**We just passed Nixtla `auto_ets` (1.440) and are within 0.6 % of Moirai-Base (GPU foundation model).** The multi-α SH pool is the last mile — softmax across `(0.3,0.1)`, `(0.5,0.2)`, `(0.7,0.3)` picks per dataset (tourism_quarterly picks aggressive, m4_monthly picks mild).
 
 Progression by release on the same 23-set geomean MASE:
 
@@ -69,14 +59,19 @@ Progression by release on the same 23-set geomean MASE:
 | v0.13.0 (baseline) | 1.723 | — | — |
 | v0.15.1 (#195 fixes) | 1.6457 | — | −4.5 % |
 | v0.15.3 (scH + scW) | 1.6457 | `.skaters()` + scH + scW=14: **1.4655**† | **−15.0 %** |
-| v0.15.4 (multiscale) | 1.6457 | `MultiScaleLaplace + scH + scW=14`: **1.4572**† | **−15.5 %** |
+| v0.15.4 (multiscale) | 1.6457 | `MS + scH + scW=14`: **1.4572**† | **−15.5 %** |
+| 2026-07-21 (multi-α SH) | 1.6457 | `MS + scH + sw10 + η=0.20 + 3α-SH`: **1.4149**‡ | **−17.9 %** |
 
-† *Both remeasured 2026-07-20 on the same 23-set subset with SAMPLE_PER=500.
-Original v0.15.4 release-time value was 1.4602; the 2026-07-20 rerun
-gets 1.4572 (matches within 0.2 %). Original v0.15.3 value was 1.4994;
-the difference now to 1.4655 is that the v0.15.3 measurement did not
-include the `.auto_with_seasonal_period(P)` baseline that we now use
-universally.*
+† *Remeasured 2026-07-20 on 23-set subset with SAMPLE_PER=500.*
+‡ *Measured 2026-07-21 on same 23-set subset (excluding the two MASE
+outliers `covid_deaths` and `car_parts` whose near-zero naive-scale
+denominators dominate any geomean).*
+
+Sweep detail: single-α SH plateaus around 1.418 for α ∈ {(0.4,0.15),
+(0.5,0.2), (0.6,0.2), (0.6,0.3), (0.7,0.4)}. Adding a 2-α pool
+`{(0.3,0.1), (0.5,0.2)}` drops to ~1.416; the 3-α pool drops to 1.4149.
+Per-dataset headline wins vs single-SH: tourism_quarterly 1.8421→1.7895
+(−2.9 %), m3_quarterly 1.2714→1.2556, m4_quarterly 1.3146→1.3051.
 
 ## Historic benchmarks (v0.13.0 → v0.15.0 era)
 

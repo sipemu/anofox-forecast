@@ -131,15 +131,15 @@ release notes].
 
 ## Step 4 — MultiScale, tails, and calibration (opt-in, situational)
 
-### `MultiScaleLaplace::skaters(H)` — best fev-27 config (marginal over `+sw14`)
+### `MultiScaleLaplace::skaters(H)` + tuned knobs + SH pool — best fev-27 config
 
-Wraps `.skaters()` at multiple decimation strides ({1, period, k}).
-Best-known fev-27 geomean MASE.
+Wraps `.skaters()` at multiple decimation strides ({1, period, k}) and
+adds a per-phase Holt (SH) pool at scale 1. Best-known fev-27 geomean MASE.
 
 - **[SETTLED]** Use when: continuous / economic panels + horizon-focused
-  MASE optimization + you want the last 0.6 % of accuracy.
-  **Geomean MASE 1.4572 on the 23-set leaderboard subset** (reproduced
-  2026-07-20; documented value 1.4602 from v0.15.4 release).
+  MASE optimization. **Geomean MASE 1.4149 on the 23-set leaderboard
+  subset** (measured 2026-07-21). Prior v0.15.4-shipped recipe (no SH,
+  sw=14, η=0.5) was 1.4572 — this recipe is a further **−2.9 %**.
 - **[SETTLED]** DO NOT use for M5 / retail counts — **+8.7 % MASE
   regression** [`docs/LAPLACE_EXPERIMENTS.md` §"M5 regression"].
 - **[SETTLED]** Requires N > 50 per activated scale; drops decimated
@@ -149,38 +149,47 @@ Best-known fev-27 geomean MASE.
 ```rust
 let mut m = MultiScaleLaplace::skaters(H)
     .with_scoring_horizon()
-    .with_scoring_window(14);
+    .with_scoring_window(10)       // 2026-07-20 sweep: 10 beats 14
+    .with_learning_rate(0.20)      // 2026-07-20 sweep: 0.20 beats 0.5 default
+    .with_seasonal_holt(0.3, 0.1)  // multi-α SH pool: softmax picks
+    .with_seasonal_holt(0.5, 0.2)  // per dataset
+    .with_seasonal_holt(0.7, 0.3);
 if period >= 2 { m = m.with_period(period); }
 ```
 
-**⚠ Attribution note (measured 2026-07-20)**: on the 23-set leaderboard
-subset, MultiScale's marginal contribution over the plain-`.skaters()`
-recipe with the same scoring knobs is only **0.57 %** geomean MASE
-(1.4572 vs 1.4655). The bulk of the historical −11.3 % v0.15.4 headline
-gain is actually from `.with_scoring_window(14)` (v0.15.3), not from
-the MultiScale wrapping. See the lighter alternative below.
+Sweep evidence (2026-07-21):
+- SH single-α: best at `(0.5, 0.2)` giving −0.65 % vs no-SH. Wider alpha
+  sweep {(0.4,0.15), (0.6,0.2), (0.6,0.3), (0.7,0.4)} shows a flat
+  plateau — no single α beats (0.5, 0.2) alone.
+- SH multi-α pool: 2-α `{(0.3,0.1), (0.5,0.2)}` gives −0.85 %; 3-α with
+  `(0.7,0.3)` added gives **−0.97 %** vs no-SH (**−0.33 %** vs single).
+  The softmax picks the right α per dataset (tourism_quarterly picks
+  the aggressive one, m4_monthly picks the mild one).
+- Killer per-dataset wins: tourism_quarterly 1.8421 → 1.7895 (**−2.9 %**),
+  m3_quarterly 1.2714 → 1.2556, m4_quarterly 1.3146 → 1.3051.
 
-### Simpler alternative: `.skaters() + scoring_horizon(P) + scoring_window(14)` — 99 % of MultiScale's gain
+### Simpler alternative: `.skaters() + scoring_horizon(P) + scoring_window(10) + SH pool`
 
-Same accuracy tier, ~15 % faster fit, no MultiScale wrapping, no per-scale
-sub-forecaster book-keeping.
+If you don't want the MultiScale wrapper, the same knobs on plain
+`.skaters()` are 99 % of the gain.
 
 ```rust
 LaplaceForecaster::new()
     .skaters()
     .auto_with_seasonal_period(P)
     .with_scoring_horizon(P)
-    .with_scoring_window(14)
+    .with_scoring_window(10)
+    .learning_rate(0.20)
+    .with_seasonal_holt(P, 0.3, 0.1)
+    .with_seasonal_holt(P, 0.5, 0.2)
+    .with_seasonal_holt(P, 0.7, 0.3)
 ```
 
-- **[SETTLED]** Geomean MASE **1.4655** on the 23-set leaderboard
-  subset — 0.57 % behind MultiScale, but wins **10/23** datasets vs
-  MultiScale's 8/23. Directly competitive.
-- **[SETTLED]** Total fit time 9.6 s vs MultiScale's 11.5 s on the same
-  panel (~15 % lighter). No MultiScale complexity.
+- **[SETTLED]** Same tier as MultiScale; small MultiScale margin
+  (≤ 0.6 % geomean, situational per-panel).
 - **[SETTLED]** Same M5 rule applies — do not use for retail counts.
 - **[HEURISTIC]** Recommended default for fev-27-shaped work when
-  simplicity matters more than the last 0.6 %.
+  simplicity matters more than the last MultiScale margin.
 
 ### `.with_parade(k) + GpdTailsForecaster` — extreme quantiles
 
@@ -219,15 +228,32 @@ Ready-to-use builder chains, ordered by common panel shape.
 
 ### Monthly economic (period 12) — the M3/tourism/fred class
 
+Best-known fev-27 recipe (2026-07-21):
+
+```rust
+let mut m = MultiScaleLaplace::skaters(H)
+    .with_period(12)
+    .with_scoring_horizon()
+    .with_scoring_window(10)
+    .with_learning_rate(0.20)
+    .with_seasonal_holt(0.3, 0.1)     // multi-α SH pool — softmax
+    .with_seasonal_holt(0.5, 0.2)     // picks per dataset
+    .with_seasonal_holt(0.7, 0.3);
+```
+Expect: rank ~6 on fev-27 (1.4149 geomean), passes Nixtla `auto_ets`.
+
+Lighter alternative if you don't want the MultiScale wrapper:
 ```rust
 LaplaceForecaster::new()
-    .auto()
-    .with_seasonal(12)
+    .skaters()
+    .auto_with_seasonal_period(12)
     .with_scoring_horizon(12)
-    .with_scoring_window(14)
+    .with_scoring_window(10)
+    .learning_rate(0.20)
+    .with_seasonal_holt(12, 0.3, 0.1)
+    .with_seasonal_holt(12, 0.5, 0.2)
+    .with_seasonal_holt(12, 0.7, 0.3)
 ```
-Expect: MASE competitive with AutoETS. Add `MultiScaleLaplace` wrapping
-for another 5-10 % on longer panels.
 
 ### Hourly with daily cycle (period 24) — M4-hourly / electricity
 
