@@ -20,6 +20,42 @@ surface; this guide picks *which* API to call.
 
 ---
 
+## TL;DR — one-liner router
+
+If you don't want to read the decision tree below, use the extracted
+router. Given a `TimeSeries` and horizon it inspects data-shape and
+returns a fit-ready forecaster keyed to the 2026-07-21 decision table:
+
+```rust
+use anofox_forecast::models::laplace::{recommended_for, recipe_for};
+use anofox_forecast::models::{DistributionalForecaster, Forecaster};
+
+let mut f = recommended_for(&series, /* horizon */ 12, /* period */ Some(12));
+f.fit(&series)?;
+let mixtures = f.forecast_dist(12)?;
+// Log which recipe was picked, e.g. for debugging a regression:
+eprintln!("recipe = {}", recipe_for(&series, Some(12)).name());
+```
+
+Rules the router applies (in order):
+
+| # | Trigger | Route | Evidence |
+|---|---|---|---|
+| 1 | `N < 60` | `.auto()` (Laplace fallback; classical Theta/ETS often better outside this crate) | Streaming softmax needs > 60 obs to converge |
+| 2 | integer-values > 95 % **and** zero-fraction > 30 % | `.auto_aid().auto_with_seasonal_period(P)` | M5 measured `.skaters()` = 0.9962 MASE vs MS = 1.0833 (+8.7 %); AID picks Poisson/NegBin/Croston |
+| 3 | excess kurtosis > 5 | `.skaters().with_terminal_crps()` | Cauchy input stability, `tests/laplace_robustness.rs::cauchy_input_produces_well_formed_forecast` |
+| 4 | continuous + `period ≥ 2` + `N ≥ 60` | `MultiScaleLaplace + scH + sw=10 + η=0.20 + 3α-SH pool` (the fev-27 winner) | fev-27 rank ~6 (1.4149 geomean) |
+| 5 | continuous fallback | `.skaters() + scH(P) + sw=10 + η=0.20` (no MS) | +0.24 % vs row 4 but simpler; skips MS when period unknown or `N < 50/scale` |
+
+Period detection is deliberately out of scope — you must supply `period`.
+For a cross-family router (also picks between `AutoTheta` / `AutoETS`),
+use [`SmartForecaster`](../src/models/smart.rs) instead.
+
+Read the sections below when you want to override a rule or understand
+*why* a given recipe wins.
+
+---
+
 ## Step 1 — Pick the top-level selector
 
 There are three streaming-distributional selectors plus one point-only
