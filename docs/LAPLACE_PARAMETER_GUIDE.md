@@ -49,7 +49,11 @@ Rules the router applies (in order):
 
 Period detection is deliberately out of scope — you must supply `period`.
 For a cross-family router (also picks between `AutoTheta` / `AutoETS`),
-use [`SmartForecaster`](../src/models/smart.rs) instead.
+use [`SmartForecaster`](../src/models/smart.rs) instead. As of
+2026-07-24 `SmartForecaster` matches AutoETS exactly on structural
+(trend / seasonal / multiplicative / exponential) archetypes and
+falls back to AID-selected Laplace on intermittent / count / non-parametric
+shapes — see the bake-off results below.
 
 Read the sections below when you want to override a rule or understand
 *why* a given recipe wins.

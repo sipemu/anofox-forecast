@@ -1,4 +1,4 @@
-//! Synthetic bake-off — 41 archetypes × 30 replicates × 5 models.
+//! Synthetic bake-off — 41 archetypes × 30 replicates × 6 models.
 //!
 //! Answers two questions:
 //!  1. Does `laplace::recommended_for(...)` pick the right recipe for
@@ -32,6 +32,7 @@ use anofox_forecast::models::theta::AutoTheta;
 use anofox_forecast::models::DistributionalForecaster;
 use anofox_forecast::models::Forecaster;
 use anofox_forecast::models::LaplaceForecaster;
+use anofox_forecast::models::SmartForecaster;
 
 use chrono::{Duration, TimeZone, Utc};
 use rand::distributions::Distribution as _;
@@ -936,14 +937,15 @@ fn geomean(xs: &[f64]) -> f64 {
 
 // ---------- Model panel ----------
 
-const MODEL_NAMES: [&str; 5] = [
+const MODEL_NAMES: [&str; 6] = [
     "AutoETS",
     "AutoTheta",
     "Lap.auto()",
     "recommended_for",
     "MS+3SH manual",
+    "SmartForecaster",
 ];
-const N_MODELS: usize = 5;
+const N_MODELS: usize = 6;
 
 fn run_one_series(
     values: Vec<f64>,
@@ -1091,6 +1093,33 @@ fn run_one_series(
                         .collect();
                     let w = wql(&matrix, test_v);
                     out[4] = Some((ms, w, t0.elapsed().as_secs_f64()));
+                }
+            }
+        }
+    }
+
+    // M5: SmartForecaster — the 2026-07-24 cross-family router.
+    // Point-only via Forecaster trait; WQL via Gaussian fallback at
+    // scale = naive-1 σ, matching the AutoETS / AutoTheta convention.
+    {
+        let t0 = Instant::now();
+        let mut m = if let Some(p) = period {
+            SmartForecaster::new().with_seasonal_period(p.max(2))
+        } else {
+            SmartForecaster::new()
+        };
+        if m.fit(&train_ts).is_ok() {
+            if let Ok(fc) = m.predict(horizon) {
+                let p = fc.primary();
+                if p.len() == test_v.len() {
+                    let ms = mae(p, test_v) / scale;
+                    let sigma = mase_scale(&train_v, 1).max(1e-9);
+                    let matrix: Vec<Vec<f64>> = WQL_Q
+                        .iter()
+                        .map(|&q| p.iter().map(|&mu| gaussian_q(mu, sigma, q)).collect())
+                        .collect();
+                    let w = wql(&matrix, test_v);
+                    out[5] = Some((ms, w, t0.elapsed().as_secs_f64()));
                 }
             }
         }

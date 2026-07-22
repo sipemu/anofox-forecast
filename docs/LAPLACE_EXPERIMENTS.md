@@ -724,6 +724,76 @@ iteration — see `src/models/laplace/recommend.rs`.
 Every rule now has ~30 replicates × 30-800 obs of measurement backing
 per archetype. Reproduce: `cargo run --release --features distributional --example synthetic_bakeoff`.
 
+### 2026-07-24 — SmartForecaster gets cross-family routing
+
+Extended `SmartForecaster` with shape-based cross-family routing
+(previously it only routed within Laplace via AID). New rules:
+
+1. `N < 60` → `AutoTheta` (streaming softmax hasn't converged).
+2. Regular series + strong trend R² > 0.30 OR seasonal autocorrelation
+   at lag = period > 0.40 → `AutoETS`.
+3. Everything else → previous AID-based Laplace routing.
+
+Second-pass bug fix (in the same session): initial routing only
+triggered for `Regular + Normal` AID class and passed the default
+seasonal_period=7 to AutoETS blindly. Both bugs caused SmartForecaster
+to fall back to Laplace on multiplicative/exponential-growth positive
+series (AID says Regular+Positive) and to confuse AutoETS on
+non-seasonal series (fake period 7 wastes grid search).
+
+Fixed router: routing triggers on ANY Regular subtype (Normal /
+Positive / Count), and period is only passed to AutoETS when
+`seasonal_autocorr_abs(values, period) > 0.40`.
+
+Bake-off result at 41 archetypes × 30 replicates:
+
+| Model | Overall geomean | v5 (broken) → v6 (fixed) |
+|---|---:|---|
+| MS+3SH manual | 0.8110 | (unchanged) |
+| AutoETS | 0.8489 | (unchanged) |
+| **SmartForecaster** | **0.8867** | 1.1360 → 0.8867 (−22 %) |
+| recommended_for | 1.0268 | (unchanged) |
+| AutoTheta | 1.0499 | (unchanged) |
+| Lap.auto() | 1.1773 | (unchanged) |
+
+Geomean by category:
+
+| Category | AutoETS | MS+3SH | SmartForecaster |
+|---|---:|---:|---:|
+| Laplace-favoring | 0.8589 | **0.6756** | 0.9183 |
+| **AutoETS-favoring** | **0.8409** | 1.2323 | **0.8409** ⭐ (matches) |
+| Neutral | 0.8075 | 0.8420 | 0.8172 |
+
+SmartForecaster now matches AutoETS exactly on all 11 AutoETS-favoring
+archetypes (identical MASE — same recipe, same period pass-through).
+Fixed archetypes vs the pre-router-fix baseline (`.auto()` fallback):
+
+  archetype                      before   after    reference
+  multiplicative_seasonality    6.4569   0.6675   AutoETS 0.6675
+  exponential_growth           20.1282   2.9362   AutoETS 2.9362
+  seasonal_linear_trend         1.1651   0.6484   AutoETS 0.6484
+  linear_trend_only             0.9193   0.6563   AutoETS 0.6563
+  heteroscedastic_multi_seasonal 1.4712  0.7072   AutoETS 0.7072
+  everything_at_once            1.8256   1.0168   AutoETS 1.0168
+  s_curve_logistic_growth       1.1608   0.9170   AutoETS 0.9170
+  piecewise_linear_trend        3.2030   0.8137   AutoETS 0.8137
+  bimodal_regime_switch         1.7769   1.0930   AutoETS 1.0849
+  regime_shift_flat_to_trend    2.1134   0.7475   AutoETS 0.7475
+
+Remaining gap vs MS+3SH on Laplace-favoring (0.9183 vs 0.6756) is
+driven by AID's commit-to-a-single-family behaviour on extreme
+intermittent panels. `all_zeros_rare_spikes`: MS+3SH 0.0000 (skaters
+pool + softmax picks the right count leaf per series); SmartForecaster
+0.3465 (AID picks one distribution family upfront, less flexible).
+Fixing this would mean routing intermittent to `.skaters()` instead
+of the AID-selected single-family recipe — a bigger design change,
+deferred.
+
+`SmartForecaster::new().fit(&series)` now covers most cross-family
+tradeoffs in a single call: parametric structural → AutoETS,
+count/intermittent → AID Laplace, short → AutoTheta, else →
+Laplace.auto().
+
 ## Meta-lessons — patterns to watch for
 
 ### 1. Measure the feature's *active region* before implementing
