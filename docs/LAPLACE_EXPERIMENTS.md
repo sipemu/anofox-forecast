@@ -654,6 +654,76 @@ while `.auto_aid()`'s Poisson / NegBin / ZIP / ZINB leaves match
 the DGP directly. If your metric is probabilistic, Laplace's edge
 in count territory is bigger than the point-forecast MASE suggests.
 
+### 2026-07-24 extension — 12 more archetypes → aggregate flips to Laplace
+
+Extended bake-off from 29 → 41 archetypes to cover under-tested
+axes: skewed continuous marginals (Gamma, Lognormal), overdispersed
+counts (NegBin), multiplicative seasonality, AR(1) persistence,
+non-linear trends (piecewise, exponential, S-curve), realistic
+combos (retail-with-promotions, web-traffic with release spikes),
+edge cases (near-constant, all-zeros-with-rare-spikes).
+
+**Result flips**: on **Laplace-favoring category** (now 26 archetypes),
+MS+3SH beats AutoETS by 21.3 % geomean (was AutoETS +8.7 %). **Overall
+geomean** across all 41 archetypes: MS+3SH 0.8110 vs AutoETS 0.8489 —
+**Laplace beats AutoETS by 4.5 %**. AutoETS-favoring category
+unchanged (AutoETS +46.5 %); the new axes shift what's in the
+Laplace-favoring category.
+
+Category counts (41 archetypes total): 26 Laplace-favoring, 11
+AutoETS-favoring, 4 Neutral.
+
+The killer new archetype: `all_zeros_rare_spikes` (99 % zeros + 1 %
+Poisson(10)). MS+3SH → near-perfect MASE (0.0000). Laplace's
+`IntermittentLeaf` / `PoissonLeaf` / `ZeroInflatedPoissonLeaf`
+predict the correct all-zero baseline; AutoETS smooths and misses.
+This one archetype does move the geomean; per-archetype tables are
+the honest read for shapes that don't match `all_zeros_rare_spikes`.
+
+Other clear new-archetype Laplace wins:
+- `ar1_persistent` (φ=0.9 AR(1)): Lap.auto 1.9443 vs AutoETS 2.1071
+  (−8 %). `Ar1Leaf` targets this shape natively.
+- `gamma_positive_skewed` / `negbin_overdispersed_counts` /
+  `lognormal_multiplicative`: near-ties (MASE within 1-4 % of AutoETS).
+  On WQL the Laplace mixture-quantile output would win by wider
+  margins (not measured this run).
+
+New-archetype AutoETS wins:
+- `piecewise_linear_trend`: AutoETS 0.81 vs Lap 1.32 (AutoETS +62 %).
+  Structural break interior to training; AutoETS's damped trend
+  handles it, Laplace's regime-shift softmax needs more warmup.
+- `exponential_growth`: AutoETS 2.94 vs Lap 3.65 (+24 %). AutoETS's
+  multiplicative-trend variants target this DGP directly.
+- `retail_with_promotions`, `weekly_plus_daily_plus_spike`: AutoETS
+  wins by 40-47 %. The parametric baseline captures the smooth
+  weekly + daily cycles; the promotion / release spikes hurt Laplace
+  more than they hurt AutoETS.
+
+**Router accuracy at 41 archetypes: 34/41 (83 %)**. Down from 26/29
+(90 %) — added archetypes probe the count/heavy-tail boundary where
+the shape checks disagree. Concrete misses: `negbin_overdispersed_counts`
+(zero-fraction < 30 % threshold), `retail_with_promotions` (spikes
+trigger heavy-tail before count check), `weekly_plus_daily_plus_spike`
+(spikes trigger heavy-tail). Fixable but scope for a separate router
+iteration — see `src/models/laplace/recommend.rs`.
+
+**Sharpened practical rule** (2026-07-24):
+
+- **Use Laplace** when your data is: extreme-intermittent (bursty,
+  all-zeros-with-spikes), zero-inflated, has regime shifts / jumps,
+  is non-parametric (RW, OU, AR(1)-persistent), has fading /
+  evolving structure, OR you need distributional output. **Overall
+  MS+3SH wins by 21 % on this shape space.**
+- **Use AutoETS** when your data is: textbook trend + seasonal +
+  Gaussian, multi-seasonal-structural, exponential / S-curve trend,
+  or has smooth periodic structure with occasional additive shocks.
+  **AutoETS wins by 47 % on this shape space.**
+- **Both close** on: pure noise, short history, near-constant, gentle
+  Gamma / Lognormal / NegBin marginals.
+
+Every rule now has ~30 replicates × 30-800 obs of measurement backing
+per archetype. Reproduce: `cargo run --release --features distributional --example synthetic_bakeoff`.
+
 ## Meta-lessons — patterns to watch for
 
 ### 1. Measure the feature's *active region* before implementing

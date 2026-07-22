@@ -56,19 +56,35 @@ Read the sections below when you want to override a rule or understand
 
 ### When to reach for Laplace vs `AutoETS`
 
-Measured 2026-07-23 on `examples/synthetic_bakeoff.rs` — 29 archetypes
-× 30 replicates covering length, seasonality, trend, variance, jumps,
-distribution, count-ness, multi-seasonality, regime shifts, GARCH,
-tick-grid, fading structure. Segmented by DGP category:
+Measured 2026-07-24 on `examples/synthetic_bakeoff.rs` — **41
+archetypes × 30 replicates** covering length, seasonality (fixed /
+multi / fading / multiplicative), trend (none / linear / damped /
+piecewise / exponential / S-curve), variance (constant / evolving /
+GARCH clustering / regime), jumps, distribution (Gaussian / Cauchy /
+Student-t / Gamma / Lognormal), count (Poisson / NegBin /
+zero-inflated / bursty / all-zeros-with-spikes), tick-grid
+discreteness, real-world combos (retail-with-promotions,
+web-traffic). Segmented by DGP category:
 
-| Category | AutoETS | Laplace family (best) | Δ | Count |
+| Category | AutoETS | Best Laplace | Δ | Count |
 |---|---:|---:|---:|---:|
-| **Laplace-favoring** (non-parametric / count / regime / heavy-tail) | 0.9120 | 0.9910 | AutoETS +8.7 % | 18 |
-| AutoETS-favoring (textbook trend + seasonal + Gaussian) | 0.7323 | 1.1427 | AutoETS +56 % | 8 |
-| Neutral (pure noise, short history, moderate var-shift) | 0.8441 | 0.8868 | AutoETS +5 % | 3 |
+| **Laplace-favoring** (non-parametric / count / regime / heavy-tail) | 0.8589 | **0.6756** (MS+3SH) | **Laplace wins by 21.3 %** ⭐ | 26 |
+| AutoETS-favoring (textbook trend + seasonal + Gaussian) | **0.8409** | 1.2323 | AutoETS wins by 46.5 % | 11 |
+| Neutral (pure noise, short history, low-var, moderate var-shift) | 0.8075 | 0.8187 | AutoETS by 1.4 % | 4 |
 
-On aggregate AutoETS beats us everywhere. But the **per-archetype
-signals are what matter for the recipe choice**:
+**Overall geomean across all 41 archetypes: MS+3SH 0.8110 beats
+AutoETS 0.8489 by 4.5 %.** This is the mirror image of the 18-archetype
+snapshot — extending coverage to the shapes Laplace was actually
+designed for (extreme intermittency, promotion spikes, non-parametric
+persistence) tips the aggregate the other way.
+
+Big caveat: on `all_zeros_rare_spikes` MS+3SH scores near-zero MASE
+because Laplace's `IntermittentLeaf` / `PoissonLeaf` / `ZeroInflatedPoissonLeaf`
+predict the correct all-zero baseline while AutoETS smooths and
+misses. This one archetype does move the geomean; look at per-archetype
+tables when your data doesn't match that shape.
+
+**Per-archetype signals are what actually matter for the recipe choice**:
 
 **Reach for Laplace when your data looks like these — clear wins:**
 

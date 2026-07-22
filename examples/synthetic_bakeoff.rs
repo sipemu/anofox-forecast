@@ -1,4 +1,4 @@
-//! Synthetic bake-off — 29 archetypes × 30 replicates × 5 models.
+//! Synthetic bake-off — 41 archetypes × 30 replicates × 5 models.
 //!
 //! Answers two questions:
 //!  1. Does `laplace::recommended_for(...)` pick the right recipe for
@@ -15,7 +15,10 @@
 //!
 //! History: started 2026-07-22 with 18 archetypes; extended
 //! 2026-07-23 with 11 more designed to isolate Laplace's actual
-//! advantages so the story sharpens.
+//! advantages; extended 2026-07-24 with 12 more covering
+//! under-tested axes (skewed marginals, overdispersed counts,
+//! multiplicative seasonality, AR(1), piecewise / exponential /
+//! S-curve trends, realistic retail + web-traffic + edge cases).
 //!
 //! Run: `SAMPLE_PER=3 cargo run --release --features distributional --example synthetic_bakeoff`  (smoke)
 //! Run: `cargo run --release --features distributional --example synthetic_bakeoff`  (full: 30 replicates)
@@ -31,9 +34,10 @@ use anofox_forecast::models::Forecaster;
 use anofox_forecast::models::LaplaceForecaster;
 
 use chrono::{Duration, TimeZone, Utc};
+use rand::distributions::Distribution as _;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
-use statrs::distribution::{ContinuousCDF, Normal, StudentsT};
+use statrs::distribution::{ContinuousCDF, Gamma, NegativeBinomial, Normal, StudentsT};
 use std::time::Instant;
 
 // ---------- Archetype spec ----------
@@ -131,6 +135,54 @@ enum Archetype {
     /// continuous process. Sticky lattice inside `.skaters()` is
     /// designed for exactly this pattern.
     TickGridWalk,
+    // === 2026-07-24 additions — cover under-tested distributional /
+    // structural / real-world axes. ===
+    /// Gamma(α=2, β=1) noise — positive-only, right-skewed continuous.
+    /// Realistic for monetary flows, energy demand baselines. AutoETS
+    /// assumes Gaussian residuals → miscalibrates quantiles.
+    GammaPositiveSkewed,
+    /// Lognormal (μ=0, σ=0.5) multiplicative noise on a slow-growing
+    /// base. Monetary / demand pattern. Right-tail is heavy.
+    LognormalMultiplicative,
+    /// Negative-Binomial(r=3, p=0.4) counts — overdispersed relative
+    /// to Poisson. Retail / demand where Poisson variance
+    /// under-estimates real dispersion. `.auto_aid()`'s NegBin leaf
+    /// is designed for exactly this.
+    NegbinOverdispersedCounts,
+    /// Multiplicative seasonality — seasonal amplitude scales with
+    /// level. Common for retail / demand series where absolute
+    /// swings grow with volume.
+    MultiplicativeSeasonality,
+    /// Pure AR(1) with φ=0.9 — highly persistent stationary process,
+    /// no trend, no seasonality. `Ar1Leaf` in the pool is designed
+    /// for this shape.
+    Ar1Persistent,
+    /// Piecewise-linear trend — slope changes at t=n/3 and t=2n/3.
+    /// AutoETS's damped-trend fits one slope; regime shifts break it.
+    PiecewiseLinearTrend,
+    /// Exponential growth y = a·exp(b·t) + noise. Compounding,
+    /// non-linear trend. AutoETS's multiplicative-error-multiplicative-trend
+    /// (MMN) variants target this; a good stress test for AutoETS's
+    /// grid vs Laplace's leaf pool.
+    ExponentialGrowth,
+    /// Logistic S-curve growth — trend saturates. Product-adoption
+    /// pattern. AutoETS's damped-trend variants are the classical
+    /// candidate; Laplace has to reach for `Ar2Leaf` / `HoltLeaf`
+    /// with a damping factor.
+    SCurveLogisticGrowth,
+    /// Retail-with-promotions — smooth weekly baseline with random
+    /// 3-8× spikes on ~5 % of days (promotion days). Realistic SKU
+    /// pattern with structural anomalies on top of clean seasonality.
+    RetailWithPromotions,
+    /// Web-traffic style — daily (24) + weekly (168) seasonality +
+    /// occasional 10× release-day spikes on ~2 % of hours.
+    WeeklyPlusDailyPlusSpike,
+    /// Near-constant series (σ = 0.01). Numerical edge case — tests
+    /// that models don't explode when variance is effectively zero.
+    NearConstantLowVar,
+    /// 99 % zeros with 1 % Poisson(10) spikes. Extreme intermittency
+    /// past `intermittent_bursty`. Route → RetailCountAid.
+    AllZerosRareSpikes,
 }
 
 impl Archetype {
@@ -166,6 +218,19 @@ impl Archetype {
         Archetype::GarchVolatilityClustering,
         Archetype::BimodalRegimeSwitch,
         Archetype::TickGridWalk,
+        // 2026-07-24 additions.
+        Archetype::GammaPositiveSkewed,
+        Archetype::LognormalMultiplicative,
+        Archetype::NegbinOverdispersedCounts,
+        Archetype::MultiplicativeSeasonality,
+        Archetype::Ar1Persistent,
+        Archetype::PiecewiseLinearTrend,
+        Archetype::ExponentialGrowth,
+        Archetype::SCurveLogisticGrowth,
+        Archetype::RetailWithPromotions,
+        Archetype::WeeklyPlusDailyPlusSpike,
+        Archetype::NearConstantLowVar,
+        Archetype::AllZerosRareSpikes,
     ];
 
     fn name(self) -> &'static str {
@@ -199,6 +264,18 @@ impl Archetype {
             Archetype::GarchVolatilityClustering => "garch_volatility_clustering",
             Archetype::BimodalRegimeSwitch => "bimodal_regime_switch",
             Archetype::TickGridWalk => "tick_grid_walk",
+            Archetype::GammaPositiveSkewed => "gamma_positive_skewed",
+            Archetype::LognormalMultiplicative => "lognormal_multiplicative",
+            Archetype::NegbinOverdispersedCounts => "negbin_overdispersed_counts",
+            Archetype::MultiplicativeSeasonality => "multiplicative_seasonality",
+            Archetype::Ar1Persistent => "ar1_persistent",
+            Archetype::PiecewiseLinearTrend => "piecewise_linear_trend",
+            Archetype::ExponentialGrowth => "exponential_growth",
+            Archetype::SCurveLogisticGrowth => "s_curve_logistic_growth",
+            Archetype::RetailWithPromotions => "retail_with_promotions",
+            Archetype::WeeklyPlusDailyPlusSpike => "weekly_plus_daily_plus_spike",
+            Archetype::NearConstantLowVar => "near_constant_low_var",
+            Archetype::AllZerosRareSpikes => "all_zeros_rare_spikes",
         }
     }
 
@@ -214,7 +291,10 @@ impl Archetype {
             | Archetype::MultiSeasonalHourly
             | Archetype::LinearTrendOnly
             | Archetype::EverythingAtOnce
-            | Archetype::HeteroscedasticMultiSeasonal => Category::AutoETSFavoring,
+            | Archetype::HeteroscedasticMultiSeasonal
+            | Archetype::MultiplicativeSeasonality
+            | Archetype::ExponentialGrowth
+            | Archetype::SCurveLogisticGrowth => Category::AutoETSFavoring,
             // Non-parametric / regime / heavy-tail / count / discrete —
             // Laplace's design targets.
             Archetype::RandomWalk
@@ -234,11 +314,20 @@ impl Archetype {
             | Archetype::ZeroInflatedSeasonal
             | Archetype::GarchVolatilityClustering
             | Archetype::BimodalRegimeSwitch
-            | Archetype::TickGridWalk => Category::LaplaceFavoring,
+            | Archetype::TickGridWalk
+            | Archetype::GammaPositiveSkewed
+            | Archetype::LognormalMultiplicative
+            | Archetype::NegbinOverdispersedCounts
+            | Archetype::Ar1Persistent
+            | Archetype::PiecewiseLinearTrend
+            | Archetype::RetailWithPromotions
+            | Archetype::WeeklyPlusDailyPlusSpike
+            | Archetype::AllZerosRareSpikes => Category::LaplaceFavoring,
             // Genuinely ambiguous.
             Archetype::PureGaussianNoise
             | Archetype::ShortGaussian
-            | Archetype::VarianceRegimeChange => Category::Neutral,
+            | Archetype::VarianceRegimeChange
+            | Archetype::NearConstantLowVar => Category::Neutral,
         }
     }
 
@@ -271,6 +360,18 @@ impl Archetype {
             Archetype::GarchVolatilityClustering => 400,
             Archetype::BimodalRegimeSwitch => 300,
             Archetype::TickGridWalk => 300,
+            Archetype::GammaPositiveSkewed => 300,
+            Archetype::LognormalMultiplicative => 300,
+            Archetype::NegbinOverdispersedCounts => 300,
+            Archetype::MultiplicativeSeasonality => 300,
+            Archetype::Ar1Persistent => 300,
+            Archetype::PiecewiseLinearTrend => 300,
+            Archetype::ExponentialGrowth => 250,
+            Archetype::SCurveLogisticGrowth => 250,
+            Archetype::RetailWithPromotions => 280,
+            Archetype::WeeklyPlusDailyPlusSpike => 800,
+            Archetype::NearConstantLowVar => 200,
+            Archetype::AllZerosRareSpikes => 200,
         }
     }
 
@@ -284,9 +385,14 @@ impl Archetype {
             | Archetype::SeasonalDampedTrend
             | Archetype::EverythingAtOnce
             | Archetype::ContaminatedSeasonal
-            | Archetype::FadingSeasonality => Some(12),
-            Archetype::MultiSeasonalHourly | Archetype::HeteroscedasticMultiSeasonal => Some(24),
-            Archetype::PoissonSeasonalRetail | Archetype::ZeroInflatedSeasonal => Some(7),
+            | Archetype::FadingSeasonality
+            | Archetype::MultiplicativeSeasonality => Some(12),
+            Archetype::MultiSeasonalHourly
+            | Archetype::HeteroscedasticMultiSeasonal
+            | Archetype::WeeklyPlusDailyPlusSpike => Some(24),
+            Archetype::PoissonSeasonalRetail
+            | Archetype::ZeroInflatedSeasonal
+            | Archetype::RetailWithPromotions => Some(7),
             _ => None,
         }
     }
@@ -298,10 +404,15 @@ impl Archetype {
             Archetype::StationarySeasonalShort => 12,
             Archetype::StationarySeasonalLong => 18,
             Archetype::SeasonalLinearTrend | Archetype::SeasonalDampedTrend => 18,
-            Archetype::MultiSeasonalHourly | Archetype::HeteroscedasticMultiSeasonal => 48,
+            Archetype::MultiSeasonalHourly
+            | Archetype::HeteroscedasticMultiSeasonal
+            | Archetype::WeeklyPlusDailyPlusSpike => 48,
             Archetype::EverythingAtOnce => 24,
-            Archetype::PoissonSeasonalRetail | Archetype::ZeroInflatedSeasonal => 14,
+            Archetype::PoissonSeasonalRetail
+            | Archetype::ZeroInflatedSeasonal
+            | Archetype::RetailWithPromotions => 14,
             Archetype::ContaminatedSeasonal | Archetype::FadingSeasonality => 18,
+            Archetype::MultiplicativeSeasonality => 18,
             _ => 20,
         }
     }
@@ -321,7 +432,10 @@ impl Archetype {
             Archetype::PoissonIntermittent
             | Archetype::PoissonSeasonalRetail
             | Archetype::IntermittentBursty
-            | Archetype::ZeroInflatedSeasonal => RecipeKind::RetailCountAid,
+            | Archetype::ZeroInflatedSeasonal
+            | Archetype::NegbinOverdispersedCounts
+            | Archetype::AllZerosRareSpikes
+            | Archetype::RetailWithPromotions => RecipeKind::RetailCountAid,
             Archetype::HeavyTailCauchy
             | Archetype::StudentTDf3
             | Archetype::StudentTTrended
@@ -329,7 +443,8 @@ impl Archetype {
             | Archetype::GarchVolatilityClustering
             | Archetype::ContaminatedSeasonal
             | Archetype::LevelShiftMidway
-            | Archetype::BimodalRegimeSwitch => RecipeKind::HeavyTailedCrps,
+            | Archetype::BimodalRegimeSwitch
+            | Archetype::LognormalMultiplicative => RecipeKind::HeavyTailedCrps,
             // Seasonal + long enough for period activation.
             Archetype::StationarySeasonalShort
             | Archetype::StationarySeasonalLong
@@ -338,7 +453,9 @@ impl Archetype {
             | Archetype::MultiSeasonalHourly
             | Archetype::HeteroscedasticMultiSeasonal
             | Archetype::EverythingAtOnce
-            | Archetype::FadingSeasonality => RecipeKind::ContinuousMultiScale,
+            | Archetype::FadingSeasonality
+            | Archetype::MultiplicativeSeasonality
+            | Archetype::WeeklyPlusDailyPlusSpike => RecipeKind::ContinuousMultiScale,
             // Non-seasonal continuous.
             _ => RecipeKind::ContinuousPlainSkaters,
         }
@@ -381,6 +498,18 @@ fn poisson_sample(rng: &mut StdRng, lambda: f64) -> f64 {
             return (k - 1) as f64;
         }
     }
+}
+
+fn gamma_sample(rng: &mut StdRng, shape: f64, rate: f64) -> f64 {
+    Gamma::new(shape, rate).unwrap().sample(rng)
+}
+
+fn lognormal_sample(rng: &mut StdRng, mu: f64, sigma: f64) -> f64 {
+    (mu + sigma * standard_normal(rng)).exp()
+}
+
+fn neg_bin_sample(rng: &mut StdRng, r: f64, p: f64) -> f64 {
+    NegativeBinomial::new(r, p).unwrap().sample(rng) as f64
 }
 
 fn generate(archetype: Archetype, seed: u64) -> Vec<f64> {
@@ -611,6 +740,134 @@ fn generate(archetype: Archetype, seed: u64) -> Vec<f64> {
                 x += standard_normal(&mut rng);
                 // Snap to the 0.25 tick grid.
                 y.push((x * 4.0).round() / 4.0);
+            }
+        }
+        // ===== 2026-07-24 additions =====
+        Archetype::GammaPositiveSkewed => {
+            // Gamma(α=2, β=1) has mean=2, var=2, right-skewed. Shift so
+            // most values sit around ~50.
+            for _ in 0..n {
+                y.push(48.0 + gamma_sample(&mut rng, 2.0, 1.0));
+            }
+        }
+        Archetype::LognormalMultiplicative => {
+            // Slow-growing base level; lognormal multiplicative noise
+            // gives a right-skewed distribution with a heavy right tail.
+            for i in 0..n {
+                let base = 10.0 + 0.02 * i as f64;
+                y.push(base * lognormal_sample(&mut rng, 0.0, 0.3));
+            }
+        }
+        Archetype::NegbinOverdispersedCounts => {
+            // NegBin(r=3, p=0.4) — mean=r(1-p)/p=4.5, var=r(1-p)/p²=11.25
+            // (overdispersed vs Poisson at the same mean).
+            for _ in 0..n {
+                y.push(neg_bin_sample(&mut rng, 3.0, 0.4));
+            }
+        }
+        Archetype::MultiplicativeSeasonality => {
+            // Seasonal amplitude scales with level. Level grows linearly.
+            let p = 12.0;
+            for i in 0..n {
+                let level = 20.0 + 0.05 * i as f64;
+                let season = 1.0 + 0.3 * (2.0 * std::f64::consts::PI * i as f64 / p).sin();
+                y.push(level * season + standard_normal(&mut rng));
+            }
+        }
+        Archetype::Ar1Persistent => {
+            // AR(1) with φ=0.9 and long-run mean 50.
+            let phi = 0.9;
+            let mu = 50.0;
+            let sigma = 1.0;
+            let mut x = mu;
+            for _ in 0..n {
+                x = mu + phi * (x - mu) + sigma * standard_normal(&mut rng);
+                y.push(x);
+            }
+        }
+        Archetype::PiecewiseLinearTrend => {
+            // Slope 0.10 for first third, -0.05 for middle, 0.15 for last.
+            let seg1 = n / 3;
+            let seg2 = 2 * n / 3;
+            let mut base = 50.0;
+            for i in 0..n {
+                if i > 0 {
+                    let slope = if i < seg1 {
+                        0.10
+                    } else if i < seg2 {
+                        -0.05
+                    } else {
+                        0.15
+                    };
+                    base += slope;
+                }
+                y.push(base + standard_normal(&mut rng));
+            }
+        }
+        Archetype::ExponentialGrowth => {
+            // y = a·exp(b·t) + noise. b=0.015 for gentle compounding.
+            for i in 0..n {
+                y.push(5.0 * (0.015 * i as f64).exp() + standard_normal(&mut rng));
+            }
+        }
+        Archetype::SCurveLogisticGrowth => {
+            // Logistic: L / (1 + exp(-k·(t - t0))).
+            let capacity = 100.0;
+            let k = 0.03;
+            let t0 = n as f64 / 2.0;
+            for i in 0..n {
+                let s = capacity / (1.0 + (-k * (i as f64 - t0)).exp());
+                y.push(s + standard_normal(&mut rng));
+            }
+        }
+        Archetype::RetailWithPromotions => {
+            // Weekly rate + Poisson counts + 5 % of days get a
+            // multiplicative 3-8× promotion spike.
+            let rates = [1.2, 1.0, 0.8, 0.8, 1.2, 3.0, 4.0];
+            for i in 0..n {
+                let base = poisson_sample(&mut rng, rates[i % 7]);
+                let u: f64 = rng.gen();
+                if u < 0.05 {
+                    let mult = 3.0 + rng.gen::<f64>() * 5.0;
+                    y.push((base * mult).round());
+                } else {
+                    y.push(base);
+                }
+            }
+        }
+        Archetype::WeeklyPlusDailyPlusSpike => {
+            // Continuous-valued web-traffic pattern: daily + weekly
+            // cycles plus rare 10× release spikes.
+            for i in 0..n {
+                let daily = 5.0 * (2.0 * std::f64::consts::PI * i as f64 / 24.0).sin();
+                let weekly = 3.0 * (2.0 * std::f64::consts::PI * i as f64 / 168.0).sin();
+                let base = 50.0 + daily + weekly + standard_normal(&mut rng);
+                let u: f64 = rng.gen();
+                let final_val = if u < 0.02 {
+                    base + 30.0 // 10× the daily amplitude
+                } else {
+                    base
+                };
+                y.push(final_val);
+            }
+        }
+        Archetype::NearConstantLowVar => {
+            // σ=0.01 — numerical edge case; MASE denominator (naive-1
+            // error) will be tiny so absolute MASE values inflate,
+            // but that's a fair test of numerical robustness.
+            for _ in 0..n {
+                y.push(50.0 + 0.01 * standard_normal(&mut rng));
+            }
+        }
+        Archetype::AllZerosRareSpikes => {
+            // 99 % zeros, 1 % Poisson(10) spikes.
+            for _ in 0..n {
+                let u: f64 = rng.gen();
+                if u < 0.01 {
+                    y.push(poisson_sample(&mut rng, 10.0));
+                } else {
+                    y.push(0.0);
+                }
             }
         }
     }
