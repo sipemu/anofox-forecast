@@ -12,9 +12,14 @@
 //! |---|---|---|---|
 //! | 1 | Short history | `N < 60` | `.auto()` (with warning — classical Theta/ETS often better outside this crate) |
 //! | 2 | Count-like | integer-valued fraction `> 0.95` AND zero-fraction `> 0.30` | `.auto_aid().auto_with_seasonal_period(P)` (no MultiScale — measured +8.7 % regression on M5) |
-//! | 3 | Heavy-tailed | excess kurtosis `> 5` | `.skaters().with_terminal_crps()` |
+//! | 3 | Heavy-tailed | excess kurtosis of first differences `> 5` OR `max_z > 6` | `.skaters().with_terminal_crps()` |
 //! | 4 | Continuous seasonal + long | `period ≥ 2` AND `N ≥ 60` | `MultiScaleLaplace + scH + sw=10 + η=0.20 + 3α-SH pool` (the 2026-07-21 fev-27 winner) |
 //! | 5 | Continuous fallback | else | `.skaters() + scH(P) + sw=10 + η=0.20` |
+//!
+//! Rule 3 uses first differences (crude detrending) and adds a
+//! max-standardised-deviation trigger so heavy-tailed innovations on
+//! top of a trend (e.g. Student-t on linear trend) still route
+//! correctly — the raw-values kurtosis version missed those.
 //!
 //! The router is Laplace-scoped by design: for `N < 60` a caller may
 //! prefer `crate::models::theta::AutoTheta` or `crate::models::exponential::AutoETS`,
@@ -165,18 +170,41 @@ fn is_count_like(values: &[f64]) -> bool {
 }
 
 fn is_heavy_tailed(values: &[f64]) -> bool {
+    // Test on FIRST DIFFERENCES to isolate the innovation distribution.
+    // Raw-values kurtosis on any trended series is dominated by the
+    // trend and misses the noise character. Two OR-triggers:
+    //
+    //  1. Excess kurtosis > 5 — direct heavy-tail signal, works on
+    //     Cauchy (theoretically ∞) and reliably on any distribution
+    //     with meaningful 4th moment beyond Gaussian.
+    //  2. Max standardised deviation > 6 — a single observation more
+    //     than 6σ from the mean of the differences. Gaussian effectively
+    //     never produces this on N ≤ 1000 (probability ~2×10⁻⁹ per
+    //     obs); Student-t(df=3), GARCH innovations, and level-shift
+    //     jumps all reliably trigger.
+    //
+    // Trigger 2 catches cases where sample kurtosis is noisy (Student-t
+    // difference of two iid variates) or where the heavy-tail character
+    // shows up as rare large spikes rather than uniformly fat tails
+    // (GARCH volatility bursts, level shifts).
     if values.len() < 30 {
         return false;
     }
-    let n = values.len() as f64;
-    let mean = values.iter().sum::<f64>() / n;
-    let m2 = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / n;
+    let diffs: Vec<f64> = values.windows(2).map(|w| w[1] - w[0]).collect();
+    let n = diffs.len() as f64;
+    let mean = diffs.iter().sum::<f64>() / n;
+    let m2 = diffs.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / n;
     if m2 < 1e-9 {
         return false;
     }
-    let m4 = values.iter().map(|v| (v - mean).powi(4)).sum::<f64>() / n;
+    let sd = m2.sqrt();
+    let m4 = diffs.iter().map(|v| (v - mean).powi(4)).sum::<f64>() / n;
     let excess_kurt = m4 / (m2 * m2) - 3.0;
-    excess_kurt > 5.0
+    let max_z = diffs
+        .iter()
+        .map(|v| ((v - mean) / sd).abs())
+        .fold(0.0f64, f64::max);
+    excess_kurt > 5.0 || max_z > 6.0
 }
 
 #[cfg(test)]
@@ -239,6 +267,27 @@ mod tests {
         vals[20] = 100.0;
         vals[40] = -80.0;
         vals[60] = 120.0;
+        let series = ts(vals);
+        assert_eq!(recipe_for(&series, None), RecipeKind::HeavyTailedCrps);
+    }
+
+    #[test]
+    fn heavy_tailed_on_trended_series_still_triggers() {
+        // 2026-07-23 regression: prior implementation computed kurtosis
+        // on raw values, so a heavy-tailed innovation on top of a linear
+        // trend was masked by trend-dominated variance. Should still trigger.
+        let mut rng_seed: u64 = 42;
+        let mut vals = Vec::with_capacity(200);
+        for i in 0..200 {
+            // Poor-man's LCG for reproducibility without a rand dep in tests.
+            rng_seed = rng_seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let u = ((rng_seed >> 33) as f64) / (u32::MAX as f64);
+            // Rough Cauchy: tan(π(u - 0.5)).
+            let noise = (std::f64::consts::PI * (u - 0.5)).tan();
+            vals.push(50.0 + 0.1 * i as f64 + 2.0 * noise);
+        }
         let series = ts(vals);
         assert_eq!(recipe_for(&series, None), RecipeKind::HeavyTailedCrps);
     }

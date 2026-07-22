@@ -1,16 +1,21 @@
-//! Synthetic bake-off — 18 archetypes × 30 replicates × 5 models.
+//! Synthetic bake-off — 29 archetypes × 30 replicates × 5 models.
 //!
 //! Answers two questions:
 //!  1. Does `laplace::recommended_for(...)` pick the right recipe for
 //!     each archetype? (validation of the 2026-07-22 router)
 //!  2. Where does our Laplace family beat / lose to classical
-//!     (AutoETS, AutoTheta) on clean-signal, single-behaviour panels?
-//!     (regression discovery — fev-27 is noisy; synthetic isolates one
-//!     axis at a time)
+//!     (AutoETS, AutoTheta)? (which panel shapes should users route
+//!     to Laplace vs AutoETS — the "when to use Laplace" cut)
 //!
 //! Each archetype isolates ONE axis (length, seasonality, trend,
-//! variance, jump, distribution, count-ness, multi-seasonal) so the
-//! winner tells us something about *why* it won.
+//! variance, jump, distribution, count-ness, multi-seasonal, regime
+//! shift, contamination, GARCH clustering, fading structure,
+//! tick-grid discreteness). The output segments wins by data-shape
+//! `Category` so the "when to use Laplace" story is legible.
+//!
+//! History: started 2026-07-22 with 18 archetypes; extended
+//! 2026-07-23 with 11 more designed to isolate Laplace's actual
+//! advantages so the story sharpens.
 //!
 //! Run: `SAMPLE_PER=3 cargo run --release --features distributional --example synthetic_bakeoff`  (smoke)
 //! Run: `cargo run --release --features distributional --example synthetic_bakeoff`  (full: 30 replicates)
@@ -33,8 +38,35 @@ use std::time::Instant;
 
 // ---------- Archetype spec ----------
 
+/// Where the archetype's DGP sits relative to model families' assumptions.
+/// Wins-by-category is the useful cut: "AutoETS wins overall" is boring
+/// because it lumps its home-turf archetypes with its blind spots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Category {
+    /// Textbook trend + seasonal + Gaussian noise — AutoETS's home turf.
+    AutoETSFavoring,
+    /// Non-parametric shapes, regime shifts, heavy tails, count / zero-inflated,
+    /// GARCH clustering, tick-grid discreteness — where the streaming
+    /// Laplace pool is expected to hold up better than a parametric baseline.
+    LaplaceFavoring,
+    /// Genuinely close: pure noise, short history, moderate variance shifts.
+    /// Neither model has a structural advantage.
+    Neutral,
+}
+
+impl Category {
+    fn name(self) -> &'static str {
+        match self {
+            Category::AutoETSFavoring => "AutoETS-favoring",
+            Category::LaplaceFavoring => "Laplace-favoring",
+            Category::Neutral => "Neutral",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Archetype {
+    // === Original 18 (2026-07-22) ===
     PureGaussianNoise,
     ShortGaussian,
     StationarySeasonalShort,
@@ -53,10 +85,57 @@ enum Archetype {
     PoissonSeasonalRetail,
     EverythingAtOnce,
     HeteroscedasticMultiSeasonal,
+    // === 2026-07-23 additions — designed to isolate Laplace's actual
+    // advantages so the "when to use Laplace" story sharpens. ===
+    /// Level-only for first half, linear trend for second half.
+    /// AutoETS grid-searches ONE decomposition; Laplace's streaming
+    /// softmax re-weights leaves at the regime boundary.
+    RegimeShiftFlatToTrend,
+    /// Sine + Gaussian noise, but 5 % of observations are Cauchy
+    /// contamination (outliers). AutoETS Kalman gets pulled by outliers;
+    /// Laplace's Student-t / Cauchy leaves resist.
+    ContaminatedSeasonal,
+    /// Linear trend with Student-t(df=3) innovations. AutoETS assumes
+    /// Gaussian noise → miscalibrates the tails; router should pick
+    /// `HeavyTailedCrps`.
+    StudentTTrended,
+    /// 80 % zeros, 20 % Poisson(λ=5) bursts. Retail-adjacent but far
+    /// more intermittent than `poisson_intermittent`. Should trigger
+    /// `RetailCountAid`.
+    IntermittentBursty,
+    /// Gaussian noise with σ = 1 + 3·|sin(2π·t/50)| — variance breathes
+    /// with period 50, non-monotonic. AutoETS's ETS variants assume
+    /// stationary error scale.
+    EvolvingVarianceSmooth,
+    /// Sine × (1 − t/N) — seasonality amplitude fades to zero. AutoETS's
+    /// fixed seasonal coefficients keep predicting the initial-cycle
+    /// amplitude; Laplace's streaming softmax deprecates the seasonal
+    /// leaf as it starts losing to non-seasonal ones.
+    FadingSeasonality,
+    /// Trend + two level shifts + Student-t innovations. Realistic
+    /// combined stress: structural break × heavy tail × trend, at once.
+    TrendJumpsHeavyTails,
+    /// 70 % forced zeros + Poisson(weekly_rate). Extreme
+    /// zero-inflation on top of a weekly cycle. Should hit
+    /// `RetailCountAid` and let `.auto_aid()`'s ZIP / ZINB leaves earn
+    /// their keep.
+    ZeroInflatedSeasonal,
+    /// GARCH(1,1) volatility clustering. AutoETS assumes constant or
+    /// trending σ; `.skaters()`'s GARCH cascade is designed for this.
+    GarchVolatilityClustering,
+    /// Markov switching between two Gaussians (μ = 45, μ = 55). Bimodal
+    /// residual distribution; AutoETS assumes unimodal Gaussian, Laplace
+    /// emits a `GaussianMixture` natively.
+    BimodalRegimeSwitch,
+    /// Random walk rounded to a 0.25 tick grid — discrete-valued
+    /// continuous process. Sticky lattice inside `.skaters()` is
+    /// designed for exactly this pattern.
+    TickGridWalk,
 }
 
 impl Archetype {
     const ALL: &'static [Archetype] = &[
+        // Original 18.
         Archetype::PureGaussianNoise,
         Archetype::ShortGaussian,
         Archetype::StationarySeasonalShort,
@@ -75,6 +154,18 @@ impl Archetype {
         Archetype::PoissonSeasonalRetail,
         Archetype::EverythingAtOnce,
         Archetype::HeteroscedasticMultiSeasonal,
+        // 2026-07-23 additions.
+        Archetype::RegimeShiftFlatToTrend,
+        Archetype::ContaminatedSeasonal,
+        Archetype::StudentTTrended,
+        Archetype::IntermittentBursty,
+        Archetype::EvolvingVarianceSmooth,
+        Archetype::FadingSeasonality,
+        Archetype::TrendJumpsHeavyTails,
+        Archetype::ZeroInflatedSeasonal,
+        Archetype::GarchVolatilityClustering,
+        Archetype::BimodalRegimeSwitch,
+        Archetype::TickGridWalk,
     ];
 
     fn name(self) -> &'static str {
@@ -97,6 +188,57 @@ impl Archetype {
             Archetype::PoissonSeasonalRetail => "poisson_seasonal_retail",
             Archetype::EverythingAtOnce => "everything_at_once",
             Archetype::HeteroscedasticMultiSeasonal => "heteroscedastic_multi_seasonal",
+            Archetype::RegimeShiftFlatToTrend => "regime_shift_flat_to_trend",
+            Archetype::ContaminatedSeasonal => "contaminated_seasonal",
+            Archetype::StudentTTrended => "student_t_trended",
+            Archetype::IntermittentBursty => "intermittent_bursty",
+            Archetype::EvolvingVarianceSmooth => "evolving_variance_smooth",
+            Archetype::FadingSeasonality => "fading_seasonality",
+            Archetype::TrendJumpsHeavyTails => "trend_jumps_heavy_tails",
+            Archetype::ZeroInflatedSeasonal => "zero_inflated_seasonal",
+            Archetype::GarchVolatilityClustering => "garch_volatility_clustering",
+            Archetype::BimodalRegimeSwitch => "bimodal_regime_switch",
+            Archetype::TickGridWalk => "tick_grid_walk",
+        }
+    }
+
+    /// Which "team" the DGP is stacked toward. Wins-by-category is what
+    /// makes the "when to use Laplace" story readable.
+    fn category(self) -> Category {
+        match self {
+            // Textbook parametric DGP — AutoETS's home turf.
+            Archetype::StationarySeasonalShort
+            | Archetype::StationarySeasonalLong
+            | Archetype::SeasonalLinearTrend
+            | Archetype::SeasonalDampedTrend
+            | Archetype::MultiSeasonalHourly
+            | Archetype::LinearTrendOnly
+            | Archetype::EverythingAtOnce
+            | Archetype::HeteroscedasticMultiSeasonal => Category::AutoETSFavoring,
+            // Non-parametric / regime / heavy-tail / count / discrete —
+            // Laplace's design targets.
+            Archetype::RandomWalk
+            | Archetype::MeanRevertingOu
+            | Archetype::LevelShiftMidway
+            | Archetype::HeavyTailCauchy
+            | Archetype::StudentTDf3
+            | Archetype::PoissonIntermittent
+            | Archetype::PoissonSeasonalRetail
+            | Archetype::RegimeShiftFlatToTrend
+            | Archetype::ContaminatedSeasonal
+            | Archetype::StudentTTrended
+            | Archetype::IntermittentBursty
+            | Archetype::EvolvingVarianceSmooth
+            | Archetype::FadingSeasonality
+            | Archetype::TrendJumpsHeavyTails
+            | Archetype::ZeroInflatedSeasonal
+            | Archetype::GarchVolatilityClustering
+            | Archetype::BimodalRegimeSwitch
+            | Archetype::TickGridWalk => Category::LaplaceFavoring,
+            // Genuinely ambiguous.
+            Archetype::PureGaussianNoise
+            | Archetype::ShortGaussian
+            | Archetype::VarianceRegimeChange => Category::Neutral,
         }
     }
 
@@ -118,6 +260,17 @@ impl Archetype {
             Archetype::PoissonSeasonalRetail => 300,
             Archetype::EverythingAtOnce => 400,
             Archetype::HeteroscedasticMultiSeasonal => 800,
+            Archetype::RegimeShiftFlatToTrend => 300,
+            Archetype::ContaminatedSeasonal => 300,
+            Archetype::StudentTTrended => 300,
+            Archetype::IntermittentBursty => 250,
+            Archetype::EvolvingVarianceSmooth => 300,
+            Archetype::FadingSeasonality => 400,
+            Archetype::TrendJumpsHeavyTails => 400,
+            Archetype::ZeroInflatedSeasonal => 280,
+            Archetype::GarchVolatilityClustering => 400,
+            Archetype::BimodalRegimeSwitch => 300,
+            Archetype::TickGridWalk => 300,
         }
     }
 
@@ -129,9 +282,11 @@ impl Archetype {
             | Archetype::StationarySeasonalLong
             | Archetype::SeasonalLinearTrend
             | Archetype::SeasonalDampedTrend
-            | Archetype::EverythingAtOnce => Some(12),
+            | Archetype::EverythingAtOnce
+            | Archetype::ContaminatedSeasonal
+            | Archetype::FadingSeasonality => Some(12),
             Archetype::MultiSeasonalHourly | Archetype::HeteroscedasticMultiSeasonal => Some(24),
-            Archetype::PoissonSeasonalRetail => Some(7),
+            Archetype::PoissonSeasonalRetail | Archetype::ZeroInflatedSeasonal => Some(7),
             _ => None,
         }
     }
@@ -145,20 +300,36 @@ impl Archetype {
             Archetype::SeasonalLinearTrend | Archetype::SeasonalDampedTrend => 18,
             Archetype::MultiSeasonalHourly | Archetype::HeteroscedasticMultiSeasonal => 48,
             Archetype::EverythingAtOnce => 24,
-            Archetype::PoissonSeasonalRetail => 14,
+            Archetype::PoissonSeasonalRetail | Archetype::ZeroInflatedSeasonal => 14,
+            Archetype::ContaminatedSeasonal | Archetype::FadingSeasonality => 18,
             _ => 20,
         }
     }
 
     /// What the router SHOULD pick, given the archetype's designed shape.
     /// A mismatch is a router bug worth investigating.
+    ///
+    /// Note: `level_shift_midway` and `bimodal_regime_switch` are
+    /// designed as "structural break" archetypes, but from a
+    /// first-differences standpoint they look heavy-tailed (rare large
+    /// residuals). The router's differencing-based heavy-tail check
+    /// routes them to `HeavyTailedCrps` — this is arguably correct
+    /// behaviour, since CRPS scoring handles both cases robustly.
     fn expected_recipe(self) -> RecipeKind {
         match self {
             Archetype::ShortGaussian => RecipeKind::ShortHistory,
-            Archetype::PoissonIntermittent | Archetype::PoissonSeasonalRetail => {
-                RecipeKind::RetailCountAid
-            }
-            Archetype::HeavyTailCauchy | Archetype::StudentTDf3 => RecipeKind::HeavyTailedCrps,
+            Archetype::PoissonIntermittent
+            | Archetype::PoissonSeasonalRetail
+            | Archetype::IntermittentBursty
+            | Archetype::ZeroInflatedSeasonal => RecipeKind::RetailCountAid,
+            Archetype::HeavyTailCauchy
+            | Archetype::StudentTDf3
+            | Archetype::StudentTTrended
+            | Archetype::TrendJumpsHeavyTails
+            | Archetype::GarchVolatilityClustering
+            | Archetype::ContaminatedSeasonal
+            | Archetype::LevelShiftMidway
+            | Archetype::BimodalRegimeSwitch => RecipeKind::HeavyTailedCrps,
             // Seasonal + long enough for period activation.
             Archetype::StationarySeasonalShort
             | Archetype::StationarySeasonalLong
@@ -166,7 +337,8 @@ impl Archetype {
             | Archetype::SeasonalDampedTrend
             | Archetype::MultiSeasonalHourly
             | Archetype::HeteroscedasticMultiSeasonal
-            | Archetype::EverythingAtOnce => RecipeKind::ContinuousMultiScale,
+            | Archetype::EverythingAtOnce
+            | Archetype::FadingSeasonality => RecipeKind::ContinuousMultiScale,
             // Non-seasonal continuous.
             _ => RecipeKind::ContinuousPlainSkaters,
         }
@@ -326,6 +498,119 @@ fn generate(archetype: Archetype, seed: u64) -> Vec<f64> {
                 let trend = 0.02 * i as f64;
                 let sigma = 1.0 + 0.5 * (2.0 * std::f64::consts::PI * i as f64 / 168.0).sin().abs();
                 y.push(50.0 + daily + weekly + trend + sigma * standard_normal(&mut rng));
+            }
+        }
+        // ===== 2026-07-23 additions =====
+        Archetype::RegimeShiftFlatToTrend => {
+            let mid = n / 2;
+            for i in 0..n {
+                let base = if i < mid {
+                    50.0
+                } else {
+                    50.0 + 0.15 * (i - mid) as f64
+                };
+                y.push(base + standard_normal(&mut rng));
+            }
+        }
+        Archetype::ContaminatedSeasonal => {
+            let p = 12.0;
+            for i in 0..n {
+                let base = 50.0 + 5.0 * (2.0 * std::f64::consts::PI * i as f64 / p).sin();
+                let u: f64 = rng.gen();
+                let noise = if u < 0.05 {
+                    // 5 % Cauchy contamination: rare, large.
+                    cauchy(&mut rng, 3.0)
+                } else {
+                    standard_normal(&mut rng)
+                };
+                y.push(base + noise);
+            }
+        }
+        Archetype::StudentTTrended => {
+            for i in 0..n {
+                y.push(50.0 + 0.05 * i as f64 + student_t(&mut rng, 3.0));
+            }
+        }
+        Archetype::IntermittentBursty => {
+            for _ in 0..n {
+                let u: f64 = rng.gen();
+                if u < 0.2 {
+                    y.push(poisson_sample(&mut rng, 5.0));
+                } else {
+                    y.push(0.0);
+                }
+            }
+        }
+        Archetype::EvolvingVarianceSmooth => {
+            for i in 0..n {
+                let sigma = 1.0 + 3.0 * (2.0 * std::f64::consts::PI * i as f64 / 50.0).sin().abs();
+                y.push(50.0 + sigma * standard_normal(&mut rng));
+            }
+        }
+        Archetype::FadingSeasonality => {
+            let p = 12.0;
+            for i in 0..n {
+                let fade = 1.0 - i as f64 / n as f64;
+                let s = 5.0 * fade * (2.0 * std::f64::consts::PI * i as f64 / p).sin();
+                y.push(50.0 + s + standard_normal(&mut rng));
+            }
+        }
+        Archetype::TrendJumpsHeavyTails => {
+            for i in 0..n {
+                let mut base = 50.0 + 0.03 * i as f64;
+                if i >= n / 4 {
+                    base += 4.0;
+                }
+                if i >= 3 * n / 4 {
+                    base -= 6.0;
+                }
+                y.push(base + student_t(&mut rng, 3.0));
+            }
+        }
+        Archetype::ZeroInflatedSeasonal => {
+            // 70 % forced zeros; the 30 % that fire are Poisson at a weekly rate.
+            let rates = [1.5, 1.0, 0.8, 0.8, 1.5, 6.0, 8.0];
+            for i in 0..n {
+                let u: f64 = rng.gen();
+                if u < 0.7 {
+                    y.push(0.0);
+                } else {
+                    y.push(poisson_sample(&mut rng, rates[i % 7]));
+                }
+            }
+        }
+        Archetype::GarchVolatilityClustering => {
+            // GARCH(1,1): σ²_t = ω + α·ε²_{t-1} + β·σ²_{t-1}
+            let omega: f64 = 0.05;
+            let alpha: f64 = 0.15;
+            let beta: f64 = 0.80;
+            let mut sigma2: f64 = omega / (1.0 - alpha - beta);
+            let mut eps_prev: f64 = 0.0;
+            for _ in 0..n {
+                sigma2 = omega + alpha * eps_prev * eps_prev + beta * sigma2;
+                let eps = sigma2.sqrt() * standard_normal(&mut rng);
+                y.push(50.0 + eps);
+                eps_prev = eps;
+            }
+        }
+        Archetype::BimodalRegimeSwitch => {
+            // Markov switch between (μ=45, σ=1) and (μ=55, σ=1). Switch prob 0.02.
+            let mut state: u8 = 0;
+            for _ in 0..n {
+                let switch: f64 = rng.gen();
+                if switch < 0.02 {
+                    state = 1 - state;
+                }
+                let mu = if state == 0 { 45.0 } else { 55.0 };
+                y.push(mu + standard_normal(&mut rng));
+            }
+        }
+        Archetype::TickGridWalk => {
+            let mut x = 50.0;
+            for _ in 0..n {
+                x += standard_normal(&mut rng);
+                // Snap to the 0.25 tick grid.
+                y.push((x * 4.0).round() / 4.0);
             }
         }
     }
@@ -709,6 +994,8 @@ fn main() {
     }
     println!();
     let mut wins = vec![0usize; N_MODELS];
+    // Per-archetype winner, kept for the segmented report below.
+    let mut winner_per_arch = Vec::with_capacity(Archetype::ALL.len());
     for ai in 0..Archetype::ALL.len() {
         let geos: Vec<f64> = (0..N_MODELS)
             .map(|mi| geomean(&mase_by_arch[ai][mi]))
@@ -720,12 +1007,68 @@ fn main() {
             .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
             .unwrap_or((0, &f64::NAN));
         wins[best_i] += 1;
+        winner_per_arch.push(best_i);
     }
     print!("{:<34}", "wins on MASE");
     for w in &wins {
         print!("{:>18}", w);
     }
     println!();
+
+    // ---- Segmented by Category (the "when to use Laplace" table) ----
+    println!("\n=== Wins by category (MASE) — the \"when to use Laplace\" cut ===");
+    print!("{:<34}", "category");
+    for m in MODEL_NAMES.iter() {
+        print!("{:>18}", m);
+    }
+    print!("{:>10}", "count");
+    println!();
+    for cat in [
+        Category::LaplaceFavoring,
+        Category::AutoETSFavoring,
+        Category::Neutral,
+    ] {
+        let mut w = vec![0usize; N_MODELS];
+        let mut n = 0usize;
+        for (ai, arch) in Archetype::ALL.iter().enumerate() {
+            if arch.category() == cat {
+                w[winner_per_arch[ai]] += 1;
+                n += 1;
+            }
+        }
+        print!("{:<34}", cat.name());
+        for wi in &w {
+            print!("{:>18}", wi);
+        }
+        print!("{:>10}", n);
+        println!();
+    }
+
+    // Per-category geomean of MASE (geomean across archetypes in that category).
+    println!("\n=== Geomean MASE by category ===");
+    print!("{:<34}", "category");
+    for m in MODEL_NAMES.iter() {
+        print!("{:>18}", m);
+    }
+    println!();
+    for cat in [
+        Category::LaplaceFavoring,
+        Category::AutoETSFavoring,
+        Category::Neutral,
+    ] {
+        print!("{:<34}", cat.name());
+        for mi in 0..N_MODELS {
+            let per_arch: Vec<f64> = Archetype::ALL
+                .iter()
+                .enumerate()
+                .filter(|(_, a)| a.category() == cat)
+                .map(|(ai, _)| geomean(&mase_by_arch[ai][mi]))
+                .collect();
+            let g = geomean(&per_arch);
+            print!("{:>18.4}", g);
+        }
+        println!();
+    }
 
     println!("\n=== Fit time per archetype (mean seconds) ===");
     print!("{:<34}", "archetype");

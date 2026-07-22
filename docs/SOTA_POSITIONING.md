@@ -4,17 +4,17 @@
 
 ## ⚠ Read this first — different benchmarks want different recipes
 
-**Our fev-27 rank ~6 comes from real-world noise defeating AutoETS's structural assumptions — NOT from Laplace being universally better.** On clean-signal synthetic data (single-behaviour archetypes: trend, seasonality, Gaussian noise), `AutoETS` beats every Laplace recipe by a wide margin. Measured 2026-07-22 on the synthetic bake-off (`examples/synthetic_bakeoff.rs`, 18 archetypes × 30 replicates):
+**Our fev-27 rank ~6 comes from real-world noise defeating AutoETS's structural assumptions — NOT from Laplace being universally better.** Measured 2026-07-23 on `examples/synthetic_bakeoff.rs` (29 archetypes × 30 replicates), segmented by data-shape category:
 
-| Model | Overall geomean MASE | Wins |
-|---|---:|---:|
-| **`AutoETS`** | **0.8417** | **13/18** |
-| `AutoTheta` | 0.9072 | 2/18 |
-| `MS+3SH manual` (our fev-27 SOTA) | 1.0374 | 1/18 |
-| `recommended_for` | 1.0418 | 1/18 |
-| `Lap.auto()` | 1.0806 | 1/18 |
+| Category | AutoETS geomean MASE | Best-Laplace geomean MASE | Δ | Count |
+|---|---:|---:|---:|---:|
+| **Laplace-favoring** (intermittent, count, regime-shift, non-parametric, heavy-tail) | 0.9120 | 0.9910 | AutoETS +8.7 % | 18 |
+| AutoETS-favoring (trend + seasonal + Gaussian) | 0.7323 | 1.1427 | AutoETS +56 % | 8 |
+| Neutral | 0.8441 | 0.8868 | AutoETS +5 % | 3 |
 
-The Laplace family wins where the DGP breaks parametric assumptions: `random_walk`, `mean_reverting_ou`, `level_shift_midway`. It loses badly where the DGP is a clean structural decomposition: `multi_seasonal_hourly` (**+152 %** vs AutoETS), `heteroscedastic_multi_seasonal` (+109 %), `linear_trend_only` (+57 %). If your data looks structural, use `AutoETS` directly.
+**Where Laplace clearly wins on synthetic** (per-archetype): `intermittent_bursty` MASE −13.8 % and WQL −18.7 %, `zero_inflated_seasonal` WQL −16.2 %, `level_shift_midway` MASE −5.8 %, `mean_reverting_ou` −5 %, `fading_seasonality` WQL −66 % vs AutoTheta. **Where Laplace loses badly**: `multi_seasonal_hourly` (**+152 %** vs AutoETS), `heteroscedastic_multi_seasonal` (+109 %), `linear_trend_only` (+57 %).
+
+Pattern: Laplace wins where the DGP breaks parametric assumptions (intermittency, zero-inflation, regime shifts, non-parametric mean-reversion) and where distributional output (WQL, quantiles) matters. AutoETS wins on textbook trend + seasonal + Gaussian. **Fev-27's 27-panel mix is dominated by Laplace-favoring shapes** — the win is real but narrower than a headline geomean suggests.
 
 **The v0.15.4 winning recipe (`MultiScaleLaplace + scH + scW=14`) is a fev-27 win but REGRESSES on M5 retail.** Measured on M5 200-series:
 

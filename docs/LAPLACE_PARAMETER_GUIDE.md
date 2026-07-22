@@ -54,37 +54,63 @@ use [`SmartForecaster`](../src/models/smart.rs) instead.
 Read the sections below when you want to override a rule or understand
 *why* a given recipe wins.
 
-### ⚠ When NOT to use `recommended_for` (or any Laplace recipe)
+### When to reach for Laplace vs `AutoETS`
 
-The router is Laplace-family-scoped. On **clean-signal data** — series
-whose generating process actually matches ETS's structural
-decomposition (trend + seasonal + Gaussian noise) — `AutoETS` beats
-every Laplace recipe by a wide margin. Measured 2026-07-22 on the
-synthetic bake-off (`examples/synthetic_bakeoff.rs`, 18 archetypes ×
-30 replicates):
+Measured 2026-07-23 on `examples/synthetic_bakeoff.rs` — 29 archetypes
+× 30 replicates covering length, seasonality, trend, variance, jumps,
+distribution, count-ness, multi-seasonality, regime shifts, GARCH,
+tick-grid, fading structure. Segmented by DGP category:
 
-| Model | Overall geomean MASE | Wins per archetype |
-|---|---:|---:|
-| **`AutoETS`** | **0.8417** | **13/18** |
-| `AutoTheta` | 0.9072 | 2/18 |
-| `MS+3SH manual` (our SOTA on fev-27) | 1.0374 | 1/18 |
-| `recommended_for` | 1.0418 | 1/18 |
-| `Lap.auto()` | 1.0806 | 1/18 |
+| Category | AutoETS | Laplace family (best) | Δ | Count |
+|---|---:|---:|---:|---:|
+| **Laplace-favoring** (non-parametric / count / regime / heavy-tail) | 0.9120 | 0.9910 | AutoETS +8.7 % | 18 |
+| AutoETS-favoring (textbook trend + seasonal + Gaussian) | 0.7323 | 1.1427 | AutoETS +56 % | 8 |
+| Neutral (pure noise, short history, moderate var-shift) | 0.8441 | 0.8868 | AutoETS +5 % | 3 |
 
-Where AutoETS wins on synthetic: `stationary_seasonal_*`,
-`seasonal_linear_trend`, `seasonal_damped_trend`, `multi_seasonal_hourly`
-(**+152 %** worse for our router), `heteroscedastic_multi_seasonal`
-(+109 %), `linear_trend_only` (+57 %). Where our Laplace family holds:
-`random_walk`, `mean_reverting_ou`, `level_shift_midway`.
+On aggregate AutoETS beats us everywhere. But the **per-archetype
+signals are what matter for the recipe choice**:
 
-**Practical implication.** Our fev-27 rank ~6 comes from real-world
-noise defeating AutoETS's structural assumptions — NOT from Laplace
-being universally better. If your panel is a well-behaved
-trend + seasonal + Gaussian process, use `AutoETS` directly (or
-`SmartForecaster` for a cross-family router). Reach for `recommended_for`
-when your data is messy, has jumps / regime shifts, is heavy-tailed,
-is count-valued, or when you specifically need the distributional
-output (`GaussianMixture`) that classical forecasters don't provide.
+**Reach for Laplace when your data looks like these — clear wins:**
+
+| Archetype | Metric | AutoETS | best Laplace | Δ |
+|---|---|---:|---:|---:|
+| `intermittent_bursty` | MASE | 0.9826 | 0.8471 (MS+3SH) | **−13.8 %** |
+| `intermittent_bursty` | WQL | 1.3019 | 1.0584 (MS+3SH) | **−18.7 %** |
+| `zero_inflated_seasonal` | WQL | 1.3682 | 1.1467 (MS+3SH) | **−16.2 %** |
+| `level_shift_midway` | MASE | 0.7332 | 0.6905 (MS+3SH) | −5.8 % |
+| `mean_reverting_ou` | MASE | 1.9092 | 1.8130 (Lap.auto) | −5.0 % |
+| `random_walk` | MASE | 2.6680 | 2.5749 (recommended) | −3.5 % |
+| `fading_seasonality` | WQL vs AutoTheta | 0.0415 | 0.0140 (recommended) | **−66 %** |
+
+Pattern: **intermittent counts, zero-inflation, structural breaks,
+non-parametric mean-reversion, fading / evolving structure**.
+Distributional metrics (WQL) win by wider margins than point (MASE)
+because AutoETS's Gaussian-fallback quantiles miscalibrate on the
+non-Gaussian residuals these DGPs produce.
+
+**Use `AutoETS` when your data looks like these — clear losses:**
+
+| Archetype | AutoETS MASE | `recommended_for` MASE | Δ |
+|---|---:|---:|---:|
+| `multi_seasonal_hourly` | 0.7453 | 1.8898 | **+152 %** |
+| `heteroscedastic_multi_seasonal` | 0.7072 | 1.4840 | +109 % |
+| `linear_trend_only` | 0.6563 | 1.0345 | +57 % |
+| `everything_at_once` | 1.0168 | 1.3758 | +35 % |
+| `stationary_seasonal_short` | 0.7930 | 0.9780 | +23 % |
+
+Pattern: **textbook trend + seasonal + Gaussian noise**. When the DGP
+matches AutoETS's structural assumptions, the parametric baseline
+wins by a wide margin — and Laplace's flexibility becomes overhead.
+
+**Why our fev-27 rank ~6 doesn't contradict this.** Fev-27 panels
+are almost all intermittent-count, real-world noisy, mixed-regime,
+heavy-tailed — the exact shape space of the *Laplace-favoring*
+category above. On clean-signal synthetic archetypes, AutoETS still
+dominates. Our win on real data is real, but narrower than the
+overall leaderboard framing suggests.
+
+For a cross-family router that also picks `AutoETS` when the data
+looks structural, use [`SmartForecaster`](../src/models/smart.rs).
 
 ---
 

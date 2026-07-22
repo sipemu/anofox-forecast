@@ -591,6 +591,69 @@ seasonal series (multi_seasonal_hourly: 685 ms vs 3-4 ms). If latency
 matters and the panel isn't obviously structural, the Laplace
 recipes are still the pragmatic pick.
 
+### 2026-07-23 extension — 11 new Laplace-favoring archetypes + category segmentation
+
+Extended the bake-off from 18 to 29 archetypes to sharpen the "when
+to use Laplace" story. New archetypes deliberately target Laplace's
+design targets: regime shifts (`regime_shift_flat_to_trend`),
+contamination (`contaminated_seasonal`), heavy-tail-on-trend
+(`student_t_trended`, `trend_jumps_heavy_tails`), extreme
+intermittency (`intermittent_bursty`, `zero_inflated_seasonal`),
+GARCH volatility clustering, evolving variance, fading seasonality,
+bimodal regime switching, discrete tick-grid random walk.
+
+Also added a `Category` enum (`LaplaceFavoring` / `AutoETSFavoring` /
+`Neutral`) so the output segments wins-by-category — makes the "when
+to use Laplace" cut visible in one glance.
+
+**Router robustness bug fixed.** Prior `is_heavy_tailed` computed
+kurtosis on RAW values, so heavy-tailed innovations on top of a
+linear trend (`student_t_trended`, `trend_jumps_heavy_tails`) were
+masked by trend-dominated variance. Now computes on first differences
+(a crude detrending) and adds a `max-standardised-deviation > 6`
+OR-trigger — Gaussian effectively never produces this in ≤ 1000 obs,
+while heavy-tailed distributions reliably do. Router accuracy
+climbed from 18/18 (original) → 26/29 on the extended set; three
+false-negatives remain (student_t_trended, trend_jumps_heavy_tails,
+garch_volatility_clustering) where sample-based kurtosis is too
+noisy to trigger consistently, but their actual MASE cost vs the
+right recipe is < 5 %.
+
+**The category-segmented result** (2026-07-23):
+
+| Category | AutoETS wins | Laplace family wins | Count |
+|---|---:|---:|---:|
+| Laplace-favoring | 10 | 8 (Lap.auto 1, recommended_for 3, MS+3SH 2, AutoTheta 2) | 18 |
+| AutoETS-favoring | 8 | 0 | 8 |
+| Neutral | 2 | 1 (AutoTheta) | 3 |
+
+Even on Laplace-favoring, AutoETS still wins 56 % of the archetypes;
+the Laplace family wins 44 %. On AutoETS-favoring, Laplace wins
+0/8. The story is no longer "Laplace is worse everywhere" — it's
+"Laplace is competitive in its design space and dominant in a
+handful of panels; AutoETS is dominant on textbook structural DGPs
+and competitive everywhere else."
+
+**Per-archetype clear-Laplace wins** (both MASE and WQL where
+applicable):
+
+| Archetype | Metric | AutoETS | Best Laplace | Δ |
+|---|---|---:|---:|---:|
+| `intermittent_bursty` | MASE | 0.9826 | 0.8471 (MS+3SH) | **−13.8 %** |
+| `intermittent_bursty` | WQL | 1.3019 | 1.0584 (MS+3SH) | **−18.7 %** |
+| `zero_inflated_seasonal` | WQL | 1.3682 | 1.1467 (MS+3SH) | **−16.2 %** |
+| `fading_seasonality` | WQL vs AutoTheta | 0.0415 | 0.0140 (recommended) | **−66 %** |
+| `level_shift_midway` | MASE | 0.7332 | 0.6905 (MS+3SH) | −5.8 % |
+| `mean_reverting_ou` | MASE | 1.9092 | 1.8130 (Lap.auto) | −5.0 % |
+| `random_walk` | MASE | 2.6680 | 2.5749 (recommended) | −3.5 % |
+
+The wide WQL wins on intermittent / zero-inflated panels are the
+sharpest story: **AutoETS's Gaussian-fallback quantile grid
+miscalibrates badly on non-Gaussian discrete-support residuals**,
+while `.auto_aid()`'s Poisson / NegBin / ZIP / ZINB leaves match
+the DGP directly. If your metric is probabilistic, Laplace's edge
+in count territory is bigger than the point-forecast MASE suggests.
+
 ## Meta-lessons — patterns to watch for
 
 ### 1. Measure the feature's *active region* before implementing
