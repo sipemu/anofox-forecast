@@ -54,6 +54,38 @@ use [`SmartForecaster`](../src/models/smart.rs) instead.
 Read the sections below when you want to override a rule or understand
 *why* a given recipe wins.
 
+### ⚠ When NOT to use `recommended_for` (or any Laplace recipe)
+
+The router is Laplace-family-scoped. On **clean-signal data** — series
+whose generating process actually matches ETS's structural
+decomposition (trend + seasonal + Gaussian noise) — `AutoETS` beats
+every Laplace recipe by a wide margin. Measured 2026-07-22 on the
+synthetic bake-off (`examples/synthetic_bakeoff.rs`, 18 archetypes ×
+30 replicates):
+
+| Model | Overall geomean MASE | Wins per archetype |
+|---|---:|---:|
+| **`AutoETS`** | **0.8417** | **13/18** |
+| `AutoTheta` | 0.9072 | 2/18 |
+| `MS+3SH manual` (our SOTA on fev-27) | 1.0374 | 1/18 |
+| `recommended_for` | 1.0418 | 1/18 |
+| `Lap.auto()` | 1.0806 | 1/18 |
+
+Where AutoETS wins on synthetic: `stationary_seasonal_*`,
+`seasonal_linear_trend`, `seasonal_damped_trend`, `multi_seasonal_hourly`
+(**+152 %** worse for our router), `heteroscedastic_multi_seasonal`
+(+109 %), `linear_trend_only` (+57 %). Where our Laplace family holds:
+`random_walk`, `mean_reverting_ou`, `level_shift_midway`.
+
+**Practical implication.** Our fev-27 rank ~6 comes from real-world
+noise defeating AutoETS's structural assumptions — NOT from Laplace
+being universally better. If your panel is a well-behaved
+trend + seasonal + Gaussian process, use `AutoETS` directly (or
+`SmartForecaster` for a cross-family router). Reach for `recommended_for`
+when your data is messy, has jumps / regime shifts, is heavy-tailed,
+is count-valued, or when you specifically need the distributional
+output (`GaussianMixture`) that classical forecasters don't provide.
+
 ---
 
 ## Step 1 — Pick the top-level selector

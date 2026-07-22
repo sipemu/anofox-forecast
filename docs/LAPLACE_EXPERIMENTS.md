@@ -535,6 +535,62 @@ let the softmax choose. Same shape as the `standardize_ema_alphas` +
 capacity is essentially free (~4 leaves × 25 obs training cost) and
 buys real gains on the panels where trend is present within a phase.
 
+## Synthetic bake-off — clean signal vs real-world noise (2026-07-22)
+
+Built 18 archetypes (varying length, seasonality, trend, variance,
+jumps, distribution, count-ness, multi-seasonality) × 30 replicates
+each = 540 synthetic series. Compared 5 models: `AutoETS`,
+`AutoTheta`, `Lap.auto()`, `laplace::recommended_for` (the router),
+and `MS+3SH manual` (our fev-27 SOTA). See
+`examples/synthetic_bakeoff.rs`.
+
+**Router validation**: 18/18 correct picks. The `recommended_for`
+router selects the intended `RecipeKind` for every archetype (short
+history → `ShortHistory`, count-like → `RetailCountAid`, heavy-tailed
+→ `HeavyTailedCrps`, seasonal + long → `ContinuousMultiScale`,
+non-seasonal → `ContinuousPlainSkaters`). Data-shape detection works.
+
+**MASE result** (overall geomean, all 18 archetypes):
+
+| Model | Geomean | Wins |
+|---|---:|---:|
+| **`AutoETS`** | **0.8417** | **13/18** |
+| `AutoTheta` | 0.9072 | 2/18 |
+| `MS+3SH manual` | 1.0374 | 1/18 |
+| `recommended_for` | 1.0418 | 1/18 |
+| `Lap.auto()` | 1.0806 | 1/18 |
+
+**Where AutoETS dominates** (parametric DGP matches its assumptions):
+`stationary_seasonal_*`, `seasonal_linear_trend`, `seasonal_damped_trend`,
+`multi_seasonal_hourly` (**+152 %** vs router), `linear_trend_only`
+(+57 %), `heteroscedastic_multi_seasonal` (+109 %).
+
+**Where our Laplace family wins**: `random_walk`, `mean_reverting_ou`,
+`level_shift_midway` (jumps), `heavy_tail_cauchy` (within 4 % of
+AutoETS via CRPS). The pattern: non-parametric / regime-changing /
+heavy-tailed shapes.
+
+**The reframe.** Our fev-27 rank ~6 (MASE 1.4149) is real, but
+narrower than the leaderboard framing suggests. It reflects
+**real-world noise defeating AutoETS's structural assumptions**, not
+Laplace being universally better. On clean-signal synthetic data the
+ordering flips completely. Fev-27 panels are noisy, mixed-regime, and
+heavy-tailed enough that the flexible streaming pool beats the
+parametric baseline; synthetic archetypes with textbook decomposition
+give the parametric baseline back its home turf.
+
+**Practical takeaway for `SOTA_POSITIONING.md` and
+`LAPLACE_PARAMETER_GUIDE.md`**: recommend `AutoETS` (or
+`SmartForecaster` for cross-family routing) when the caller's data
+looks like a clean trend + seasonal + Gaussian process. Reserve
+`recommended_for` for messy / non-parametric / count / heavy-tailed
+panels — which is what the fev-27 27-set panel actually is.
+
+**Fit-time cost**: AutoETS is 10-100× slower than Laplace on longer
+seasonal series (multi_seasonal_hourly: 685 ms vs 3-4 ms). If latency
+matters and the panel isn't obviously structural, the Laplace
+recipes are still the pragmatic pick.
+
 ## Meta-lessons — patterns to watch for
 
 ### 1. Measure the feature's *active region* before implementing

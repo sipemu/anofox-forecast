@@ -4,6 +4,18 @@
 
 ## ⚠ Read this first — different benchmarks want different recipes
 
+**Our fev-27 rank ~6 comes from real-world noise defeating AutoETS's structural assumptions — NOT from Laplace being universally better.** On clean-signal synthetic data (single-behaviour archetypes: trend, seasonality, Gaussian noise), `AutoETS` beats every Laplace recipe by a wide margin. Measured 2026-07-22 on the synthetic bake-off (`examples/synthetic_bakeoff.rs`, 18 archetypes × 30 replicates):
+
+| Model | Overall geomean MASE | Wins |
+|---|---:|---:|
+| **`AutoETS`** | **0.8417** | **13/18** |
+| `AutoTheta` | 0.9072 | 2/18 |
+| `MS+3SH manual` (our fev-27 SOTA) | 1.0374 | 1/18 |
+| `recommended_for` | 1.0418 | 1/18 |
+| `Lap.auto()` | 1.0806 | 1/18 |
+
+The Laplace family wins where the DGP breaks parametric assumptions: `random_walk`, `mean_reverting_ou`, `level_shift_midway`. It loses badly where the DGP is a clean structural decomposition: `multi_seasonal_hourly` (**+152 %** vs AutoETS), `heteroscedastic_multi_seasonal` (+109 %), `linear_trend_only` (+57 %). If your data looks structural, use `AutoETS` directly.
+
 **The v0.15.4 winning recipe (`MultiScaleLaplace + scH + scW=14`) is a fev-27 win but REGRESSES on M5 retail.** Measured on M5 200-series:
 
 | Model | mean MASE | panel WAPE | fit time |

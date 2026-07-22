@@ -26,7 +26,7 @@ use crate::models::laplace::multiscale::MultiScaleLaplace;
 use crate::models::laplace::{DistributionalForecaster, LaplaceForecaster};
 
 /// Which recipe the router picked, for logging / introspection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RecipeKind {
     /// N < 60. Laplace family runs but classical Theta/ETS is usually
     /// better here; caller should consider switching.
