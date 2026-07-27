@@ -50,3 +50,26 @@ for (const sc of scenarios) {
 
 if (fail > 0) { console.error(`FAILED (${fail})`); process.exit(1); }
 console.log('OK — all scenarios produced finite forecasts.');
+
+// ---------- Anomaly-tab methods smoke ----------
+console.log('\nAnomaly-tab methods:');
+{
+  const rng = new Rng(7);
+  const warm = [];
+  for (let i = 0; i < 100; i++) warm.push(50 + rng.normal());
+  const pg = new LaplacePlayground(new Float64Array(warm), 0, 1);
+  const surpriseIn = pg.surprise(50);            // ~expected value
+  const surpriseOut = pg.surprise(50 + 8);       // ~8σ out
+  const tailIn = pg.tail_probability(50);
+  const tailOut = pg.tail_probability(50 + 8);
+  const ok = Number.isFinite(surpriseIn)
+    && Number.isFinite(surpriseOut)
+    && surpriseOut > surpriseIn + 5   // 8σ out must have much higher surprise
+    && tailIn > 0.5                    // near-median → tail prob near 1
+    && tailOut < 0.05;                 // 8σ out → tiny tail prob
+  console.log(`  surprise(50)  = ${surpriseIn.toFixed(2)}   surprise(58)  = ${surpriseOut.toFixed(2)}   ${surpriseOut > surpriseIn + 5 ? 'OK' : 'FAIL'}`);
+  console.log(`  tailProb(50)  = ${tailIn.toFixed(3)}     tailProb(58)  = ${tailOut.toExponential(2)}     ${tailIn > 0.5 && tailOut < 0.05 ? 'OK' : 'FAIL'}`);
+  if (!ok) { console.error('anomaly methods FAILED sanity check'); process.exit(1); }
+  pg.free();
+}
+console.log('OK — anomaly methods behave.');

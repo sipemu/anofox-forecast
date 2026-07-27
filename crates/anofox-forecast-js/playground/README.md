@@ -55,6 +55,21 @@ python3 -m http.server 8000
 
 Any static-file server works (`npx serve`, `caddy file-server`, etc).
 
+## Tabs
+
+- **Forecast** — the classic streaming demo: pick an archetype, watch the
+  1..H-step predictive fan re-fit as new observations arrive.
+- **Anomaly detection** — same streaming loop, but the harness injects
+  random-sign spikes at a user-controlled rate and the Laplace 1-step
+  predictive mixture scores each incoming observation. Observations
+  whose surprise `-log p(y | mixture)` exceeds the threshold are
+  flagged (red X); the ground-truth injected obs are shown as red
+  rings. Metrics: precision, recall, TP, FP.
+
+The threshold slider is interactive — re-scores the entire history
+against the new cut without re-fitting, so you can find the
+precision/recall trade-off by dragging.
+
 ## Archetypes
 
 Same generators as `examples/synthetic_bakeoff.rs`:

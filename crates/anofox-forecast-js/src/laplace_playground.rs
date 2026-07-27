@@ -131,6 +131,52 @@ impl LaplacePlayground {
         }
         Ok(out)
     }
+
+    /// Surprise score: `-log p(y | current 1-step predictive mixture)`.
+    /// Higher = more anomalous. Under a well-calibrated Gaussian
+    /// predictive this is roughly `0.5 · z² + const`, so a threshold
+    /// near 5 corresponds to ~3σ, near 8.5 to ~4σ.
+    ///
+    /// Returns `NaN` if the mixture is empty or the predictive density
+    /// is exactly zero at `y` (extremely deep tail).
+    pub fn surprise(&self, y: f64) -> f64 {
+        if !y.is_finite() {
+            return f64::NAN;
+        }
+        let mixtures = match self.inner.forecast_dist(1) {
+            Ok(m) => m,
+            Err(_) => return f64::NAN,
+        };
+        if mixtures.is_empty() {
+            return f64::NAN;
+        }
+        let lp = mixtures[0].logpdf(y);
+        if lp.is_finite() {
+            -lp
+        } else {
+            f64::INFINITY
+        }
+    }
+
+    /// Two-sided tail probability of `y` under the current 1-step
+    /// predictive mixture: `2 · min(F(y), 1 - F(y))`. Returns a value
+    /// in `[0, 1]`; smaller = further into the tail = more anomalous.
+    /// Complementary to [`Self::surprise`] — this is the "PIT-style"
+    /// surprise index that doesn't depend on the log-scale.
+    pub fn tail_probability(&self, y: f64) -> f64 {
+        if !y.is_finite() {
+            return f64::NAN;
+        }
+        let mixtures = match self.inner.forecast_dist(1) {
+            Ok(m) => m,
+            Err(_) => return f64::NAN,
+        };
+        if mixtures.is_empty() {
+            return f64::NAN;
+        }
+        let f = mixtures[0].cdf(y).clamp(0.0, 1.0);
+        2.0 * f.min(1.0 - f)
+    }
 }
 
 fn build_series(values: &[f64]) -> Result<TimeSeries, String> {
