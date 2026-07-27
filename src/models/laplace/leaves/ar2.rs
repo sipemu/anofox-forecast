@@ -119,19 +119,45 @@ impl Leaf for Ar2Leaf {
     }
 
     fn predict(&self, horizon: usize) -> Vec<Gaussian> {
+        // Multi-step forecast: mean is the recursive AR(2) projection,
+        // variance is the correct MA(∞) form σ² · Σ_{i=0..h-1} ψ_i²
+        // where the ψ coefficients satisfy the same AR(2) recurrence
+        // as the mean: ψ_0 = 1, ψ_1 = φ_1, ψ_i = φ_1·ψ_{i-1} + φ_2·ψ_{i-2}.
+        //
+        // Pre-fix (skaters #157 in upstream): used σ · √h — the
+        // random-walk formula. That assumes independent innovations
+        // at each step, but for a *stationary* AR(2) the multi-step
+        // variance approaches the unconditional bound σ²/(1-φ_1²-φ_2²)
+        // (approx), not σ²·h. The pre-fix formula:
+        //   - overstates h-step uncertainty for stationary AR(2),
+        //     hurting probabilistic-metric calibration (WQL, CRPS);
+        //   - is scale-independent of φ, so a near-white AR(2)
+        //     (φ_1=φ_2=0) got the same variance as a strongly
+        //     autocorrelated one — physically wrong.
         let mu = self.e_y;
         let last = self.last.unwrap_or(mu);
         let last2 = self.last2.unwrap_or(mu);
         let sigma = self.sigma();
-        let mut y_prev2 = last2 - mu; // deviation from μ
+        let mut y_prev2 = last2 - mu;
         let mut y_prev1 = last - mu;
+        // Rolling MA(∞) coefficients ψ_i, initialised at ψ_0=1, ψ_{-1}=0.
+        let mut psi_prev2: f64 = 0.0;
+        let mut psi_prev1: f64 = 1.0;
+        let mut var_scale: f64 = 1.0; // Σ ψ_i² accumulated so far = ψ_0² = 1
         (1..=horizon)
             .map(|h| {
                 let y_h = self.phi1 * y_prev1 + self.phi2 * y_prev2;
                 let mean = mu + y_h;
                 y_prev2 = y_prev1;
                 y_prev1 = y_h;
-                Gaussian::new(mean, sigma * (h as f64).sqrt())
+                let g = Gaussian::new(mean, sigma * var_scale.sqrt());
+                // Roll the MA(∞) coefficient for the NEXT step.
+                let psi_next = self.phi1 * psi_prev1 + self.phi2 * psi_prev2;
+                psi_prev2 = psi_prev1;
+                psi_prev1 = psi_next;
+                var_scale += psi_next * psi_next;
+                let _ = h;
+                g
             })
             .collect()
     }

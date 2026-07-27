@@ -146,6 +146,50 @@ The fev-27 winner `MultiScaleLaplace + scH + scW=14` **regresses on M5 retail** 
 
 **Lesson**: fev-27 (mixed classical) and M5 (retail counts) are structurally different tasks with different best selectors. **No single recipe wins everywhere.** The v0.15.4 improvements are fev-27 improvements, not universal ones. For retail, `.auto_aid()` or `SmartForecaster` remain recommended (v0.13.0 era, unchanged).
 
+## Upstream sync — skaters #157 bug audit (2026-07-25)
+
+Re-check of open microprediction/skaters issues and merged PRs
+surfaced upstream PR #157 (merged 2026-07-24, "Stabilize AR and garch
+forecasts on non-stationary / large-magnitude series"). Three
+correctness bugs, two applied to our Rust port:
+
+| Upstream bug | Our Ar1Leaf | Our Ar2Leaf | Our GarchWrappedLeaf |
+|---|---|---|---|
+| 1. Non-stationary blow-up | ✅ safe (phi clamped ±0.999) | ✅ safe (project_to_stationary) | N/A |
+| 2. Wrong multi-step variance | ✅ correct MA(∞) | ❌ used `σ·√h` (fixed) | N/A |
+| 3. GARCH: variance of level vs deviation | N/A | N/A | ❌ used raw `y²` (fixed) |
+
+**Bug 2 fix — `Ar2Leaf` MA(∞) variance.** The h-step variance now
+follows the correct recurrence: ψ_0=1, ψ_1=φ_1, ψ_i = φ_1·ψ_{i-1} +
+φ_2·ψ_{i-2}, Var[h] = σ²·Σ_{i=0..h-1} ψ_i². Pre-fix used the random-walk
+form `σ·√h`, which overstated horizon-h uncertainty for stationary
+AR(2) and made the variance identical for any φ_1, φ_2 in the stationary
+triangle. Regression test:
+`tests/laplace_component_robustness.rs::ar2_h_step_variance_bounded_for_stationary_phis`
+asserts sigma_long/sigma_short < 2.0 (pre-fix ratio was ≈ 10).
+
+**Bug 3 fix — `GarchWrappedLeaf` shift-invariant recursion.** The
+GARCH recursion now runs on **deviations from a running mean**
+(`d = y - mu_running`), not raw `y²`. On level series (values ~1e5),
+`α·y²` used to dominate ω and β·σ², so "volatility" became of order
+`|y|` and the inverse re-inflated the mixture σ. The wrapper is now
+end-to-end shift-invariant: the inner leaf is fed `(y-mu)/σ` (centered
+standardized) rather than `y/σ`, and predictions add `mu` back on the
+way out. Regression test:
+`tests/laplace_component_robustness.rs::garch_shift_invariant_on_level_series`
+asserts predictive σ stays O(1) on values around 1e6.
+
+Upstream's headline number: GIFT-Eval `m4_yearly` WQL recovered
+0.208 → 0.1195 (−43 %) — a plausibly big win for us too on
+large-magnitude panels we haven't measured yet (fev-27 mostly has
+values in [0, 1e3]).
+
+Also added 8 adversarial-input tests (`tests/laplace_component_robustness.rs`)
+mirroring the intent of upstream's `test_component_robustness.py`:
+billion-scale inputs, stationary long-horizon variance bounds, single
+spikes, level shifts. Would have caught both bugs immediately; guard
+the fixes going forward.
+
 ## Skaters-issue verification tests (2026-07-17)
 
 After v0.15.8, three open skaters issues (#86, #82, #84) each proposed a

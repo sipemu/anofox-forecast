@@ -5,16 +5,26 @@
 //! distribution by the same σ on the way out.
 //!
 //! ```text
-//!   σ_t² = ω + α y_{t-1}² + β σ_{t-1}²
-//!   y'_t = y_t / σ_t             ← inner leaf sees this
-//!   D_out = D_inner.scale(σ_t)   ← recover original-space distribution
+//!   d_{t-1} = y_{t-1} - μ̂_{t-1}                 ← deviation from running mean
+//!   σ_t²   = ω + α d_{t-1}² + β σ_{t-1}²
+//!   y'_t   = y_t / σ_t                          ← inner leaf sees this
+//!   D_out  = D_inner.scale(σ_t)                 ← recover original-space distribution
 //! ```
 //!
 //! Stationarity requires `α + β < 1`; the unconditional variance is
 //! `ω / (1 - α - β)`. Defaults `(ω, α, β) = (0.01, 0.1, 0.85)` match
 //! skaters' default and are typical for financial return series.
 //!
-//! PR #3 of #180.
+//! # Shift invariance (2026-07-25, fixes skaters #157 bug 3)
+//!
+//! The recursion runs on **deviations from a running mean**, not raw
+//! `y_{t-1}²`. Pre-fix, on a level series (values ~1e5) `α · y²` grew
+//! quadratically with the input scale and "volatility" became of order
+//! `|y|` rather than the actual innovation variance. Now shift-invariant
+//! (a no-op for the mean-zero return series GARCH is meant for; a
+//! massive stability improvement for level series).
+//!
+//! PR #3 of #180; extended 2026-07-25 with the deviation-based recursion.
 
 use super::super::dist::Gaussian;
 use super::super::leaf::Leaf;
@@ -26,6 +36,11 @@ pub struct GarchWrappedLeaf {
     beta: f64,
     var: f64,
     last_y: f64,
+    /// Running mean of observed y (used to build shift-invariant
+    /// deviations for the GARCH recursion). Updated as a running
+    /// (unweighted) mean — mirroring skaters' standardize behavior.
+    running_mean: f64,
+    n_obs: u64,
     initialized: bool,
     label: String,
 }
@@ -45,6 +60,8 @@ impl GarchWrappedLeaf {
             beta,
             var: 0.0,
             last_y: 0.0,
+            running_mean: 0.0,
+            n_obs: 0,
             initialized: false,
             label,
         }
@@ -70,30 +87,38 @@ impl Leaf for GarchWrappedLeaf {
     }
 
     fn predict(&self, horizon: usize) -> Vec<Gaussian> {
+        // Inner leaf's predictions are in *centered-standardized*
+        // space (deviations from the running mean, divided by σ_t).
+        // Recover the original-space distribution by scaling by σ_t
+        // and adding the running mean back to the mean.
         let sigma_t = self.conditional_sigma();
-        // The inner leaf's predictions are in standardized space; scale
-        // them back by σ_t. Skaters keeps σ_t fixed across horizons —
-        // the GARCH inverse doesn't grow with h. That's a simplification
-        // (true GARCH multi-step variance is a mean-reverting geometric
-        // series), but matches skaters' port for parity.
+        let mu = self.running_mean;
         let inner = self.inner.predict(horizon);
         inner
             .into_iter()
-            .map(|g| Gaussian::new(g.mean * sigma_t, (g.std * sigma_t).max(1e-9)))
+            .map(|g| Gaussian::new(g.mean * sigma_t + mu, (g.std * sigma_t).max(1e-9)))
             .collect()
     }
 
     #[inline]
     fn predict_one(&self) -> Gaussian {
         let sigma_t = self.conditional_sigma();
+        let mu = self.running_mean;
         let g = self.inner.predict_one();
-        Gaussian::new(g.mean * sigma_t, (g.std * sigma_t).max(1e-9))
+        Gaussian::new(g.mean * sigma_t + mu, (g.std * sigma_t).max(1e-9))
     }
 
     fn observe(&mut self, y: f64) {
         if !y.is_finite() {
             return;
         }
+        // Update running mean incrementally BEFORE using it in the
+        // recursion — strictly causal on observations 1..t and makes
+        // the wrapper shift-invariant on the marginal level of y.
+        self.n_obs += 1;
+        let n_f = self.n_obs as f64;
+        self.running_mean += (y - self.running_mean) / n_f;
+
         if !self.initialized {
             // Bootstrap: use unconditional variance if stationary.
             let persist = self.alpha + self.beta;
@@ -103,26 +128,33 @@ impl Leaf for GarchWrappedLeaf {
                 self.omega
             };
             // FLOOR by y² so the very first standardized value stays
-            // O(1) regardless of input scale. Without this floor,
-            // `omega/(1-persist)` is a tiny constant (~5e-5) that on
-            // billion-scale input produces `y / sigma ≈ 2e11`,
-            // poisoning the inner EMA for many observations. Diagnosed
-            // on cif_2016 series 54 where this cascaded into a
-            // 60-million-times mixture-σ inflation via the terminal
-            // residual EWMA.
+            // O(1) regardless of input scale. At n=1 the running mean
+            // equals y, so `dev = y - running_mean = 0` — we can't use
+            // dev² as the floor. Fall back to `y * y` for the bootstrap
+            // only; from n=2 onward the deviation-based recursion
+            // takes over.
             self.var = unconditional.max(y * y);
             self.last_y = y;
             self.initialized = true;
             let sigma = self.conditional_sigma();
-            self.inner.observe(y / sigma);
+            // Feed inner in centered-standardized space, `(y-mu)/σ`.
+            // At n=1 this is 0 — the inner leaf sees no shock, which
+            // is the right behaviour (we have no residual yet).
+            self.inner.observe((y - self.running_mean) / sigma);
             return;
         }
-        // Update conditional variance BEFORE dividing y — skaters' order
-        // (updates based on last_y², then standardizes current y).
-        self.var = self.omega + self.alpha * self.last_y * self.last_y + self.beta * self.var;
+        // Deviation-based recursion (shift-invariant). Pre-2026-07-25
+        // used `alpha * last_y * last_y`, which on level series
+        // (values ~1e4-1e6) made "volatility" of order |y| and the
+        // inverse re-inflated it. The `running_mean` subtraction is a
+        // no-op for the mean-zero return series GARCH is meant for.
+        let d_prev = self.last_y - self.running_mean;
+        self.var = self.omega + self.alpha * d_prev * d_prev + self.beta * self.var;
         let sigma = self.conditional_sigma();
         self.last_y = y;
-        self.inner.observe(y / sigma);
+        // Feed the inner leaf the centered-standardized deviation, not
+        // the raw y/σ — matches the shift-invariance of the recursion.
+        self.inner.observe((y - self.running_mean) / sigma);
     }
 }
 
