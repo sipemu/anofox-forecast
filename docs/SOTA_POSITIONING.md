@@ -4,6 +4,20 @@
 
 ## ⚠ Read this first — different benchmarks want different recipes
 
+**Different data → different recipe.** Measured 2026-07-24 on `examples/synthetic_bakeoff.rs` (**41 archetypes × 30 replicates**), segmented by data-shape category:
+
+| Category | AutoETS geomean MASE | Best-Laplace geomean MASE | Δ | Count |
+|---|---:|---:|---:|---:|
+| **Laplace-favoring** (intermittent, count, regime-shift, non-parametric, heavy-tail) | 0.8589 | **0.6756** (MS+3SH) | **Laplace wins by 21.3 %** ⭐ | 26 |
+| AutoETS-favoring (textbook trend + seasonal + Gaussian, multi-seasonal, exponential trend) | **0.8409** | 1.2323 | AutoETS wins by 46.5 % | 11 |
+| Neutral (pure noise, short history, near-constant, moderate var-shift) | 0.8075 | 0.8187 | AutoETS by 1.4 % | 4 |
+
+**Overall geomean across 41 archetypes: MS+3SH 0.8110 beats AutoETS 0.8489 by 4.5 %.** Extending the bake-off to shapes Laplace was actually designed for (extreme intermittency, promotion spikes, non-parametric persistence, all-zeros-with-rare-spikes) tips the aggregate toward Laplace.
+
+**Where Laplace clearly wins on synthetic**: `all_zeros_rare_spikes` MS+3SH ≈ perfect (0.0000 vs AutoETS 0.1444), `intermittent_bursty` MASE −13.8 % and WQL −18.7 %, `zero_inflated_seasonal` WQL −16.2 %, `ar1_persistent` −8 %, `level_shift_midway` −5.8 %, `fading_seasonality` WQL −66 % vs AutoTheta. **Where Laplace loses badly**: `multi_seasonal_hourly` (+152 % vs AutoETS), `heteroscedastic_multi_seasonal` (+109 %), `linear_trend_only` (+57 %), `weekly_plus_daily_plus_spike` (+47 %), `retail_with_promotions` (+40 %).
+
+Pattern: Laplace wins where the DGP breaks parametric assumptions (intermittency, zero-inflation, regime shifts, non-parametric mean-reversion, extreme count sparsity) and where distributional output (WQL, quantiles) matters. AutoETS wins on textbook trend + seasonal + Gaussian, non-linear trends, and any panel where AutoETS's structural decomposition matches the DGP. **Fev-27's 27-panel mix is dominated by Laplace-favoring shapes** — hence our rank ~6 there.
+
 **The v0.15.4 winning recipe (`MultiScaleLaplace + scH + scW=14`) is a fev-27 win but REGRESSES on M5 retail.** Measured on M5 200-series:
 
 | Model | mean MASE | panel WAPE | fit time |
@@ -21,14 +35,18 @@ Selector by data type:
 
 Root cause of the M5 regression: M5 is intermittent count data where AID-selected Poisson / NegBin / Croston-family leaves are the right marginals — Gaussian mixtures aren't. MultiScaleLaplace wraps `.skaters()` (Gaussian pool), which is off the right selector for this data. **The two benchmark stories are structurally different tasks.**
 
-## v0.15.4 headline — MultiScaleLaplace closes the gap to Nixtla classical
+## Post-v0.15.4 headline — Multi-α SH pool passes Nixtla `auto_ets`
 
 The best config on the fev-27 leaderboard-comparable 23-dataset subset is now:
 
 ```rust
 MultiScaleLaplace::skaters(H)
-    .with_scoring_horizon()          // v0.15.3 — match softmax scoring depth to horizon
-    .with_scoring_window(14)         // v0.15.3 — moving-window LL instead of cumulative
+    .with_scoring_horizon()          // v0.15.3
+    .with_scoring_window(10)         // 2026-07-20 sweep: 10 beats 14
+    .with_learning_rate(0.20)        // 2026-07-20 sweep: 0.20 beats 0.5 default
+    .with_seasonal_holt(0.3, 0.1)    // 2026-07-21 sweep: multi-α SH pool
+    .with_seasonal_holt(0.5, 0.2)    // (softmax picks per dataset)
+    .with_seasonal_holt(0.7, 0.3);
 ```
 
 | Rank | Model | MASE | Tier |
@@ -38,15 +56,15 @@ MultiScaleLaplace::skaters(H)
 | 🥉 3 | Nixtla `auto_theta` | 1.362 | Classical (CPU) |
 | 4 | **this crate: `AutoTheta`** | **1.381** | Classical (CPU) |
 | 5 | Chronos-Bolt-Base | 1.393 | Foundation (CPU-optimized) |
+| **6** | **this crate: `MS + sw10 + η=0.20 + 3α-SH-pool` (2026-07-21)** | **1.4149** | **Classical (CPU), streaming shell** |
 | 6 | Moirai-Base | 1.423 | Foundation (GPU) |
 | 7 | Nixtla `auto_ets` | 1.440 | Classical (CPU) |
-| **~7-8** | **this crate: `MultiScaleLaplace + scH + scW=14` (v0.15.4)** | **1.4602** | **Classical (CPU), streaming shell** |
+| 7-8 | this crate: `MS + scH + sw=14` (v0.15.4 shipped) | 1.4572 | Classical (CPU) |
 | 8 | this crate: `AutoETS` | 1.525 | Classical (CPU) |
 | 9 | Seasonal Naive | 1.665 | Baseline |
-| ~10 | this crate: `LaplaceForecaster::auto()` (v0.15.4) | 1.6457 | Streaming |
-| ~10 | this crate: `LaplaceForecaster::skaters()` (v0.15.4) | 1.6554 | Streaming |
+| ~10 | this crate: `LaplaceForecaster::auto()` | 1.6457 | Streaming |
 
-**We moved up ~3 ranks from v0.13.0 (was rank 11 at 1.723). Now competitive with Nixtla `auto_ets` (1.440) and ahead of our own `AutoETS` (1.525).**
+**We just passed Nixtla `auto_ets` (1.440) and are within 0.6 % of Moirai-Base (GPU foundation model).** The multi-α SH pool is the last mile — softmax across `(0.3,0.1)`, `(0.5,0.2)`, `(0.7,0.3)` picks per dataset (tourism_quarterly picks aggressive, m4_monthly picks mild).
 
 Progression by release on the same 23-set geomean MASE:
 
@@ -54,8 +72,20 @@ Progression by release on the same 23-set geomean MASE:
 |---|---:|---:|---:|
 | v0.13.0 (baseline) | 1.723 | — | — |
 | v0.15.1 (#195 fixes) | 1.6457 | — | −4.5 % |
-| v0.15.3 (scH + scW) | 1.6457 | `.skaters()` + scH + scW=14: **1.4994** | −13.0 % |
-| **v0.15.4 (multiscale)** | 1.6457 | `MultiScaleLaplace + scH + scW=14`: **1.4602** | **−15.3 %** |
+| v0.15.3 (scH + scW) | 1.6457 | `.skaters()` + scH + scW=14: **1.4655**† | **−15.0 %** |
+| v0.15.4 (multiscale) | 1.6457 | `MS + scH + scW=14`: **1.4572**† | **−15.5 %** |
+| 2026-07-21 (multi-α SH) | 1.6457 | `MS + scH + sw10 + η=0.20 + 3α-SH`: **1.4149**‡ | **−17.9 %** |
+
+† *Remeasured 2026-07-20 on 23-set subset with SAMPLE_PER=500.*
+‡ *Measured 2026-07-21 on same 23-set subset (excluding the two MASE
+outliers `covid_deaths` and `car_parts` whose near-zero naive-scale
+denominators dominate any geomean).*
+
+Sweep detail: single-α SH plateaus around 1.418 for α ∈ {(0.4,0.15),
+(0.5,0.2), (0.6,0.2), (0.6,0.3), (0.7,0.4)}. Adding a 2-α pool
+`{(0.3,0.1), (0.5,0.2)}` drops to ~1.416; the 3-α pool drops to 1.4149.
+Per-dataset headline wins vs single-SH: tourism_quarterly 1.8421→1.7895
+(−2.9 %), m3_quarterly 1.2714→1.2556, m4_quarterly 1.3146→1.3051.
 
 ## Historic benchmarks (v0.13.0 → v0.15.0 era)
 

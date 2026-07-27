@@ -117,6 +117,7 @@ pub mod leaf;
 mod leaf_enum;
 pub mod leaves;
 pub mod multiscale;
+pub mod recommend;
 
 pub use dist::{Gaussian, GaussianMixture};
 pub use forecaster::LaplaceForecaster;
@@ -125,6 +126,7 @@ pub use gpd_tails::{GpdTailParams, GpdTailsForecaster};
 pub use hierarchical::HierarchicalLaplace;
 pub use leaf::Leaf;
 pub use multiscale::MultiScaleLaplace;
+pub use recommend::{recipe_for, recommended_for, RecipeKind};
 
 use crate::error::Result;
 

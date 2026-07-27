@@ -1,10 +1,10 @@
-# Laplace experiments — post-mortem (v0.15.2 → v0.15.5)
+# Laplace experiments — post-mortem (v0.15.2 → 2026-07-21)
 
-*Written 2026-07-14 after the skaters-parity work. This is a consolidated engineering post-mortem covering ~10 experiments across four releases: what we tried, what worked, what didn't, and the meta-lessons. Meant to save future contributors from re-running dead ends.*
+*Written 2026-07-14 after the skaters-parity work, extended 2026-07-21 with the multi-α SH pool experiments. Consolidated engineering post-mortem covering ~15 experiments across five phases: what we tried, what worked, what didn't, and the meta-lessons.*
 
 ## Context
 
-The starting point was v0.13.0 `LaplaceForecaster::auto()` at rank 11 on the fev-27 leaderboard-comparable subset (MASE 1.723). By v0.15.5 we're at rank ~7-8 (MASE 1.4602 with the winning opt-in recipe) — competitive with Nixtla `auto_ets`. This document records how we got there.
+Starting point v0.13.0 `LaplaceForecaster::auto()` at rank 11 on the fev-27 leaderboard-comparable 23-dataset subset (MASE 1.723). After the 2026-07-21 multi-α SH pool work we're at rank ~6-7 (MASE 1.4149 with the current-best recipe) — past Nixtla `auto_ets` and within 0.6 % of Moirai-Base (GPU foundation model).
 
 ## Summary table
 
@@ -19,6 +19,11 @@ The starting point was v0.13.0 `LaplaceForecaster::auto()` at rank 11 on the fev
 | MultiScaleLaplace `DistributionalForecaster` + scH/scW pass-through | v0.15.4 | ✅ **−11.3 % MASE** on fev-27 leaderboard subset | ~200 LOC |
 | Parade PIT + GPD tails (full port) | v0.15.4 | ⚠ Works, 0 % benefit on fev-27, 17× fit-time cost | ~500 LOC |
 | `MultiScaleLaplace + scH + scW=14` on M5 | v0.15.4 | ❌ Regresses M5 retail by +8.7 % MASE / +9.5 % WAPE | Discovered post-release |
+| Scoring window sweep + learning-rate sweep on `.skaters()`/MS | 2026-07-20 | ✅ `sw=10` beats `sw=14` (−0.4 %); `η=0.20` beats default `η=0.5` (−0.85 % on MS) | Harness only |
+| Per-phase Holt (SH) leaf single-α on MS | 2026-07-21 | ✅ SH(0.5, 0.2) yields −0.65 % geomean; killer wins on trending seasonal (tourism_quarterly −8.9 %) | ~120 LOC (new `SeasonalHoltLeaf`) + builder wiring |
+| Per-phase Holt multi-α pool on MS | 2026-07-21 | ✅ **3-α pool `{(0.3,0.1), (0.5,0.2), (0.7,0.3)}` beats single-α by −0.33 %, total −0.97 % vs no-SH** | Vec-typed builder change on `MultiScaleLaplace` |
+| Partial-moment (up/down asymmetric variance) leaf | 2026-07-21 | ❌ Neutral to +0.05 %; single-Gaussian-per-leaf arch prevents true two-piece predictive | ~150 LOC, reverted |
+| Streaming ridge stacker prototype | 2026-07-21 | ❌ +66 % regression on yearly panels (tail too short for stable weights); non-neg-constrained variant deferred | Probe example only, no crate change |
 
 ## What worked
 
@@ -37,15 +42,48 @@ The single biggest surprise. Replaces the cumulative `Σ logpdf` in `cum_log_lik
 
 Optimum is aggressive (W = 7–14). Larger windows monotonically approach the cumulative baseline.
 
-### `MultiScaleLaplace + scH + scW=14` — the star (v0.15.4)
+### `MultiScaleLaplace + scH + scW=14` — the "star" that's mostly `scW=14` (v0.15.4)
 
-Combining v0.15.3's scoring knobs with a multi-scale wrapper (each scale runs `.skaters()` on decimated data, blended per-horizon via softmax over per-scale training log-lik) gave **−11.3 % MASE** on the leaderboard-comparable subset. Biggest single-change improvement in project history.
+Combining v0.15.3's scoring knobs with a multi-scale wrapper (each scale runs `.skaters()` on decimated data, blended per-horizon via softmax over per-scale training log-lik) gave **−11.3 % MASE** on the leaderboard-comparable subset. Originally framed as the biggest single-change improvement in project history.
 
 **Key tuning parameters** — all discovered by measurement:
 - `min_samples = 50` (dropped from 100). At 100 no fev-27 panel activates any decimated scale (degenerates to scale-1). At 30 m4_hourly's stride 24 activates with only 29 obs and the 30-leaf sub-pool can't fit → catastrophic regression.
 - Drop the `⌈√k⌉` stride when a period is set. A coprime stride aliases the seasonal signal; measured on fev-27 as −55 % m4_hourly / −50 % tourism_monthly regression at v1 of the port.
 - Scale-1 sub-forecaster receives the period hint via `.auto_with_seasonal_period(p)` — matches the fev-27 harness call pattern so multiscale isn't handicapped by missing the v0.15.1 seasonal-period fix.
 - Sub-forecasters wrap `.skaters()`, not `.auto()` — the wider pool wins on m4_hourly and long-N panels.
+
+**⚠ Attribution correction (measured 2026-07-20 on full fev-27, SAMPLE_PER=500)**:
+The v0.15.4 headline of "biggest single-change improvement" was
+overstated. On the 23-set leaderboard subset, the marginal contribution
+of MultiScale over the plain-`.skaters()` recipe with the same scoring
+knobs is only **0.57 %** geomean MASE:
+
+| Recipe | Geomean MASE (23-set) | Win-rate |
+|---|---:|---:|
+| `.skaters().auto_with_seasonal_period(P)` (baseline) | 1.6526 | 3/23 |
+| `+scoring_horizon(P)` alone (no `scW=14`) | 1.6411 | 1/23 |
+| `+scoring_horizon(P) + scoring_window(14)` | 1.4655 | 10/23 ⭐ |
+| `MultiScale + scH + scW=14` (v0.15.4 "winner") | 1.4572 | 8/23 |
+| `MultiScale + scH` (no `scW=14`) | 1.6410 | 1/23 |
+
+The bulk of the gain (−11.3 % of the −11.7 % over baseline) is from
+`.with_scoring_window(14)`, which was **v0.15.3**. MultiScale on top
+adds 0.57 % geomean and *loses* the win-rate. The v0.15.4 story is
+best rewritten as: **v0.15.3's `scoring_window(14)` was the star;
+v0.15.4's MultiScale wrapping is a small, situational refinement that
+buys the last 0.6 % at ~15 % higher fit-time cost.**
+
+Practical implication for users: pick MultiScale if you already have
+the wrapper for other reasons or want the last 0.5 %. Otherwise, the
+plain-`.skaters().auto_with_seasonal_period(P).with_scoring_horizon(P).with_scoring_window(14)`
+recipe is 99 % as good, simpler API, faster. See
+`docs/LAPLACE_PARAMETER_GUIDE.md` §"Step 4" for the current guidance.
+
+**Meta-lesson**: attribution matters. When a compound recipe wins,
+run the "just the last knob" A/B before crediting the outermost
+wrapper. In v0.15.4 we bundled MultiScale + scH + scW together and
+credited MultiScale; the honest attribution was to scoring_window (an
+earlier feature) and the wrapper contributed marginal refinement.
 
 ## What didn't work (and why)
 
@@ -107,6 +145,50 @@ The fev-27 winner `MultiScaleLaplace + scH + scW=14` **regresses on M5 retail** 
 **Root cause**: M5 is intermittent daily count data. AID-selected Poisson / NegBin / Croston-family leaves fit these SKUs; Gaussian mixtures (what MultiScaleLaplace emits, wrapping `.skaters()`) don't. The scoring knobs' aggressive multi-step objective on decimated sub-forecasters compounds the wrong-marginal problem.
 
 **Lesson**: fev-27 (mixed classical) and M5 (retail counts) are structurally different tasks with different best selectors. **No single recipe wins everywhere.** The v0.15.4 improvements are fev-27 improvements, not universal ones. For retail, `.auto_aid()` or `SmartForecaster` remain recommended (v0.13.0 era, unchanged).
+
+## Upstream sync — skaters #157 bug audit (2026-07-25)
+
+Re-check of open microprediction/skaters issues and merged PRs
+surfaced upstream PR #157 (merged 2026-07-24, "Stabilize AR and garch
+forecasts on non-stationary / large-magnitude series"). Three
+correctness bugs, two applied to our Rust port:
+
+| Upstream bug | Our Ar1Leaf | Our Ar2Leaf | Our GarchWrappedLeaf |
+|---|---|---|---|
+| 1. Non-stationary blow-up | ✅ safe (phi clamped ±0.999) | ✅ safe (project_to_stationary) | N/A |
+| 2. Wrong multi-step variance | ✅ correct MA(∞) | ❌ used `σ·√h` (fixed) | N/A |
+| 3. GARCH: variance of level vs deviation | N/A | N/A | ❌ used raw `y²` (fixed) |
+
+**Bug 2 fix — `Ar2Leaf` MA(∞) variance.** The h-step variance now
+follows the correct recurrence: ψ_0=1, ψ_1=φ_1, ψ_i = φ_1·ψ_{i-1} +
+φ_2·ψ_{i-2}, Var[h] = σ²·Σ_{i=0..h-1} ψ_i². Pre-fix used the random-walk
+form `σ·√h`, which overstated horizon-h uncertainty for stationary
+AR(2) and made the variance identical for any φ_1, φ_2 in the stationary
+triangle. Regression test:
+`tests/laplace_component_robustness.rs::ar2_h_step_variance_bounded_for_stationary_phis`
+asserts sigma_long/sigma_short < 2.0 (pre-fix ratio was ≈ 10).
+
+**Bug 3 fix — `GarchWrappedLeaf` shift-invariant recursion.** The
+GARCH recursion now runs on **deviations from a running mean**
+(`d = y - mu_running`), not raw `y²`. On level series (values ~1e5),
+`α·y²` used to dominate ω and β·σ², so "volatility" became of order
+`|y|` and the inverse re-inflated the mixture σ. The wrapper is now
+end-to-end shift-invariant: the inner leaf is fed `(y-mu)/σ` (centered
+standardized) rather than `y/σ`, and predictions add `mu` back on the
+way out. Regression test:
+`tests/laplace_component_robustness.rs::garch_shift_invariant_on_level_series`
+asserts predictive σ stays O(1) on values around 1e6.
+
+Upstream's headline number: GIFT-Eval `m4_yearly` WQL recovered
+0.208 → 0.1195 (−43 %) — a plausibly big win for us too on
+large-magnitude panels we haven't measured yet (fev-27 mostly has
+values in [0, 1e3]).
+
+Also added 8 adversarial-input tests (`tests/laplace_component_robustness.rs`)
+mirroring the intent of upstream's `test_component_robustness.py`:
+billion-scale inputs, stationary long-horizon variance bounds, single
+spikes, level shifts. Would have caught both bugs immediately; guard
+the fixes going forward.
 
 ## Skaters-issue verification tests (2026-07-17)
 
@@ -449,6 +531,312 @@ of scope for a unit-test suite. If the UCR forecasting benefit
 mirrors the fev-27 finding (single-digit percent, not 80 %+), the
 practical answer is the same: `.auto_with_seasonal_period(P).with_scoring_horizon(P)`
 with the caller supplying the detected period.
+
+## Multi-α seasonal-Holt pool (2026-07-21)
+
+Post-v0.15.4 push to close the gap to Nixtla `auto_ets` (1.440) on the
+23-set leaderboard subset. Three tests:
+
+**Test 1 — SH single-α sweep.** Extended `.with_seasonal_holt` to a
+sweep over α = (level, trend) ∈ {(0.4, 0.15), (0.5, 0.2), (0.5, 0.3),
+(0.6, 0.2), (0.6, 0.3), (0.7, 0.4)}. All lie in a flat plateau at
+−0.44 % to −0.62 % vs the no-SH MS baseline. No single-α beats
+(0.5, 0.2). Conclusion: single-α is a dead end.
+
+**Test 2 — SH multi-α pool [WIN].** Extended `MultiScaleLaplace` to
+accept a Vec of `(α_l, α_t)` pairs, one leaf per call. Softmax across
+the pool picks per dataset:
+
+| Variant | Full-scale 25-set geomean | vs no-SH |
+|---|---:|---:|
+| MS_ref (no SH) | 5.3375 | 0 % |
+| MS + SH(0.5, 0.2) | 5.3029 | −0.65 % |
+| MS + SH(0.3, 0.1) + SH(0.5, 0.2) | 5.2923 | −0.85 % |
+| **MS + SH(0.3, 0.1) + SH(0.5, 0.2) + SH(0.7, 0.3)** | **5.2855** | **−0.97 %** |
+
+Ex-outlier (`covid_deaths` and `car_parts` have near-zero naive-scale
+denominators that dominate the geomean): 3-α pool = **1.4149** vs prior
+best 1.4572 (v0.15.4) = **−2.9 %**. Per-dataset headline wins:
+tourism_quarterly 1.8421 → 1.7895 (**−2.9 %**), m3_quarterly
+1.2714 → 1.2556, tourism_monthly 1.5751 → 1.5454.
+
+**Test 3 — Ridge stacking [BUST].** Prototype `RidgeStackedLaplace`:
+fit 4 LaplaceForecaster variants on head (85 % of train), stream tail
+via `observe()` to build (X, y) pairs, solve ridge for combining
+weights, apply to full-train forecasts. **+66.5 % regression** vs MS
+baseline at SAMPLE_PER=25. Failure mode: yearly panels blow up because
+tail_len = 5-20 is too short for stable weights with 4 predictors
+(m3_yearly 4.38 → 15.06, m4_yearly 5.47 → 23.54). Where the tail *does*
+have signal, ridge actually wins (tourism_monthly 1.5090 → 1.4475).
+Not shipping-quality in current form; would need non-negativity
+constraints, higher λ on short series, and a min-tail-length fallback
+to simple averaging to be viable. Deferred.
+
+**Meta-lesson.** The multi-α SH pool is a repeat of the sk#113 idea 2
+finding: don't optimize one shrinkage constant, seed a diverse pool and
+let the softmax choose. Same shape as the `standardize_ema_alphas` +
+`fast_slow_slow_alphas` recipes that already ship. Additional pool
+capacity is essentially free (~4 leaves × 25 obs training cost) and
+buys real gains on the panels where trend is present within a phase.
+
+## Synthetic bake-off — clean signal vs real-world noise (2026-07-22)
+
+Built 18 archetypes (varying length, seasonality, trend, variance,
+jumps, distribution, count-ness, multi-seasonality) × 30 replicates
+each = 540 synthetic series. Compared 5 models: `AutoETS`,
+`AutoTheta`, `Lap.auto()`, `laplace::recommended_for` (the router),
+and `MS+3SH manual` (our fev-27 SOTA). See
+`examples/synthetic_bakeoff.rs`.
+
+**Router validation**: 18/18 correct picks. The `recommended_for`
+router selects the intended `RecipeKind` for every archetype (short
+history → `ShortHistory`, count-like → `RetailCountAid`, heavy-tailed
+→ `HeavyTailedCrps`, seasonal + long → `ContinuousMultiScale`,
+non-seasonal → `ContinuousPlainSkaters`). Data-shape detection works.
+
+**MASE result** (overall geomean, all 18 archetypes):
+
+| Model | Geomean | Wins |
+|---|---:|---:|
+| **`AutoETS`** | **0.8417** | **13/18** |
+| `AutoTheta` | 0.9072 | 2/18 |
+| `MS+3SH manual` | 1.0374 | 1/18 |
+| `recommended_for` | 1.0418 | 1/18 |
+| `Lap.auto()` | 1.0806 | 1/18 |
+
+**Where AutoETS dominates** (parametric DGP matches its assumptions):
+`stationary_seasonal_*`, `seasonal_linear_trend`, `seasonal_damped_trend`,
+`multi_seasonal_hourly` (**+152 %** vs router), `linear_trend_only`
+(+57 %), `heteroscedastic_multi_seasonal` (+109 %).
+
+**Where our Laplace family wins**: `random_walk`, `mean_reverting_ou`,
+`level_shift_midway` (jumps), `heavy_tail_cauchy` (within 4 % of
+AutoETS via CRPS). The pattern: non-parametric / regime-changing /
+heavy-tailed shapes.
+
+**The reframe.** Our fev-27 rank ~6 (MASE 1.4149) is real, but
+narrower than the leaderboard framing suggests. It reflects
+**real-world noise defeating AutoETS's structural assumptions**, not
+Laplace being universally better. On clean-signal synthetic data the
+ordering flips completely. Fev-27 panels are noisy, mixed-regime, and
+heavy-tailed enough that the flexible streaming pool beats the
+parametric baseline; synthetic archetypes with textbook decomposition
+give the parametric baseline back its home turf.
+
+**Practical takeaway for `SOTA_POSITIONING.md` and
+`LAPLACE_PARAMETER_GUIDE.md`**: recommend `AutoETS` (or
+`SmartForecaster` for cross-family routing) when the caller's data
+looks like a clean trend + seasonal + Gaussian process. Reserve
+`recommended_for` for messy / non-parametric / count / heavy-tailed
+panels — which is what the fev-27 27-set panel actually is.
+
+**Fit-time cost**: AutoETS is 10-100× slower than Laplace on longer
+seasonal series (multi_seasonal_hourly: 685 ms vs 3-4 ms). If latency
+matters and the panel isn't obviously structural, the Laplace
+recipes are still the pragmatic pick.
+
+### 2026-07-23 extension — 11 new Laplace-favoring archetypes + category segmentation
+
+Extended the bake-off from 18 to 29 archetypes to sharpen the "when
+to use Laplace" story. New archetypes deliberately target Laplace's
+design targets: regime shifts (`regime_shift_flat_to_trend`),
+contamination (`contaminated_seasonal`), heavy-tail-on-trend
+(`student_t_trended`, `trend_jumps_heavy_tails`), extreme
+intermittency (`intermittent_bursty`, `zero_inflated_seasonal`),
+GARCH volatility clustering, evolving variance, fading seasonality,
+bimodal regime switching, discrete tick-grid random walk.
+
+Also added a `Category` enum (`LaplaceFavoring` / `AutoETSFavoring` /
+`Neutral`) so the output segments wins-by-category — makes the "when
+to use Laplace" cut visible in one glance.
+
+**Router robustness bug fixed.** Prior `is_heavy_tailed` computed
+kurtosis on RAW values, so heavy-tailed innovations on top of a
+linear trend (`student_t_trended`, `trend_jumps_heavy_tails`) were
+masked by trend-dominated variance. Now computes on first differences
+(a crude detrending) and adds a `max-standardised-deviation > 6`
+OR-trigger — Gaussian effectively never produces this in ≤ 1000 obs,
+while heavy-tailed distributions reliably do. Router accuracy
+climbed from 18/18 (original) → 26/29 on the extended set; three
+false-negatives remain (student_t_trended, trend_jumps_heavy_tails,
+garch_volatility_clustering) where sample-based kurtosis is too
+noisy to trigger consistently, but their actual MASE cost vs the
+right recipe is < 5 %.
+
+**The category-segmented result** (2026-07-23):
+
+| Category | AutoETS wins | Laplace family wins | Count |
+|---|---:|---:|---:|
+| Laplace-favoring | 10 | 8 (Lap.auto 1, recommended_for 3, MS+3SH 2, AutoTheta 2) | 18 |
+| AutoETS-favoring | 8 | 0 | 8 |
+| Neutral | 2 | 1 (AutoTheta) | 3 |
+
+Even on Laplace-favoring, AutoETS still wins 56 % of the archetypes;
+the Laplace family wins 44 %. On AutoETS-favoring, Laplace wins
+0/8. The story is no longer "Laplace is worse everywhere" — it's
+"Laplace is competitive in its design space and dominant in a
+handful of panels; AutoETS is dominant on textbook structural DGPs
+and competitive everywhere else."
+
+**Per-archetype clear-Laplace wins** (both MASE and WQL where
+applicable):
+
+| Archetype | Metric | AutoETS | Best Laplace | Δ |
+|---|---|---:|---:|---:|
+| `intermittent_bursty` | MASE | 0.9826 | 0.8471 (MS+3SH) | **−13.8 %** |
+| `intermittent_bursty` | WQL | 1.3019 | 1.0584 (MS+3SH) | **−18.7 %** |
+| `zero_inflated_seasonal` | WQL | 1.3682 | 1.1467 (MS+3SH) | **−16.2 %** |
+| `fading_seasonality` | WQL vs AutoTheta | 0.0415 | 0.0140 (recommended) | **−66 %** |
+| `level_shift_midway` | MASE | 0.7332 | 0.6905 (MS+3SH) | −5.8 % |
+| `mean_reverting_ou` | MASE | 1.9092 | 1.8130 (Lap.auto) | −5.0 % |
+| `random_walk` | MASE | 2.6680 | 2.5749 (recommended) | −3.5 % |
+
+The wide WQL wins on intermittent / zero-inflated panels are the
+sharpest story: **AutoETS's Gaussian-fallback quantile grid
+miscalibrates badly on non-Gaussian discrete-support residuals**,
+while `.auto_aid()`'s Poisson / NegBin / ZIP / ZINB leaves match
+the DGP directly. If your metric is probabilistic, Laplace's edge
+in count territory is bigger than the point-forecast MASE suggests.
+
+### 2026-07-24 extension — 12 more archetypes → aggregate flips to Laplace
+
+Extended bake-off from 29 → 41 archetypes to cover under-tested
+axes: skewed continuous marginals (Gamma, Lognormal), overdispersed
+counts (NegBin), multiplicative seasonality, AR(1) persistence,
+non-linear trends (piecewise, exponential, S-curve), realistic
+combos (retail-with-promotions, web-traffic with release spikes),
+edge cases (near-constant, all-zeros-with-rare-spikes).
+
+**Result flips**: on **Laplace-favoring category** (now 26 archetypes),
+MS+3SH beats AutoETS by 21.3 % geomean (was AutoETS +8.7 %). **Overall
+geomean** across all 41 archetypes: MS+3SH 0.8110 vs AutoETS 0.8489 —
+**Laplace beats AutoETS by 4.5 %**. AutoETS-favoring category
+unchanged (AutoETS +46.5 %); the new axes shift what's in the
+Laplace-favoring category.
+
+Category counts (41 archetypes total): 26 Laplace-favoring, 11
+AutoETS-favoring, 4 Neutral.
+
+The killer new archetype: `all_zeros_rare_spikes` (99 % zeros + 1 %
+Poisson(10)). MS+3SH → near-perfect MASE (0.0000). Laplace's
+`IntermittentLeaf` / `PoissonLeaf` / `ZeroInflatedPoissonLeaf`
+predict the correct all-zero baseline; AutoETS smooths and misses.
+This one archetype does move the geomean; per-archetype tables are
+the honest read for shapes that don't match `all_zeros_rare_spikes`.
+
+Other clear new-archetype Laplace wins:
+- `ar1_persistent` (φ=0.9 AR(1)): Lap.auto 1.9443 vs AutoETS 2.1071
+  (−8 %). `Ar1Leaf` targets this shape natively.
+- `gamma_positive_skewed` / `negbin_overdispersed_counts` /
+  `lognormal_multiplicative`: near-ties (MASE within 1-4 % of AutoETS).
+  On WQL the Laplace mixture-quantile output would win by wider
+  margins (not measured this run).
+
+New-archetype AutoETS wins:
+- `piecewise_linear_trend`: AutoETS 0.81 vs Lap 1.32 (AutoETS +62 %).
+  Structural break interior to training; AutoETS's damped trend
+  handles it, Laplace's regime-shift softmax needs more warmup.
+- `exponential_growth`: AutoETS 2.94 vs Lap 3.65 (+24 %). AutoETS's
+  multiplicative-trend variants target this DGP directly.
+- `retail_with_promotions`, `weekly_plus_daily_plus_spike`: AutoETS
+  wins by 40-47 %. The parametric baseline captures the smooth
+  weekly + daily cycles; the promotion / release spikes hurt Laplace
+  more than they hurt AutoETS.
+
+**Router accuracy at 41 archetypes: 34/41 (83 %)**. Down from 26/29
+(90 %) — added archetypes probe the count/heavy-tail boundary where
+the shape checks disagree. Concrete misses: `negbin_overdispersed_counts`
+(zero-fraction < 30 % threshold), `retail_with_promotions` (spikes
+trigger heavy-tail before count check), `weekly_plus_daily_plus_spike`
+(spikes trigger heavy-tail). Fixable but scope for a separate router
+iteration — see `src/models/laplace/recommend.rs`.
+
+**Sharpened practical rule** (2026-07-24):
+
+- **Use Laplace** when your data is: extreme-intermittent (bursty,
+  all-zeros-with-spikes), zero-inflated, has regime shifts / jumps,
+  is non-parametric (RW, OU, AR(1)-persistent), has fading /
+  evolving structure, OR you need distributional output. **Overall
+  MS+3SH wins by 21 % on this shape space.**
+- **Use AutoETS** when your data is: textbook trend + seasonal +
+  Gaussian, multi-seasonal-structural, exponential / S-curve trend,
+  or has smooth periodic structure with occasional additive shocks.
+  **AutoETS wins by 47 % on this shape space.**
+- **Both close** on: pure noise, short history, near-constant, gentle
+  Gamma / Lognormal / NegBin marginals.
+
+Every rule now has ~30 replicates × 30-800 obs of measurement backing
+per archetype. Reproduce: `cargo run --release --features distributional --example synthetic_bakeoff`.
+
+### 2026-07-24 — SmartForecaster gets cross-family routing
+
+Extended `SmartForecaster` with shape-based cross-family routing
+(previously it only routed within Laplace via AID). New rules:
+
+1. `N < 60` → `AutoTheta` (streaming softmax hasn't converged).
+2. Regular series + strong trend R² > 0.30 OR seasonal autocorrelation
+   at lag = period > 0.40 → `AutoETS`.
+3. Everything else → previous AID-based Laplace routing.
+
+Second-pass bug fix (in the same session): initial routing only
+triggered for `Regular + Normal` AID class and passed the default
+seasonal_period=7 to AutoETS blindly. Both bugs caused SmartForecaster
+to fall back to Laplace on multiplicative/exponential-growth positive
+series (AID says Regular+Positive) and to confuse AutoETS on
+non-seasonal series (fake period 7 wastes grid search).
+
+Fixed router: routing triggers on ANY Regular subtype (Normal /
+Positive / Count), and period is only passed to AutoETS when
+`seasonal_autocorr_abs(values, period) > 0.40`.
+
+Bake-off result at 41 archetypes × 30 replicates:
+
+| Model | Overall geomean | v5 (broken) → v6 (fixed) |
+|---|---:|---|
+| MS+3SH manual | 0.8110 | (unchanged) |
+| AutoETS | 0.8489 | (unchanged) |
+| **SmartForecaster** | **0.8867** | 1.1360 → 0.8867 (−22 %) |
+| recommended_for | 1.0268 | (unchanged) |
+| AutoTheta | 1.0499 | (unchanged) |
+| Lap.auto() | 1.1773 | (unchanged) |
+
+Geomean by category:
+
+| Category | AutoETS | MS+3SH | SmartForecaster |
+|---|---:|---:|---:|
+| Laplace-favoring | 0.8589 | **0.6756** | 0.9183 |
+| **AutoETS-favoring** | **0.8409** | 1.2323 | **0.8409** ⭐ (matches) |
+| Neutral | 0.8075 | 0.8420 | 0.8172 |
+
+SmartForecaster now matches AutoETS exactly on all 11 AutoETS-favoring
+archetypes (identical MASE — same recipe, same period pass-through).
+Fixed archetypes vs the pre-router-fix baseline (`.auto()` fallback):
+
+  archetype                      before   after    reference
+  multiplicative_seasonality    6.4569   0.6675   AutoETS 0.6675
+  exponential_growth           20.1282   2.9362   AutoETS 2.9362
+  seasonal_linear_trend         1.1651   0.6484   AutoETS 0.6484
+  linear_trend_only             0.9193   0.6563   AutoETS 0.6563
+  heteroscedastic_multi_seasonal 1.4712  0.7072   AutoETS 0.7072
+  everything_at_once            1.8256   1.0168   AutoETS 1.0168
+  s_curve_logistic_growth       1.1608   0.9170   AutoETS 0.9170
+  piecewise_linear_trend        3.2030   0.8137   AutoETS 0.8137
+  bimodal_regime_switch         1.7769   1.0930   AutoETS 1.0849
+  regime_shift_flat_to_trend    2.1134   0.7475   AutoETS 0.7475
+
+Remaining gap vs MS+3SH on Laplace-favoring (0.9183 vs 0.6756) is
+driven by AID's commit-to-a-single-family behaviour on extreme
+intermittent panels. `all_zeros_rare_spikes`: MS+3SH 0.0000 (skaters
+pool + softmax picks the right count leaf per series); SmartForecaster
+0.3465 (AID picks one distribution family upfront, less flexible).
+Fixing this would mean routing intermittent to `.skaters()` instead
+of the AID-selected single-family recipe — a bigger design change,
+deferred.
+
+`SmartForecaster::new().fit(&series)` now covers most cross-family
+tradeoffs in a single call: parametric structural → AutoETS,
+count/intermittent → AID Laplace, short → AutoTheta, else →
+Laplace.auto().
 
 ## Meta-lessons — patterns to watch for
 

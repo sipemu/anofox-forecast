@@ -1,0 +1,827 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>anofox-forecast — streaming Laplace playground</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #1a1d24;
+    --border: #2a2f3a;
+    --fg: #e8ebf1;
+    --dim: #9aa3b2;
+    --accent: #f59e0b;
+    --accent-soft: rgba(245, 158, 11, 0.22);
+    --obs: #6ba4ff;
+    --anom: #ef4444;
+    --anom-soft: rgba(239, 68, 68, 0.35);
+    --recipe-bg: rgba(107, 164, 255, 0.16);
+    --good: #10b981;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 0;
+    font-family: system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    line-height: 1.4;
+  }
+  header {
+    padding: 16px 24px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  header .title-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 12px;
+    padding-bottom: 12px;
+  }
+  header h1 { margin: 0; font-size: 18px; font-weight: 600; }
+  header .sub { color: var(--dim); font-size: 13px; }
+  .tab-bar {
+    display: flex;
+    gap: 2px;
+    padding-top: 6px;
+  }
+  .tab {
+    background: transparent;
+    color: var(--dim);
+    border: none;
+    border-bottom: 2px solid transparent;
+    padding: 8px 14px;
+    font-size: 13px;
+    font-family: inherit;
+    cursor: pointer;
+    font-weight: 500;
+  }
+  .tab:hover { color: var(--fg); }
+  .tab.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+  }
+  main {
+    display: grid;
+    grid-template-columns: 280px 1fr;
+    gap: 16px;
+    padding: 16px 24px;
+  }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 14px 16px;
+  }
+  .panel h2 {
+    margin: 0 0 12px;
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--dim);
+    font-weight: 600;
+  }
+  .row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+    font-size: 13px;
+  }
+  .row label { color: var(--dim); }
+  .row .val {
+    color: var(--fg);
+    font-variant-numeric: tabular-nums;
+    min-width: 40px;
+    text-align: right;
+  }
+  select, input[type="range"] {
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 4px 8px;
+    font-size: 13px;
+    flex: 1;
+  }
+  input[type="range"] { padding: 0; }
+  select:focus, input:focus { outline: 1px solid var(--accent); }
+  .btn-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    margin-top: 10px;
+  }
+  .btn-row.full { grid-template-columns: 1fr; }
+  button {
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 6px 10px;
+    font-size: 13px;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  button.primary { background: var(--accent); color: #1a1200; border-color: var(--accent); font-weight: 600; }
+  button.primary:hover { color: #000; }
+  .chart-wrap {
+    position: relative;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 14px;
+  }
+  canvas.chart {
+    width: 100%;
+    height: 420px;
+    display: block;
+    background: var(--bg);
+    border-radius: 4px;
+  }
+  .info-bar {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    flex-wrap: wrap;
+    margin-top: 12px;
+    font-size: 13px;
+    color: var(--dim);
+  }
+  .recipe-tag {
+    display: inline-block;
+    background: var(--recipe-bg);
+    color: var(--obs);
+    padding: 2px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  }
+  .n-badge { display: inline-block; color: var(--fg); font-variant-numeric: tabular-nums; }
+  .legend {
+    margin-left: auto;
+    display: flex;
+    gap: 14px;
+    align-items: center;
+    font-size: 12px;
+  }
+  .legend .swatch {
+    display: inline-block;
+    width: 12px;
+    height: 4px;
+    vertical-align: middle;
+    margin-right: 4px;
+    border-radius: 2px;
+  }
+  .swatch.obs { background: var(--obs); }
+  .swatch.median { background: var(--accent); }
+  .swatch.band { background: var(--accent-soft); height: 10px; }
+  .swatch.anom { background: var(--anom); }
+  .err { color: #fca5a5; font-size: 12px; min-height: 16px; }
+  .metrics {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 8px;
+    margin-top: 12px;
+    font-size: 13px;
+  }
+  .metric {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 8px 10px;
+  }
+  .metric .lab {
+    color: var(--dim);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .metric .num {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 15px;
+    color: var(--fg);
+    margin-top: 2px;
+    font-variant-numeric: tabular-nums;
+  }
+  .metric .num.good { color: var(--good); }
+  .metric .num.warn { color: var(--anom); }
+  footer {
+    padding: 10px 24px;
+    color: var(--dim);
+    font-size: 12px;
+    border-top: 1px solid var(--border);
+    text-align: center;
+  }
+  section.tab-view[hidden] { display: none; }
+</style>
+</head>
+<body>
+<header>
+  <div class="title-row">
+    <div>
+      <h1>anofox-forecast — streaming Laplace playground</h1>
+      <div class="sub">Router picks a recipe per data-shape. Streaming: one observation added per tick; predictive fan re-fit each step.</div>
+    </div>
+  </div>
+  <div class="tab-bar" role="tablist">
+    <button class="tab active" data-tab="forecast" role="tab">Forecast</button>
+    <button class="tab" data-tab="anomaly" role="tab">Anomaly detection</button>
+  </div>
+</header>
+
+<!-- ================== FORECAST TAB ================== -->
+<section class="tab-view" id="tab-forecast">
+<main>
+  <aside class="panel">
+    <h2>Data</h2>
+    <div class="row"><label for="fc-archetype">Archetype</label></div>
+    <select id="fc-archetype">
+      <option value="seasonal_linear_trend">seasonal + linear trend (P=12)</option>
+      <option value="pure_gaussian_noise">pure Gaussian noise</option>
+      <option value="random_walk">random walk</option>
+      <option value="mean_reverting_ou">mean-reverting (OU)</option>
+      <option value="intermittent_bursty">intermittent bursty counts</option>
+      <option value="heavy_tail_cauchy">heavy-tail (Cauchy)</option>
+      <option value="level_shift_midway">level shift midway</option>
+      <option value="multi_seasonal_hourly">multi-seasonal (P=24)</option>
+      <option value="all_zeros_rare_spikes">all-zeros + rare spikes</option>
+    </select>
+
+    <h2 style="margin-top:18px;">Controls</h2>
+    <div class="row"><label for="fc-horizon">Horizon</label><span class="val" id="fc-horizonVal">20</span></div>
+    <input type="range" id="fc-horizon" min="1" max="48" value="20" step="1" />
+    <div class="row" style="margin-top:8px;"><label for="fc-speed">Step delay (ms)</label><span class="val" id="fc-speedVal">200</span></div>
+    <input type="range" id="fc-speed" min="30" max="1000" value="200" step="10" />
+    <div class="row" style="margin-top:8px;"><label for="fc-warmup">Warm-up</label><span class="val" id="fc-warmupVal">80</span></div>
+    <input type="range" id="fc-warmup" min="30" max="200" value="80" step="10" />
+
+    <div class="btn-row" style="margin-top:14px;">
+      <button id="fc-playBtn" class="primary">Play</button>
+      <button id="fc-regenBtn">Regenerate</button>
+    </div>
+    <div class="btn-row full" style="margin-top:6px;">
+      <button id="fc-stepBtn">Step +1</button>
+    </div>
+    <div class="err" id="fc-err"></div>
+  </aside>
+
+  <div class="chart-wrap">
+    <canvas id="fc-chart" class="chart" width="1000" height="420"></canvas>
+    <div class="info-bar">
+      <span>Recipe:</span>
+      <span class="recipe-tag" id="fc-recipeTag">—</span>
+      <span>Observed: <span class="n-badge" id="fc-nObs">0</span></span>
+      <div class="legend">
+        <span><span class="swatch obs"></span>observations</span>
+        <span><span class="swatch median"></span>median</span>
+        <span><span class="swatch band"></span>10-90 % / 25-75 %</span>
+      </div>
+    </div>
+  </div>
+</main>
+</section>
+
+<!-- ================== ANOMALY TAB ================== -->
+<section class="tab-view" id="tab-anomaly" hidden>
+<main>
+  <aside class="panel">
+    <h2>Data</h2>
+    <div class="row"><label for="an-archetype">Baseline archetype</label></div>
+    <select id="an-archetype">
+      <option value="pure_gaussian_noise">pure Gaussian noise</option>
+      <option value="seasonal_linear_trend">seasonal + linear trend (P=12)</option>
+      <option value="mean_reverting_ou">mean-reverting (OU)</option>
+      <option value="random_walk">random walk</option>
+      <option value="multi_seasonal_hourly">multi-seasonal (P=24)</option>
+      <option value="intermittent_bursty">intermittent bursty counts</option>
+    </select>
+
+    <h2 style="margin-top:18px;">Injection</h2>
+    <div class="row"><label for="an-injectRate">Spike rate (%)</label><span class="val" id="an-injectRateVal">5</span></div>
+    <input type="range" id="an-injectRate" min="0" max="20" value="5" step="1" />
+    <div class="row" style="margin-top:8px;"><label for="an-spikeMag">Spike magnitude (×σ)</label><span class="val" id="an-spikeMagVal">6</span></div>
+    <input type="range" id="an-spikeMag" min="3" max="20" value="6" step="1" />
+
+    <h2 style="margin-top:18px;">Detector</h2>
+    <div class="row"><label for="an-threshold">Surprise threshold</label><span class="val" id="an-thresholdVal">6.0</span></div>
+    <input type="range" id="an-threshold" min="2" max="20" value="6" step="0.5" />
+    <div class="row" style="margin-top:6px;"><label style="color:var(--dim);font-size:11px;">Higher = fewer detections. ~3σ ≈ 5, ~4σ ≈ 8.5.</label></div>
+
+    <h2 style="margin-top:18px;">Playback</h2>
+    <div class="row"><label for="an-speed">Step delay (ms)</label><span class="val" id="an-speedVal">150</span></div>
+    <input type="range" id="an-speed" min="30" max="600" value="150" step="10" />
+    <div class="row" style="margin-top:8px;"><label for="an-warmup">Warm-up</label><span class="val" id="an-warmupVal">120</span></div>
+    <input type="range" id="an-warmup" min="60" max="300" value="120" step="10" />
+
+    <div class="btn-row" style="margin-top:14px;">
+      <button id="an-playBtn" class="primary">Play</button>
+      <button id="an-regenBtn">Regenerate</button>
+    </div>
+    <div class="btn-row full" style="margin-top:6px;">
+      <button id="an-stepBtn">Step +1</button>
+    </div>
+    <div class="err" id="an-err"></div>
+  </aside>
+
+  <div class="chart-wrap">
+    <canvas id="an-chart" class="chart" width="1000" height="420"></canvas>
+    <div class="info-bar">
+      <span>Recipe:</span>
+      <span class="recipe-tag" id="an-recipeTag">—</span>
+      <span>Observed: <span class="n-badge" id="an-nObs">0</span></span>
+      <div class="legend">
+        <span><span class="swatch obs"></span>observations</span>
+        <span><span class="swatch anom"></span>flagged</span>
+        <span><span class="swatch band"></span>1-step 10-90 %</span>
+      </div>
+    </div>
+    <div class="metrics">
+      <div class="metric"><div class="lab">injected (truth)</div><div class="num" id="an-injected">0</div></div>
+      <div class="metric"><div class="lab">flagged (detector)</div><div class="num" id="an-flagged">0</div></div>
+      <div class="metric"><div class="lab">true positives</div><div class="num good" id="an-tp">0</div></div>
+      <div class="metric"><div class="lab">false positives</div><div class="num warn" id="an-fp">0</div></div>
+      <div class="metric"><div class="lab">precision</div><div class="num" id="an-precision">—</div></div>
+      <div class="metric"><div class="lab">recall</div><div class="num" id="an-recall">—</div></div>
+    </div>
+  </div>
+</main>
+</section>
+
+<footer>
+  Powered by <code>anofox-forecast</code> compiled to WebAssembly.
+  Forecast tab: streaming softmax over the Laplace leaf pool re-fits per tick.
+  Anomaly tab: surprise = −log p(y | 1-step predictive mixture); threshold on the log-scale.
+  Recipe picked by <code>laplace::recommended_for</code> from cheap data-shape checks.
+</footer>
+
+<script type="module">
+import init, { LaplacePlayground } from './pkg/anofox_forecast_js.js';
+
+// ---------- Deterministic PRNG (LCG) ----------
+class Rng {
+  constructor(seed) { this.s = BigInt(seed) & ((1n << 64n) - 1n); }
+  next() {
+    this.s = (this.s * 6364136223846793005n + 1442695040888963407n) & ((1n << 64n) - 1n);
+    return Number((this.s >> 32n) & 0xffffffffn) / 4294967296;
+  }
+  normal() { let s = 0; for (let i = 0; i < 12; i++) s += this.next(); return s - 6; }
+  cauchy(scale = 1) {
+    const u = Math.max(1e-6, Math.min(1 - 1e-6, this.next()));
+    return scale * Math.tan(Math.PI * (u - 0.5));
+  }
+  poisson(lambda) {
+    if (lambda <= 0) return 0;
+    const L = Math.exp(-lambda);
+    let k = 0, p = 1;
+    while (true) { k++; p *= this.next(); if (p <= L) return k - 1; }
+  }
+}
+
+// ---------- Archetype generators ----------
+// Each returns { period, baselineSigma, draw(i) }. baselineSigma is a
+// rough scale used by the anomaly tab to size injected spikes.
+const ARCHETYPES = {
+  pure_gaussian_noise:   { period: 0,  baselineSigma: 1, factory: (rng) => (_i) => 50 + rng.normal() },
+  seasonal_linear_trend: { period: 12, baselineSigma: 1, factory: (rng) => (i) => 50 + 5 * Math.sin(2 * Math.PI * i / 12) + 0.05 * i + rng.normal() },
+  random_walk:           { period: 0,  baselineSigma: 1, factory: (rng) => { let x = 50; return () => { x += rng.normal(); return x; }; } },
+  mean_reverting_ou:     { period: 0,  baselineSigma: 1, factory: (rng) => { const mu = 50, theta = 0.1; let x = mu; return () => { x += theta * (mu - x) + rng.normal(); return x; }; } },
+  intermittent_bursty:   { period: 0,  baselineSigma: 2, factory: (rng) => () => (rng.next() < 0.2 ? rng.poisson(5) : 0) },
+  heavy_tail_cauchy:     { period: 0,  baselineSigma: 1, factory: (rng) => () => 50 + rng.cauchy(1) },
+  level_shift_midway:    { period: 0,  baselineSigma: 0.5, factory: (rng) => (i) => (i < 150 ? 50 : 55) + 0.5 * rng.normal() },
+  multi_seasonal_hourly: { period: 24, baselineSigma: 1, factory: (rng) => (i) => 50 + 3 * Math.sin(2 * Math.PI * i / 24) + 2 * Math.sin(2 * Math.PI * i / 168) + rng.normal() },
+  all_zeros_rare_spikes: { period: 0,  baselineSigma: 1, factory: (rng) => () => (rng.next() < 0.01 ? rng.poisson(10) : 0) },
+};
+
+// ---------- Canvas chart ----------
+class Chart {
+  constructor(canvas) {
+    this.c = canvas;
+    this.ctx = canvas.getContext('2d');
+    this.dpr = window.devicePixelRatio || 1;
+    this.resize();
+    window.addEventListener('resize', () => this.resize());
+  }
+  resize() {
+    const cssW = this.c.clientWidth || this.c.width;
+    const cssH = this.c.clientHeight || this.c.height;
+    this.c.width = Math.floor(cssW * this.dpr);
+    this.c.height = Math.floor(cssH * this.dpr);
+    this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    this.w = cssW; this.h = cssH;
+  }
+  // opts: { observations, forecast?, horizon?, qLevels?, injected?, flagged?, band1step? }
+  draw(opts) {
+    const ctx = this.ctx;
+    const w = this.w, h = this.h;
+    ctx.clearRect(0, 0, w, h);
+    const obs = opts.observations || [];
+    if (obs.length === 0) return;
+    const horizon = opts.horizon || 0;
+    const nObs = obs.length;
+    const xN = nObs + horizon;
+    const padL = 40, padR = 12, padT = 10, padB = 22;
+    let yMin = Infinity, yMax = -Infinity;
+    for (const y of obs) if (Number.isFinite(y)) { if (y < yMin) yMin = y; if (y > yMax) yMax = y; }
+    if (opts.forecast) {
+      for (const v of opts.forecast) if (Number.isFinite(v)) { if (v < yMin) yMin = v; if (v > yMax) yMax = v; }
+    }
+    if (opts.band1step) {
+      for (let i = 0; i < opts.band1step.length; i++) {
+        const v = opts.band1step[i];
+        if (Number.isFinite(v)) { if (v < yMin) yMin = v; if (v > yMax) yMax = v; }
+      }
+    }
+    if (!Number.isFinite(yMin) || !Number.isFinite(yMax) || yMax - yMin < 1e-9) yMax = yMin + 1;
+    const pad = (yMax - yMin) * 0.08;
+    yMin -= pad; yMax += pad;
+
+    const x = (i) => padL + (w - padL - padR) * (i / Math.max(1, xN - 1));
+    const y = (v) => padT + (h - padT - padB) * (1 - (v - yMin) / (yMax - yMin));
+
+    // Axes + grid.
+    ctx.strokeStyle = '#2a2f3a';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(padL, padT); ctx.lineTo(padL, h - padB); ctx.lineTo(w - padR, h - padB);
+    ctx.stroke();
+    ctx.fillStyle = '#6b7280';
+    ctx.font = '11px ui-monospace,SFMono-Regular,Menlo,monospace';
+    ctx.textAlign = 'right';
+    for (let k = 0; k <= 4; k++) {
+      const yv = yMin + (yMax - yMin) * k / 4;
+      const yp = y(yv);
+      ctx.fillText(fmt(yv), padL - 5, yp + 3);
+      ctx.strokeStyle = '#20242c';
+      ctx.beginPath(); ctx.moveTo(padL, yp); ctx.lineTo(w - padR, yp); ctx.stroke();
+    }
+
+    // Anomaly-tab: rolling 1-step 10-90 band (past history).
+    if (opts.band1step && opts.band1step.length === 2 * nObs) {
+      ctx.fillStyle = 'rgba(245, 158, 11, 0.14)';
+      ctx.beginPath();
+      let started = false;
+      for (let i = 0; i < nObs; i++) {
+        const lo = opts.band1step[2 * i], hi = opts.band1step[2 * i + 1];
+        if (!Number.isFinite(lo) || !Number.isFinite(hi)) continue;
+        if (!started) { ctx.moveTo(x(i), y(hi)); started = true; } else ctx.lineTo(x(i), y(hi));
+      }
+      for (let i = nObs - 1; i >= 0; i--) {
+        const lo = opts.band1step[2 * i], hi = opts.band1step[2 * i + 1];
+        if (!Number.isFinite(lo) || !Number.isFinite(hi)) continue;
+        ctx.lineTo(x(i), y(lo));
+      }
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    // Forecast tab: boundary + fan.
+    if (horizon > 0 && opts.forecast) {
+      ctx.strokeStyle = '#4a5060'; ctx.setLineDash([4, 4]);
+      const xB = x(nObs - 1);
+      ctx.beginPath(); ctx.moveTo(xB, padT); ctx.lineTo(xB, h - padB); ctx.stroke();
+      ctx.setLineDash([]);
+
+      const stride = opts.qLevels.length + 1;
+      const readCol = (idx) => {
+        if (idx < 0) return null;
+        const out = new Array(horizon);
+        for (let hh = 0; hh < horizon; hh++) out[hh] = opts.forecast[hh * stride + idx];
+        return out;
+      };
+      const idx10 = opts.qLevels.indexOf(0.1),
+            idx25 = opts.qLevels.indexOf(0.25),
+            idx50 = opts.qLevels.indexOf(0.5),
+            idx75 = opts.qLevels.indexOf(0.75),
+            idx90 = opts.qLevels.indexOf(0.9);
+      const q10 = readCol(idx10), q25 = readCol(idx25),
+            q50 = readCol(idx50), q75 = readCol(idx75), q90 = readCol(idx90);
+      const drawBand = (lo, hi, alpha) => {
+        if (!lo || !hi) return;
+        ctx.fillStyle = `rgba(245, 158, 11, ${alpha})`;
+        ctx.beginPath();
+        const yAnchor = obs[nObs - 1];
+        ctx.moveTo(x(nObs - 1), y(yAnchor));
+        for (let hh = 0; hh < horizon; hh++) ctx.lineTo(x(nObs + hh), y(hi[hh]));
+        for (let hh = horizon - 1; hh >= 0; hh--) ctx.lineTo(x(nObs + hh), y(lo[hh]));
+        ctx.lineTo(x(nObs - 1), y(yAnchor));
+        ctx.closePath();
+        ctx.fill();
+      };
+      drawBand(q10, q90, 0.18);
+      drawBand(q25, q75, 0.28);
+      if (q50) {
+        ctx.strokeStyle = '#f59e0b'; ctx.lineWidth = 2; ctx.setLineDash([5, 4]);
+        ctx.beginPath();
+        ctx.moveTo(x(nObs - 1), y(obs[nObs - 1]));
+        for (let hh = 0; hh < horizon; hh++) ctx.lineTo(x(nObs + hh), y(q50[hh]));
+        ctx.stroke(); ctx.setLineDash([]);
+      }
+    }
+
+    // Observations line.
+    ctx.strokeStyle = '#6ba4ff';
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    let started = false;
+    for (let i = 0; i < nObs; i++) {
+      const v = obs[i];
+      if (!Number.isFinite(v)) { started = false; continue; }
+      if (!started) { ctx.moveTo(x(i), y(v)); started = true; } else ctx.lineTo(x(i), y(v));
+    }
+    ctx.stroke();
+
+    // Injected-truth markers (small hollow rings, ground truth).
+    if (opts.injected) {
+      ctx.strokeStyle = 'rgba(239, 68, 68, 0.55)';
+      ctx.lineWidth = 1;
+      for (const i of opts.injected) {
+        if (i >= nObs) continue;
+        ctx.beginPath();
+        ctx.arc(x(i), y(obs[i]), 5, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    }
+    // Detector-flagged (filled red X).
+    if (opts.flagged) {
+      ctx.strokeStyle = '#ef4444'; ctx.lineWidth = 2;
+      for (const i of opts.flagged) {
+        if (i >= nObs) continue;
+        const xi = x(i), yi = y(obs[i]);
+        ctx.beginPath();
+        ctx.moveTo(xi - 4, yi - 4); ctx.lineTo(xi + 4, yi + 4);
+        ctx.moveTo(xi - 4, yi + 4); ctx.lineTo(xi + 4, yi - 4);
+        ctx.stroke();
+      }
+    }
+
+    // Last-observation marker.
+    ctx.fillStyle = '#6ba4ff';
+    ctx.beginPath();
+    ctx.arc(x(nObs - 1), y(obs[nObs - 1]), 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function fmt(v) {
+  const a = Math.abs(v);
+  if (a === 0) return '0';
+  if (a >= 100 || a < 0.1) return v.toExponential(1);
+  return v.toFixed(1);
+}
+
+// ---------- Tab controller ----------
+const tabs = document.querySelectorAll('.tab');
+const views = document.querySelectorAll('.tab-view');
+tabs.forEach(t => t.addEventListener('click', () => {
+  tabs.forEach(x => x.classList.toggle('active', x === t));
+  views.forEach(v => { v.hidden = v.id !== `tab-${t.dataset.tab}`; });
+  // Force chart resize on show (canvas dimensions were 0 while hidden).
+  if (t.dataset.tab === 'forecast') fc.chart.resize();
+  if (t.dataset.tab === 'anomaly') an.chart.resize();
+  if (t.dataset.tab === 'forecast') fc.render(); else an.render();
+}));
+
+const $ = (id) => document.getElementById(id);
+
+// ---------- Forecast tab ----------
+const fc = {
+  chart: null,
+  playground: null,
+  gen: null,
+  observations: [],
+  iCursor: 0,
+  running: false,
+  timer: null,
+  seed: 42,
+  qLevels: [0.1, 0.25, 0.5, 0.75, 0.9],
+  regen() {
+    const key = $('fc-archetype').value;
+    const arch = ARCHETYPES[key];
+    const warmup = parseInt($('fc-warmup').value, 10);
+    const rng = new Rng(this.seed);
+    const draw = arch.factory(rng);
+    this.observations = [];
+    for (let i = 0; i < warmup; i++) this.observations.push(draw(i));
+    this.gen = draw;
+    this.iCursor = warmup;
+    try {
+      if (this.playground) this.playground.free();
+      this.playground = new LaplacePlayground(new Float64Array(this.observations), arch.period, parseInt($('fc-horizon').value, 10));
+      $('fc-recipeTag').textContent = this.playground.recipe();
+      $('fc-err').textContent = '';
+    } catch (e) { $('fc-err').textContent = String(e); return; }
+    $('fc-nObs').textContent = this.observations.length;
+    this.render();
+  },
+  step() {
+    if (!this.playground || !this.gen) return;
+    const y = this.gen(this.iCursor++);
+    try { this.playground.observe(y); }
+    catch (e) { $('fc-err').textContent = String(e); this.stop(); return; }
+    this.observations.push(y);
+    $('fc-recipeTag').textContent = this.playground.recipe();
+    $('fc-nObs').textContent = this.observations.length;
+    this.render();
+  },
+  render() {
+    const horizon = parseInt($('fc-horizon').value, 10);
+    let forecast = null;
+    if (this.playground) {
+      try { forecast = this.playground.forecast(horizon, new Float64Array(this.qLevels)); }
+      catch (e) { $('fc-err').textContent = String(e); }
+    }
+    this.chart.draw({ observations: this.observations, forecast, horizon, qLevels: this.qLevels });
+  },
+  start() {
+    this.running = true;
+    $('fc-playBtn').textContent = 'Pause'; $('fc-playBtn').classList.remove('primary');
+    const tick = () => {
+      if (!this.running) return;
+      this.step();
+      this.timer = setTimeout(tick, parseInt($('fc-speed').value, 10));
+    };
+    tick();
+  },
+  stop() {
+    this.running = false;
+    if (this.timer) clearTimeout(this.timer);
+    $('fc-playBtn').textContent = 'Play'; $('fc-playBtn').classList.add('primary');
+  },
+};
+
+// ---------- Anomaly tab ----------
+const an = {
+  chart: null,
+  playground: null,
+  gen: null,               // baseline generator (returns baseline y)
+  observations: [],        // observations actually seen (with injections)
+  band1step: [],           // rolling [lo, hi] pairs from the 1-step predictive AT THE TIME of that observation
+  surprises: [],           // per-obs -log pdf
+  injected: [],            // indices where an injection was applied
+  flagged: [],             // indices where surprise > threshold
+  iCursor: 0,
+  running: false,
+  timer: null,
+  seed: 314,
+  rng: null,
+  arch: null,
+  regen() {
+    const key = $('an-archetype').value;
+    const arch = ARCHETYPES[key];
+    this.arch = arch;
+    this.rng = new Rng(this.seed);
+    const draw = arch.factory(this.rng);
+    const warmup = parseInt($('an-warmup').value, 10);
+    // Warm-up is CLEAN (no injections) so the model gets a baseline
+    // idea of the DGP before we start challenging it.
+    this.observations = [];
+    for (let i = 0; i < warmup; i++) this.observations.push(draw(i));
+    this.gen = draw;
+    this.iCursor = warmup;
+    this.band1step = new Array(warmup * 2).fill(NaN);
+    this.surprises = new Array(warmup).fill(NaN);
+    this.injected = [];
+    this.flagged = [];
+    try {
+      if (this.playground) this.playground.free();
+      // Horizon=1 is enough here — we only score surprise on the next obs.
+      this.playground = new LaplacePlayground(new Float64Array(this.observations), arch.period, 1);
+      $('an-recipeTag').textContent = this.playground.recipe();
+      $('an-err').textContent = '';
+    } catch (e) { $('an-err').textContent = String(e); return; }
+    this.updateMetrics();
+    this.render();
+  },
+  step() {
+    if (!this.playground || !this.gen) return;
+    // Snapshot the current 1-step predictive band BEFORE ingesting the
+    // next obs — that's the interval the detector had at decision time.
+    let lo = NaN, hi = NaN;
+    try {
+      const q = this.playground.forecast(1, new Float64Array([0.1, 0.9]));
+      lo = q[0]; hi = q[1];
+    } catch (_) {}
+
+    // Baseline value from the generator.
+    const yBase = this.gen(this.iCursor);
+    const injectRate = parseInt($('an-injectRate').value, 10) / 100;
+    const spikeMag = parseInt($('an-spikeMag').value, 10);
+    let y = yBase;
+    let isInjection = false;
+    if (this.rng.next() < injectRate) {
+      // Random-sign spike of magnitude ± spikeMag · baselineSigma.
+      const sign = this.rng.next() < 0.5 ? -1 : 1;
+      y = yBase + sign * spikeMag * this.arch.baselineSigma;
+      isInjection = true;
+    }
+
+    // Score the observation BEFORE observe() consumes it.
+    let surprise = NaN;
+    try { surprise = this.playground.surprise(y); }
+    catch (_) {}
+
+    // Ingest.
+    try { this.playground.observe(y); }
+    catch (e) { $('an-err').textContent = String(e); this.stop(); return; }
+
+    this.observations.push(y);
+    this.band1step.push(lo, hi);
+    this.surprises.push(surprise);
+    if (isInjection) this.injected.push(this.observations.length - 1);
+    const thr = parseFloat($('an-threshold').value);
+    if (surprise > thr) this.flagged.push(this.observations.length - 1);
+
+    this.iCursor++;
+    $('an-recipeTag').textContent = this.playground.recipe();
+    $('an-nObs').textContent = this.observations.length;
+    this.updateMetrics();
+    this.render();
+  },
+  updateMetrics() {
+    const injectedSet = new Set(this.injected);
+    const flaggedSet = new Set(this.flagged);
+    let tp = 0, fp = 0;
+    for (const i of this.flagged) (injectedSet.has(i) ? tp++ : fp++);
+    let missed = 0;
+    for (const i of this.injected) if (!flaggedSet.has(i)) missed++;
+    $('an-injected').textContent = this.injected.length;
+    $('an-flagged').textContent = this.flagged.length;
+    $('an-tp').textContent = tp;
+    $('an-fp').textContent = fp;
+    $('an-precision').textContent = (tp + fp) > 0 ? (tp / (tp + fp)).toFixed(2) : '—';
+    $('an-recall').textContent = this.injected.length > 0 ? (tp / this.injected.length).toFixed(2) : '—';
+  },
+  render() {
+    this.chart.draw({
+      observations: this.observations,
+      band1step: this.band1step,
+      injected: this.injected,
+      flagged: this.flagged,
+    });
+  },
+  start() {
+    this.running = true;
+    $('an-playBtn').textContent = 'Pause'; $('an-playBtn').classList.remove('primary');
+    const tick = () => {
+      if (!this.running) return;
+      this.step();
+      this.timer = setTimeout(tick, parseInt($('an-speed').value, 10));
+    };
+    tick();
+  },
+  stop() {
+    this.running = false;
+    if (this.timer) clearTimeout(this.timer);
+    $('an-playBtn').textContent = 'Play'; $('an-playBtn').classList.add('primary');
+  },
+  reflag() {
+    // Recompute `flagged` from the stored surprises against the new threshold.
+    // Doesn't re-fit — just re-thresholds.
+    const thr = parseFloat($('an-threshold').value);
+    this.flagged = [];
+    for (let i = 0; i < this.surprises.length; i++) {
+      if (this.surprises[i] > thr) this.flagged.push(i);
+    }
+    this.updateMetrics();
+    this.render();
+  },
+};
+
+// ---------- Wire-up ----------
+async function boot() {
+  await init();
+  fc.chart = new Chart($('fc-chart'));
+  an.chart = new Chart($('an-chart'));
+  fc.regen();
+  an.regen();
+}
+
+// Forecast tab.
+$('fc-horizon').addEventListener('input', () => { $('fc-horizonVal').textContent = $('fc-horizon').value; fc.render(); });
+$('fc-speed').addEventListener('input', () => { $('fc-speedVal').textContent = $('fc-speed').value; });
+$('fc-warmup').addEventListener('input', () => { $('fc-warmupVal').textContent = $('fc-warmup').value; });
+$('fc-archetype').addEventListener('change', () => { fc.stop(); fc.seed = Math.floor(Math.random() * 1e9); fc.regen(); });
+$('fc-regenBtn').addEventListener('click', () => { fc.stop(); fc.seed = Math.floor(Math.random() * 1e9); fc.regen(); });
+$('fc-playBtn').addEventListener('click', () => { fc.running ? fc.stop() : fc.start(); });
+$('fc-stepBtn').addEventListener('click', () => { fc.stop(); fc.step(); });
+
+// Anomaly tab.
+$('an-injectRate').addEventListener('input', () => { $('an-injectRateVal').textContent = $('an-injectRate').value; });
+$('an-spikeMag').addEventListener('input', () => { $('an-spikeMagVal').textContent = $('an-spikeMag').value; });
+$('an-threshold').addEventListener('input', () => { $('an-thresholdVal').textContent = parseFloat($('an-threshold').value).toFixed(1); an.reflag(); });
+$('an-speed').addEventListener('input', () => { $('an-speedVal').textContent = $('an-speed').value; });
+$('an-warmup').addEventListener('input', () => { $('an-warmupVal').textContent = $('an-warmup').value; });
+$('an-archetype').addEventListener('change', () => { an.stop(); an.seed = Math.floor(Math.random() * 1e9); an.regen(); });
+$('an-regenBtn').addEventListener('click', () => { an.stop(); an.seed = Math.floor(Math.random() * 1e9); an.regen(); });
+$('an-playBtn').addEventListener('click', () => { an.running ? an.stop() : an.start(); });
+$('an-stepBtn').addEventListener('click', () => { an.stop(); an.step(); });
+
+boot();
+</script>
+</body>
+</html>

@@ -45,6 +45,18 @@ pub struct MultiScaleLaplace {
     /// If true, pass `.with_scoring_horizon(coarse_h)` to each scale's
     /// sub, where `coarse_h = ceil(max_horizon / s)` for scale s.
     enable_scoring_horizon: bool,
+    /// If Some(η), pass `.learning_rate(η)` to each scale's sub-forecaster.
+    /// Overrides `.skaters()`' internal default of 0.5. Measured on fev-27
+    /// (2026-07-20): lower η consistently beats the default in the sampled
+    /// range (0.3 gives −0.24 % geomean MASE vs 0.5 on `.skaters()+scH+sw10`).
+    learning_rate: Option<f64>,
+    /// Per-phase Holt leaves added to the scale-1 sub-forecaster via
+    /// `.with_seasonal_holt(period, α_level, α_trend)`, one call per
+    /// `(α_level, α_trend)` in this vec. Only applied on scale 1
+    /// (fine-clock) with a `period_hint` set — decimated scales don't
+    /// have the same period. Call `.with_seasonal_holt` multiple times
+    /// to seed a multi-alpha SH pool (softmax picks per dataset).
+    seasonal_holt_alphas: Vec<(f64, f64)>,
 }
 
 /// Scale set for the multi-scale wrapper. Combines skaters' `{1, ⌈√k⌉, k}`
@@ -95,7 +107,31 @@ impl MultiScaleLaplace {
             scale_scores: Vec::new(),
             scoring_window: None,
             enable_scoring_horizon: false,
+            learning_rate: None,
+            seasonal_holt_alphas: Vec::new(),
         }
+    }
+
+    /// Pass `.learning_rate(η)` to each scale's sub-forecaster. When None
+    /// (default), the sub-forecaster uses `.skaters()`' default of 0.5.
+    /// Clamped to `(0, 1]` by the sub-forecaster's own setter.
+    pub fn with_learning_rate(mut self, eta: f64) -> Self {
+        self.learning_rate = Some(eta);
+        self
+    }
+
+    /// Add a per-phase Holt (level+trend) leaf to the scale-1 sub-forecaster
+    /// at the period supplied to [`Self::with_period`]. No-op if the period
+    /// hint is unset (decimated scales alone can't host a seasonal Holt at
+    /// the original period). See [`super::LaplaceForecaster::with_seasonal_holt`].
+    ///
+    /// Measured on fev-27 (2026-07-20): on the plain-`.skaters()` recipe,
+    /// SH(α_l=0.5, α_t=0.2) at the period yields −0.70 % geomean MASE via
+    /// wins on trending seasonal panels (tourism_quarterly −8.7 %,
+    /// tourism_monthly −2.4 %, m3_quarterly −1.6 %).
+    pub fn with_seasonal_holt(mut self, alpha_level: f64, alpha_trend: f64) -> Self {
+        self.seasonal_holt_alphas.push((alpha_level, alpha_trend));
+        self
     }
 
     /// Pass `.with_scoring_window(w)` to each scale's sub-forecaster.
@@ -177,6 +213,9 @@ impl Forecaster for MultiScaleLaplace {
                 if let Some(p) = self.period_hint {
                     if p >= 2 {
                         f = f.auto_with_seasonal_period(p);
+                        for &(a_lvl, a_trend) in &self.seasonal_holt_alphas {
+                            f = f.with_seasonal_holt(p, a_lvl, a_trend);
+                        }
                     }
                 }
             }
@@ -189,6 +228,9 @@ impl Forecaster for MultiScaleLaplace {
             }
             if let Some(w) = self.scoring_window {
                 f = f.with_scoring_window(w);
+            }
+            if let Some(eta) = self.learning_rate {
+                f = f.learning_rate(eta);
             }
             f.fit(&ts)?;
             // Mean training log-likelihood at this scale (average
