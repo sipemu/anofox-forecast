@@ -18,6 +18,7 @@ pub mod filters;
 pub mod forecaster;
 pub mod global_models;
 pub mod hierarchy;
+pub mod laplace_playground;
 pub mod monitor;
 pub mod pipeline;
 pub mod postprocess;
@@ -46,6 +47,7 @@ pub use filters::{
 pub use forecaster::*;
 pub use global_models::{global_auto_ets, global_croston, global_ets, global_theta};
 pub use hierarchy::HierarchyTree;
+pub use laplace_playground::LaplacePlayground;
 pub use monitor::{monitor_forecast_errors, update_forecast_monitor};
 pub use pipeline::{Pipeline, PipelineBuilder};
 pub use postprocess::*;

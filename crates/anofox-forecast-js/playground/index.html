@@ -1,0 +1,593 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>anofox-forecast — streaming Laplace playground</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #1a1d24;
+    --border: #2a2f3a;
+    --fg: #e8ebf1;
+    --dim: #9aa3b2;
+    --accent: #f59e0b;
+    --accent-soft: rgba(245, 158, 11, 0.22);
+    --obs: #6ba4ff;
+    --recipe-bg: rgba(107, 164, 255, 0.16);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 0;
+    font-family: system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    line-height: 1.4;
+  }
+  header {
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  header h1 {
+    margin: 0;
+    font-size: 18px;
+    font-weight: 600;
+  }
+  header .sub {
+    color: var(--dim);
+    font-size: 13px;
+  }
+  main {
+    display: grid;
+    grid-template-columns: 260px 1fr;
+    gap: 16px;
+    padding: 16px 24px;
+  }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 14px 16px;
+  }
+  .panel h2 {
+    margin: 0 0 12px;
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--dim);
+    font-weight: 600;
+  }
+  .row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+    font-size: 13px;
+  }
+  .row label {
+    color: var(--dim);
+  }
+  .row .val {
+    color: var(--fg);
+    font-variant-numeric: tabular-nums;
+    min-width: 40px;
+    text-align: right;
+  }
+  select, input[type="range"] {
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 4px 8px;
+    font-size: 13px;
+    flex: 1;
+  }
+  input[type="range"] { padding: 0; }
+  select:focus, input:focus { outline: 1px solid var(--accent); }
+  .btn-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    margin-top: 10px;
+  }
+  .btn-row.full { grid-template-columns: 1fr; }
+  button {
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 6px 10px;
+    font-size: 13px;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  button.primary { background: var(--accent); color: #1a1200; border-color: var(--accent); font-weight: 600; }
+  button.primary:hover { color: #000; }
+  .chart-wrap {
+    position: relative;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 14px;
+  }
+  #chart {
+    width: 100%;
+    height: 420px;
+    display: block;
+    background: var(--bg);
+    border-radius: 4px;
+  }
+  .info-bar {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    flex-wrap: wrap;
+    margin-top: 12px;
+    font-size: 13px;
+    color: var(--dim);
+  }
+  .recipe-tag {
+    display: inline-block;
+    background: var(--recipe-bg);
+    color: var(--obs);
+    padding: 2px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  }
+  .n-badge {
+    display: inline-block;
+    color: var(--fg);
+    font-variant-numeric: tabular-nums;
+  }
+  .legend {
+    margin-left: auto;
+    display: flex;
+    gap: 14px;
+    align-items: center;
+    font-size: 12px;
+  }
+  .legend .swatch {
+    display: inline-block;
+    width: 12px;
+    height: 4px;
+    vertical-align: middle;
+    margin-right: 4px;
+    border-radius: 2px;
+  }
+  .swatch.obs { background: var(--obs); }
+  .swatch.median { background: var(--accent); }
+  .swatch.band { background: var(--accent-soft); height: 10px; }
+  .err {
+    color: #fca5a5;
+    font-size: 12px;
+    min-height: 16px;
+  }
+  footer {
+    padding: 10px 24px;
+    color: var(--dim);
+    font-size: 12px;
+    border-top: 1px solid var(--border);
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>anofox-forecast — streaming Laplace playground</h1>
+    <div class="sub">Router picks a recipe per data-shape. Streaming: one observation added per tick; predictive fan re-fit each step.</div>
+  </div>
+</header>
+
+<main>
+  <aside class="panel">
+    <h2>Data</h2>
+    <div class="row">
+      <label for="archetype">Archetype</label>
+    </div>
+    <select id="archetype">
+      <option value="seasonal_linear_trend">seasonal + linear trend (P=12)</option>
+      <option value="pure_gaussian_noise">pure Gaussian noise</option>
+      <option value="random_walk">random walk</option>
+      <option value="mean_reverting_ou">mean-reverting (OU)</option>
+      <option value="intermittent_bursty">intermittent bursty counts</option>
+      <option value="heavy_tail_cauchy">heavy-tail (Cauchy)</option>
+      <option value="level_shift_midway">level shift midway</option>
+      <option value="multi_seasonal_hourly">multi-seasonal (P=24)</option>
+      <option value="all_zeros_rare_spikes">all-zeros + rare spikes</option>
+    </select>
+
+    <h2 style="margin-top:18px;">Controls</h2>
+    <div class="row">
+      <label for="horizon">Horizon</label>
+      <span class="val" id="horizonVal">20</span>
+    </div>
+    <input type="range" id="horizon" min="1" max="48" value="20" step="1" />
+    <div class="row" style="margin-top:8px;">
+      <label for="speed">Step delay (ms)</label>
+      <span class="val" id="speedVal">200</span>
+    </div>
+    <input type="range" id="speed" min="30" max="1000" value="200" step="10" />
+    <div class="row" style="margin-top:8px;">
+      <label for="warmup">Warm-up</label>
+      <span class="val" id="warmupVal">80</span>
+    </div>
+    <input type="range" id="warmup" min="30" max="200" value="80" step="10" />
+
+    <div class="btn-row" style="margin-top:14px;">
+      <button id="playBtn" class="primary">Play</button>
+      <button id="regenBtn">Regenerate</button>
+    </div>
+    <div class="btn-row full" style="margin-top:6px;">
+      <button id="stepBtn">Step +1</button>
+    </div>
+    <div class="err" id="err"></div>
+  </aside>
+
+  <div class="chart-wrap">
+    <canvas id="chart" width="1000" height="420"></canvas>
+    <div class="info-bar">
+      <span>Recipe:</span>
+      <span class="recipe-tag" id="recipeTag">—</span>
+      <span>Observed: <span class="n-badge" id="nObs">0</span></span>
+      <div class="legend">
+        <span><span class="swatch obs"></span>observations</span>
+        <span><span class="swatch median"></span>median</span>
+        <span><span class="swatch band"></span>10-90 % / 25-75 % bands</span>
+      </div>
+    </div>
+  </div>
+</main>
+
+<footer>
+  Powered by <code>anofox-forecast</code> compiled to WebAssembly. Streaming softmax over the Laplace leaf pool re-fits each tick.
+  Recipe picked by <code>laplace::recommended_for</code> based on cheap data-shape checks (short-history / count / heavy-tail / seasonal / plain).
+</footer>
+
+<script type="module">
+import init, { LaplacePlayground } from './pkg/anofox_forecast_js.js';
+
+// ---------- Deterministic PRNG (LCG) so Regenerate at same seed is stable ----------
+class Rng {
+  constructor(seed) { this.s = BigInt(seed) & ((1n << 64n) - 1n); }
+  next() {
+    this.s = (this.s * 6364136223846793005n + 1442695040888963407n) & ((1n << 64n) - 1n);
+    return Number((this.s >> 32n) & 0xffffffffn) / 4294967296;
+  }
+  normal() {
+    // Central-limit approximation.
+    let s = 0;
+    for (let i = 0; i < 12; i++) s += this.next();
+    return s - 6;
+  }
+  cauchy(scale = 1) {
+    const u = Math.max(1e-6, Math.min(1 - 1e-6, this.next()));
+    return scale * Math.tan(Math.PI * (u - 0.5));
+  }
+  poisson(lambda) {
+    // Knuth. Small-λ only.
+    if (lambda <= 0) return 0;
+    const L = Math.exp(-lambda);
+    let k = 0, p = 1;
+    while (true) {
+      k++;
+      p *= this.next();
+      if (p <= L) return k - 1;
+    }
+  }
+}
+
+// ---------- Archetype generators (mirror examples/synthetic_bakeoff.rs) ----------
+// Each returns a function (i) => y_i; the harness draws sequentially.
+const ARCHETYPES = {
+  pure_gaussian_noise: {
+    period: 0,
+    gen: (rng) => (_i) => 50 + rng.normal(),
+  },
+  seasonal_linear_trend: {
+    period: 12,
+    gen: (rng) => (i) => 50 + 5 * Math.sin(2 * Math.PI * i / 12) + 0.05 * i + rng.normal(),
+  },
+  random_walk: {
+    period: 0,
+    stateful: true,
+    gen: (rng) => {
+      let x = 50;
+      return () => { x += rng.normal(); return x; };
+    },
+  },
+  mean_reverting_ou: {
+    period: 0,
+    stateful: true,
+    gen: (rng) => {
+      const mu = 50, theta = 0.1;
+      let x = mu;
+      return () => { x += theta * (mu - x) + rng.normal(); return x; };
+    },
+  },
+  intermittent_bursty: {
+    period: 0,
+    gen: (rng) => () => (rng.next() < 0.2 ? rng.poisson(5) : 0),
+  },
+  heavy_tail_cauchy: {
+    period: 0,
+    gen: (rng) => () => 50 + rng.cauchy(1),
+  },
+  level_shift_midway: {
+    period: 0,
+    gen: (rng) => (i) => (i < 150 ? 50 : 55) + 0.5 * rng.normal(),
+  },
+  multi_seasonal_hourly: {
+    period: 24,
+    gen: (rng) => (i) =>
+      50 + 3 * Math.sin(2 * Math.PI * i / 24) + 2 * Math.sin(2 * Math.PI * i / 168) + rng.normal(),
+  },
+  all_zeros_rare_spikes: {
+    period: 0,
+    gen: (rng) => () => (rng.next() < 0.01 ? rng.poisson(10) : 0),
+  },
+};
+
+// ---------- Chart (plain canvas) ----------
+class Chart {
+  constructor(canvas) {
+    this.c = canvas;
+    this.ctx = canvas.getContext('2d');
+    this.dpr = window.devicePixelRatio || 1;
+    this.resize();
+    window.addEventListener('resize', () => this.resize());
+  }
+  resize() {
+    const cssW = this.c.clientWidth || this.c.width;
+    const cssH = this.c.clientHeight || this.c.height;
+    this.c.width = Math.floor(cssW * this.dpr);
+    this.c.height = Math.floor(cssH * this.dpr);
+    this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    this.w = cssW; this.h = cssH;
+  }
+  draw(observations, forecast, horizon, qLevels) {
+    const ctx = this.ctx;
+    const w = this.w, h = this.h;
+    ctx.clearRect(0, 0, w, h);
+    const nObs = observations.length;
+    if (nObs === 0) return;
+    // X spans past + horizon.
+    const xN = nObs + horizon;
+    const padL = 40, padR = 12, padT = 10, padB = 22;
+    // Y bounds: union of observed range + forecast band.
+    let yMin = Infinity, yMax = -Infinity;
+    for (const y of observations) {
+      if (Number.isFinite(y)) { if (y < yMin) yMin = y; if (y > yMax) yMax = y; }
+    }
+    if (forecast) {
+      const stride = qLevels.length + 1;
+      for (let i = 0; i < forecast.length; i++) {
+        const v = forecast[i];
+        if (Number.isFinite(v)) { if (v < yMin) yMin = v; if (v > yMax) yMax = v; }
+      }
+    }
+    if (!Number.isFinite(yMin) || !Number.isFinite(yMax) || yMax - yMin < 1e-9) {
+      yMax = yMin + 1;
+    }
+    const pad = (yMax - yMin) * 0.08;
+    yMin -= pad; yMax += pad;
+
+    const x = (i) => padL + (w - padL - padR) * (i / (xN - 1));
+    const y = (v) => padT + (h - padT - padB) * (1 - (v - yMin) / (yMax - yMin));
+
+    // Axes.
+    ctx.strokeStyle = '#2a2f3a';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(padL, padT); ctx.lineTo(padL, h - padB); ctx.lineTo(w - padR, h - padB);
+    ctx.stroke();
+
+    // Y ticks.
+    ctx.fillStyle = '#6b7280';
+    ctx.font = '11px ui-monospace,SFMono-Regular,Menlo,monospace';
+    ctx.textAlign = 'right';
+    for (let k = 0; k <= 4; k++) {
+      const yv = yMin + (yMax - yMin) * k / 4;
+      const yp = y(yv);
+      ctx.fillText(fmt(yv), padL - 5, yp + 3);
+      ctx.strokeStyle = '#20242c';
+      ctx.beginPath(); ctx.moveTo(padL, yp); ctx.lineTo(w - padR, yp); ctx.stroke();
+    }
+    // X separator at boundary (past/future).
+    ctx.strokeStyle = '#4a5060';
+    ctx.setLineDash([4, 4]);
+    const xBoundary = x(nObs - 1);
+    ctx.beginPath(); ctx.moveTo(xBoundary, padT); ctx.lineTo(xBoundary, h - padB); ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Forecast fan: draw outer band (10-90), inner band (25-75), median.
+    if (forecast) {
+      const stride = qLevels.length + 1;
+      const idx10 = qLevels.indexOf(0.1);
+      const idx25 = qLevels.indexOf(0.25);
+      const idx50 = qLevels.indexOf(0.5);
+      const idx75 = qLevels.indexOf(0.75);
+      const idx90 = qLevels.indexOf(0.9);
+      const readCol = (idx) => {
+        if (idx < 0) return null;
+        const out = new Array(horizon);
+        for (let hh = 0; hh < horizon; hh++) out[hh] = forecast[hh * stride + idx];
+        return out;
+      };
+      const q10 = readCol(idx10), q25 = readCol(idx25);
+      const q50 = readCol(idx50), q75 = readCol(idx75), q90 = readCol(idx90);
+
+      const drawBand = (lo, hi, alpha) => {
+        if (!lo || !hi) return;
+        ctx.fillStyle = `rgba(245, 158, 11, ${alpha})`;
+        ctx.beginPath();
+        // Anchor at last observation for continuity.
+        const yAnchor = observations[nObs - 1];
+        ctx.moveTo(x(nObs - 1), y(yAnchor));
+        for (let hh = 0; hh < horizon; hh++) ctx.lineTo(x(nObs + hh), y(hi[hh]));
+        for (let hh = horizon - 1; hh >= 0; hh--) ctx.lineTo(x(nObs + hh), y(lo[hh]));
+        ctx.lineTo(x(nObs - 1), y(yAnchor));
+        ctx.closePath();
+        ctx.fill();
+      };
+      drawBand(q10, q90, 0.18);
+      drawBand(q25, q75, 0.28);
+
+      // Median line.
+      if (q50) {
+        ctx.strokeStyle = '#f59e0b';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([5, 4]);
+        ctx.beginPath();
+        ctx.moveTo(x(nObs - 1), y(observations[nObs - 1]));
+        for (let hh = 0; hh < horizon; hh++) ctx.lineTo(x(nObs + hh), y(q50[hh]));
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+    }
+
+    // Observations (line).
+    ctx.strokeStyle = '#6ba4ff';
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    let started = false;
+    for (let i = 0; i < nObs; i++) {
+      const v = observations[i];
+      if (!Number.isFinite(v)) { started = false; continue; }
+      if (!started) { ctx.moveTo(x(i), y(v)); started = true; }
+      else ctx.lineTo(x(i), y(v));
+    }
+    ctx.stroke();
+
+    // Last-observation marker.
+    ctx.fillStyle = '#6ba4ff';
+    ctx.beginPath();
+    ctx.arc(x(nObs - 1), y(observations[nObs - 1]), 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function fmt(v) {
+  const a = Math.abs(v);
+  if (a === 0) return '0';
+  if (a >= 100 || a < 0.1) return v.toExponential(1);
+  return v.toFixed(1);
+}
+
+// ---------- Orchestration ----------
+const state = {
+  playground: null,
+  observations: [],
+  gen: null,
+  archetype: null,
+  running: false,
+  timer: null,
+  seed: 42,
+  qLevels: [0.1, 0.25, 0.5, 0.75, 0.9],
+};
+
+const $ = (id) => document.getElementById(id);
+const chart = new Chart($('chart'));
+const err = $('err');
+
+function setErr(msg) { err.textContent = msg || ''; }
+
+async function boot() {
+  await init();
+  regenerate();
+}
+
+function regenerate() {
+  const key = $('archetype').value;
+  const arch = ARCHETYPES[key];
+  const warmup = parseInt($('warmup').value, 10);
+  state.archetype = key;
+  const rng = new Rng(state.seed);
+  const draw = arch.gen(rng);
+  state.observations = [];
+  for (let i = 0; i < warmup; i++) state.observations.push(draw(i));
+  state.gen = draw;
+  state.iCursor = warmup;
+
+  try {
+    if (state.playground) { state.playground.free(); }
+    state.playground = new LaplacePlayground(new Float64Array(state.observations), arch.period, parseInt($('horizon').value, 10));
+    $('recipeTag').textContent = state.playground.recipe();
+    setErr('');
+  } catch (e) {
+    setErr(String(e));
+    return;
+  }
+  $('nObs').textContent = state.observations.length;
+  render();
+}
+
+function step() {
+  if (!state.playground || !state.gen) return;
+  const y = state.gen(state.iCursor++);
+  try {
+    state.playground.observe(y);
+  } catch (e) {
+    setErr(String(e));
+    stopPlay();
+    return;
+  }
+  state.observations.push(y);
+  $('recipeTag').textContent = state.playground.recipe();
+  $('nObs').textContent = state.observations.length;
+  render();
+}
+
+function render() {
+  const horizon = parseInt($('horizon').value, 10);
+  let forecast = null;
+  if (state.playground) {
+    try {
+      forecast = state.playground.forecast(horizon, new Float64Array(state.qLevels));
+    } catch (e) {
+      setErr(String(e));
+    }
+  }
+  chart.draw(state.observations, forecast, horizon, state.qLevels);
+}
+
+function startPlay() {
+  state.running = true;
+  $('playBtn').textContent = 'Pause';
+  $('playBtn').classList.remove('primary');
+  const tick = () => {
+    if (!state.running) return;
+    step();
+    state.timer = setTimeout(tick, parseInt($('speed').value, 10));
+  };
+  tick();
+}
+function stopPlay() {
+  state.running = false;
+  if (state.timer) clearTimeout(state.timer);
+  $('playBtn').textContent = 'Play';
+  $('playBtn').classList.add('primary');
+}
+
+// Wire up UI.
+$('horizon').addEventListener('input', () => { $('horizonVal').textContent = $('horizon').value; render(); });
+$('speed').addEventListener('input', () => { $('speedVal').textContent = $('speed').value; });
+$('warmup').addEventListener('input', () => { $('warmupVal').textContent = $('warmup').value; });
+$('archetype').addEventListener('change', () => { stopPlay(); state.seed = Math.floor(Math.random() * 1e9); regenerate(); });
+$('regenBtn').addEventListener('click', () => { stopPlay(); state.seed = Math.floor(Math.random() * 1e9); regenerate(); });
+$('playBtn').addEventListener('click', () => { state.running ? stopPlay() : startPlay(); });
+$('stepBtn').addEventListener('click', () => { stopPlay(); step(); });
+
+boot();
+</script>
+</body>
+</html>
