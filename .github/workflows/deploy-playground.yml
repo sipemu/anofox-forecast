@@ -1,0 +1,91 @@
+name: deploy-playground
+
+# Builds the streaming Laplace WASM playground and deploys it to GitHub Pages.
+# Deployment URL: https://sipemu.github.io/anofox-forecast/
+#
+# One-time repo setup required:
+#   Settings → Pages → Build and deployment → Source = "GitHub Actions"
+#
+# After that, this workflow runs automatically on pushes to `main` that touch
+# the playground sources, and can be manually triggered from the Actions tab.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/anofox-forecast-js/**'
+      - 'src/models/laplace/**'
+      - '.github/workflows/deploy-playground.yml'
+  workflow_dispatch:
+
+# Only one live deployment at a time. Cancel in-flight runs when a newer
+# commit lands so we never race the artifact upload.
+concurrency:
+  group: 'pages'
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build WASM + assemble Pages artifact
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: pages-cargo-${{ hashFiles('Cargo.lock', 'crates/anofox-forecast-js/Cargo.toml') }}
+          restore-keys: |
+            pages-cargo-
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Build WASM package (release, --target web)
+        working-directory: crates/anofox-forecast-js
+        run: wasm-pack build --release --target web --out-dir playground/pkg
+
+      - name: Verify playground assets
+        run: |
+          ls -lh crates/anofox-forecast-js/playground/
+          ls -lh crates/anofox-forecast-js/playground/pkg/
+          test -f crates/anofox-forecast-js/playground/index.html
+          test -f crates/anofox-forecast-js/playground/pkg/anofox_forecast_js.js
+          test -f crates/anofox-forecast-js/playground/pkg/anofox_forecast_js_bg.wasm
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: crates/anofox-forecast-js/playground
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4

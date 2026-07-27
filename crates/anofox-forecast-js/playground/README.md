@@ -1,10 +1,26 @@
 # Laplace playground (WebAssembly demo)
 
+**Live demo (once GitHub Pages is enabled): https://sipemu.github.io/anofox-forecast/**
+
 Interactive browser demo of the streaming Laplace forecaster from
 `anofox-forecast`. Mirrors the shape / interaction of
 [skaters' playground](https://skaters.microprediction.org/demos/playground.html):
 one observation is added per tick, the forecast fan is re-fit every
 step, and the router picks the recipe based on the observed data shape.
+
+## Deployment (GitHub Pages)
+
+Automatic via `.github/workflows/deploy-playground.yml` — runs on
+pushes to `main` that touch the playground sources or the Laplace
+crate, plus a manual "Run workflow" button in the Actions tab.
+
+**One-time repo setup required.** In GitHub:
+
+  Settings → Pages → Build and deployment → Source = **"GitHub Actions"**
+
+Without this the workflow will error at the deploy step. After
+enabling, the next push (or a manual trigger) will publish the site
+at `https://sipemu.github.io/anofox-forecast/`.
 
 ## Contents
 
