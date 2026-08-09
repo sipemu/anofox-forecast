@@ -1,0 +1,66 @@
+name: WASM Size Gate
+
+# Triggers: push and pull_request on [main, master].
+# This job only reads the committed baseline — it never writes or commits
+# anything under .planning/baselines/ (MEAS-01 CI-read-only invariant).
+"on":
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  wasm-size:
+    name: WASM Binary Size Gate
+    runs-on: ubuntu-latest
+    # Least-privilege: this job reads the WASM artifact and the committed
+    # baseline JSON. It needs no write access to the repository (T-01-02, T-01-03).
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+
+      # Install wasm-pack via the official rustwasm installer over HTTPS.
+      # T-01-04: standard installer, HTTPS transport, measurement-only CI,
+      # no secrets in scope — accepted per threat register.
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Build release WASM
+        run: |
+          wasm-pack build crates/anofox-forecast-js \
+            --target web \
+            --out-dir ../../js \
+            --out-name anofox_forecast_js \
+            --release
+
+      # Restore custom package.json and README that wasm-pack overwrites.
+      - name: Restore custom package.json and README
+        run: git checkout js/package.json js/README.md
+
+      # D-11: fail CI if the release WASM grows strictly greater than 1% vs
+      # the committed baseline. At/under 1% is allowed (pass).
+      # The baseline was committed by Task 3 of Plan 01-01 and reflects the
+      # post-PERF-06 binary — no first-run concern here.
+      #
+      # This step contains NO git add, git commit, or writes under
+      # .planning/baselines/ — CI reads only (MEAS-01).
+      - name: Check WASM size gate (D-11 fail if > 1% growth)
+        run: |
+          CURRENT=$(stat --format=%s js/anofox_forecast_js_bg.wasm)
+          BASELINE=$(python3 -c "import json; d=json.load(open('.planning/baselines/wasm_size.json')); print(d['bytes'])")
+          python3 -c "
+          current, baseline = $CURRENT, $BASELINE
+          delta = (current - baseline) / baseline * 100
+          print(f'WASM size: current={current}B  baseline={baseline}B  delta={delta:.2f}%')
+          if delta > 1.0:
+              raise SystemExit(f'WASM size grew {delta:.2f}% (threshold: 1.0% -- update baseline via scripts/update_wasm_size.sh)')
+          print('PASS: WASM size within 1% of baseline')
+          "
