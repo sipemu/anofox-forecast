@@ -6,18 +6,19 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <style>
   :root {
-    --bg: #0f1115;
-    --panel: #1a1d24;
-    --border: #2a2f3a;
-    --fg: #e8ebf1;
-    --dim: #9aa3b2;
-    --accent: #f59e0b;
-    --accent-soft: rgba(245, 158, 11, 0.22);
-    --obs: #6ba4ff;
-    --anom: #ef4444;
-    --anom-soft: rgba(239, 68, 68, 0.35);
-    --recipe-bg: rgba(107, 164, 255, 0.16);
-    --good: #10b981;
+    /* Light palette — inspired by GitHub's default light theme. */
+    --bg: #ffffff;
+    --panel: #f6f8fa;
+    --border: #d0d7de;
+    --fg: #1f2328;
+    --dim: #656d76;
+    --accent: #bf8700;          /* darker amber for AA contrast on white */
+    --accent-soft: rgba(9, 105, 218, 0.16);
+    --obs: #0969da;             /* blue */
+    --anom: #cf222e;            /* red */
+    --anom-soft: rgba(207, 34, 46, 0.30);
+    --recipe-bg: rgba(9, 105, 218, 0.10);
+    --good: #1a7f37;
   }
   * { box-sizing: border-box; }
   body {
@@ -177,11 +178,13 @@
     margin-right: 4px;
     border-radius: 2px;
   }
-  .swatch.obs { background: var(--obs); }
-  .swatch.median { background: var(--accent); }
+  .swatch.obs { background: #1f2328; border-radius: 999px; width: 6px; height: 6px; margin-right: 5px; }
+  .swatch.median { background: var(--obs); }
   .swatch.band { background: var(--accent-soft); height: 10px; }
   .swatch.anom { background: var(--anom); }
-  .err { color: #fca5a5; font-size: 12px; min-height: 16px; }
+  .swatch.truth { background: var(--good); border-radius: 999px; width: 8px; height: 8px; margin-right: 5px; }
+  .swatch.pastfc { background: rgba(191, 135, 0, 0.35); height: 10px; }
+  .err { color: #cf222e; font-size: 12px; min-height: 16px; }
   .metrics {
     display: grid;
     grid-template-columns: repeat(2, 1fr);
@@ -231,6 +234,7 @@
   <div class="tab-bar" role="tablist">
     <button class="tab active" data-tab="forecast" role="tab">Forecast</button>
     <button class="tab" data-tab="anomaly" role="tab">Anomaly detection</button>
+    <button class="tab" data-tab="evaluate" role="tab">Evaluate</button>
   </div>
 </header>
 
@@ -241,16 +245,40 @@
     <h2>Data</h2>
     <div class="row"><label for="fc-archetype">Archetype</label></div>
     <select id="fc-archetype">
-      <option value="seasonal_linear_trend">seasonal + linear trend (P=12)</option>
-      <option value="pure_gaussian_noise">pure Gaussian noise</option>
-      <option value="random_walk">random walk</option>
-      <option value="mean_reverting_ou">mean-reverting (OU)</option>
-      <option value="intermittent_bursty">intermittent bursty counts</option>
-      <option value="heavy_tail_cauchy">heavy-tail (Cauchy)</option>
-      <option value="level_shift_midway">level shift midway</option>
-      <option value="multi_seasonal_hourly">multi-seasonal (P=24)</option>
-      <option value="all_zeros_rare_spikes">all-zeros + rare spikes</option>
+      <optgroup label="Synthetic">
+        <option value="seasonal_linear_trend">seasonal + linear trend (P=12)</option>
+        <option value="pure_gaussian_noise">pure Gaussian noise</option>
+        <option value="random_walk">random walk</option>
+        <option value="mean_reverting_ou">mean-reverting (OU)</option>
+        <option value="intermittent_bursty">intermittent bursty counts</option>
+        <option value="heavy_tail_cauchy">heavy-tail (Cauchy)</option>
+        <option value="level_shift_midway">random level shifts (with pauses)</option>
+        <option value="sudden_variance_change">sudden variance changes</option>
+        <option value="level_and_variance_shifts">level + variance shifts (independent)</option>
+        <option value="multi_seasonal_hourly">multi-seasonal (P=24)</option>
+        <option value="all_zeros_rare_spikes">all-zeros + rare spikes</option>
+      </optgroup>
+      <optgroup label="Real — NAB (Numenta Anomaly Benchmark)">
+        <option value="nab_nyc_taxi">NAB · NYC taxi rides</option>
+        <option value="nab_ec2_cpu">NAB · AWS EC2 CPU util</option>
+        <option value="nab_ambient_temp">NAB · ambient temp (system failure)</option>
+        <option value="nab_twitter_aapl">NAB · Twitter mentions $AAPL</option>
+        <option value="nab_machine_temp">NAB · industrial machine temp</option>
+      </optgroup>
     </select>
+
+    <h2 style="margin-top:18px;">Model</h2>
+    <div class="row"><label for="fc-variant">Variant</label></div>
+    <select id="fc-variant">
+      <option value="">router (recommended_for)</option>
+      <option value="multiscale_3sh">MS + 3-α SH pool (fev-27 winner)</option>
+      <option value="skaters">.skaters() + tuned knobs + SH</option>
+      <option value="auto">.auto() (light default)</option>
+      <option value="auto_aid">.auto_aid() (AID-selected pool)</option>
+    </select>
+    <div class="row" style="margin-top:8px;"><label for="fc-periods">Seasonal periods</label></div>
+    <input type="text" id="fc-periods" value="" placeholder="e.g. 24  or  24,168" spellcheck="false" style="background:var(--bg);color:var(--fg);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:13px;width:100%;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;" />
+    <div class="row" style="margin-top:2px;"><label style="color:var(--dim);font-size:11px;">Blank = archetype default. Comma-separated for multi-cycle.</label></div>
 
     <h2 style="margin-top:18px;">Controls</h2>
     <div class="row"><label for="fc-horizon">Horizon</label><span class="val" id="fc-horizonVal">20</span></div>
@@ -259,6 +287,25 @@
     <input type="range" id="fc-speed" min="30" max="1000" value="200" step="10" />
     <div class="row" style="margin-top:8px;"><label for="fc-warmup">Warm-up</label><span class="val" id="fc-warmupVal">80</span></div>
     <input type="range" id="fc-warmup" min="30" max="200" value="80" step="10" />
+    <div class="row" style="margin-top:8px;"><label for="fc-stepSize">Step size (obs / click)</label><span class="val" id="fc-stepSizeVal">1</span></div>
+    <input type="range" id="fc-stepSize" min="1" max="48" value="1" step="1" />
+    <div class="row" style="margin-top:2px;"><label style="color:var(--dim);font-size:11px;">Each Play/Step advances N obs. The forecast made *before* the step stays visible as a light overlay for comparison.</label></div>
+    <div class="row" style="margin-top:8px;">
+      <label for="fc-showTrail" style="flex:1;">Show past <span id="fc-showTrailStepLbl">1</span>-step backtest trail</label>
+      <input type="checkbox" id="fc-showTrail" checked />
+    </div>
+
+    <h2 style="margin-top:18px;">KPI strip</h2>
+    <div class="row"><label for="fc-showKpi" style="flex:1;">Show RMSE / Coverage below</label><input type="checkbox" id="fc-showKpi" checked /></div>
+    <div class="row" style="margin-top:6px;"><label for="fc-showBaselines" style="flex:1;">Show baseline RMSE</label><input type="checkbox" id="fc-showBaselines" checked /></div>
+    <div class="row" style="margin-top:8px;"><label for="fc-kpiMode" style="flex:1;">Aggregation</label></div>
+    <select id="fc-kpiMode">
+      <option value="step">per step-size window</option>
+      <option value="rolling">rolling window (custom)</option>
+      <option value="cumulative">cumulative</option>
+    </select>
+    <div class="row" style="margin-top:8px;" id="fc-kpiWindowRow"><label for="fc-kpiWindow">Window (obs)</label><span class="val" id="fc-kpiWindowVal">50</span></div>
+    <input type="range" id="fc-kpiWindow" min="10" max="500" value="50" step="10" />
 
     <div class="btn-row" style="margin-top:14px;">
       <button id="fc-playBtn" class="primary">Play</button>
@@ -271,16 +318,63 @@
   </aside>
 
   <div class="chart-wrap">
-    <canvas id="fc-chart" class="chart" width="1000" height="420"></canvas>
+    <canvas id="fc-chart" class="chart" width="1000" height="360"></canvas>
+    <canvas id="fc-kpiStrip" class="chart" width="1000" height="150" style="height:150px;margin-top:6px;"></canvas>
     <div class="info-bar">
       <span>Recipe:</span>
       <span class="recipe-tag" id="fc-recipeTag">—</span>
       <span>Observed: <span class="n-badge" id="fc-nObs">0</span></span>
       <div class="legend">
         <span><span class="swatch obs"></span>observations</span>
-        <span><span class="swatch median"></span>median</span>
-        <span><span class="swatch band"></span>10-90 % / 25-75 %</span>
+        <span><span class="swatch median"></span>median (future)</span>
+        <span><span class="swatch band"></span>fan (future) + 1-step trail (past)</span>
+        <span><span class="swatch pastfc"></span>past forecast reveal</span>
+        <span style="margin-left:8px;color:var(--dim);">Bottom: RMSE + Coverage (<span id="fc-kpiLabel">rolling</span>)</span>
       </div>
+    </div>
+    <div style="margin-top:12px;overflow-x:auto;">
+      <table style="width:100%;border-collapse:collapse;font-size:13px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;">
+        <thead>
+          <tr style="color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:0.5px;text-align:left;">
+            <th style="padding:6px 8px;border-bottom:1px solid var(--border);">method</th>
+            <th style="padding:6px 8px;border-bottom:1px solid var(--border);text-align:right;">RMSE</th>
+            <th style="padding:6px 8px;border-bottom:1px solid var(--border);text-align:right;">coverage</th>
+            <th style="padding:6px 8px;border-bottom:1px solid var(--border);color:var(--dim);">notes</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td style="padding:6px 8px;color:#0969da;font-weight:600;">Laplace model</td>
+            <td style="padding:6px 8px;text-align:right;" id="fc-rmse">—</td>
+            <td style="padding:6px 8px;text-align:right;" id="fc-cov">—</td>
+            <td style="padding:6px 8px;color:var(--dim);">80 % PI from mixture quantiles</td>
+          </tr>
+          <tr>
+            <td style="padding:6px 8px;color:#6e7681;">naive</td>
+            <td style="padding:6px 8px;text-align:right;" id="fc-naive-rmse">—</td>
+            <td style="padding:6px 8px;text-align:right;" id="fc-naive-cov">—</td>
+            <td style="padding:6px 8px;color:var(--dim);">ŷ = last obs; PI = ±1.28·σ(res)</td>
+          </tr>
+          <tr>
+            <td style="padding:6px 8px;color:#8250df;">seasonal-naive</td>
+            <td style="padding:6px 8px;text-align:right;" id="fc-snaive-rmse">—</td>
+            <td style="padding:6px 8px;text-align:right;" id="fc-snaive-cov">—</td>
+            <td style="padding:6px 8px;color:var(--dim);">ŷ_k = obs[T−P+k]; needs seasonal period</td>
+          </tr>
+          <tr>
+            <td style="padding:6px 8px;color:#bc4c00;">running mean</td>
+            <td style="padding:6px 8px;text-align:right;" id="fc-runmean-rmse">—</td>
+            <td style="padding:6px 8px;text-align:right;" id="fc-runmean-cov">—</td>
+            <td style="padding:6px 8px;color:var(--dim);">ŷ = mean(all past); PI = ±1.28·σ(res)</td>
+          </tr>
+        </tbody>
+        <tfoot>
+          <tr style="color:var(--dim);font-size:11px;">
+            <td style="padding:6px 8px;">aggregation</td>
+            <td colspan="3" style="padding:6px 8px;" id="fc-kpiAggLabel">per step-size · 12</td>
+          </tr>
+        </tfoot>
+      </table>
     </div>
   </div>
 </main>
@@ -293,24 +387,64 @@
     <h2>Data</h2>
     <div class="row"><label for="an-archetype">Baseline archetype</label></div>
     <select id="an-archetype">
-      <option value="pure_gaussian_noise">pure Gaussian noise</option>
-      <option value="seasonal_linear_trend">seasonal + linear trend (P=12)</option>
-      <option value="mean_reverting_ou">mean-reverting (OU)</option>
-      <option value="random_walk">random walk</option>
-      <option value="multi_seasonal_hourly">multi-seasonal (P=24)</option>
-      <option value="intermittent_bursty">intermittent bursty counts</option>
+      <optgroup label="Synthetic">
+        <option value="pure_gaussian_noise">pure Gaussian noise</option>
+        <option value="seasonal_linear_trend">seasonal + linear trend (P=12)</option>
+        <option value="mean_reverting_ou">mean-reverting (OU)</option>
+        <option value="random_walk">random walk</option>
+        <option value="multi_seasonal_hourly">multi-seasonal (P=24)</option>
+        <option value="intermittent_bursty">intermittent bursty counts</option>
+      </optgroup>
+      <optgroup label="Real — NAB (labels = ground-truth injections)">
+        <option value="nab_nyc_taxi">NAB · NYC taxi rides</option>
+        <option value="nab_ec2_cpu">NAB · AWS EC2 CPU util</option>
+        <option value="nab_ambient_temp">NAB · ambient temp (system failure)</option>
+        <option value="nab_twitter_aapl">NAB · Twitter mentions $AAPL</option>
+        <option value="nab_machine_temp">NAB · industrial machine temp</option>
+      </optgroup>
     </select>
 
-    <h2 style="margin-top:18px;">Injection</h2>
-    <div class="row"><label for="an-injectRate">Spike rate (%)</label><span class="val" id="an-injectRateVal">5</span></div>
-    <input type="range" id="an-injectRate" min="0" max="20" value="5" step="1" />
-    <div class="row" style="margin-top:8px;"><label for="an-spikeMag">Spike magnitude (×σ)</label><span class="val" id="an-spikeMagVal">6</span></div>
-    <input type="range" id="an-spikeMag" min="3" max="20" value="6" step="1" />
+    <h2 style="margin-top:18px;" id="an-injectHead">Injection</h2>
+    <div id="an-injectBlock">
+      <div class="row"><label for="an-injectRate">Spike rate (%)</label><span class="val" id="an-injectRateVal">5</span></div>
+      <input type="range" id="an-injectRate" min="0" max="20" value="5" step="1" />
+      <div class="row" style="margin-top:8px;"><label for="an-spikeMag">Spike magnitude (×σ)</label><span class="val" id="an-spikeMagVal">6</span></div>
+      <input type="range" id="an-spikeMag" min="3" max="20" value="6" step="1" />
+    </div>
+    <div id="an-realBlock" hidden>
+      <div class="row" style="font-size:12px;color:var(--dim);">
+        Real data — no synthetic injection. Ground truth from NAB labels;<br>
+        TP window ±5 % of series length (NAB convention).
+      </div>
+    </div>
 
     <h2 style="margin-top:18px;">Detector</h2>
-    <div class="row"><label for="an-threshold">Surprise threshold</label><span class="val" id="an-thresholdVal">6.0</span></div>
+    <div class="row"><label for="an-detector">Method</label></div>
+    <select id="an-detector">
+      <option value="surprise">surprise (−log pdf)</option>
+      <option value="mahalanobis">parade-z Mahalanobis (skaters #88)</option>
+    </select>
+    <div class="row" style="margin-top:8px;">
+      <label for="an-reject" style="flex:1;">Reject flagged from update</label>
+      <input type="checkbox" id="an-reject" checked />
+    </div>
+    <div class="row" style="margin-top:2px;"><label style="color:var(--dim);font-size:11px;">On (surprise only): don't feed detected anomalies into the model. Prevents contamination of the σ estimate. Mahalanobis can't cleanly reject (score computed after observe).</label></div>
+    <div class="row" style="margin-top:8px;"><label for="an-cooldown">Cooldown after flag (obs)</label><span class="val" id="an-cooldownVal">5</span></div>
+    <input type="range" id="an-cooldown" min="0" max="60" value="5" step="1" />
+    <div class="row" style="margin-top:2px;"><label style="color:var(--dim);font-size:11px;">After a flag, suppress further flags for N observations. Treats consecutive high-score ticks as the same event (prevents double-counting the spike + its recovery). If reject is on, cooldown ticks are also skipped from the model update.</label></div>
+    <div class="row" style="margin-top:8px;" id="an-thresholdRow"><label for="an-threshold">Surprise threshold</label><span class="val" id="an-thresholdVal">6.0</span></div>
     <input type="range" id="an-threshold" min="2" max="20" value="6" step="0.5" />
-    <div class="row" style="margin-top:6px;"><label style="color:var(--dim);font-size:11px;">Higher = fewer detections. ~3σ ≈ 5, ~4σ ≈ 8.5.</label></div>
+    <div class="row" style="margin-top:6px;" id="an-thresholdNote"><label style="color:var(--dim);font-size:11px;">Higher = fewer detections. ~3σ ≈ 5, ~4σ ≈ 8.5.</label></div>
+    <div class="row" style="margin-top:8px;" id="an-mahaRow" hidden><label for="an-mahaP">p-value ≤</label><span class="val" id="an-mahaPVal">0.001</span></div>
+    <input type="range" id="an-mahaP" min="-6" max="-1" value="-3" step="0.5" hidden />
+    <div class="row" style="margin-top:6px;" id="an-mahaNote" hidden><label style="color:var(--dim);font-size:11px;">Slider is log₁₀ p. Wraps a k-horizon parade — needs longer warm-up.</label></div>
+    <div class="row" style="margin-top:8px;" id="an-mahaKRow" hidden><label for="an-mahaK">Parade k</label><span class="val" id="an-mahaKVal">6</span></div>
+    <input type="range" id="an-mahaK" min="2" max="12" value="6" step="1" hidden />
+
+    <h2 style="margin-top:18px;">Forecast overlay</h2>
+    <div class="row"><label for="an-fcHorizon">Fan horizon</label><span class="val" id="an-fcHorizonVal">12</span></div>
+    <input type="range" id="an-fcHorizon" min="1" max="48" value="12" step="1" />
+    <div class="row" style="margin-top:6px;"><label for="an-showFan" style="flex:1;">Show Laplace forecast fan</label><input type="checkbox" id="an-showFan" checked /></div>
 
     <h2 style="margin-top:18px;">Playback</h2>
     <div class="row"><label for="an-speed">Step delay (ms)</label><span class="val" id="an-speedVal">150</span></div>
@@ -322,22 +456,26 @@
       <button id="an-playBtn" class="primary">Play</button>
       <button id="an-regenBtn">Regenerate</button>
     </div>
-    <div class="btn-row full" style="margin-top:6px;">
+    <div class="btn-row" style="margin-top:6px;">
       <button id="an-stepBtn">Step +1</button>
+      <button id="an-runToEndBtn">Run to end ▶▶</button>
     </div>
     <div class="err" id="an-err"></div>
   </aside>
 
   <div class="chart-wrap">
-    <canvas id="an-chart" class="chart" width="1000" height="420"></canvas>
+    <canvas id="an-chart" class="chart" width="1000" height="340"></canvas>
+    <canvas id="an-strip" class="chart" width="1000" height="110" style="height:110px;margin-top:6px;"></canvas>
     <div class="info-bar">
       <span>Recipe:</span>
       <span class="recipe-tag" id="an-recipeTag">—</span>
       <span>Observed: <span class="n-badge" id="an-nObs">0</span></span>
       <div class="legend">
         <span><span class="swatch obs"></span>observations</span>
-        <span><span class="swatch anom"></span>flagged</span>
+        <span><span class="swatch truth"></span>ground truth</span>
+        <span><span class="swatch anom"></span>detected</span>
         <span><span class="swatch band"></span>1-step 10-90 %</span>
+        <span style="margin-left:8px;color:var(--dim);">Bottom: <span id="an-stripLabel">−log p</span> per tick</span>
       </div>
     </div>
     <div class="metrics">
@@ -352,6 +490,57 @@
 </main>
 </section>
 
+<!-- ================== EVALUATE TAB ================== -->
+<section class="tab-view" id="tab-evaluate" hidden>
+<main>
+  <aside class="panel">
+    <h2>Archetypes</h2>
+    <div id="ev-archetypes" style="display:flex;flex-direction:column;gap:2px;max-height:280px;overflow-y:auto;font-size:12px;"></div>
+    <div class="btn-row" style="margin-top:6px;">
+      <button id="ev-selectAll">All</button>
+      <button id="ev-selectNone">None</button>
+    </div>
+
+    <h2 style="margin-top:14px;">Models</h2>
+    <div id="ev-models" style="display:flex;flex-direction:column;gap:2px;font-size:12px;"></div>
+
+    <h2 style="margin-top:14px;">Parameters</h2>
+    <div class="row"><label for="ev-warmup">Warm-up (obs)</label><span class="val" id="ev-warmupVal">80</span></div>
+    <input type="range" id="ev-warmup" min="30" max="300" value="80" step="10" />
+    <div class="row" style="margin-top:8px;"><label for="ev-neval">Eval points</label><span class="val" id="ev-nevalVal">150</span></div>
+    <input type="range" id="ev-neval" min="30" max="1000" value="150" step="10" />
+    <div class="row" style="margin-top:8px;"><label for="ev-stepSize">Step size (h)</label><span class="val" id="ev-stepSizeVal">12</span></div>
+    <input type="range" id="ev-stepSize" min="1" max="48" value="12" step="1" />
+    <div class="row" style="margin-top:8px;"><label for="ev-seed">Seed</label></div>
+    <input type="number" id="ev-seed" value="42" style="background:var(--bg);color:var(--fg);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:13px;width:100%;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;" />
+    <div class="row" style="margin-top:8px;"><label for="ev-periodsOverride">Seasonal periods override</label></div>
+    <input type="text" id="ev-periodsOverride" value="" placeholder="blank = archetype default; e.g. 24  or  24,168" spellcheck="false" style="background:var(--bg);color:var(--fg);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:13px;width:100%;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;" />
+    <div class="row" style="margin-top:2px;"><label style="color:var(--dim);font-size:11px;">Passed to Laplace variants (multi-period unlocks the SH pool at each). Seasonal-naive baseline uses the first period if set, else the archetype default.</label></div>
+    <div class="row" style="margin-top:8px;"><label for="ev-variantOverride">Model variant override</label></div>
+    <select id="ev-variantOverride" style="background:var(--bg);color:var(--fg);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:13px;width:100%;">
+      <option value="">(per model default)</option>
+      <option value="multiscale_3sh">MS + 3-α SH pool</option>
+      <option value="skaters">.skaters() + 3α-SH</option>
+      <option value="auto">.auto()</option>
+      <option value="auto_aid">.auto_aid()</option>
+    </select>
+    <div class="row" style="margin-top:2px;"><label style="color:var(--dim);font-size:11px;">If set, replaces the variant of ALL selected Laplace-family models. Blank = each model uses its own variant.</label></div>
+
+    <div class="btn-row full" style="margin-top:12px;">
+      <button id="ev-runBtn" class="primary">Run evaluation ▶▶</button>
+    </div>
+    <div class="err" id="ev-err"></div>
+  </aside>
+
+  <div class="chart-wrap">
+    <div class="info-bar" style="margin-top:0;">
+      <span id="ev-status" style="color:var(--dim);">Configure the panel on the left and click <b>Run evaluation</b>. Metrics per (archetype × model) will populate the table below. Progress is reported live.</span>
+    </div>
+    <div id="ev-tableWrap" style="margin-top:12px;overflow-x:auto;"></div>
+  </div>
+</main>
+</section>
+
 <footer>
   Powered by <code>anofox-forecast</code> compiled to WebAssembly.
   Forecast tab: streaming softmax over the Laplace leaf pool re-fits per tick.
@@ -360,7 +549,7 @@
 </footer>
 
 <script type="module">
-import init, { LaplacePlayground } from './pkg/anofox_forecast_js.js';
+import init, { LaplacePlayground, MahalanobisPlayground } from './pkg/anofox_forecast_js.js';
 
 // ---------- Deterministic PRNG (LCG) ----------
 class Rng {
@@ -382,6 +571,103 @@ class Rng {
   }
 }
 
+// ---------- NAB real-data loader ----------
+// Fetches on-demand from raw.githubusercontent.com (CORS-open). Streams
+// are cached after first fetch so switching archetypes is instant.
+// Ground-truth labels from NAB combined_labels.json — turned into
+// observation indices via timestamp matching. In the anomaly tab these
+// indices show as red rings (ground truth) instead of the random
+// spike injector.
+const NAB_STREAMS = {
+  'nab_nyc_taxi': {
+    label: 'NAB — NYC taxi rides (30 min)',
+    csv: 'https://raw.githubusercontent.com/numenta/NAB/master/data/realKnownCause/nyc_taxi.csv',
+    labelKey: 'realKnownCause/nyc_taxi.csv',
+    period: 48,           // 30-min sampling → daily = 48
+    periodsCsv: '48',
+    baselineSigma: 2000,
+  },
+  'nab_ec2_cpu': {
+    label: 'NAB — AWS EC2 CPU utilization (5 min)',
+    csv: 'https://raw.githubusercontent.com/numenta/NAB/master/data/realAWSCloudwatch/ec2_cpu_utilization_5f5533.csv',
+    labelKey: 'realAWSCloudwatch/ec2_cpu_utilization_5f5533.csv',
+    period: 0,
+    periodsCsv: '',
+    baselineSigma: 5,
+  },
+  'nab_ambient_temp': {
+    label: 'NAB — ambient temp (hourly, system failure)',
+    csv: 'https://raw.githubusercontent.com/numenta/NAB/master/data/realKnownCause/ambient_temperature_system_failure.csv',
+    labelKey: 'realKnownCause/ambient_temperature_system_failure.csv',
+    period: 24,           // hourly sampling → daily = 24
+    periodsCsv: '24',
+    baselineSigma: 5,
+  },
+  'nab_twitter_aapl': {
+    label: 'NAB — Twitter mentions $AAPL (5 min)',
+    csv: 'https://raw.githubusercontent.com/numenta/NAB/master/data/realTweets/Twitter_volume_AAPL.csv',
+    labelKey: 'realTweets/Twitter_volume_AAPL.csv',
+    period: 0,            // event-driven, weak diurnal cycle
+    periodsCsv: '',
+    baselineSigma: 20,
+  },
+  'nab_machine_temp': {
+    label: 'NAB — industrial machine temp (5 min, failure)',
+    csv: 'https://raw.githubusercontent.com/numenta/NAB/master/data/realKnownCause/machine_temperature_system_failure.csv',
+    labelKey: 'realKnownCause/machine_temperature_system_failure.csv',
+    period: 0,            // structural failure, no seasonality
+    periodsCsv: '',
+    baselineSigma: 3,
+  },
+};
+
+const NAB_LABELS_URL = 'https://raw.githubusercontent.com/numenta/NAB/master/labels/combined_labels.json';
+const nabCache = new Map();     // key → { values, labelIndices, timestamps }
+let nabLabelsPromise = null;    // cached fetch of combined_labels.json
+
+async function loadNabLabels() {
+  if (nabLabelsPromise) return nabLabelsPromise;
+  nabLabelsPromise = fetch(NAB_LABELS_URL).then(r => r.json());
+  return nabLabelsPromise;
+}
+
+function parseNabCsv(text) {
+  // Two-column CSV: timestamp,value. Skip header, tolerate blank lines.
+  const timestamps = [], values = [];
+  const lines = text.split(/\r?\n/);
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    const comma = line.indexOf(',');
+    if (comma < 0) continue;
+    const ts = line.substring(0, comma).trim();
+    const v = parseFloat(line.substring(comma + 1));
+    if (Number.isFinite(v)) { timestamps.push(ts); values.push(v); }
+  }
+  return { timestamps, values };
+}
+
+async function loadNabStream(key) {
+  if (nabCache.has(key)) return nabCache.get(key);
+  const spec = NAB_STREAMS[key];
+  if (!spec) throw new Error('unknown NAB stream: ' + key);
+  const [csvText, labels] = await Promise.all([
+    fetch(spec.csv).then(r => { if (!r.ok) throw new Error(`fetch ${spec.csv} → ${r.status}`); return r.text(); }),
+    loadNabLabels(),
+  ]);
+  const { timestamps, values } = parseNabCsv(csvText);
+  const labelTs = new Set(labels[spec.labelKey] || []);
+  const labelIndices = [];
+  for (let i = 0; i < timestamps.length; i++) {
+    if (labelTs.has(timestamps[i])) labelIndices.push(i);
+  }
+  const bundle = { values, timestamps, labelIndices, spec };
+  nabCache.set(key, bundle);
+  return bundle;
+}
+
+function isNabKey(key) { return key && key.startsWith('nab_'); }
+
 // ---------- Archetype generators ----------
 // Each returns { period, baselineSigma, draw(i) }. baselineSigma is a
 // rough scale used by the anomaly tab to size injected spikes.
@@ -392,7 +678,76 @@ const ARCHETYPES = {
   mean_reverting_ou:     { period: 0,  baselineSigma: 1, factory: (rng) => { const mu = 50, theta = 0.1; let x = mu; return () => { x += theta * (mu - x) + rng.normal(); return x; }; } },
   intermittent_bursty:   { period: 0,  baselineSigma: 2, factory: (rng) => () => (rng.next() < 0.2 ? rng.poisson(5) : 0) },
   heavy_tail_cauchy:     { period: 0,  baselineSigma: 1, factory: (rng) => () => 50 + rng.cauchy(1) },
-  level_shift_midway:    { period: 0,  baselineSigma: 0.5, factory: (rng) => (i) => (i < 150 ? 50 : 55) + 0.5 * rng.normal() },
+  level_shift_midway:    {
+    // Persistent level with occasional random ±shifts separated by a
+    // cooldown pause. Stateful — factory returns a closure that owns
+    // the level + cooldown state.
+    period: 0, baselineSigma: 0.5,
+    factory: (rng) => {
+      let level = 50;
+      let cooldown = 30 + Math.floor(rng.next() * 40);
+      return () => {
+        if (cooldown > 0) cooldown--;
+        else if (rng.next() < 0.05) {
+          const magnitude = 3 + rng.next() * 5;
+          const sign = rng.next() < 0.5 ? -1 : 1;
+          level += sign * magnitude;
+          cooldown = 20 + Math.floor(rng.next() * 60);
+        }
+        return level + 0.5 * rng.normal();
+      };
+    },
+  },
+  sudden_variance_change: {
+    // Level fixed at 50; the *noise σ* jumps between discrete regimes
+    // (0.3 → 5.0 range) with cooldown pauses between changes. Tests
+    // whether the forecaster's PI adapts fast enough after a variance
+    // shock and whether anomaly detectors handle the calm→turbulent
+    // transition (which naive residual-scaling gets wrong).
+    period: 0, baselineSigma: 0.5,
+    factory: (rng) => {
+      const sigmaOpts = [0.3, 0.5, 1.0, 2.5, 5.0];
+      let sigma = 0.5;
+      let cooldown = 40 + Math.floor(rng.next() * 40);
+      return () => {
+        if (cooldown > 0) cooldown--;
+        else if (rng.next() < 0.04) {
+          sigma = sigmaOpts[Math.floor(rng.next() * sigmaOpts.length)];
+          cooldown = 30 + Math.floor(rng.next() * 60);
+        }
+        return 50 + sigma * rng.normal();
+      };
+    },
+  },
+  level_and_variance_shifts: {
+    // BOTH level and σ can shift, on INDEPENDENT cooldowns. A regime
+    // may consist of a new level with the old σ, or vice versa, or
+    // occasionally both change close together by chance. Realistic
+    // shape for equipment / market / cell-tower monitoring.
+    period: 0, baselineSigma: 0.5,
+    factory: (rng) => {
+      const sigmaOpts = [0.3, 0.5, 1.0, 2.5, 5.0];
+      let level = 50;
+      let sigma = 0.5;
+      let levelCd = 30 + Math.floor(rng.next() * 40);
+      let varCd = 50 + Math.floor(rng.next() * 40);
+      return () => {
+        if (levelCd > 0) levelCd--;
+        else if (rng.next() < 0.04) {
+          const magnitude = 3 + rng.next() * 5;
+          const sign = rng.next() < 0.5 ? -1 : 1;
+          level += sign * magnitude;
+          levelCd = 20 + Math.floor(rng.next() * 60);
+        }
+        if (varCd > 0) varCd--;
+        else if (rng.next() < 0.03) {
+          sigma = sigmaOpts[Math.floor(rng.next() * sigmaOpts.length)];
+          varCd = 40 + Math.floor(rng.next() * 80);
+        }
+        return level + sigma * rng.normal();
+      };
+    },
+  },
   multi_seasonal_hourly: { period: 24, baselineSigma: 1, factory: (rng) => (i) => 50 + 3 * Math.sin(2 * Math.PI * i / 24) + 2 * Math.sin(2 * Math.PI * i / 168) + rng.normal() },
   all_zeros_rare_spikes: { period: 0,  baselineSigma: 1, factory: (rng) => () => (rng.next() < 0.01 ? rng.poisson(10) : 0) },
 };
@@ -443,45 +798,77 @@ class Chart {
     const x = (i) => padL + (w - padL - padR) * (i / Math.max(1, xN - 1));
     const y = (v) => padT + (h - padT - padB) * (1 - (v - yMin) / (yMax - yMin));
 
-    // Axes + grid.
-    ctx.strokeStyle = '#2a2f3a';
+    // Axes + grid (light theme).
+    ctx.strokeStyle = '#8c959f';
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(padL, padT); ctx.lineTo(padL, h - padB); ctx.lineTo(w - padR, h - padB);
     ctx.stroke();
-    ctx.fillStyle = '#6b7280';
+    ctx.fillStyle = '#656d76';
     ctx.font = '11px ui-monospace,SFMono-Regular,Menlo,monospace';
     ctx.textAlign = 'right';
     for (let k = 0; k <= 4; k++) {
       const yv = yMin + (yMax - yMin) * k / 4;
       const yp = y(yv);
       ctx.fillText(fmt(yv), padL - 5, yp + 3);
-      ctx.strokeStyle = '#20242c';
+      ctx.strokeStyle = '#eaeef2';
       ctx.beginPath(); ctx.moveTo(padL, yp); ctx.lineTo(w - padR, yp); ctx.stroke();
     }
 
-    // Anomaly-tab: rolling 1-step 10-90 band (past history).
-    if (opts.band1step && opts.band1step.length === 2 * nObs) {
-      ctx.fillStyle = 'rgba(245, 158, 11, 0.14)';
-      ctx.beginPath();
-      let started = false;
-      for (let i = 0; i < nObs; i++) {
-        const lo = opts.band1step[2 * i], hi = opts.band1step[2 * i + 1];
-        if (!Number.isFinite(lo) || !Number.isFinite(hi)) continue;
-        if (!started) { ctx.moveTo(x(i), y(hi)); started = true; } else ctx.lineTo(x(i), y(hi));
+    // Past step-size backtest trail: each `pastForecasts` entry is one
+    // h=stepSize capture. Draw each as a thin translucent blue band
+    // + thin dashed blue median line, all overlaid — the accumulated
+    // "sausage" shows every backtest window across the run.
+    let pastMed = null;   // kept for the future-fan bridge below
+    if (opts.pastForecasts && opts.pastForecasts.length > 0) {
+      ctx.fillStyle = 'rgba(9, 105, 218, 0.14)';
+      for (const pf of opts.pastForecasts) {
+        const H = pf.med.length;
+        if (H === 0) continue;
+        ctx.beginPath();
+        let seed = false;
+        for (let h = 0; h < H; h++) {
+          const xh = x(pf.atIdx + h);
+          const hi = pf.hi[h];
+          if (!Number.isFinite(hi)) continue;
+          if (!seed) { ctx.moveTo(xh, y(hi)); seed = true; } else ctx.lineTo(xh, y(hi));
+        }
+        for (let h = H - 1; h >= 0; h--) {
+          const xh = x(pf.atIdx + h);
+          const lo = pf.lo[h];
+          if (!Number.isFinite(lo)) continue;
+          ctx.lineTo(xh, y(lo));
+        }
+        ctx.closePath();
+        ctx.fill();
       }
-      for (let i = nObs - 1; i >= 0; i--) {
-        const lo = opts.band1step[2 * i], hi = opts.band1step[2 * i + 1];
-        if (!Number.isFinite(lo) || !Number.isFinite(hi)) continue;
-        ctx.lineTo(x(i), y(lo));
+      // Thin median lines per capture, dashed so overlapping ones still read.
+      ctx.strokeStyle = 'rgba(9, 105, 218, 0.85)';
+      ctx.lineWidth = 1.4;
+      for (const pf of opts.pastForecasts) {
+        const H = pf.med.length;
+        ctx.beginPath();
+        let seed = false;
+        for (let h = 0; h < H; h++) {
+          const v = pf.med[h];
+          if (!Number.isFinite(v)) { seed = false; continue; }
+          const xh = x(pf.atIdx + h);
+          if (!seed) { ctx.moveTo(xh, y(v)); seed = true; } else ctx.lineTo(xh, y(v));
+        }
+        ctx.stroke();
       }
-      ctx.closePath();
-      ctx.fill();
+      // Anchor for the future-fan bridge: use the very last past capture's
+      // last median so the live blue fan starts continuously.
+      const last = opts.pastForecasts[opts.pastForecasts.length - 1];
+      if (last && last.med.length > 0) {
+        pastMed = new Array(nObs);
+        pastMed[nObs - 1] = last.med[last.med.length - 1];
+      }
     }
 
     // Forecast tab: boundary + fan.
     if (horizon > 0 && opts.forecast) {
-      ctx.strokeStyle = '#4a5060'; ctx.setLineDash([4, 4]);
+      ctx.strokeStyle = '#8c959f'; ctx.setLineDash([4, 4]);
       const xB = x(nObs - 1);
       ctx.beginPath(); ctx.moveTo(xB, padT); ctx.lineTo(xB, h - padB); ctx.stroke();
       ctx.setLineDash([]);
@@ -502,7 +889,7 @@ class Chart {
             q50 = readCol(idx50), q75 = readCol(idx75), q90 = readCol(idx90);
       const drawBand = (lo, hi, alpha) => {
         if (!lo || !hi) return;
-        ctx.fillStyle = `rgba(245, 158, 11, ${alpha})`;
+        ctx.fillStyle = `rgba(9, 105, 218, ${alpha})`;
         ctx.beginPath();
         const yAnchor = obs[nObs - 1];
         ctx.moveTo(x(nObs - 1), y(yAnchor));
@@ -512,43 +899,118 @@ class Chart {
         ctx.closePath();
         ctx.fill();
       };
-      drawBand(q10, q90, 0.18);
-      drawBand(q25, q75, 0.28);
+      drawBand(q10, q90, 0.20);
+      drawBand(q25, q75, 0.30);
       if (q50) {
-        ctx.strokeStyle = '#f59e0b'; ctx.lineWidth = 2; ctx.setLineDash([5, 4]);
+        ctx.strokeStyle = '#0969da'; ctx.lineWidth = 2;
         ctx.beginPath();
-        ctx.moveTo(x(nObs - 1), y(obs[nObs - 1]));
+        // Bridge from the last past forecast median (if any) to the
+        // first future median so the blue line is continuous across
+        // the past/future boundary.
+        const anchor = pastMed && Number.isFinite(pastMed[nObs - 1])
+          ? pastMed[nObs - 1]
+          : obs[nObs - 1];
+        ctx.moveTo(x(nObs - 1), y(anchor));
         for (let hh = 0; hh < horizon; hh++) ctx.lineTo(x(nObs + hh), y(q50[hh]));
-        ctx.stroke(); ctx.setLineDash([]);
+        ctx.stroke();
       }
     }
 
-    // Observations line.
-    ctx.strokeStyle = '#6ba4ff';
-    ctx.lineWidth = 1.6;
-    ctx.beginPath();
-    let started = false;
+    // "Past forecast reveal" — the h-step forecast the model made
+    // right BEFORE the most recent step advance. Semi-transparent so
+    // it doesn't dominate the current fan/observations. Only drawn
+    // when stepSize > 1 (i.e., there are actuals to compare against
+    // the frozen prediction).
+    if (opts.pastForecast) {
+      const pf = opts.pastForecast;
+      const H = pf.med.length;
+      const xEndCap = Math.max(0, xN - 1);
+      // Band (10-90).
+      ctx.fillStyle = 'rgba(191, 135, 0, 0.16)';   // light amber
+      ctx.beginPath();
+      let seedH = false;
+      for (let h = 0; h < H; h++) {
+        const xh = x(pf.atIdx + h);
+        if (xh > x(xEndCap) + 1) break;
+        if (!seedH) { ctx.moveTo(xh, y(pf.hi[h])); seedH = true; } else ctx.lineTo(xh, y(pf.hi[h]));
+      }
+      for (let h = H - 1; h >= 0; h--) {
+        const xh = x(pf.atIdx + h);
+        if (xh > x(xEndCap) + 1) continue;
+        ctx.lineTo(xh, y(pf.lo[h]));
+      }
+      ctx.closePath();
+      ctx.fill();
+      // Median line (dashed amber).
+      ctx.strokeStyle = 'rgba(191, 135, 0, 0.85)';
+      ctx.lineWidth = 1.6;
+      ctx.setLineDash([5, 4]);
+      ctx.beginPath();
+      let seed = false;
+      for (let h = 0; h < H; h++) {
+        const xh = x(pf.atIdx + h);
+        if (!seed) { ctx.moveTo(xh, y(pf.med[h])); seed = true; } else ctx.lineTo(xh, y(pf.med[h]));
+      }
+      ctx.stroke();
+      ctx.setLineDash([]);
+      // Marker at the origin of the reveal (small amber diamond).
+      ctx.fillStyle = '#bf8700';
+      const xo = x(pf.atIdx), yo = y(pf.med[0]);
+      ctx.beginPath();
+      ctx.moveTo(xo, yo - 4); ctx.lineTo(xo + 4, yo); ctx.lineTo(xo, yo + 4); ctx.lineTo(xo - 4, yo);
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    // Past 1-step forecast median line (blue). Drawn BEFORE observations
+    // so black dots sit on top.
+    if (pastMed) {
+      ctx.strokeStyle = '#0969da'; ctx.lineWidth = 2;
+      ctx.beginPath();
+      let started = false;
+      for (let i = 0; i < nObs; i++) {
+        const v = pastMed[i];
+        if (!Number.isFinite(v)) { started = false; continue; }
+        if (!started) { ctx.moveTo(x(i), y(v)); started = true; } else ctx.lineTo(x(i), y(v));
+      }
+      ctx.stroke();
+    }
+
+    // Observations as small filled BLACK dots.
+    ctx.fillStyle = '#1f2328';
     for (let i = 0; i < nObs; i++) {
       const v = obs[i];
-      if (!Number.isFinite(v)) { started = false; continue; }
-      if (!started) { ctx.moveTo(x(i), y(v)); started = true; } else ctx.lineTo(x(i), y(v));
+      if (!Number.isFinite(v)) continue;
+      ctx.beginPath();
+      ctx.arc(x(i), y(v), 2.2, 0, Math.PI * 2);
+      ctx.fill();
     }
-    ctx.stroke();
 
-    // Injected-truth markers (small hollow rings, ground truth).
+    // Ground-truth anomaly windows (real NAB data only): translucent
+    // green vertical band spanning ±tpHalfWindow around each label.
+    // This is the "TP window" — any detection inside counts.
+    if (opts.truthWindows) {
+      ctx.fillStyle = 'rgba(26, 127, 55, 0.15)';
+      for (const [lo, hi] of opts.truthWindows) {
+        const xl = x(Math.max(0, lo));
+        const xh = x(Math.min(nObs - 1, hi));
+        ctx.fillRect(xl, padT, Math.max(1, xh - xl), h - padT - padB);
+      }
+    }
+    // Ground-truth anomaly markers: solid green dot at the exact
+    // labelled/injected observation.
     if (opts.injected) {
-      ctx.strokeStyle = 'rgba(239, 68, 68, 0.55)';
-      ctx.lineWidth = 1;
+      ctx.fillStyle = '#1a7f37';
       for (const i of opts.injected) {
         if (i >= nObs) continue;
         ctx.beginPath();
-        ctx.arc(x(i), y(obs[i]), 5, 0, Math.PI * 2);
-        ctx.stroke();
+        ctx.arc(x(i), y(obs[i]), 4.5, 0, Math.PI * 2);
+        ctx.fill();
       }
     }
     // Detector-flagged (filled red X).
     if (opts.flagged) {
-      ctx.strokeStyle = '#ef4444'; ctx.lineWidth = 2;
+      ctx.strokeStyle = '#cf222e'; ctx.lineWidth = 2;
       for (const i of opts.flagged) {
         if (i >= nObs) continue;
         const xi = x(i), yi = y(obs[i]);
@@ -559,11 +1021,13 @@ class Chart {
       }
     }
 
-    // Last-observation marker.
-    ctx.fillStyle = '#6ba4ff';
+    // Last-observation marker: slightly larger black dot with subtle ring.
+    ctx.strokeStyle = '#8c959f'; ctx.lineWidth = 1;
+    ctx.fillStyle = '#1f2328';
     ctx.beginPath();
-    ctx.arc(x(nObs - 1), y(obs[nObs - 1]), 3, 0, Math.PI * 2);
+    ctx.arc(x(nObs - 1), y(obs[nObs - 1]), 3.5, 0, Math.PI * 2);
     ctx.fill();
+    ctx.stroke();
   }
 }
 
@@ -574,6 +1038,213 @@ function fmt(v) {
   return v.toFixed(1);
 }
 
+/**
+ * Aligned strip plot for the anomaly tab. Draws a bar per tick showing
+ * -log10(p) (Mahalanobis) or surprise score (surprise detector). Red
+ * markers on ticks where the threshold is crossed. Timemachines-style.
+ */
+class Strip {
+  constructor(canvas) {
+    this.c = canvas;
+    this.ctx = canvas.getContext('2d');
+    this.dpr = window.devicePixelRatio || 1;
+    this.resize();
+    window.addEventListener('resize', () => this.resize());
+  }
+  resize() {
+    const cssW = this.c.clientWidth || this.c.width;
+    const cssH = this.c.clientHeight || this.c.height;
+    this.c.width = Math.floor(cssW * this.dpr);
+    this.c.height = Math.floor(cssH * this.dpr);
+    this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    this.w = cssW; this.h = cssH;
+  }
+  // opts: { series (per-tick score, NaN = warmup), threshold, flaggedSet:Set, xN (matches main chart), yLabel }
+  draw(opts) {
+    const ctx = this.ctx;
+    const w = this.w, h = this.h;
+    ctx.clearRect(0, 0, w, h);
+    const s = opts.series || [];
+    const xN = opts.xN || s.length;
+    if (s.length === 0) return;
+    const padL = 40, padR = 12, padT = 8, padB = 18;
+
+    let yMax = -Infinity;
+    for (const v of s) if (Number.isFinite(v) && v > yMax) yMax = v;
+    if (!Number.isFinite(yMax)) yMax = 1;
+    yMax = Math.max(yMax, opts.threshold ?? 1) * 1.1;
+
+    const x = (i) => padL + (w - padL - padR) * (i / Math.max(1, xN - 1));
+    const y = (v) => padT + (h - padT - padB) * (1 - Math.max(0, v) / yMax);
+
+    // Axes.
+    ctx.strokeStyle = '#8c959f';
+    ctx.beginPath(); ctx.moveTo(padL, padT); ctx.lineTo(padL, h - padB); ctx.lineTo(w - padR, h - padB); ctx.stroke();
+    ctx.fillStyle = '#656d76';
+    ctx.font = '10px ui-monospace,SFMono-Regular,Menlo,monospace';
+    ctx.textAlign = 'right';
+    for (let k = 0; k <= 2; k++) {
+      const v = (yMax * k) / 2;
+      ctx.fillText(fmt(v), padL - 4, y(v) + 3);
+    }
+    ctx.fillText(opts.yLabel || 'score', padL - 4, padT + 8);
+
+    // Threshold line.
+    if (Number.isFinite(opts.threshold)) {
+      const yt = y(opts.threshold);
+      ctx.strokeStyle = 'rgba(207, 34, 46, 0.55)';
+      ctx.setLineDash([4, 3]); ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(padL, yt); ctx.lineTo(w - padR, yt); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    // Bars (thin lollipops).
+    const barW = Math.max(0.8, (w - padL - padR) / Math.max(1, xN - 1) - 0.5);
+    const flaggedSet = opts.flaggedSet || new Set();
+    for (let i = 0; i < s.length; i++) {
+      const v = s[i];
+      if (!Number.isFinite(v)) continue;
+      const xi = x(i), yi = y(v);
+      const isFlag = flaggedSet.has(i);
+      ctx.fillStyle = isFlag ? '#cf222e' : 'rgba(9, 105, 218, 0.55)';
+      ctx.fillRect(xi - barW / 2, yi, barW, h - padB - yi);
+      if (isFlag) {
+        ctx.beginPath();
+        ctx.arc(xi, yi, 2.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+}
+
+/**
+ * KPI strip for the forecast tab. Two lines on a shared x-axis:
+ *  - RMSE (blue, left y-axis, dynamic scale)
+ *  - Coverage (green, right y-axis, 0..1 scale)
+ * A dashed horizontal line marks the nominal coverage level.
+ */
+class KpiStrip {
+  constructor(canvas) {
+    this.c = canvas;
+    this.ctx = canvas.getContext('2d');
+    this.dpr = window.devicePixelRatio || 1;
+    this.resize();
+    window.addEventListener('resize', () => this.resize());
+  }
+  resize() {
+    const cssW = this.c.clientWidth || this.c.width;
+    const cssH = this.c.clientHeight || this.c.height;
+    this.c.width = Math.floor(cssW * this.dpr);
+    this.c.height = Math.floor(cssH * this.dpr);
+    this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    this.w = cssW; this.h = cssH;
+  }
+  // opts: { rmseSeries: [{name, color, values, width?, dashed?}], coverage, xN, nominalCoverage }
+  draw(opts) {
+    const ctx = this.ctx;
+    const w = this.w, h = this.h;
+    ctx.clearRect(0, 0, w, h);
+    const seriesList = opts.rmseSeries || [];
+    const cov = opts.coverage || [];
+    // xN: max known observation count (drives x-scale).
+    let xN = opts.xN || 0;
+    for (const s of seriesList) if (s.values && s.values.length > xN) xN = s.values.length;
+    if (xN === 0 && cov.length === 0) return;
+    const padL = 42, padR = 42, padT = 8, padB = 24;
+
+    // Y-max on RMSE axis: max across all series.
+    let rmseMax = -Infinity;
+    for (const s of seriesList) {
+      for (const v of s.values) if (Number.isFinite(v) && v > rmseMax) rmseMax = v;
+    }
+    if (!Number.isFinite(rmseMax) || rmseMax <= 0) rmseMax = 1;
+    rmseMax *= 1.1;
+
+    const x = (i) => padL + (w - padL - padR) * (i / Math.max(1, xN - 1));
+    const yRmse = (v) => padT + (h - padT - padB) * (1 - Math.max(0, v) / rmseMax);
+    const yCov = (v) => padT + (h - padT - padB) * (1 - Math.max(0, Math.min(1, v)));
+
+    // Axes.
+    ctx.strokeStyle = '#8c959f'; ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(padL, padT); ctx.lineTo(padL, h - padB); ctx.lineTo(w - padR, h - padB); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(w - padR, padT); ctx.lineTo(w - padR, h - padB); ctx.stroke();
+
+    ctx.font = '10px ui-monospace,SFMono-Regular,Menlo,monospace';
+    ctx.fillStyle = '#0969da';
+    ctx.textAlign = 'right';
+    for (let k = 0; k <= 2; k++) {
+      const v = (rmseMax * k) / 2;
+      ctx.fillText(fmt(v), padL - 4, yRmse(v) + 3);
+    }
+    ctx.fillText('RMSE', padL - 4, padT + 8);
+
+    ctx.fillStyle = '#1a7f37';
+    ctx.textAlign = 'left';
+    for (const v of [0, 0.5, 1.0]) {
+      ctx.fillText((v * 100).toFixed(0) + '%', w - padR + 4, yCov(v) + 3);
+    }
+    ctx.fillText('Cov', w - padR + 4, padT + 8);
+
+    const nom = Number.isFinite(opts.nominalCoverage) ? opts.nominalCoverage : 0.8;
+    ctx.strokeStyle = 'rgba(26, 127, 55, 0.55)';
+    ctx.setLineDash([4, 3]); ctx.lineWidth = 1;
+    const yn = yCov(nom);
+    ctx.beginPath(); ctx.moveTo(padL, yn); ctx.lineTo(w - padR, yn); ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Draw each RMSE series (baselines first so model sits on top).
+    const sorted = seriesList.slice().sort((a, b) => (a.name === 'model' ? 1 : b.name === 'model' ? -1 : 0));
+    for (const s of sorted) {
+      ctx.strokeStyle = s.color;
+      ctx.lineWidth = s.width || (s.name === 'model' ? 2 : 1);
+      if (s.dashed) ctx.setLineDash([3, 3]); else ctx.setLineDash([]);
+      ctx.beginPath();
+      let seed = false;
+      for (let i = 0; i < s.values.length; i++) {
+        const v = s.values[i];
+        if (!Number.isFinite(v)) { seed = false; continue; }
+        if (!seed) { ctx.moveTo(x(i), yRmse(v)); seed = true; }
+        else ctx.lineTo(x(i), yRmse(v));
+      }
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+
+    // Coverage line (green).
+    ctx.strokeStyle = '#1a7f37'; ctx.lineWidth = 2;
+    ctx.beginPath();
+    let seed = false;
+    for (let i = 0; i < cov.length; i++) {
+      const v = cov[i];
+      if (!Number.isFinite(v)) { seed = false; continue; }
+      if (!seed) { ctx.moveTo(x(i), yCov(v)); seed = true; }
+      else ctx.lineTo(x(i), yCov(v));
+    }
+    ctx.stroke();
+
+    // Legend row at the bottom of the strip.
+    ctx.font = '10px system-ui, sans-serif';
+    ctx.textAlign = 'left';
+    let lx = padL;
+    const ly = h - 4;
+    for (const s of seriesList) {
+      ctx.strokeStyle = s.color;
+      ctx.lineWidth = s.width || 1.4;
+      if (s.dashed) ctx.setLineDash([3, 3]);
+      ctx.beginPath(); ctx.moveTo(lx, ly - 3); ctx.lineTo(lx + 14, ly - 3); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = '#656d76';
+      ctx.fillText(s.name, lx + 18, ly);
+      lx += 20 + ctx.measureText(s.name).width + 10;
+    }
+    ctx.strokeStyle = '#1a7f37'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(lx, ly - 3); ctx.lineTo(lx + 14, ly - 3); ctx.stroke();
+    ctx.fillStyle = '#656d76';
+    ctx.fillText('coverage', lx + 18, ly);
+  }
+}
+
 // ---------- Tab controller ----------
 const tabs = document.querySelectorAll('.tab');
 const views = document.querySelectorAll('.tab-view');
@@ -581,9 +1252,13 @@ tabs.forEach(t => t.addEventListener('click', () => {
   tabs.forEach(x => x.classList.toggle('active', x === t));
   views.forEach(v => { v.hidden = v.id !== `tab-${t.dataset.tab}`; });
   // Force chart resize on show (canvas dimensions were 0 while hidden).
-  if (t.dataset.tab === 'forecast') fc.chart.resize();
-  if (t.dataset.tab === 'anomaly') an.chart.resize();
-  if (t.dataset.tab === 'forecast') fc.render(); else an.render();
+  // Layout doesn't happen synchronously when hidden→visible; defer
+  // resize+render to the next frame so canvas.clientWidth is populated.
+  requestAnimationFrame(() => {
+    if (t.dataset.tab === 'forecast') { fc.chart.resize(); fc.render(); }
+    else if (t.dataset.tab === 'anomaly') { an.chart.resize(); an.strip?.resize(); an.render(); }
+    // 'evaluate' has no canvases; the table just re-renders on Run.
+  });
 }));
 
 const $ = (id) => document.getElementById(id);
@@ -591,27 +1266,94 @@ const $ = (id) => document.getElementById(id);
 // ---------- Forecast tab ----------
 const fc = {
   chart: null,
+  kpiStrip: null,
   playground: null,
   gen: null,
   observations: [],
+  // Accumulated step-size backtest captures. Each entry is the h=stepSize
+  // forecast the model made right before advancing by that step. Kept
+  // for the whole run so the chart draws a "sausage" of past predictions
+  // vs actuals AND the KPI strip can aggregate per-obs errors across
+  // the whole history.
+  pastForecasts: [],       // [{atIdx, lo:[], med:[], hi:[]}]
+  perObsErr: [],           // sq_err per observation index (from covering capture)
+  perObsCov: [],           // 1 if obs inside [lo, hi] at horizon-position k, else 0
+  // Per-obs squared error for each baseline. Same length + alignment
+  // as perObsErr, so the KPI aggregator works identically.
+  baselineErr: { naive: [], seasonalNaive: [], runningMean: [] },
+  baselineCov: { naive: [], seasonalNaive: [], runningMean: [] },
+  // Cumulative running-variance state per baseline — used to estimate
+  // σ_residual on the fly so a Gaussian PI (ŷ ± 1.28σ) can be derived
+  // for coverage. Updated AFTER scoring each new obs (so the PI at
+  // time t uses only obs [0..t-1], no leakage).
+  baselineStats: {
+    naive: { sumSq: 0, n: 0 },
+    seasonalNaive: { sumSq: 0, n: 0 },
+    runningMean: { sumSq: 0, n: 0 },
+  },
   iCursor: 0,
   running: false,
   timer: null,
   seed: 42,
   qLevels: [0.1, 0.25, 0.5, 0.75, 0.9],
-  regen() {
+  periodsCsv() {
+    const raw = $('fc-periods').value.trim();
+    if (raw) return raw;
     const key = $('fc-archetype').value;
+    if (isNabKey(key)) return '';
     const arch = ARCHETYPES[key];
+    return arch.period > 0 ? String(arch.period) : '';
+  },
+  async regen() {
+    const key = $('fc-archetype').value;
     const warmup = parseInt($('fc-warmup').value, 10);
-    const rng = new Rng(this.seed);
-    const draw = arch.factory(rng);
-    this.observations = [];
-    for (let i = 0; i < warmup; i++) this.observations.push(draw(i));
-    this.gen = draw;
-    this.iCursor = warmup;
+    if (isNabKey(key)) {
+      $('fc-err').textContent = 'loading real data…';
+      let bundle;
+      try { bundle = await loadNabStream(key); }
+      catch (e) { $('fc-err').textContent = 'NAB load failed: ' + String(e); return; }
+      const clamped = Math.min(warmup, Math.max(30, Math.floor(bundle.values.length * 0.3)));
+      this.observations = bundle.values.slice(0, clamped);
+      const seq = bundle.values;
+      this.gen = (i) => (i < seq.length ? seq[i] : NaN);
+      this.iCursor = clamped;
+    } else {
+      const arch = ARCHETYPES[key];
+      const rng = new Rng(this.seed);
+      const draw = arch.factory(rng);
+      this.observations = [];
+      for (let i = 0; i < warmup; i++) this.observations.push(draw(i));
+      this.gen = draw;
+      this.iCursor = warmup;
+    }
+    // Reset the step-size backtest bookkeeping.
+    this.pastForecasts = [];
+    const nWarm = this.observations.length;
+    this.perObsErr = new Array(nWarm).fill(NaN);
+    this.perObsCov = new Array(nWarm).fill(NaN);
+    this.baselineErr = {
+      naive: new Array(nWarm).fill(NaN),
+      seasonalNaive: new Array(nWarm).fill(NaN),
+      runningMean: new Array(nWarm).fill(NaN),
+    };
+    this.baselineCov = {
+      naive: new Array(nWarm).fill(NaN),
+      seasonalNaive: new Array(nWarm).fill(NaN),
+      runningMean: new Array(nWarm).fill(NaN),
+    };
+    this.baselineStats = {
+      naive: { sumSq: 0, n: 0 },
+      seasonalNaive: { sumSq: 0, n: 0 },
+      runningMean: { sumSq: 0, n: 0 },
+    };
     try {
       if (this.playground) this.playground.free();
-      this.playground = new LaplacePlayground(new Float64Array(this.observations), arch.period, parseInt($('fc-horizon').value, 10));
+      this.playground = new LaplacePlayground(
+        new Float64Array(this.observations),
+        this.periodsCsv(),
+        parseInt($('fc-horizon').value, 10),
+        $('fc-variant').value,
+      );
       $('fc-recipeTag').textContent = this.playground.recipe();
       $('fc-err').textContent = '';
     } catch (e) { $('fc-err').textContent = String(e); return; }
@@ -620,22 +1362,180 @@ const fc = {
   },
   step() {
     if (!this.playground || !this.gen) return;
-    const y = this.gen(this.iCursor++);
-    try { this.playground.observe(y); }
-    catch (e) { $('fc-err').textContent = String(e); this.stop(); return; }
-    this.observations.push(y);
+    const stepSize = Math.max(1, parseInt($('fc-stepSize').value, 10));
+
+    // Capture the h=stepSize forecast BEFORE advancing. This is the
+    // "backtest window" — as soon as the next `stepSize` observations
+    // are realised, we score each of them against the corresponding
+    // horizon position of this capture.
+    let cap = null;
+    try {
+      const qs = [0.1, 0.5, 0.9];
+      const q = this.playground.forecast(stepSize, new Float64Array(qs));
+      const stride = qs.length + 1;
+      cap = { atIdx: this.observations.length, lo: [], med: [], hi: [] };
+      for (let h = 0; h < stepSize; h++) {
+        cap.lo.push(q[h * stride + 0]);
+        cap.med.push(q[h * stride + 1]);
+        cap.hi.push(q[h * stride + 2]);
+      }
+    } catch (_) {}
+
+    // Baselines are frozen at the step origin — all N ticks in this
+    // step are scored against these fixed predictions.
+    const stepOriginIdx = this.observations.length;   // pre-push length
+    const lastObs = stepOriginIdx > 0 ? this.observations[stepOriginIdx - 1] : NaN;
+    let meanSoFar = NaN;
+    if (stepOriginIdx > 0) {
+      let s = 0;
+      for (let i = 0; i < stepOriginIdx; i++) s += this.observations[i];
+      meanSoFar = s / stepOriginIdx;
+    }
+    // Effective period for seasonal-naive: what the LaplacePlayground
+    // was configured with (single first period from the CSV).
+    const periodsCsvStr = this.periodsCsv();
+    let period = 0;
+    if (periodsCsvStr) {
+      const p0 = parseInt(periodsCsvStr.split(',')[0], 10);
+      if (Number.isFinite(p0) && p0 >= 2) period = p0;
+    }
+
+    // Advance stepSize observations. For each one, score it against the
+    // horizon-position it fills inside `cap` and each baseline.
+    let advanced = 0;
+    for (let k = 0; k < stepSize; k++) {
+      const y = this.gen(this.iCursor++);
+      if (!Number.isFinite(y)) { this.stop(); $('fc-err').textContent = 'end of stream'; break; }
+      try { this.playground.observe(y); }
+      catch (e) { $('fc-err').textContent = String(e); this.stop(); break; }
+      this.observations.push(y);
+      if (cap && k < cap.med.length && Number.isFinite(cap.med[k])) {
+        this.perObsErr.push((y - cap.med[k]) ** 2);
+        const inside = (y >= cap.lo[k] && y <= cap.hi[k]) ? 1 : 0;
+        this.perObsCov.push(inside);
+      } else {
+        this.perObsErr.push(NaN);
+        this.perObsCov.push(NaN);
+      }
+      // Baselines. For each: compute the residual, decide coverage
+      // against a Gaussian PI derived from PAST residual stats
+      // (ŷ ± 1.28σ ≈ 80 % PI), then update the running stats.
+      const Z80 = 1.2816;
+      const MIN_STATS = 10;   // need at least this many past residuals before scoring coverage
+      const runCov = (statsKey, yhat) => {
+        if (!Number.isFinite(yhat)) {
+          this.baselineErr[statsKey].push(NaN);
+          this.baselineCov[statsKey].push(NaN);
+          return;
+        }
+        const err2 = (y - yhat) ** 2;
+        const st = this.baselineStats[statsKey];
+        // Cover using PRE-update sigma so no leakage.
+        if (st.n >= MIN_STATS) {
+          const sigma = Math.sqrt(st.sumSq / st.n);
+          const inside = Math.abs(y - yhat) <= Z80 * sigma ? 1 : 0;
+          this.baselineCov[statsKey].push(inside);
+        } else {
+          this.baselineCov[statsKey].push(NaN);
+        }
+        this.baselineErr[statsKey].push(err2);
+        st.sumSq += err2;
+        st.n++;
+      };
+      runCov('naive', lastObs);
+      runCov('runningMean', meanSoFar);
+      if (period >= 2) {
+        const pastIdx = stepOriginIdx + k - period;
+        const yhatSeas = (pastIdx >= 0 && pastIdx < this.observations.length)
+          ? this.observations[pastIdx] : NaN;
+        runCov('seasonalNaive', yhatSeas);
+      } else {
+        this.baselineErr.seasonalNaive.push(NaN);
+        this.baselineCov.seasonalNaive.push(NaN);
+      }
+      advanced++;
+    }
+
+    if (advanced > 0 && cap) this.pastForecasts.push(cap);
+
     $('fc-recipeTag').textContent = this.playground.recipe();
     $('fc-nObs').textContent = this.observations.length;
     this.render();
   },
   render() {
+    this.chart.resize();
     const horizon = parseInt($('fc-horizon').value, 10);
     let forecast = null;
     if (this.playground) {
       try { forecast = this.playground.forecast(horizon, new Float64Array(this.qLevels)); }
       catch (e) { $('fc-err').textContent = String(e); }
     }
-    this.chart.draw({ observations: this.observations, forecast, horizon, qLevels: this.qLevels });
+    const showTrail = $('fc-showTrail').checked;
+    this.chart.draw({
+      observations: this.observations,
+      forecast, horizon, qLevels: this.qLevels,
+      pastForecasts: showTrail ? this.pastForecasts : null,
+    });
+    // KPI strip.
+    if ($('fc-showKpi').checked && this.kpiStrip) {
+      this.kpiStrip.resize();
+      const mode = $('fc-kpiMode').value;
+      const stepSize = Math.max(1, parseInt($('fc-stepSize').value, 10));
+      // In "step" mode the aggregation window is exactly the current
+      // stepSize — each strip point reflects one complete backtest
+      // window. Under the hood we reuse the rolling aggregator with
+      // W = stepSize.
+      const effectiveW = mode === 'step'
+        ? stepSize
+        : parseInt($('fc-kpiWindow').value, 10);
+      const effectiveMode = mode === 'cumulative' ? 'cumulative' : 'rolling';
+      const rmse = aggregate(this.perObsErr, effectiveW, effectiveMode)
+        .map(v => Number.isFinite(v) ? Math.sqrt(v) : NaN);
+      const cov = aggregate(this.perObsCov, effectiveW, effectiveMode);
+      const rmseSeries = [{ name: 'model', color: '#0969da', values: rmse, width: 2 }];
+      let naiveRmse = null, snaiveRmse = null, runmeanRmse = null;
+      let naiveCov = null, snaiveCov = null, runmeanCov = null;
+      if ($('fc-showBaselines').checked) {
+        naiveRmse = aggregate(this.baselineErr.naive, effectiveW, effectiveMode)
+          .map(v => Number.isFinite(v) ? Math.sqrt(v) : NaN);
+        snaiveRmse = aggregate(this.baselineErr.seasonalNaive, effectiveW, effectiveMode)
+          .map(v => Number.isFinite(v) ? Math.sqrt(v) : NaN);
+        runmeanRmse = aggregate(this.baselineErr.runningMean, effectiveW, effectiveMode)
+          .map(v => Number.isFinite(v) ? Math.sqrt(v) : NaN);
+        naiveCov = aggregate(this.baselineCov.naive, effectiveW, effectiveMode);
+        snaiveCov = aggregate(this.baselineCov.seasonalNaive, effectiveW, effectiveMode);
+        runmeanCov = aggregate(this.baselineCov.runningMean, effectiveW, effectiveMode);
+        rmseSeries.push({ name: 'naive', color: '#6e7681', values: naiveRmse, dashed: true });
+        if (snaiveRmse.some(Number.isFinite)) {
+          rmseSeries.push({ name: 'seasonal-naive', color: '#8250df', values: snaiveRmse, dashed: true });
+        }
+        rmseSeries.push({ name: 'running mean', color: '#bc4c00', values: runmeanRmse, dashed: true });
+      }
+      this.kpiStrip.draw({
+        rmseSeries, coverage: cov,
+        xN: this.observations.length,
+        nominalCoverage: 0.8,
+      });
+      const lastFinite = (arr) => { if (!arr) return NaN; for (let i = arr.length - 1; i >= 0; i--) if (Number.isFinite(arr[i])) return arr[i]; return NaN; };
+      const fmtNum = (v) => Number.isFinite(v) ? v.toFixed(3) : '—';
+      const fmtPct = (v) => Number.isFinite(v) ? (v * 100).toFixed(0) + '%' : '—';
+      $('fc-rmse').textContent = fmtNum(lastFinite(rmse));
+      $('fc-cov').textContent = fmtPct(lastFinite(cov));
+      $('fc-naive-rmse').textContent = fmtNum(lastFinite(naiveRmse));
+      $('fc-naive-cov').textContent = fmtPct(lastFinite(naiveCov));
+      $('fc-snaive-rmse').textContent = fmtNum(lastFinite(snaiveRmse));
+      $('fc-snaive-cov').textContent = fmtPct(lastFinite(snaiveCov));
+      $('fc-runmean-rmse').textContent = fmtNum(lastFinite(runmeanRmse));
+      $('fc-runmean-cov').textContent = fmtPct(lastFinite(runmeanCov));
+      const aggLabel = mode === 'cumulative'
+        ? 'cumulative'
+        : (mode === 'step' ? `per step-size · ${stepSize}` : `rolling · ${effectiveW}`);
+      $('fc-kpiAggLabel').textContent = aggLabel;
+      $('fc-kpiLabel').textContent = aggLabel;
+      $('fc-kpiStrip').style.display = '';
+    } else {
+      $('fc-kpiStrip').style.display = 'none';
+    }
   },
   start() {
     this.running = true;
@@ -654,114 +1554,323 @@ const fc = {
   },
 };
 
+// Cumulative or rolling-window mean of an array. NaN entries skipped.
+function aggregate(arr, W, mode) {
+  const out = new Array(arr.length);
+  if (mode === 'cumulative') {
+    let sum = 0, cnt = 0;
+    for (let i = 0; i < arr.length; i++) {
+      if (Number.isFinite(arr[i])) { sum += arr[i]; cnt++; }
+      out[i] = cnt > 0 ? sum / cnt : NaN;
+    }
+  } else {
+    // Rolling with running sum + counter for O(N) total.
+    let sum = 0, cnt = 0;
+    for (let i = 0; i < arr.length; i++) {
+      if (Number.isFinite(arr[i])) { sum += arr[i]; cnt++; }
+      const dropIdx = i - W;
+      if (dropIdx >= 0 && Number.isFinite(arr[dropIdx])) { sum -= arr[dropIdx]; cnt--; }
+      out[i] = cnt > 0 ? sum / cnt : NaN;
+    }
+  }
+  return out;
+}
+
 // ---------- Anomaly tab ----------
+// Supports two detectors — switched via the "Method" dropdown:
+//   - "surprise" wraps LaplacePlayground and thresholds on -log pdf.
+//   - "mahalanobis" wraps MahalanobisPlayground (skaters #88 port) and
+//     thresholds on the k-horizon parade-z Mahalanobis p-value.
 const an = {
   chart: null,
-  playground: null,
+  playground: null,        // active detector instance (either kind)
+  detector: 'surprise',    // 'surprise' | 'mahalanobis'
   gen: null,               // baseline generator (returns baseline y)
   observations: [],        // observations actually seen (with injections)
   band1step: [],           // rolling [lo, hi] pairs from the 1-step predictive AT THE TIME of that observation
-  surprises: [],           // per-obs -log pdf
+  scores: [],              // per-obs raw detector score (surprise or Mahalanobis d²)
+  pvals: [],               // per-obs p-value (Mahalanobis only; NaN for surprise)
   injected: [],            // indices where an injection was applied
-  flagged: [],             // indices where surprise > threshold
+  flagged: [],             // indices where score crossed the threshold
   iCursor: 0,
   running: false,
   timer: null,
   seed: 314,
   rng: null,
   arch: null,
-  regen() {
+  // Separate 1-step predictive used purely for chart-band visualisation
+  // when the Mahalanobis detector is active (it doesn't expose forecasts).
+  bandSource: null,
+  async regen() {
     const key = $('an-archetype').value;
-    const arch = ARCHETYPES[key];
-    this.arch = arch;
+    this.detector = $('an-detector').value;
     this.rng = new Rng(this.seed);
-    const draw = arch.factory(this.rng);
     const warmup = parseInt($('an-warmup').value, 10);
-    // Warm-up is CLEAN (no injections) so the model gets a baseline
-    // idea of the DGP before we start challenging it.
-    this.observations = [];
-    for (let i = 0; i < warmup; i++) this.observations.push(draw(i));
-    this.gen = draw;
-    this.iCursor = warmup;
-    this.band1step = new Array(warmup * 2).fill(NaN);
-    this.surprises = new Array(warmup).fill(NaN);
-    this.injected = [];
+    let periodsCsv = '';
+    this.injected = [];    // ground-truth anomaly indices (from NAB labels for real data)
+    this.isReal = isNabKey(key);
+    let labelSet = null;   // for real data: absolute label indices we haven't reached yet
+
+    if (this.isReal) {
+      $('an-err').textContent = 'loading real data…';
+      let bundle;
+      try { bundle = await loadNabStream(key); }
+      catch (e) { $('an-err').textContent = 'NAB load failed: ' + String(e); return; }
+      // User spec: warm-up = 20 % of the full stream, then play to end.
+      const clamped = Math.max(30, Math.floor(bundle.values.length * 0.20));
+      this.observations = bundle.values.slice(0, clamped);
+      for (const idx of bundle.labelIndices) {
+        if (idx < clamped) this.injected.push(idx);
+      }
+      this.allLabels = bundle.labelIndices.slice();      // all ground-truth indices (past + future)
+      // NAB-standard scoring: ±5 % of series length around each label
+      // is the "TP window" for a detection to be credited. Half-window in obs.
+      this.tpHalfWindow = Math.max(1, Math.floor(bundle.values.length * 0.05));
+      periodsCsv = bundle.spec.periodsCsv || '';
+      labelSet = new Set(bundle.labelIndices);
+      this.labelSet = labelSet;
+      const seq = bundle.values;
+      this.gen = (i) => (i < seq.length ? seq[i] : NaN);
+      this.iCursor = clamped;
+      this.arch = { period: bundle.spec.period, baselineSigma: bundle.spec.baselineSigma };
+    } else {
+      const arch = ARCHETYPES[key];
+      this.arch = arch;
+      const draw = arch.factory(this.rng);
+      this.observations = [];
+      for (let i = 0; i < warmup; i++) this.observations.push(draw(i));
+      this.gen = draw;
+      this.iCursor = warmup;
+      this.labelSet = null;
+      this.allLabels = null;
+      this.tpHalfWindow = 0;
+      periodsCsv = arch.period > 0 ? String(arch.period) : '';
+    }
+    const n = this.observations.length;
+    this.band1step = new Array(n * 3).fill(NaN);
+    this.scores = new Array(n).fill(NaN);
+    this.pvals = new Array(n).fill(NaN);
     this.flagged = [];
     try {
       if (this.playground) this.playground.free();
-      // Horizon=1 is enough here — we only score surprise on the next obs.
-      this.playground = new LaplacePlayground(new Float64Array(this.observations), arch.period, 1);
-      $('an-recipeTag').textContent = this.playground.recipe();
+      if (this.bandSource && this.bandSource !== this.playground) this.bandSource.free();
+      if (this.detector === 'mahalanobis') {
+        const k = parseInt($('an-mahaK').value, 10);
+        this.playground = new MahalanobisPlayground(new Float64Array(this.observations), k, periodsCsv);
+        this.bandSource = new LaplacePlayground(new Float64Array(this.observations), periodsCsv, parseInt($('an-fcHorizon').value, 10), '');
+        $('an-recipeTag').textContent = this.playground.label();
+      } else {
+        this.playground = new LaplacePlayground(new Float64Array(this.observations), periodsCsv, 1, '');
+        this.bandSource = this.playground;
+        $('an-recipeTag').textContent = this.playground.recipe();
+      }
       $('an-err').textContent = '';
     } catch (e) { $('an-err').textContent = String(e); return; }
+    $('an-nObs').textContent = this.observations.length;
     this.updateMetrics();
     this.render();
   },
   step() {
     if (!this.playground || !this.gen) return;
-    // Snapshot the current 1-step predictive band BEFORE ingesting the
-    // next obs — that's the interval the detector had at decision time.
-    let lo = NaN, hi = NaN;
+    // 1-step predictive band snapshot (for the chart), from the band
+    // source (a LaplacePlayground). Uses the *previous* fit state so
+    // it reflects the interval the detector actually saw.
+    let lo = NaN, med = NaN, hi = NaN;
     try {
-      const q = this.playground.forecast(1, new Float64Array([0.1, 0.9]));
-      lo = q[0]; hi = q[1];
+      // Request [q0.1, q0.5, q0.9] — width = 4 (includes mean at index 3).
+      const q = this.bandSource.forecast(1, new Float64Array([0.1, 0.5, 0.9]));
+      lo = q[0]; med = q[1]; hi = q[2];
     } catch (_) {}
 
-    // Baseline value from the generator.
+    // Baseline; on synthetic archetypes we may inject a spike. On real
+    // data we take the observation verbatim — ground truth comes from
+    // the NAB label set instead of a synthetic injector.
     const yBase = this.gen(this.iCursor);
-    const injectRate = parseInt($('an-injectRate').value, 10) / 100;
-    const spikeMag = parseInt($('an-spikeMag').value, 10);
+    if (!Number.isFinite(yBase)) { this.stop(); $('an-err').textContent = 'end of stream'; return; }
     let y = yBase;
     let isInjection = false;
-    if (this.rng.next() < injectRate) {
-      // Random-sign spike of magnitude ± spikeMag · baselineSigma.
-      const sign = this.rng.next() < 0.5 ? -1 : 1;
-      y = yBase + sign * spikeMag * this.arch.baselineSigma;
-      isInjection = true;
+    if (this.isReal) {
+      isInjection = this.labelSet && this.labelSet.has(this.iCursor);
+    } else {
+      const injectRate = parseInt($('an-injectRate').value, 10) / 100;
+      const spikeMag = parseInt($('an-spikeMag').value, 10);
+      if (this.rng.next() < injectRate) {
+        const sign = this.rng.next() < 0.5 ? -1 : 1;
+        y = yBase + sign * spikeMag * this.arch.baselineSigma;
+        isInjection = true;
+      }
     }
 
-    // Score the observation BEFORE observe() consumes it.
-    let surprise = NaN;
-    try { surprise = this.playground.surprise(y); }
-    catch (_) {}
+    // Score depends on active detector.
+    let score = NaN, pv = NaN;
+    if (this.detector === 'surprise') {
+      try { score = this.playground.surprise(y); } catch (_) {}
+    }
 
-    // Ingest.
-    try { this.playground.observe(y); }
-    catch (e) { $('an-err').textContent = String(e); this.stop(); return; }
+    // Anomaly rejection (surprise only): if the pre-observe score
+    // crosses the threshold OR we're in the cooldown after a recent
+    // flag, DON'T feed the observation into the model. Prevents the
+    // mixture's σ from being inflated by the anomalies we're trying
+    // to detect, and treats the cooldown region as ongoing-event
+    // contamination.
+    const reject = $('an-reject').checked;
+    const cooldown = parseInt($('an-cooldown').value, 10);
+    const nowIdxPre = this.observations.length; // this tick's index once pushed
+    const lastFlag = this.flagged.length > 0 ? this.flagged[this.flagged.length - 1] : -Infinity;
+    const inCooldown = (nowIdxPre - lastFlag) <= cooldown;
+    const preFlag = this.detector === 'surprise'
+      && Number.isFinite(score)
+      && this.crossesThreshold(score, pv);
+    const skipUpdate = reject && (preFlag || inCooldown);
+
+    try {
+      if (!skipUpdate) {
+        this.playground.observe(y);
+        if (this.bandSource !== this.playground) this.bandSource.observe(y);
+      }
+    } catch (e) { $('an-err').textContent = String(e); this.stop(); return; }
+
+    // Mahalanobis score is read AFTER observe (the detector snapshots
+    // the current tick's z-vector against the pre-update scatter). Note
+    // this means Mahalanobis inherently contaminates by one tick — the
+    // reject toggle can't help here without a peek-only API on the
+    // detector. `skipUpdate` is always false for mahalanobis, so the
+    // observe() call above already ran.
+    if (this.detector === 'mahalanobis') {
+      const s = this.playground.last_score();  // [d2, p_value, run, ok]
+      score = s[0];
+      pv = s[1];
+    }
 
     this.observations.push(y);
-    this.band1step.push(lo, hi);
-    this.surprises.push(surprise);
-    if (isInjection) this.injected.push(this.observations.length - 1);
-    const thr = parseFloat($('an-threshold').value);
-    if (surprise > thr) this.flagged.push(this.observations.length - 1);
+    this.band1step.push(lo, med, hi);
+    this.scores.push(score);
+    this.pvals.push(pv);
+    const nowIdx = this.observations.length - 1;
+    // Ground-truth injection: NAB label reached (real data) OR a synthetic
+    // spike was applied on this tick (synthetic data).
+    if (this.isReal) {
+      if (this.labelSet && this.labelSet.has(nowIdx)) this.injected.push(nowIdx);
+    } else if (isInjection) {
+      this.injected.push(nowIdx);
+    }
+    {
+      const cd = parseInt($('an-cooldown').value, 10);
+      const lastFlagIdx = this.flagged.length > 0 ? this.flagged[this.flagged.length - 1] : -Infinity;
+      const inCd = (nowIdx - lastFlagIdx) <= cd;
+      if (!inCd && this.crossesThreshold(score, pv)) this.flagged.push(nowIdx);
+    }
 
     this.iCursor++;
-    $('an-recipeTag').textContent = this.playground.recipe();
     $('an-nObs').textContent = this.observations.length;
     this.updateMetrics();
     this.render();
   },
+  crossesThreshold(score, pv) {
+    if (this.detector === 'mahalanobis') {
+      if (!Number.isFinite(pv)) return false;
+      const pMax = Math.pow(10, parseFloat($('an-mahaP').value));
+      return pv < pMax;
+    }
+    if (!Number.isFinite(score)) return false;
+    const thr = parseFloat($('an-threshold').value);
+    return score > thr;
+  },
   updateMetrics() {
-    const injectedSet = new Set(this.injected);
-    const flaggedSet = new Set(this.flagged);
-    let tp = 0, fp = 0;
-    for (const i of this.flagged) (injectedSet.has(i) ? tp++ : fp++);
-    let missed = 0;
-    for (const i of this.injected) if (!flaggedSet.has(i)) missed++;
-    $('an-injected').textContent = this.injected.length;
-    $('an-flagged').textContent = this.flagged.length;
-    $('an-tp').textContent = tp;
-    $('an-fp').textContent = fp;
-    $('an-precision').textContent = (tp + fp) > 0 ? (tp / (tp + fp)).toFixed(2) : '—';
-    $('an-recall').textContent = this.injected.length > 0 ? (tp / this.injected.length).toFixed(2) : '—';
+    // Two counting modes:
+    //  - Synthetic: exact-index matching (spike is a single obs).
+    //  - Real (NAB): NAB-standard windowed matching — a flag counts as
+    //    TP if it falls within ±tpHalfWindow of ANY ground-truth label,
+    //    and a label is "recalled" if AT LEAST ONE flag lands in its
+    //    window. This mirrors the NAB scoring convention (windows
+    //    proportional to series length).
+    let tp = 0, fp = 0, recallHits = 0;
+    if (this.isReal && this.tpHalfWindow > 0) {
+      const labels = this.allLabels.filter(L => L <= this.observations.length - 1);
+      for (const f of this.flagged) {
+        let hit = false;
+        for (const L of labels) {
+          if (Math.abs(f - L) <= this.tpHalfWindow) { hit = true; break; }
+        }
+        hit ? tp++ : fp++;
+      }
+      for (const L of labels) {
+        let any = false;
+        for (const f of this.flagged) {
+          if (Math.abs(f - L) <= this.tpHalfWindow) { any = true; break; }
+        }
+        if (any) recallHits++;
+      }
+      $('an-injected').textContent = labels.length;
+      $('an-flagged').textContent = this.flagged.length;
+      $('an-tp').textContent = tp;
+      $('an-fp').textContent = fp;
+      $('an-precision').textContent = (tp + fp) > 0 ? (tp / (tp + fp)).toFixed(2) : '—';
+      $('an-recall').textContent = labels.length > 0 ? (recallHits / labels.length).toFixed(2) : '—';
+    } else {
+      const injectedSet = new Set(this.injected);
+      for (const i of this.flagged) (injectedSet.has(i) ? tp++ : fp++);
+      const flaggedSet = new Set(this.flagged);
+      let missed = 0;
+      for (const i of this.injected) if (!flaggedSet.has(i)) missed++;
+      $('an-injected').textContent = this.injected.length;
+      $('an-flagged').textContent = this.flagged.length;
+      $('an-tp').textContent = tp;
+      $('an-fp').textContent = fp;
+      $('an-precision').textContent = (tp + fp) > 0 ? (tp / (tp + fp)).toFixed(2) : '—';
+      $('an-recall').textContent = this.injected.length > 0 ? (tp / this.injected.length).toFixed(2) : '—';
+    }
   },
   render() {
+    this.chart.resize();
+    this.strip?.resize();
+    let truthWindows = null;
+    if (this.isReal && this.tpHalfWindow > 0 && this.allLabels) {
+      truthWindows = this.allLabels.map(L => [L - this.tpHalfWindow, L + this.tpHalfWindow]);
+    }
+    // Live forecast fan from the bandSource (Laplace). Anomaly tab uses
+    // the same chart draw path as forecast — pass a forecast array and
+    // horizon so the future-fan is drawn to the right of the current time.
+    let forecast = null;
+    let horizon = 0;
+    if ($('an-showFan').checked && this.bandSource) {
+      const qs = [0.1, 0.25, 0.5, 0.75, 0.9];
+      const h = parseInt($('an-fcHorizon').value, 10);
+      try {
+        forecast = this.bandSource.forecast(h, new Float64Array(qs));
+        horizon = h;
+      } catch (_) { forecast = null; }
+    }
     this.chart.draw({
       observations: this.observations,
       band1step: this.band1step,
       injected: this.injected,
       flagged: this.flagged,
+      truthWindows,
+      forecast, horizon, qLevels: [0.1, 0.25, 0.5, 0.75, 0.9],
+    });
+    // Strip below: -log10 p (Mahalanobis) or raw surprise (surprise).
+    let stripSeries;
+    let stripThreshold;
+    let stripLabel;
+    if (this.detector === 'mahalanobis') {
+      stripSeries = this.pvals.map(p =>
+        (Number.isFinite(p) && p > 0) ? -Math.log10(p) : NaN
+      );
+      stripThreshold = -parseFloat($('an-mahaP').value);
+      stripLabel = '−log₁₀ p';
+    } else {
+      stripSeries = this.scores.slice();
+      stripThreshold = parseFloat($('an-threshold').value);
+      stripLabel = 'surprise (nats)';
+    }
+    $('an-stripLabel').textContent = stripLabel;
+    this.strip.draw({
+      series: stripSeries,
+      threshold: stripThreshold,
+      flaggedSet: new Set(this.flagged),
+      xN: this.observations.length,
+      yLabel: stripLabel,
     });
   },
   start() {
@@ -776,16 +1885,114 @@ const an = {
   },
   stop() {
     this.running = false;
+    this.batchRunning = false;
     if (this.timer) clearTimeout(this.timer);
     $('an-playBtn').textContent = 'Play'; $('an-playBtn').classList.add('primary');
+    $('an-runToEndBtn').textContent = 'Run to end ▶▶';
+    $('an-runToEndBtn').disabled = false;
+  },
+  // Fast single-tick used by batch mode. Skips the chart-band snapshot
+  // (still stored as NaN so array lengths stay consistent) and does NOT
+  // observe on the separate bandSource — that path re-fits a full
+  // LaplaceForecaster per tick and dominates the runtime. Trade-off:
+  // no rolling 1-step band on the chart after batch, but 30-100× faster.
+  stepFast() {
+    if (!this.playground || !this.gen) return false;
+    const yBase = this.gen(this.iCursor);
+    if (!Number.isFinite(yBase)) return false;
+    let y = yBase;
+    let isInjection = false;
+    if (this.isReal) {
+      isInjection = this.labelSet && this.labelSet.has(this.iCursor);
+    } else {
+      const injectRate = parseInt($('an-injectRate').value, 10) / 100;
+      const spikeMag = parseInt($('an-spikeMag').value, 10);
+      if (this.rng.next() < injectRate) {
+        const sign = this.rng.next() < 0.5 ? -1 : 1;
+        y = yBase + sign * spikeMag * this.arch.baselineSigma;
+        isInjection = true;
+      }
+    }
+    let score = NaN, pv = NaN;
+    if (this.detector === 'surprise') {
+      try { score = this.playground.surprise(y); } catch (_) {}
+    }
+    const reject = $('an-reject').checked;
+    const cooldown = parseInt($('an-cooldown').value, 10);
+    const nowIdxPre = this.observations.length;
+    const lastFlagIdx0 = this.flagged.length > 0 ? this.flagged[this.flagged.length - 1] : -Infinity;
+    const inCd0 = (nowIdxPre - lastFlagIdx0) <= cooldown;
+    const preFlag = this.detector === 'surprise'
+      && Number.isFinite(score)
+      && this.crossesThreshold(score, pv);
+    const skipUpdate = reject && (preFlag || inCd0);
+    if (!skipUpdate) {
+      try { this.playground.observe(y); } catch (_) { return false; }
+    }
+    if (this.detector === 'mahalanobis') {
+      const s = this.playground.last_score();
+      score = s[0]; pv = s[1];
+    }
+    this.observations.push(y);
+    this.band1step.push(NaN, NaN, NaN);
+    this.scores.push(score);
+    this.pvals.push(pv);
+    const nowIdx = this.observations.length - 1;
+    if (this.isReal) {
+      if (this.labelSet && this.labelSet.has(nowIdx)) this.injected.push(nowIdx);
+    } else if (isInjection) {
+      this.injected.push(nowIdx);
+    }
+    {
+      const cd = parseInt($('an-cooldown').value, 10);
+      const lastFlagIdx = this.flagged.length > 0 ? this.flagged[this.flagged.length - 1] : -Infinity;
+      const inCd = (nowIdx - lastFlagIdx) <= cd;
+      if (!inCd && this.crossesThreshold(score, pv)) this.flagged.push(nowIdx);
+    }
+    this.iCursor++;
+    return true;
+  },
+  async runToEnd() {
+    if (this.batchRunning) { this.stop(); return; }
+    this.stop();     // cancel any active play loop
+    this.batchRunning = true;
+    $('an-runToEndBtn').textContent = 'Stop batch ⏹';
+    $('an-playBtn').disabled = true;
+    $('an-stepBtn').disabled = true;
+    const t0 = performance.now();
+    const chunkSize = 200;
+    let alive = true;
+    while (alive && this.batchRunning) {
+      for (let k = 0; k < chunkSize; k++) {
+        if (!this.stepFast()) { alive = false; break; }
+      }
+      $('an-nObs').textContent = this.observations.length;
+      $('an-err').textContent = `batch running… n=${this.observations.length}`;
+      this.updateMetrics();
+      await new Promise(r => setTimeout(r, 0));
+    }
+    const dt = ((performance.now() - t0) / 1000).toFixed(2);
+    $('an-err').textContent = alive
+      ? `batch stopped at n=${this.observations.length} (${dt}s)`
+      : `batch done — n=${this.observations.length} in ${dt}s`;
+    this.batchRunning = false;
+    $('an-runToEndBtn').textContent = 'Run to end ▶▶';
+    $('an-playBtn').disabled = false;
+    $('an-stepBtn').disabled = false;
+    this.render();
   },
   reflag() {
-    // Recompute `flagged` from the stored surprises against the new threshold.
-    // Doesn't re-fit — just re-thresholds.
-    const thr = parseFloat($('an-threshold').value);
+    // Recompute `flagged` from stored scores against the current
+    // threshold AND cooldown. Doesn't re-fit — just re-thresholds.
+    const cooldown = parseInt($('an-cooldown').value, 10);
     this.flagged = [];
-    for (let i = 0; i < this.surprises.length; i++) {
-      if (this.surprises[i] > thr) this.flagged.push(i);
+    let lastFlag = -Infinity;
+    for (let i = 0; i < this.scores.length; i++) {
+      if ((i - lastFlag) <= cooldown) continue;
+      if (this.crossesThreshold(this.scores[i], this.pvals[i])) {
+        this.flagged.push(i);
+        lastFlag = i;
+      }
     }
     this.updateMetrics();
     this.render();
@@ -793,33 +2000,394 @@ const an = {
 };
 
 // ---------- Wire-up ----------
+// ---------- Evaluate tab ----------
+// Batch model × archetype backtest. For each selected model, walks
+// `n_eval` observations in chunks of `stepSize` after warm-up: capture
+// the h=stepSize forecast, advance, score against each realised obs.
+// Aggregates RMSE, MAE, bias, coverage (80 % PI) per combination.
+//
+// Runs sequentially with UI yields so the browser stays responsive on
+// long jobs; results table is re-rendered after each combination lands.
+const EV_MODELS = [
+  { key: 'router',    label: 'Laplace router (recommended_for)', kind: 'laplace', variant: '' },
+  { key: 'ms3sh',     label: 'MS + 3-α SH pool',                 kind: 'laplace', variant: 'multiscale_3sh' },
+  { key: 'skaters',   label: '.skaters() + 3α-SH',                kind: 'laplace', variant: 'skaters' },
+  { key: 'auto',      label: '.auto()',                          kind: 'laplace', variant: 'auto' },
+  { key: 'naive',     label: 'naive (ŷ = last obs)',              kind: 'baseline' },
+  { key: 'snaive',    label: 'seasonal-naive (ŷ_k = obs[T−P+k])', kind: 'baseline' },
+  { key: 'runmean',   label: 'running mean',                     kind: 'baseline' },
+];
+
+// Warm-up-then-walk backtest for one (archetype, model) combination.
+// `opts.periodsOverride` — if set, overrides the archetype's default
+// seasonal period(s) (comma-separated CSV like "24" or "24,168").
+// `opts.variantOverride` — if set, replaces `model.variant` for Laplace
+// models (baselines ignore this).
+// Returns { rmse, mae, bias, coverage, nEff, elapsedMs, warning }.
+async function evOneRun(archetype, model, warmup, nEval, stepSize, seed, opts = {}) {
+  const t0 = performance.now();
+  const isReal = isNabKey(archetype);
+  let allValues;
+  let period = 0;
+  let periodsCsv = '';
+  if (isReal) {
+    try {
+      const bundle = await loadNabStream(archetype);
+      allValues = bundle.values.slice(0, warmup + nEval);
+      period = bundle.spec.period || 0;
+      periodsCsv = bundle.spec.periodsCsv || '';
+      if (allValues.length < warmup + 10) return { warning: 'NAB stream shorter than warm-up' };
+    } catch (e) { return { warning: 'NAB load failed: ' + e }; }
+  } else {
+    const arch = ARCHETYPES[archetype];
+    if (!arch) return { warning: 'unknown archetype' };
+    const rng = new Rng(seed);
+    const draw = arch.factory(rng);
+    allValues = [];
+    for (let i = 0; i < warmup + nEval; i++) allValues.push(draw(i));
+    period = arch.period || 0;
+    periodsCsv = period >= 2 ? String(period) : '';
+  }
+  // Apply overrides.
+  if (opts.periodsOverride && opts.periodsOverride.trim()) {
+    periodsCsv = opts.periodsOverride.trim();
+    const first = parseInt(periodsCsv.split(',')[0], 10);
+    if (Number.isFinite(first) && first >= 2) period = first;
+  }
+  const effectiveVariant = (model.kind === 'laplace' && opts.variantOverride)
+    ? opts.variantOverride : model.variant;
+  const warm = allValues.slice(0, warmup);
+  const evalObs = allValues.slice(warmup, warmup + nEval);
+
+  // Per-obs residuals + coverage flags — model-agnostic aggregation.
+  const errs = [];       // signed (y - ŷ)
+  const insidePI = [];   // 1 if inside 80 % PI, else 0
+  const Z80 = 1.2816;
+
+  if (model.kind === 'laplace') {
+    let pg;
+    try {
+      pg = new LaplacePlayground(new Float64Array(warm), periodsCsv, stepSize, effectiveVariant);
+    } catch (e) { return { warning: 'model fit failed: ' + e }; }
+    let iCursor = 0;
+    while (iCursor < evalObs.length) {
+      let cap;
+      try {
+        const q = pg.forecast(stepSize, new Float64Array([0.1, 0.5, 0.9]));
+        cap = { lo: [], med: [], hi: [] };
+        for (let h = 0; h < stepSize; h++) {
+          cap.lo.push(q[h * 4 + 0]);
+          cap.med.push(q[h * 4 + 1]);
+          cap.hi.push(q[h * 4 + 2]);
+        }
+      } catch (_) { cap = null; }
+      const stepK = Math.min(stepSize, evalObs.length - iCursor);
+      for (let k = 0; k < stepK; k++) {
+        const y = evalObs[iCursor + k];
+        try { pg.observe(y); } catch (_) { break; }
+        if (cap && Number.isFinite(cap.med[k])) {
+          errs.push(y - cap.med[k]);
+          insidePI.push(y >= cap.lo[k] && y <= cap.hi[k] ? 1 : 0);
+        }
+      }
+      iCursor += stepK;
+      // Yield to UI every ~48 obs so we don't freeze the browser.
+      if (iCursor % 48 === 0) await new Promise(r => setTimeout(r, 0));
+    }
+    pg.free();
+  } else {
+    // Baseline. Score with a static rule + Gaussian PI derived from
+    // past residuals (walk-forward, no leakage).
+    let sumSq = 0, nSq = 0;
+    const past = warm.slice();
+    let iCursor = 0;
+    while (iCursor < evalObs.length) {
+      const stepK = Math.min(stepSize, evalObs.length - iCursor);
+      // Compute frozen prediction for the next stepK obs.
+      let yhats = new Array(stepK).fill(NaN);
+      const lastObs = past[past.length - 1];
+      const meanSoFar = past.reduce((a, b) => a + b, 0) / past.length;
+      if (model.key === 'naive') {
+        for (let k = 0; k < stepK; k++) yhats[k] = lastObs;
+      } else if (model.key === 'snaive' && period >= 2) {
+        for (let k = 0; k < stepK; k++) {
+          const idx = past.length - period + k;
+          yhats[k] = idx >= 0 && idx < past.length ? past[idx] : lastObs;
+        }
+      } else if (model.key === 'runmean') {
+        for (let k = 0; k < stepK; k++) yhats[k] = meanSoFar;
+      } else {
+        for (let k = 0; k < stepK; k++) yhats[k] = NaN;
+      }
+      for (let k = 0; k < stepK; k++) {
+        const y = evalObs[iCursor + k];
+        past.push(y);
+        const yh = yhats[k];
+        if (!Number.isFinite(yh)) continue;
+        const e = y - yh;
+        errs.push(e);
+        if (nSq >= 10) {
+          const sigma = Math.sqrt(sumSq / nSq);
+          insidePI.push(Math.abs(e) <= Z80 * sigma ? 1 : 0);
+        } else {
+          insidePI.push(NaN);
+        }
+        sumSq += e * e; nSq++;
+      }
+      iCursor += stepK;
+    }
+  }
+
+  const finiteErrs = errs.filter(Number.isFinite);
+  const finiteCov = insidePI.filter(Number.isFinite);
+  const rmse = finiteErrs.length > 0
+    ? Math.sqrt(finiteErrs.reduce((a, e) => a + e * e, 0) / finiteErrs.length) : NaN;
+  const mae = finiteErrs.length > 0
+    ? finiteErrs.reduce((a, e) => a + Math.abs(e), 0) / finiteErrs.length : NaN;
+  const bias = finiteErrs.length > 0
+    ? finiteErrs.reduce((a, e) => a + e, 0) / finiteErrs.length : NaN;
+  const coverage = finiteCov.length > 0
+    ? finiteCov.reduce((a, c) => a + c, 0) / finiteCov.length : NaN;
+  return { rmse, mae, bias, coverage, nEff: finiteErrs.length, elapsedMs: performance.now() - t0 };
+}
+
+const ev = {
+  running: false,
+  populate() {
+    // Populate archetype + model checkbox lists.
+    const archTargets = [];
+    for (const key of Object.keys(ARCHETYPES)) {
+      archTargets.push({ key, label: key.replace(/_/g, ' '), real: false });
+    }
+    for (const key of Object.keys(NAB_STREAMS)) {
+      archTargets.push({ key, label: NAB_STREAMS[key].label, real: true });
+    }
+    const archHost = $('ev-archetypes');
+    archHost.innerHTML = archTargets.map(a =>
+      `<label style="display:flex;align-items:center;gap:6px;padding:2px 0;"><input type="checkbox" value="${a.key}" ${a.real ? '' : 'checked'} data-real="${a.real ? '1' : '0'}" /> ${a.label}${a.real ? ' <span style="color:var(--dim);font-size:10px;">(NAB, fetched)</span>' : ''}</label>`
+    ).join('');
+    const modelHost = $('ev-models');
+    modelHost.innerHTML = EV_MODELS.map(m =>
+      `<label style="display:flex;align-items:center;gap:6px;padding:2px 0;"><input type="checkbox" value="${m.key}" checked /> ${m.label}</label>`
+    ).join('');
+  },
+  selectedArchs() { return Array.from(document.querySelectorAll('#ev-archetypes input:checked')).map(el => el.value); },
+  selectedModels() {
+    const keys = new Set(Array.from(document.querySelectorAll('#ev-models input:checked')).map(el => el.value));
+    return EV_MODELS.filter(m => keys.has(m.key));
+  },
+  renderTable(rows, progressText) {
+    rows = rows.slice().sort((a, b) => (a.arch === b.arch ? 0 : a.arch < b.arch ? -1 : 1));
+    // Compute best per (archetype × metric). Winner rule per metric:
+    //   RMSE, MAE → lowest wins
+    //   Bias      → closest to 0 wins (|bias| smallest)
+    //   Coverage  → highest wins (higher = tighter fit inside the PI)
+    // All rules are reduced to a "lower-is-better score" so a single
+    // min-across-rows comparison finds the winner. Ties: everyone at
+    // the tied best score gets the star.
+    const bestPer = { rmse: {}, mae: {}, bias: {}, cov: {} };
+    const scoreFor = { rmse: v => v, mae: v => v, bias: v => Math.abs(v), cov: v => -v };
+    for (const r of rows) {
+      for (const m of ['rmse', 'mae', 'bias', 'coverage']) {
+        const val = r[m];
+        if (!Number.isFinite(val)) continue;
+        const key = m === 'coverage' ? 'cov' : m;
+        const s = scoreFor[key](val);
+        if (!(r.arch in bestPer[key]) || s < bestPer[key][r.arch]) bestPer[key][r.arch] = s;
+      }
+    }
+    const isBest = (r, m) => {
+      const key = m === 'coverage' ? 'cov' : m;
+      const val = r[m];
+      if (!Number.isFinite(val)) return false;
+      return Math.abs(scoreFor[key](val) - bestPer[key][r.arch]) < 1e-9;
+    };
+    const fmtN = (v) => Number.isFinite(v) ? v.toFixed(3) : '—';
+    const fmtP = (v) => Number.isFinite(v) ? (v * 100).toFixed(0) + '%' : '—';
+    const fmtS = (v) => Number.isFinite(v) ? (v >= 0 ? '+' : '') + v.toFixed(3) : '—';
+    const cellHtml = (val, txt, best) => {
+      const style = best
+        ? 'padding:6px 8px;border-bottom:1px solid var(--border);text-align:right;color:#1a7f37;font-weight:600;'
+        : 'padding:6px 8px;border-bottom:1px solid var(--border);text-align:right;';
+      return `<td style="${style}">${txt}${best ? ' ★' : ''}</td>`;
+    };
+    const html = `
+      <div style="color:var(--dim);font-size:12px;margin-bottom:6px;">${progressText || ''}</div>
+      <table style="width:100%;border-collapse:collapse;font-size:13px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;">
+        <thead>
+          <tr style="color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:0.5px;">
+            <th style="padding:6px 8px;border-bottom:1px solid var(--border);text-align:left;">archetype</th>
+            <th style="padding:6px 8px;border-bottom:1px solid var(--border);text-align:left;">model</th>
+            <th style="padding:6px 8px;border-bottom:1px solid var(--border);text-align:right;">RMSE <span style="color:var(--dim);font-weight:normal;">↓</span></th>
+            <th style="padding:6px 8px;border-bottom:1px solid var(--border);text-align:right;">MAE <span style="color:var(--dim);font-weight:normal;">↓</span></th>
+            <th style="padding:6px 8px;border-bottom:1px solid var(--border);text-align:right;">Bias <span style="color:var(--dim);font-weight:normal;">→0</span></th>
+            <th style="padding:6px 8px;border-bottom:1px solid var(--border);text-align:right;">Cov <span style="color:var(--dim);font-weight:normal;">↑ (80% nom)</span></th>
+            <th style="padding:6px 8px;border-bottom:1px solid var(--border);text-align:right;">n</th>
+            <th style="padding:6px 8px;border-bottom:1px solid var(--border);text-align:right;">time</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map(r => {
+            const t = r.elapsedMs;
+            const tCell = Number.isFinite(t)
+              ? (t >= 1000 ? (t / 1000).toFixed(2) + 's' : t.toFixed(0) + 'ms')
+              : '—';
+            return `<tr>
+              <td style="padding:6px 8px;border-bottom:1px solid var(--border);">${r.arch}</td>
+              <td style="padding:6px 8px;border-bottom:1px solid var(--border);color:${r.modelKind === 'baseline' ? '#6e7681' : '#0969da'};">${r.modelLabel}</td>
+              ${cellHtml(r.rmse, fmtN(r.rmse), isBest(r, 'rmse'))}
+              ${cellHtml(r.mae, fmtN(r.mae), isBest(r, 'mae'))}
+              ${cellHtml(r.bias, fmtS(r.bias), isBest(r, 'bias'))}
+              ${cellHtml(r.coverage, fmtP(r.coverage), isBest(r, 'coverage'))}
+              <td style="padding:6px 8px;border-bottom:1px solid var(--border);text-align:right;color:var(--dim);">${r.nEff || '—'}</td>
+              <td style="padding:6px 8px;border-bottom:1px solid var(--border);text-align:right;color:var(--dim);">${tCell}</td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    `;
+    $('ev-tableWrap').innerHTML = html;
+  },
+  async runAll() {
+    if (this.running) return;
+    const archs = this.selectedArchs();
+    const models = this.selectedModels();
+    if (archs.length === 0 || models.length === 0) {
+      $('ev-err').textContent = 'Select at least one archetype and one model.';
+      return;
+    }
+    $('ev-err').textContent = '';
+    this.running = true;
+    $('ev-runBtn').textContent = 'Running…'; $('ev-runBtn').disabled = true;
+    const warmup = parseInt($('ev-warmup').value, 10);
+    const nEval = parseInt($('ev-neval').value, 10);
+    const stepSize = parseInt($('ev-stepSize').value, 10);
+    const seed = parseInt($('ev-seed').value, 10) || 42;
+    const opts = {
+      periodsOverride: $('ev-periodsOverride').value,
+      variantOverride: $('ev-variantOverride').value,
+    };
+    const total = archs.length * models.length;
+    let done = 0;
+    const rows = [];
+    const t0 = performance.now();
+    for (const arch of archs) {
+      for (const model of models) {
+        $('ev-status').textContent = `Running ${arch} × ${model.label} … (${done + 1}/${total})`;
+        try {
+          const r = await evOneRun(arch, model, warmup, nEval, stepSize, seed, opts);
+          rows.push({
+            arch, modelKey: model.key, modelLabel: model.label, modelKind: model.kind,
+            ...r,
+          });
+        } catch (e) {
+          rows.push({ arch, modelKey: model.key, modelLabel: model.label, modelKind: model.kind, warning: String(e) });
+        }
+        done++;
+        this.renderTable(rows, `Progress: ${done}/${total} · elapsed ${((performance.now() - t0) / 1000).toFixed(1)}s`);
+        await new Promise(r => setTimeout(r, 0));
+      }
+    }
+    const dt = ((performance.now() - t0) / 1000).toFixed(1);
+    $('ev-status').textContent = `Done — ${total} combinations in ${dt}s. ★ = best per archetype for each metric (RMSE/MAE: lowest; Bias: closest to 0; Cov: highest, nominal 80 %).`;
+    this.running = false;
+    $('ev-runBtn').textContent = 'Run evaluation ▶▶'; $('ev-runBtn').disabled = false;
+  },
+};
+
 async function boot() {
   await init();
   fc.chart = new Chart($('fc-chart'));
+  fc.kpiStrip = new KpiStrip($('fc-kpiStrip'));
   an.chart = new Chart($('an-chart'));
+  an.strip = new Strip($('an-strip'));
+  ev.populate();
+  syncKpiWindowUi();
   fc.regen();
   an.regen();
 }
 
 // Forecast tab.
 $('fc-horizon').addEventListener('input', () => { $('fc-horizonVal').textContent = $('fc-horizon').value; fc.render(); });
+$('fc-stepSize').addEventListener('input', () => {
+  $('fc-stepSizeVal').textContent = $('fc-stepSize').value;
+  $('fc-showTrailStepLbl').textContent = $('fc-stepSize').value;
+  // If KPI mode = per-step, the effective window changes — repaint.
+  if ($('fc-kpiMode').value === 'step') fc.render();
+});
+$('fc-showKpi').addEventListener('change', () => fc.render());
+function syncKpiWindowUi() {
+  const m = $('fc-kpiMode').value;
+  const showCustomWindow = m === 'rolling';
+  $('fc-kpiWindowRow').hidden = !showCustomWindow;
+  $('fc-kpiWindow').hidden = !showCustomWindow;
+}
+$('fc-kpiMode').addEventListener('change', () => { syncKpiWindowUi(); fc.render(); });
+$('fc-kpiWindow').addEventListener('input', () => {
+  $('fc-kpiWindowVal').textContent = $('fc-kpiWindow').value;
+  fc.render();
+});
+$('fc-showTrail').addEventListener('change', () => fc.render());
 $('fc-speed').addEventListener('input', () => { $('fc-speedVal').textContent = $('fc-speed').value; });
 $('fc-warmup').addEventListener('input', () => { $('fc-warmupVal').textContent = $('fc-warmup').value; });
 $('fc-archetype').addEventListener('change', () => { fc.stop(); fc.seed = Math.floor(Math.random() * 1e9); fc.regen(); });
+$('fc-variant').addEventListener('change', () => { fc.stop(); fc.regen(); });
+$('fc-periods').addEventListener('change', () => { fc.stop(); fc.regen(); });
 $('fc-regenBtn').addEventListener('click', () => { fc.stop(); fc.seed = Math.floor(Math.random() * 1e9); fc.regen(); });
 $('fc-playBtn').addEventListener('click', () => { fc.running ? fc.stop() : fc.start(); });
 $('fc-stepBtn').addEventListener('click', () => { fc.stop(); fc.step(); });
 
 // Anomaly tab.
+function syncDetectorUI() {
+  const isMaha = $('an-detector').value === 'mahalanobis';
+  const surpriseIds = ['an-thresholdRow', 'an-threshold', 'an-thresholdNote'];
+  const mahaIds = ['an-mahaRow', 'an-mahaP', 'an-mahaNote', 'an-mahaKRow', 'an-mahaK'];
+  for (const id of surpriseIds) $(id).hidden = isMaha;
+  for (const id of mahaIds) $(id).hidden = !isMaha;
+}
 $('an-injectRate').addEventListener('input', () => { $('an-injectRateVal').textContent = $('an-injectRate').value; });
 $('an-spikeMag').addEventListener('input', () => { $('an-spikeMagVal').textContent = $('an-spikeMag').value; });
 $('an-threshold').addEventListener('input', () => { $('an-thresholdVal').textContent = parseFloat($('an-threshold').value).toFixed(1); an.reflag(); });
+$('an-mahaP').addEventListener('input', () => {
+  const p = Math.pow(10, parseFloat($('an-mahaP').value));
+  $('an-mahaPVal').textContent = p.toExponential(1);
+  an.reflag();
+});
+$('an-mahaK').addEventListener('input', () => { $('an-mahaKVal').textContent = $('an-mahaK').value; });
+$('an-cooldown').addEventListener('input', () => { $('an-cooldownVal').textContent = $('an-cooldown').value; an.reflag(); });
+$('an-fcHorizon').addEventListener('input', () => {
+  $('an-fcHorizonVal').textContent = $('an-fcHorizon').value;
+  // The bandSource was constructed with the old horizon; rebuild it to
+  // extend the forecast range. Fresh state — but warm-up is preserved
+  // and the model refits on all past observations.
+  an.stop(); an.regen();
+});
+$('an-showFan').addEventListener('change', () => an.render());
+$('an-detector').addEventListener('change', () => { syncDetectorUI(); an.stop(); an.regen(); });
 $('an-speed').addEventListener('input', () => { $('an-speedVal').textContent = $('an-speed').value; });
 $('an-warmup').addEventListener('input', () => { $('an-warmupVal').textContent = $('an-warmup').value; });
-$('an-archetype').addEventListener('change', () => { an.stop(); an.seed = Math.floor(Math.random() * 1e9); an.regen(); });
+$('an-archetype').addEventListener('change', () => {
+  an.stop();
+  an.seed = Math.floor(Math.random() * 1e9);
+  const real = isNabKey($('an-archetype').value);
+  $('an-injectBlock').hidden = real;
+  $('an-realBlock').hidden = !real;
+  $('an-injectHead').textContent = real ? 'Real data' : 'Injection';
+  an.regen();
+});
 $('an-regenBtn').addEventListener('click', () => { an.stop(); an.seed = Math.floor(Math.random() * 1e9); an.regen(); });
 $('an-playBtn').addEventListener('click', () => { an.running ? an.stop() : an.start(); });
 $('an-stepBtn').addEventListener('click', () => { an.stop(); an.step(); });
+$('an-runToEndBtn').addEventListener('click', () => { an.runToEnd(); });
+
+// Evaluate tab.
+$('ev-warmup').addEventListener('input', () => { $('ev-warmupVal').textContent = $('ev-warmup').value; });
+$('ev-neval').addEventListener('input', () => { $('ev-nevalVal').textContent = $('ev-neval').value; });
+$('ev-stepSize').addEventListener('input', () => { $('ev-stepSizeVal').textContent = $('ev-stepSize').value; });
+$('ev-selectAll').addEventListener('click', () => { document.querySelectorAll('#ev-archetypes input').forEach(el => el.checked = true); });
+$('ev-selectNone').addEventListener('click', () => { document.querySelectorAll('#ev-archetypes input').forEach(el => el.checked = false); });
+$('ev-runBtn').addEventListener('click', () => ev.runAll());
+syncDetectorUI();
 
 boot();
 </script>

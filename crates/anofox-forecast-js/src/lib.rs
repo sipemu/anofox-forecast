@@ -47,7 +47,7 @@ pub use filters::{
 pub use forecaster::*;
 pub use global_models::{global_auto_ets, global_croston, global_ets, global_theta};
 pub use hierarchy::HierarchyTree;
-pub use laplace_playground::LaplacePlayground;
+pub use laplace_playground::{LaplacePlayground, MahalanobisPlayground};
 pub use monitor::{monitor_forecast_errors, update_forecast_monitor};
 pub use pipeline::{Pipeline, PipelineBuilder};
 pub use postprocess::*;

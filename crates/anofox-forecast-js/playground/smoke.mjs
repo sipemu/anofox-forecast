@@ -33,7 +33,7 @@ for (const sc of scenarios) {
   const draw = sc.gen(rng);
   const warm = [];
   for (let i = 0; i < sc.warmup; i++) warm.push(draw(i));
-  const pg = new LaplacePlayground(new Float64Array(warm), sc.period, 12);
+  const pg = new LaplacePlayground(new Float64Array(warm), sc.period ? String(sc.period) : '', 12, '');
   const recipe = pg.recipe();
   const fc = pg.forecast(12, new Float64Array([0.1, 0.5, 0.9]));
   // fc layout: 12 rows × 4 cols (0.1, 0.5, 0.9, mean).
@@ -51,13 +51,63 @@ for (const sc of scenarios) {
 if (fail > 0) { console.error(`FAILED (${fail})`); process.exit(1); }
 console.log('OK — all scenarios produced finite forecasts.');
 
+// Variant + multi-period smoke.
+console.log('\nVariant + multi-period smoke:');
+{
+  const rng = new Rng(9);
+  const warm = [];
+  for (let i = 0; i < 200; i++) {
+    warm.push(50 + 3 * Math.sin(2 * Math.PI * i / 24) + 2 * Math.sin(2 * Math.PI * i / 168) + rng.normal());
+  }
+  const cases = [
+    { variant: '',                periodsCsv: '24' },
+    { variant: 'multiscale_3sh',  periodsCsv: '24' },
+    { variant: 'skaters',         periodsCsv: '24,168' },
+    { variant: 'auto',            periodsCsv: '' },
+  ];
+  for (const c of cases) {
+    const pg = new LaplacePlayground(new Float64Array(warm), c.periodsCsv, 24, c.variant);
+    const fc = pg.forecast(24, new Float64Array([0.5]));
+    const label = pg.recipe();
+    const ok = fc.length === 48 && Array.from(fc).every(Number.isFinite);
+    console.log(`  variant='${c.variant.padEnd(15)}' periods='${c.periodsCsv.padEnd(6)}'  →  ${label}   ${ok ? 'OK' : 'FAIL'}`);
+    pg.free();
+    if (!ok) process.exit(1);
+  }
+}
+console.log('OK — variant selector + multi-period supported.');
+
+// Mahalanobis playground smoke.
+console.log('\nMahalanobisPlayground smoke:');
+{
+  const { MahalanobisPlayground } = await import('./pkg/anofox_forecast_js.js');
+  const rng = new Rng(11);
+  const warm = [];
+  for (let i = 0; i < 200; i++) warm.push(50 + rng.normal());
+  const det = new MahalanobisPlayground(new Float64Array(warm), 6, '');
+  // Feed enough post-warmup obs for the parade z-bank to fill up.
+  for (let i = 0; i < 60; i++) det.observe(50 + rng.normal());
+  const scoreQuiet = det.last_score();
+  det.observe(50 + 20);   // 20σ spike
+  const scoreSpike = det.last_score();
+  console.log(`  quiet  d²=${fmtOrNaN(scoreQuiet[0])}  p=${fmtOrNaNE(scoreQuiet[1])}  run=${scoreQuiet[2]}  warm=${scoreQuiet[3]}`);
+  console.log(`  spike  d²=${fmtOrNaN(scoreSpike[0])}  p=${fmtOrNaNE(scoreSpike[1])}  run=${scoreSpike[2]}  warm=${scoreSpike[3]}`);
+  const ok = scoreSpike[3] === 1.0 && scoreSpike[0] > scoreQuiet[0];
+  console.log(`  ${ok ? 'OK — spike scored higher than quiet baseline' : 'FAIL'}`);
+  det.free();
+  if (!ok) process.exit(1);
+}
+function fmtOrNaN(v) { return Number.isFinite(v) ? v.toFixed(2) : 'NaN'; }
+function fmtOrNaNE(v) { return Number.isFinite(v) ? v.toExponential(1) : 'NaN'; }
+console.log('OK — Mahalanobis detector reports d²/p_value/run.');
+
 // ---------- Anomaly-tab methods smoke ----------
 console.log('\nAnomaly-tab methods:');
 {
   const rng = new Rng(7);
   const warm = [];
   for (let i = 0; i < 100; i++) warm.push(50 + rng.normal());
-  const pg = new LaplacePlayground(new Float64Array(warm), 0, 1);
+  const pg = new LaplacePlayground(new Float64Array(warm), '', 1, '');
   const surpriseIn = pg.surprise(50);            // ~expected value
   const surpriseOut = pg.surprise(50 + 8);       // ~8σ out
   const tailIn = pg.tail_probability(50);
