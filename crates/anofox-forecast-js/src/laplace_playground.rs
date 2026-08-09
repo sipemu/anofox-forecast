@@ -12,7 +12,6 @@ use anofox_forecast::anomaly::{MahalanobisConfig, MahalanobisDetector};
 use anofox_forecast::core::TimeSeries;
 use anofox_forecast::models::laplace::{
     recipe_for, recommended_for, DistributionalForecaster, LaplaceForecaster, MultiScaleLaplace,
-    RecipeKind,
 };
 use anofox_forecast::models::Forecaster;
 use chrono::{Duration, TimeZone, Utc};
@@ -28,8 +27,8 @@ use wasm_bindgen::prelude::*;
 pub struct LaplacePlayground {
     inner: Box<dyn DistributionalForecaster>,
     label: String,
-    variant: String,       // "" = router-picked; else fixed variant name
-    periods: Vec<usize>,   // canonical: [] = none, [P] = single, [P1, P2, ...] = multi
+    variant: String,     // "" = router-picked; else fixed variant name
+    periods: Vec<usize>, // canonical: [] = none, [P] = single, [P1, P2, ...] = multi
     horizon: usize,
     values: Vec<f64>,
 }
@@ -97,8 +96,7 @@ impl LaplacePlayground {
         let series = build_series(&self.values)?;
         // Rebuild the inner forecaster each observe — variants can flip
         // (router path) and multi-scale needs a full re-fit anyway.
-        let (mut inner, label) =
-            build_variant(&self.variant, &self.periods, self.horizon, &series);
+        let (mut inner, label) = build_variant(&self.variant, &self.periods, self.horizon, &series);
         <dyn DistributionalForecaster as Forecaster>::fit(&mut *inner, &series)
             .map_err(|e| format!("re-fit failed: {}", e))?;
         self.inner = inner;

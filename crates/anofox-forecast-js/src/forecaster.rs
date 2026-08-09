@@ -380,12 +380,6 @@ impl SESForecaster {
     }
 }
 
-impl SESForecaster {
-    pub(crate) fn inner(&self) -> &SimpleExponentialSmoothing {
-        &self.model
-    }
-}
-
 /// Holt Linear Trend (Double Exponential Smoothing) forecaster.
 #[wasm_bindgen]
 pub struct HoltForecaster {
@@ -427,12 +421,6 @@ impl HoltForecaster {
     #[wasm_bindgen(getter)]
     pub fn name(&self) -> String {
         self.model.name().to_string()
-    }
-}
-
-impl HoltForecaster {
-    pub(crate) fn inner(&self) -> &HoltLinearTrend {
-        &self.model
     }
 }
 
@@ -510,12 +498,6 @@ impl HoltWintersForecaster {
     #[wasm_bindgen(getter)]
     pub fn name(&self) -> String {
         self.model.name().to_string()
-    }
-}
-
-impl HoltWintersForecaster {
-    pub(crate) fn inner(&self) -> &HoltWinters {
-        &self.model
     }
 }
 
@@ -1205,12 +1187,6 @@ impl CrostonForecaster {
     }
 }
 
-impl CrostonForecaster {
-    pub(crate) fn inner(&self) -> &Croston {
-        &self.model
-    }
-}
-
 impl Default for CrostonForecaster {
     fn default() -> Self {
         Self::new()
@@ -1254,12 +1230,6 @@ impl TSBForecaster {
     #[wasm_bindgen(getter)]
     pub fn name(&self) -> String {
         self.model.name().to_string()
-    }
-}
-
-impl TSBForecaster {
-    pub(crate) fn inner(&self) -> &TSB {
-        &self.model
     }
 }
 
@@ -1311,12 +1281,6 @@ impl ADIDAForecaster {
     }
 }
 
-impl ADIDAForecaster {
-    pub(crate) fn inner(&self) -> &ADIDA {
-        &self.model
-    }
-}
-
 impl Default for ADIDAForecaster {
     fn default() -> Self {
         Self::new()
@@ -1362,12 +1326,6 @@ impl IMAPAForecaster {
     #[wasm_bindgen(getter)]
     pub fn name(&self) -> String {
         self.model.name().to_string()
-    }
-}
-
-impl IMAPAForecaster {
-    pub(crate) fn inner(&self) -> &IMAPA {
-        &self.model
     }
 }
 
@@ -1626,12 +1584,6 @@ impl GARCHForecaster {
     #[wasm_bindgen(getter)]
     pub fn name(&self) -> String {
         self.model.name().to_string()
-    }
-}
-
-impl GARCHForecaster {
-    pub(crate) fn inner(&self) -> &GARCH {
-        &self.model
     }
 }
 
@@ -2138,7 +2090,7 @@ impl KalmanForecaster {
         let values = series.inner().primary_values();
         let observations: Vec<Vec<f64>> = values.iter().map(|&v| vec![v]).collect();
 
-        let mut kf = anofox_forecast::models::kalman::KalmanFilter::new(self.ssm.clone())
+        let kf = anofox_forecast::models::kalman::KalmanFilter::new(self.ssm.clone())
             .map_err(|e| JsError::new(&e.to_string()))?;
         kf.log_likelihood(&observations)
             .map_err(|e| JsError::new(&e.to_string()))
