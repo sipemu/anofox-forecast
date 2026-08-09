@@ -33,10 +33,10 @@ Every claimed capability is measured, and every improvement is proven with a bef
   4. Known WASM dead code (unused `inner()` methods, unused imports in `crates/anofox-forecast-js/`) is removed and confirmed absent before the WASM size baseline is committed
   5. Native-parallel and WASM/single-thread benchmark profiles are reported in separate sections; criterion baselines are captured locally (not on GitHub Actions) to avoid wall-clock noise
 
-**Plans**: 3 plans
+**Plans**: 1/3 plans executed
 **Wave 1**
 
-- [ ] 01-01-PLAN.md — Tracer: harness crate + D-02 schema, PERF-06 dead-code cleanup, WASM-size baseline + wasm-size.yml gate (MEAS-01..04, PERF-05, PERF-06)
+- [x] 01-01-PLAN.md — Tracer: harness crate + D-02 schema, PERF-06 dead-code cleanup, WASM-size baseline + wasm-size.yml gate (MEAS-01..04, PERF-05, PERF-06)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
@@ -110,7 +110,7 @@ Every claimed capability is measured, and every improvement is proven with a bef
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Measurement Infrastructure & Compute Baselines | 0/? | Not started | - |
+| 1. Measurement Infrastructure & Compute Baselines | 1/3 | In Progress|  |
 | 2. Accuracy Harness & Statistical Methodology | 0/? | Not started | - |
 | 3. Numerical Robustness & Coverage Baseline | 0/? | Not started | - |
 | 4. Prioritized Improvement Backlog & Top-Value Fixes | 0/? | Not started | - |

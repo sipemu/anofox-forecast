@@ -11,10 +11,10 @@ regression.
 
 ### Measurement Infrastructure (MEAS)
 
-- [ ] **MEAS-01**: A committed baseline store exists at `.planning/baselines/` holding JSON baselines per dimension; CI reads baselines but never writes them
-- [ ] **MEAS-02**: A maintainer can capture/refresh baselines via documented `scripts/update_*.sh` on a quiet local machine
-- [ ] **MEAS-03**: CI workflows exist for benchmarking (`bench.yml`) and WASM size (`wasm-size.yml`); the accuracy workflow (`accuracy.yml`) is `workflow_dispatch`-only and never gates PR merges
-- [ ] **MEAS-04**: All measurement code lives in `benches/`, `tests/`, `scripts/`, and a harness crate — nothing new is added to library `src/`
+- [x] **MEAS-01**: A committed baseline store exists at `.planning/baselines/` holding JSON baselines per dimension; CI reads baselines but never writes them
+- [x] **MEAS-02**: A maintainer can capture/refresh baselines via documented `scripts/update_*.sh` on a quiet local machine
+- [x] **MEAS-03**: CI workflows exist for benchmarking (`bench.yml`) and WASM size (`wasm-size.yml`); the accuracy workflow (`accuracy.yml`) is `workflow_dispatch`-only and never gates PR merges
+- [x] **MEAS-04**: All measurement code lives in `benches/`, `tests/`, `scripts/`, and a harness crate — nothing new is added to library `src/`
 
 ### Compute Performance (PERF)
 
@@ -22,8 +22,8 @@ regression.
 - [ ] **PERF-02**: iai-callgrind instruction-count gates run in CI on 3–5 critical hot paths (e.g., AutoETS fit, ARIMA fit, batch-100)
 - [ ] **PERF-03**: Native-parallel and WASM/single-thread (no-Rayon) profiles are measured and reported separately
 - [ ] **PERF-04**: A native peak-memory measurement (dhat) asserts bounds for major model families
-- [ ] **PERF-05**: The compiled release WASM binary size is tracked against a committed baseline with a delta threshold in CI
-- [ ] **PERF-06**: Known WASM dead code (unused `inner()` methods, unused imports in `crates/anofox-forecast-js/`) is removed before the WASM size baseline is locked
+- [x] **PERF-05**: The compiled release WASM binary size is tracked against a committed baseline with a delta threshold in CI
+- [x] **PERF-06**: Known WASM dead code (unused `inner()` methods, unused imports in `crates/anofox-forecast-js/`) is removed before the WASM size baseline is locked
 
 ### Accuracy & Statistical Methodology (ACCUR)
 
@@ -98,16 +98,16 @@ Explicitly excluded. Documented to prevent scope creep.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| MEAS-01 | Phase 1 | Pending |
-| MEAS-02 | Phase 1 | Pending |
-| MEAS-03 | Phase 1 | Pending |
-| MEAS-04 | Phase 1 | Pending |
+| MEAS-01 | Phase 1 | Complete |
+| MEAS-02 | Phase 1 | Complete |
+| MEAS-03 | Phase 1 | Complete |
+| MEAS-04 | Phase 1 | Complete |
 | PERF-01 | Phase 1 | Pending |
 | PERF-02 | Phase 1 | Pending |
 | PERF-03 | Phase 1 | Pending |
 | PERF-04 | Phase 1 | Pending |
-| PERF-05 | Phase 1 | Pending |
-| PERF-06 | Phase 1 | Pending |
+| PERF-05 | Phase 1 | Complete |
+| PERF-06 | Phase 1 | Complete |
 | ACCUR-01 | Phase 2 | Pending |
 | ACCUR-02 | Phase 2 | Pending |
 | ACCUR-03 | Phase 2 | Pending |
@@ -128,6 +128,7 @@ Explicitly excluded. Documented to prevent scope creep.
 | IMPR-03 | Phase 4 | Pending |
 
 **Coverage:**
+
 - v1 requirements: 28 total (note: original count of 27 was a typo; actual count is 28 across MEAS×4 + PERF×6 + ACCUR×8 + ROBUST×3 + COVER×2 + BENCH×2 + IMPR×3)
 - Mapped to phases: 28/28
 - Unmapped: 0 ✓
