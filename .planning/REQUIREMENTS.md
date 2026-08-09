@@ -96,19 +96,42 @@ Explicitly excluded. Documented to prevent scope creep.
 
 ## Traceability
 
-Populated during roadmap creation (one phase per requirement). Preliminary grouping:
-MEAS/PERF → measurement backbone phase · ACCUR/BENCH → accuracy & methodology phase ·
-ROBUST/COVER → robustness & coverage phase · IMPR → improvement phase.
-
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| (filled by roadmapper) | — | Pending |
+| MEAS-01 | Phase 1 | Pending |
+| MEAS-02 | Phase 1 | Pending |
+| MEAS-03 | Phase 1 | Pending |
+| MEAS-04 | Phase 1 | Pending |
+| PERF-01 | Phase 1 | Pending |
+| PERF-02 | Phase 1 | Pending |
+| PERF-03 | Phase 1 | Pending |
+| PERF-04 | Phase 1 | Pending |
+| PERF-05 | Phase 1 | Pending |
+| PERF-06 | Phase 1 | Pending |
+| ACCUR-01 | Phase 2 | Pending |
+| ACCUR-02 | Phase 2 | Pending |
+| ACCUR-03 | Phase 2 | Pending |
+| ACCUR-04 | Phase 2 | Pending |
+| ACCUR-05 | Phase 2 | Pending |
+| ACCUR-06 | Phase 2 | Pending |
+| ACCUR-07 | Phase 2 | Pending |
+| ACCUR-08 | Phase 2 | Pending |
+| BENCH-01 | Phase 2 | Pending |
+| BENCH-02 | Phase 2 | Pending |
+| ROBUST-01 | Phase 3 | Pending |
+| ROBUST-02 | Phase 3 | Pending |
+| ROBUST-03 | Phase 3 | Pending |
+| COVER-01 | Phase 3 | Pending |
+| COVER-02 | Phase 3 | Pending |
+| IMPR-01 | Phase 4 | Pending |
+| IMPR-02 | Phase 4 | Pending |
+| IMPR-03 | Phase 4 | Pending |
 
 **Coverage:**
-- v1 requirements: 27 total
-- Mapped to phases: 0 (pending roadmap)
-- Unmapped: 27 ⚠️
+- v1 requirements: 28 total (note: original count of 27 was a typo; actual count is 28 across MEAS×4 + PERF×6 + ACCUR×8 + ROBUST×3 + COVER×2 + BENCH×2 + IMPR×3)
+- Mapped to phases: 28/28
+- Unmapped: 0 ✓
 
 ---
 *Requirements defined: 2026-08-09*
-*Last updated: 2026-08-09 after initial definition*
+*Last updated: 2026-08-09 after roadmap creation — traceability populated*
