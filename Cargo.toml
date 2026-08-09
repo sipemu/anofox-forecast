@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/anofox-forecast-js"]
+members = [".", "crates/anofox-forecast-js", "crates/anofox-bench-harness"]
 resolver = "2"
 
 [package]
