@@ -4,14 +4,14 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 01
 current_phase_name: measurement-infrastructure-compute-baselines
-status: executing
-stopped_at: Completed 01-02-PLAN.md
-last_updated: "2026-08-09T20:42:25.971Z"
+status: verifying
+stopped_at: Completed 01-03-PLAN.md
+last_updated: "2026-08-09T21:09:53.018Z"
 progress:
   total_phases: 1
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 3
-  completed_plans: 2
+  completed_plans: 3
 ---
 
 # Project State: anofox-forecast — Performance & Validation Hardening
@@ -33,10 +33,10 @@ progress:
 
 **Phase:** 01 (measurement-infrastructure-compute-baselines) — EXECUTING
 **Plan:** 3 of 3
-**Status:** Ready to execute
+**Status:** Phase complete — ready for verification
 
 ```
-Progress: [███████░░░] 67%
+Progress: [██████████] 100%
 
 Phase 1 [NOT STARTED] ░░░░░
 Phase 2 [NOT STARTED] ░░░░░
@@ -61,6 +61,7 @@ Phase 4 [NOT STARTED] ░░░░░
 |------|----------|-------|-------|
 | Phase 01 P01 | 9 | 4 tasks | 7 files |
 | Phase 01 P02 | 10 | 3 tasks | 5 files |
+| Phase 01 P03 | 30 | 3 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -95,8 +96,8 @@ None at this time.
 
 ## Session Continuity
 
-**Last session:** 2026-08-09T20:42:25.963Z
-**Stopped at:** Completed 01-02-PLAN.md
+**Last session:** 2026-08-09T21:09:53.006Z
+**Stopped at:** Completed 01-03-PLAN.md
 **Resume file:** None
 
 ### What Was Done This Session
@@ -123,3 +124,6 @@ Start `/gsd-plan-phase 1` — Phase 1: Measurement Infrastructure & Compute Base
 - [Phase ?]: LibraryBenchmarkConfig.tool() not .callgrind() — verified against iai-callgrind 0.16.1 source
 - [Phase ?]: iai.json placeholder values (instruction_count=0) — valgrind absent on dev machine; regenerate via update_iai.sh
 - [Phase ?]: Doc comments (///) rejected by #[library_benchmark] proc-macro — use // inline comments on bench fns
+- [Phase ?]: LaplaceForecaster gated behind cfg(distributional) in baseline_suite.rs — criterion_group! duplicated for cfg/no-cfg build variants
+- [Phase ?]: All 7 dhat families in one #[test] fn to avoid overlapping dhat::Profiler instances (dhat panics on concurrent profilers)
+- [Phase ?]: criterion.json committed as 0.0 placeholder (local-only capture, D-03); dhat.json committed with real values (native test, no env deps)
