@@ -107,6 +107,10 @@ harness = false
 name = "comprehensive_benchmark"
 harness = false
 
+[[bench]]
+name = "baseline_suite"
+harness = false
+
 # Examples
 [[example]]
 name = "anomaly_detection"
