@@ -56,3 +56,6 @@ validation/data/kaggle_web_traffic_weekly.tsf
 validation/data/m5.tsf
 validation/data/dominick.tsf
 validation/data/traffic.tsf
+
+# GSD research web-fetch cache (transient)
+.planning/research/.cache/
