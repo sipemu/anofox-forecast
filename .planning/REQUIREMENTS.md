@@ -19,7 +19,7 @@ regression.
 ### Compute Performance (PERF)
 
 - [ ] **PERF-01**: A criterion benchmark suite covers fit + predict across model families (ARIMA, ETS, Theta, baseline, intermittent, ensemble, Laplace), single-series and batch, with committed local baselines
-- [ ] **PERF-02**: iai-callgrind instruction-count gates run in CI on 3–5 critical hot paths (e.g., AutoETS fit, ARIMA fit, batch-100)
+- [x] **PERF-02**: iai-callgrind instruction-count gates run in CI on 3–5 critical hot paths (e.g., AutoETS fit, ARIMA fit, batch-100)
 - [ ] **PERF-03**: Native-parallel and WASM/single-thread (no-Rayon) profiles are measured and reported separately
 - [ ] **PERF-04**: A native peak-memory measurement (dhat) asserts bounds for major model families
 - [x] **PERF-05**: The compiled release WASM binary size is tracked against a committed baseline with a delta threshold in CI
@@ -103,7 +103,7 @@ Explicitly excluded. Documented to prevent scope creep.
 | MEAS-03 | Phase 1 | Complete |
 | MEAS-04 | Phase 1 | Complete |
 | PERF-01 | Phase 1 | Pending |
-| PERF-02 | Phase 1 | Pending |
+| PERF-02 | Phase 1 | Complete |
 | PERF-03 | Phase 1 | Pending |
 | PERF-04 | Phase 1 | Pending |
 | PERF-05 | Phase 1 | Complete |

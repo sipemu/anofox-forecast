@@ -5,13 +5,13 @@ milestone_name: milestone
 current_phase: 01
 current_phase_name: measurement-infrastructure-compute-baselines
 status: executing
-stopped_at: Completed 01-01-PLAN.md (all 4 tasks)
-last_updated: "2026-08-09T20:29:25.298Z"
+stopped_at: Completed 01-02-PLAN.md
+last_updated: "2026-08-09T20:42:25.971Z"
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 3
-  completed_plans: 1
+  completed_plans: 2
 ---
 
 # Project State: anofox-forecast — Performance & Validation Hardening
@@ -32,11 +32,11 @@ progress:
 ## Current Position
 
 **Phase:** 01 (measurement-infrastructure-compute-baselines) — EXECUTING
-**Plan:** 2 of 3
+**Plan:** 3 of 3
 **Status:** Ready to execute
 
 ```
-Progress: [███░░░░░░░] 33%
+Progress: [███████░░░] 67%
 
 Phase 1 [NOT STARTED] ░░░░░
 Phase 2 [NOT STARTED] ░░░░░
@@ -60,6 +60,7 @@ Phase 4 [NOT STARTED] ░░░░░
 | Plan | Duration | Tasks | Files |
 |------|----------|-------|-------|
 | Phase 01 P01 | 9 | 4 tasks | 7 files |
+| Phase 01 P02 | 10 | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -94,8 +95,8 @@ None at this time.
 
 ## Session Continuity
 
-**Last session:** 2026-08-09T20:29:25.290Z
-**Stopped at:** Completed 01-01-PLAN.md (all 4 tasks)
+**Last session:** 2026-08-09T20:42:25.963Z
+**Stopped at:** Completed 01-02-PLAN.md
 **Resume file:** None
 
 ### What Was Done This Session
@@ -119,3 +120,6 @@ Start `/gsd-plan-phase 1` — Phase 1: Measurement Infrastructure & Compute Base
 - [Phase ?]: No [[bench]] in harness Cargo.toml yet — avoids compile error until source files exist in Plans 02-03
 - [Phase ?]: wasm-size.yml uses quoted 'on' key to avoid YAML boolean coercion; zero baseline write steps (MEAS-01 CI-read-only)
 - [Phase ?]: PERF-06 guard in update_wasm_size.sh enforces PERF-06-before-PERF-05 sequencing at runtime
+- [Phase ?]: LibraryBenchmarkConfig.tool() not .callgrind() — verified against iai-callgrind 0.16.1 source
+- [Phase ?]: iai.json placeholder values (instruction_count=0) — valgrind absent on dev machine; regenerate via update_iai.sh
+- [Phase ?]: Doc comments (///) rejected by #[library_benchmark] proc-macro — use // inline comments on bench fns
