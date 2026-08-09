@@ -1,0 +1,180 @@
+{
+  "provenance": {
+    "git_sha": "9ed2dcfa6c691533047f0eeefde0efa480fa9cf5",
+    "timestamp_iso": "2026-08-09T21:04:23Z",
+    "rustc_version": "rustc 1.97.0 (2d8144b78 2026-07-07)",
+    "host_cpu": "13th Gen Intel(R) Core(TM) i9-13900H",
+    "host_os": "Linux 6.18.36-1-MANJARO",
+    "active_features": []
+  },
+  "benchmarks": [
+    {
+      "name": "auto_arima_fit_predict_n200",
+      "profile": "parallel",
+      "median_ns": 0.0,
+      "mad_ns": 0.0
+    },
+    {
+      "name": "auto_arima_batch100_fit_predict_n200",
+      "profile": "parallel",
+      "median_ns": 0.0,
+      "mad_ns": 0.0
+    },
+    {
+      "name": "auto_ets_fit_predict_n200_p12",
+      "profile": "parallel",
+      "median_ns": 0.0,
+      "mad_ns": 0.0
+    },
+    {
+      "name": "auto_ets_batch100_fit_predict_n200_p12",
+      "profile": "parallel",
+      "median_ns": 0.0,
+      "mad_ns": 0.0
+    },
+    {
+      "name": "auto_theta_fit_predict_n200",
+      "profile": "parallel",
+      "median_ns": 0.0,
+      "mad_ns": 0.0
+    },
+    {
+      "name": "auto_theta_batch100_fit_predict_n200",
+      "profile": "parallel",
+      "median_ns": 0.0,
+      "mad_ns": 0.0
+    },
+    {
+      "name": "naive_fit_predict_n200",
+      "profile": "parallel",
+      "median_ns": 0.0,
+      "mad_ns": 0.0
+    },
+    {
+      "name": "naive_batch100_fit_predict_n200",
+      "profile": "parallel",
+      "median_ns": 0.0,
+      "mad_ns": 0.0
+    },
+    {
+      "name": "croston_fit_predict_n200",
+      "profile": "parallel",
+      "median_ns": 0.0,
+      "mad_ns": 0.0
+    },
+    {
+      "name": "croston_batch100_fit_predict_n200",
+      "profile": "parallel",
+      "median_ns": 0.0,
+      "mad_ns": 0.0
+    },
+    {
+      "name": "auto_ensemble_fit_predict_n200",
+      "profile": "parallel",
+      "median_ns": 0.0,
+      "mad_ns": 0.0
+    },
+    {
+      "name": "auto_ensemble_batch100_fit_predict_n200",
+      "profile": "parallel",
+      "median_ns": 0.0,
+      "mad_ns": 0.0
+    },
+    {
+      "name": "laplace_fit_predict_n200",
+      "profile": "parallel",
+      "median_ns": 0.0,
+      "mad_ns": 0.0
+    },
+    {
+      "name": "laplace_batch100_fit_predict_n200",
+      "profile": "parallel",
+      "median_ns": 0.0,
+      "mad_ns": 0.0
+    },
+    {
+      "name": "auto_arima_fit_predict_n200",
+      "profile": "no_parallel",
+      "median_ns": 0.0,
+      "mad_ns": 0.0
+    },
+    {
+      "name": "auto_arima_batch100_fit_predict_n200",
+      "profile": "no_parallel",
+      "median_ns": 0.0,
+      "mad_ns": 0.0
+    },
+    {
+      "name": "auto_ets_fit_predict_n200_p12",
+      "profile": "no_parallel",
+      "median_ns": 0.0,
+      "mad_ns": 0.0
+    },
+    {
+      "name": "auto_ets_batch100_fit_predict_n200_p12",
+      "profile": "no_parallel",
+      "median_ns": 0.0,
+      "mad_ns": 0.0
+    },
+    {
+      "name": "auto_theta_fit_predict_n200",
+      "profile": "no_parallel",
+      "median_ns": 0.0,
+      "mad_ns": 0.0
+    },
+    {
+      "name": "auto_theta_batch100_fit_predict_n200",
+      "profile": "no_parallel",
+      "median_ns": 0.0,
+      "mad_ns": 0.0
+    },
+    {
+      "name": "naive_fit_predict_n200",
+      "profile": "no_parallel",
+      "median_ns": 0.0,
+      "mad_ns": 0.0
+    },
+    {
+      "name": "naive_batch100_fit_predict_n200",
+      "profile": "no_parallel",
+      "median_ns": 0.0,
+      "mad_ns": 0.0
+    },
+    {
+      "name": "croston_fit_predict_n200",
+      "profile": "no_parallel",
+      "median_ns": 0.0,
+      "mad_ns": 0.0
+    },
+    {
+      "name": "croston_batch100_fit_predict_n200",
+      "profile": "no_parallel",
+      "median_ns": 0.0,
+      "mad_ns": 0.0
+    },
+    {
+      "name": "auto_ensemble_fit_predict_n200",
+      "profile": "no_parallel",
+      "median_ns": 0.0,
+      "mad_ns": 0.0
+    },
+    {
+      "name": "auto_ensemble_batch100_fit_predict_n200",
+      "profile": "no_parallel",
+      "median_ns": 0.0,
+      "mad_ns": 0.0
+    },
+    {
+      "name": "laplace_fit_predict_n200",
+      "profile": "no_parallel",
+      "median_ns": 0.0,
+      "mad_ns": 0.0
+    },
+    {
+      "name": "laplace_batch100_fit_predict_n200",
+      "profile": "no_parallel",
+      "median_ns": 0.0,
+      "mad_ns": 0.0
+    }
+  ]
+}
