@@ -18,3 +18,7 @@ chrono = "0.4"
 iai-callgrind = "0.16.1"
 dhat = "0.3.3"
 criterion = "0.5"
+
+[[bench]]
+name = "iai_suite"
+harness = false
