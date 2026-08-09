@@ -54,13 +54,23 @@ jobs:
       # .planning/baselines/ — CI reads only (MEAS-01).
       - name: Check WASM size gate (D-11 fail if > 1% growth)
         run: |
-          CURRENT=$(stat --format=%s js/anofox_forecast_js_bg.wasm)
-          BASELINE=$(python3 -c "import json; d=json.load(open('.planning/baselines/wasm_size.json')); print(d['bytes'])")
-          python3 -c "
-          current, baseline = $CURRENT, $BASELINE
+          # Measured size is passed via the environment, never spliced into the
+          # Python source. The committed baseline is read and coerced with int()
+          # inside Python so a crafted "bytes" value in wasm_size.json cannot be
+          # executed as code (CR-01: no shell interpolation of file-derived data).
+          export WASM_CURRENT_BYTES="$(stat --format=%s js/anofox_forecast_js_bg.wasm)"
+          python3 - <<'PY'
+          import json, os
+
+          current = int(os.environ["WASM_CURRENT_BYTES"])
+          with open(".planning/baselines/wasm_size.json") as f:
+              baseline = int(json.load(f)["bytes"])  # int() rejects any non-numeric / injected value
+
           delta = (current - baseline) / baseline * 100
-          print(f'WASM size: current={current}B  baseline={baseline}B  delta={delta:.2f}%')
+          print(f"WASM size: current={current}B  baseline={baseline}B  delta={delta:.2f}%")
           if delta > 1.0:
-              raise SystemExit(f'WASM size grew {delta:.2f}% (threshold: 1.0% -- update baseline via scripts/update_wasm_size.sh)')
-          print('PASS: WASM size within 1% of baseline')
-          "
+              raise SystemExit(
+                  f"WASM size grew {delta:.2f}% (threshold: 1.0% -- update baseline via scripts/update_wasm_size.sh)"
+              )
+          print("PASS: WASM size within 1% of baseline")
+          PY
