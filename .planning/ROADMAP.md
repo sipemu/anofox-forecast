@@ -32,7 +32,10 @@ Every claimed capability is measured, and every improvement is proven with a bef
   4. Known WASM dead code (unused `inner()` methods, unused imports in `crates/anofox-forecast-js/`) is removed and confirmed absent before the WASM size baseline is committed
   5. Native-parallel and WASM/single-thread benchmark profiles are reported in separate sections; criterion baselines are captured locally (not on GitHub Actions) to avoid wall-clock noise
 
-**Plans**: TBD
+**Plans**: 3 plans
+- [ ] 01-01-PLAN.md — Tracer: harness crate + D-02 schema, PERF-06 dead-code cleanup, WASM-size baseline + wasm-size.yml gate (MEAS-01..04, PERF-05, PERF-06)
+- [ ] 01-02-PLAN.md — iai-callgrind instruction gate: iai_suite bench, update_iai.sh, bench.yml (PERF-02)
+- [ ] 01-03-PLAN.md — criterion + dhat dimensions: baseline_suite, dhat_peak tests, update_criterion.sh/update_dhat.sh (PERF-01, PERF-03, PERF-04)
 
 ---
 
