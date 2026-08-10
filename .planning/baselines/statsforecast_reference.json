@@ -1,0 +1,32 @@
+{
+  "provenance": {
+    "statsforecast_version": "2.0.3",
+    "numpy_version": "2.3.5",
+    "pandas_version": "2.3.3",
+    "python_version": "3.12.12",
+    "timestamp_iso": "2026-08-10T21:19:52.401294+00:00",
+    "m3_preprocessing": "Single-origin expanding-window split: train = all values except last H steps, test = last H steps. Horizons: yearly=6, quarterly=8, monthly=18. TSF files read with Latin-1 byte decode. Series shorter than horizon+1 skipped. AutoETS season_length: yearly=1, quarterly=4, monthly=12. Reported MASE uses training-slice seasonal-naive denominator (same as Rust harness)."
+  },
+  "datasets": {
+    "M3": {
+      "yearly": {
+        "n_series": 645,
+        "horizon": 6,
+        "seasonal_period": 1,
+        "autoets_mase": 2.695399907039439
+      },
+      "quarterly": {
+        "n_series": 756,
+        "horizon": 8,
+        "seasonal_period": 4,
+        "autoets_mase": 1.1436303076985483
+      },
+      "monthly": {
+        "n_series": 1428,
+        "horizon": 18,
+        "seasonal_period": 12,
+        "autoets_mase": 0.8633396679872559
+      }
+    }
+  }
+}
