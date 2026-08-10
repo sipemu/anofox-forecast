@@ -4,14 +4,14 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 02
 current_phase_name: accuracy-harness-statistical-methodology
-status: executing
-stopped_at: "02-04 Task 1 complete; checkpoint:decision reached for accuracy.json lock"
-last_updated: "2026-08-10T21:35:37.766Z"
+status: verifying
+stopped_at: "Completed 02-04-PLAN.md (defer-lock: accuracy.json deferred; accuracy.yml MEAS-03 delivered)"
+last_updated: "2026-08-10T21:48:16.305Z"
 progress:
   total_phases: 2
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 7
-  completed_plans: 6
+  completed_plans: 7
 ---
 
 # Project State: anofox-forecast — Performance & Validation Hardening
@@ -33,10 +33,10 @@ progress:
 
 **Phase:** 02 (accuracy-harness-statistical-methodology) — EXECUTING
 **Plan:** 4 of 4
-**Status:** Ready to execute
+**Status:** Phase complete — ready for verification
 
 ```
-Progress: [█████████░] 86%
+Progress: [██████████] 100%
 
 Phase 1 [COMPLETE]     █████
 Phase 2 [NOT STARTED]  ░░░░░
@@ -65,6 +65,7 @@ Phase 4 [NOT STARTED]  ░░░░░
 | Phase 02 P01 | 330 | 3 tasks | 4 files |
 | Phase 02 P02 | 518 | 3 tasks | 3 files |
 | Phase 02-accuracy-harness-statistical-methodology P03 | 678 | 3 tasks | 5 files |
+| Phase 02 P04 | 12 | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -96,11 +97,12 @@ Phase 4 [NOT STARTED]  ░░░░░
 - ⚠️ [Phase 1] `iai.json` / `criterion.json` baselines committed as structural placeholders — real numbers require maintainer capture on a valgrind ≥ 3.20 machine (`scripts/update_iai.sh`) and a quiet local machine (`scripts/update_criterion.sh`). Harness/gates complete; numeric population is a documented manual step.
 
 ---
+- accuracy.json lock deferred (ACCUR-07 partial): ACCUR-08 anchor failed (anofox MASE=1.0452 vs ref=0.8633, gap=+21%, outside ±0.02). Must re-run emit_accuracy_baseline_if_write_flag_set with ANOFOX_WRITE_ACCURACY_BASELINE=1 after Phase 4 improvements close the MASE gap.
 
 ## Session Continuity
 
-**Last session:** 2026-08-10T21:35:37.748Z
-**Stopped at:** 02-04 Task 1 complete; checkpoint:decision reached for accuracy.json lock
+**Last session:** 2026-08-10T21:48:07.747Z
+**Stopped at:** Completed 02-04-PLAN.md (defer-lock: accuracy.json deferred; accuracy.yml MEAS-03 delivered)
 **Resume file:** None
 
 ### What Was Done This Session
@@ -135,3 +137,6 @@ Start `/gsd-plan-phase 2` — Phase 2: Accuracy Harness & Statistical Methodolog
 - [Phase ?]: DM gate exercised via synthetic vectors (fixture has only aggregate MASE, not per-step forecasts) — documented as fixture scope limitation; Plan 04 narrative must state DM gate data scope honestly
 - [Phase ?]: statsforecast 2.0.3 monthly MASE=0.8633 (not 0.93 from 1.x): provenance makes the version difference auditable; ACCUR-08 comparison is within the pinned env
 - [Phase ?]: CARGO_MANIFEST_DIR used for cross_library.rs fixture path: cargo integration tests for workspace member crates CWD is the crate dir, not workspace root
+- [Phase ?]: defer-lock: ACCUR-08 anchor failed (anofox MASE=1.0452 vs statsforecast 2.0.3 ref=0.8633, gap=+21%, outside ±0.02 tolerance); accuracy.json not committed until Phase 4 improvements close the gap
+- [Phase ?]: accuracy.yml (MEAS-03) delivered workflow_dispatch-only with contents:read permissions, read-only harness runner, never gates PR merges
+- [Phase ?]: emit_accuracy_json() helper committed with dual-key guard (write flag + anchor assertion); Phase 4 can lock baseline by running with ANOFOX_WRITE_ACCURACY_BASELINE=1 after anchor passes

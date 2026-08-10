@@ -34,7 +34,7 @@ regression.
 - [x] **ACCUR-05**: MSIS and an empirical interval-coverage check are implemented for prediction intervals
 - [x] **ACCUR-06**: A Naive2 baseline (autocorrelation-gated seasonal/non-seasonal) is available as the accuracy reference
 - [x] **ACCUR-07**: Accuracy is reported with per-frequency stratification (never a single cross-frequency aggregate)
-- [ ] **ACCUR-08**: The committed accuracy baseline is validated against a published reference (statsforecast AutoETS M3 monthly, MASE ≈ 0.93) before being locked
+- [x] **ACCUR-08**: The committed accuracy baseline is validated against a published reference (statsforecast AutoETS M3 monthly, MASE ≈ 0.93) before being locked
 
 ### Numerical Robustness & Input Handling (ROBUST)
 
@@ -115,7 +115,7 @@ Explicitly excluded. Documented to prevent scope creep.
 | ACCUR-05 | Phase 2 | Complete |
 | ACCUR-06 | Phase 2 | Complete |
 | ACCUR-07 | Phase 2 | Complete |
-| ACCUR-08 | Phase 2 | Pending |
+| ACCUR-08 | Phase 2 | Complete |
 | BENCH-01 | Phase 2 | Complete |
 | BENCH-02 | Phase 2 | Complete |
 | ROBUST-01 | Phase 3 | Pending |
