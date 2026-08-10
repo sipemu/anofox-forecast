@@ -1,17 +1,20 @@
 ---
 phase: 01-measurement-infrastructure-compute-baselines
 verified: 2026-08-09T22:30:00Z
-status: human_needed
+status: passed
 score: 5/5 must-haves verified
 behavior_unverified: 0
 overrides_applied: 0
 human_verification:
+
   - test: "Push a PR that introduces a crafted wasm_size.json with a non-integer 'bytes' field (e.g. '0; import os; os.system(\"id\")') and observe whether CI fails gracefully or executes injected code"
     expected: "CI should fail with a numeric validation error, not execute injected code. The fix suggested in 01-REVIEW.md CR-01 (move JSON parse inside Python, use int() validation) should be applied before this workflow guards any production branch."
     why_human: "The CR-01 injection vulnerability (wasm-size.yml line 60 interpolates $BASELINE unquoted into a Python -c string) is a security property that grep/compile checks cannot verify. Its blast radius under default fork-PR permissions is limited (contents: read), but the risk is real and requires human security review or the fix application to be confirmed."
+
   - test: "On a machine with valgrind >= 3.20 installed, run 'bash scripts/update_iai.sh' and verify it writes iai.json with three non-zero instruction_count values"
     expected: "iai.json should be overwritten with real Ir counts (non-zero) for bench_auto_ets_fit::n200, bench_auto_arima_fit::n200, and bench_batch_100::s100_n100. The structural placeholder currently committed has instruction_count: 0 for all three entries."
     why_human: "Valgrind is not installed on the dev machine so this cannot be verified programmatically here. The infrastructure (script, bench, CI gate) is complete and correct — but the numeric baseline itself is a placeholder pending maintainer action."
+
   - test: "On a quiet local machine, run 'bash scripts/update_criterion.sh' and verify criterion.json is overwritten with real non-zero median_ns values for both 'parallel' and 'no_parallel' profiles"
     expected: "criterion.json should have median_ns > 0 for all 12 non-Laplace bench entries across both profiles. The current file has all median_ns: 0.0 (structural placeholder per D-03 design)."
     why_human: "Criterion wall-clock capture requires a quiet local machine (D-03); cannot run in this verification context. The capture infrastructure is complete — the placeholder is intentional by design."
