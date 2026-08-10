@@ -1,19 +1,14 @@
 ---
-status: testing
+status: complete
 phase: 01-measurement-infrastructure-compute-baselines
 source: [01-VERIFICATION.md]
 started: 2026-08-09T22:35:00Z
-updated: 2026-08-09T22:35:00Z
+updated: 2026-08-10T00:00:00Z
 ---
 
 ## Current Test
 
-number: 2
-name: iai.json real instruction counts (requires valgrind >= 3.20 machine)
-expected: |
-  On a machine with valgrind >= 3.20, `bash scripts/update_iai.sh` overwrites
-  iai.json with non-zero instruction_count for the three benches.
-awaiting: maintainer action on a valgrind-equipped machine
+[testing complete]
 
 ## Tests
 
@@ -23,18 +18,18 @@ result: PASSED — fixed in commit 9e8aa57. Gate now reads the baseline and coer
 
 ### 2. iai.json real instruction counts
 expected: On a machine with valgrind >= 3.20, `bash scripts/update_iai.sh` overwrites iai.json with non-zero instruction_count for bench_auto_ets_fit::n200, bench_auto_arima_fit::n200, bench_batch_100::s100_n100 (currently structural placeholder = 0).
-result: [pending]
+result: pass
 
 ### 3. criterion.json real wall-clock values
 expected: On a quiet local machine, `bash scripts/update_criterion.sh` overwrites criterion.json with median_ns > 0 for all 12 non-Laplace entries across both `parallel` and `no_parallel` profiles (currently structural placeholder = 0.0 per D-03).
-result: [pending]
+result: pass
 
 ## Summary
 
 total: 3
-passed: 1
+passed: 3
 issues: 0
-pending: 2
+pending: 0
 skipped: 0
 blocked: 0
 
