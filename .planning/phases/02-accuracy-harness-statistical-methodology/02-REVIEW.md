@@ -18,7 +18,19 @@ findings:
   warning: 4
   info: 4
   total: 9
-status: issues_found
+status: partial_fix
+fixed:
+  - CR-01  # emit_accuracy_json NaN panic — Option<f64> for rmse/mae (commit 1302b3d)
+  - WR-01  # MASE filter asymmetry — mase > 0.0 guard added (commit 044db8a)
+  - WR-03  # Bartlett label corrected to 95% confidence (commit 9c7a6ad)
+  - WR-04  # D-03 comment corrected to reference test slice (commit c7685dd)
+open:
+  - WR-02  # silent MSIS/MASE count discrepancy — deferred
+  - IN-01  # Python skip threshold differs from Rust — no M3 impact, deferred
+  - IN-02  # test name mislabels guard as noise test — deferred
+  - IN-03  # temp file not cleaned on panic — deferred
+  - IN-04  # accuracy.yml non-existent DATASET_DIR — deferred
+fixed_at: 2026-08-11T00:00:00Z
 ---
 
 # Phase 02: Code Review Report
