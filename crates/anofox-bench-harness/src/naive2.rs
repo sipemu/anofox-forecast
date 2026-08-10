@@ -2,11 +2,11 @@
 //!
 //! A harness-only model (D-07): not part of the public `anofox-forecast` API.
 //! Composes [`Naive`] and [`SeasonalNaive`] from the library, gated by a
-//! 90%-confidence autocorrelation test at the seasonal lag (D-08, ACCUR-06).
+//! Bartlett 95% confidence autocorrelation test at the seasonal lag (D-08, ACCUR-06).
 //!
-//! The ACF threshold is `1.645 / sqrt(n)` (one-sided 90% CI under the
-//! Bartlett asymptotic normal approximation, matching the statsforecast/M4
-//! Naive2 canonical form — see Assumption A1 in 02-RESEARCH.md).
+//! The ACF threshold is `1.645 / sqrt(n)` (Bartlett 95% confidence band,
+//! |ACF| > threshold ↔ significant at the 5% level two-sided — matching
+//! the statsforecast/M4 Naive2 canonical form — see Assumption A1 in 02-RESEARCH.md).
 
 use anofox_forecast::core::TimeSeries;
 use anofox_forecast::error::ForecastError;
@@ -23,8 +23,8 @@ enum Naive2Inner {
 /// ACF-gated seasonal/non-seasonal reference baseline (D-07, D-08).
 ///
 /// On `fit`, evaluates the autocorrelation at the configured seasonal lag.
-/// If `|acf| > 1.645 / sqrt(n)` (90%-confidence Bartlett test) and the series
-/// is long enough to fit a full seasonal cycle, uses [`SeasonalNaive`];
+/// If `|acf| > 1.645 / sqrt(n)` (Bartlett 95% confidence band, 5% two-sided) and
+/// the series is long enough to fit a full seasonal cycle, uses [`SeasonalNaive`];
 /// otherwise uses [`Naive`] (random-walk last-value carry-forward).
 pub struct Naive2 {
     seasonal_period: usize,
@@ -51,7 +51,8 @@ impl Naive2 {
     pub fn fit(&mut self, train: &[f64]) -> Result<(), ForecastError> {
         let acf = acf_at_lag(train, self.seasonal_period);
         let n = train.len();
-        // 90%-confidence Bartlett critical value (A1/D-08): 1.645 / sqrt(n)
+        // Bartlett 95% confidence band (A1/D-08): |ACF| > 1.645/sqrt(n) is significant
+        // at the 5% two-sided level (statsforecast Naive2 canonical threshold).
         let critical = 1.645 / (n as f64).sqrt();
 
         let use_seasonal =
