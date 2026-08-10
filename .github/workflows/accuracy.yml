@@ -1,0 +1,68 @@
+name: Accuracy Harness
+
+# Triggers: workflow_dispatch ONLY.
+# This workflow runs the M3 accuracy harness (Naive2 + AutoETS over M3 Y/Q/M)
+# and reports per-frequency MASE, sMAPE, RMSE, MAE, MSIS, and coverage.
+#
+# MEAS-03: accuracy.yml is workflow_dispatch-only — it NEVER gates a PR merge.
+# Do NOT add push: or pull_request: triggers — those would block PRs and
+# violate the phase-wide CI-read-only rule (Phase 1 D-01).
+#
+# Capture discipline (Phase 1 CI-read-only rule):
+#   - This workflow does NOT write or commit anything under .planning/baselines/.
+#   - accuracy.json is a LOCAL-ONLY maintainer capture via ANOFOX_WRITE_ACCURACY_BASELINE=1.
+#   - The ACCUR-08 anchor must pass locally before accuracy.json is ever committed.
+#
+# YAML boolean coercion note (D-12, wasm-size.yml precedent):
+# The `on` key is quoted as `'on':` to prevent YAML parsers from coercing it
+# to the boolean `true`, which would make the workflow unparseable.
+'on':
+  workflow_dispatch:
+    inputs:
+      verbose:
+        description: "Pass --nocapture to show per-series diagnostic output"
+        required: false
+        default: "false"
+        type: boolean
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  accuracy:
+    name: M3 Accuracy Harness (Naive2 + AutoETS)
+    runs-on: ubuntu-latest
+    # Least-privilege: this job runs the accuracy test suite in read-only mode.
+    # It does NOT write baselines (MEAS-03, T-02-CIWRITE).
+    # permissions: contents: read is inherited from the workflow-level block above.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Run the M3 accuracy harness (Naive2 + AutoETS over Yearly/Quarterly/Monthly).
+      #
+      # ANOFOX_DATASET_DIR: the M3 corpus must be present at validation/data/.
+      # In CI, the corpus is not committed to the repo; the harness skips cleanly
+      # when ANOFOX_DATASET_DIR points to a missing directory (ACCUR-01 env gate).
+      #
+      # To run the full harness in CI, upload the M3 corpus as a GitHub Actions
+      # artifact and restore it before this step, or mount a self-hosted runner
+      # with the corpus pre-loaded at validation/data/.
+      #
+      # ANOFOX_WRITE_ACCURACY_BASELINE is intentionally NOT set — this step is
+      # read-only. Baseline capture is a local-only maintainer operation (T-02-CIWRITE).
+      - name: Run accuracy tests
+        env:
+          ANOFOX_DATASET_DIR: ${{ github.workspace }}/validation/data
+        run: |
+          if [ "${{ inputs.verbose }}" = "true" ]; then
+            cargo test -p anofox-bench-harness --test accuracy -- --nocapture
+          else
+            cargo test -p anofox-bench-harness --test accuracy
+          fi
