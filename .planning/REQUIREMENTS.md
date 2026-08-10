@@ -49,8 +49,8 @@ regression.
 
 ### Reference-Library Benchmarking (BENCH)
 
-- [ ] **BENCH-01**: A documented cross-library comparison runs anofox-forecast against a reference implementation (via the existing `run_statsforecast.py`) on shared datasets, horizons, and preprocessing
-- [ ] **BENCH-02**: Any "model A beats model B" / "beats reference" claim is gated by a Diebold–Mariano significance test when the accuracy gap is < 5%
+- [x] **BENCH-01**: A documented cross-library comparison runs anofox-forecast against a reference implementation (via the existing `run_statsforecast.py`) on shared datasets, horizons, and preprocessing
+- [x] **BENCH-02**: Any "model A beats model B" / "beats reference" claim is gated by a Diebold–Mariano significance test when the accuracy gap is < 5%
 
 ### Improvement Delivery (IMPR)
 
@@ -116,8 +116,8 @@ Explicitly excluded. Documented to prevent scope creep.
 | ACCUR-06 | Phase 2 | Complete |
 | ACCUR-07 | Phase 2 | Complete |
 | ACCUR-08 | Phase 2 | Pending |
-| BENCH-01 | Phase 2 | Pending |
-| BENCH-02 | Phase 2 | Pending |
+| BENCH-01 | Phase 2 | Complete |
+| BENCH-02 | Phase 2 | Complete |
 | ROBUST-01 | Phase 3 | Pending |
 | ROBUST-02 | Phase 3 | Pending |
 | ROBUST-03 | Phase 3 | Pending |

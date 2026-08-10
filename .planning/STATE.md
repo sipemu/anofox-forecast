@@ -5,13 +5,13 @@ milestone_name: milestone
 current_phase: 02
 current_phase_name: accuracy-harness-statistical-methodology
 status: executing
-stopped_at: Completed 02-02-PLAN.md
-last_updated: "2026-08-10T21:12:09.568Z"
+stopped_at: Completed 02-03-PLAN.md
+last_updated: "2026-08-10T21:28:22.063Z"
 progress:
   total_phases: 2
   completed_phases: 1
   total_plans: 7
-  completed_plans: 5
+  completed_plans: 6
 ---
 
 # Project State: anofox-forecast — Performance & Validation Hardening
@@ -32,11 +32,11 @@ progress:
 ## Current Position
 
 **Phase:** 02 (accuracy-harness-statistical-methodology) — EXECUTING
-**Plan:** 3 of 4
+**Plan:** 4 of 4
 **Status:** Ready to execute
 
 ```
-Progress: [███████░░░] 71%
+Progress: [█████████░] 86%
 
 Phase 1 [COMPLETE]     █████
 Phase 2 [NOT STARTED]  ░░░░░
@@ -64,6 +64,7 @@ Phase 4 [NOT STARTED]  ░░░░░
 | Phase 01 P03 | 30 | 3 tasks | 7 files |
 | Phase 02 P01 | 330 | 3 tasks | 4 files |
 | Phase 02 P02 | 518 | 3 tasks | 3 files |
+| Phase 02-accuracy-harness-statistical-methodology P03 | 678 | 3 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -98,8 +99,8 @@ Phase 4 [NOT STARTED]  ░░░░░
 
 ## Session Continuity
 
-**Last session:** 2026-08-10T21:12:09.556Z
-**Stopped at:** Completed 02-02-PLAN.md
+**Last session:** 2026-08-10T21:28:22.054Z
+**Stopped at:** Completed 02-03-PLAN.md
 **Resume file:** None
 
 ### What Was Done This Session
@@ -131,3 +132,6 @@ Start `/gsd-plan-phase 2` — Phase 2: Accuracy Harness & Statistical Methodolog
 - [Phase ?]: mase_scale() training-denominator placed in loader.rs (harness) to keep competition-correct MASE separate from library calculate_mase which scales on test slice (Pitfall 1)
 - [Phase ?]: MSIS scoped to monthly only to bound runtime; monthly is ACCUR-08 anchor frequency with richest interval evaluation
 - [Phase ?]: msis() uses period-1 first-diff scaling (A4/Pitfall 4) — not seasonal-lag as M4 competition; documented in code; ACCUR-08 anchor = MASE only
+- [Phase ?]: DM gate exercised via synthetic vectors (fixture has only aggregate MASE, not per-step forecasts) — documented as fixture scope limitation; Plan 04 narrative must state DM gate data scope honestly
+- [Phase ?]: statsforecast 2.0.3 monthly MASE=0.8633 (not 0.93 from 1.x): provenance makes the version difference auditable; ACCUR-08 comparison is within the pinned env
+- [Phase ?]: CARGO_MANIFEST_DIR used for cross_library.rs fixture path: cargo integration tests for workspace member crates CWD is the crate dir, not workspace root

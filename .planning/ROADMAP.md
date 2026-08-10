@@ -64,7 +64,7 @@ Every claimed capability is measured, and every improvement is proven with a bef
   4. Accuracy is reported with per-frequency stratification (Yearly/Quarterly/Monthly/Weekly/Daily/Hourly); the committed `baselines/accuracy.json` matches published statsforecast AutoETS M3 monthly MASE ≈ 0.93 before being locked
   5. The cross-library comparison against the reference implementation runs on shared datasets/horizons/preprocessing; any accuracy-gap claim under 5% is gated by a Diebold-Mariano significance test
 
-**Plans**: 2/4 plans executed
+**Plans**: 3/4 plans executed
 
 **Wave 1**
 
@@ -76,7 +76,7 @@ Every claimed capability is measured, and every improvement is proven with a bef
 
 **Wave 3** *(blocked on Wave 2)*
 
-- [ ] 02-03-PLAN.md — Diebold-Mariano test (HLN+HAC) + pinned statsforecast reference fixture + cross-library diff table (BENCH-01, BENCH-02)
+- [x] 02-03-PLAN.md — Diebold-Mariano test (HLN+HAC) + pinned statsforecast reference fixture + cross-library diff table (BENCH-01, BENCH-02)
 
 **Wave 4** *(blocked on Wave 3 — contains lock checkpoint)*
 
@@ -127,7 +127,7 @@ Every claimed capability is measured, and every improvement is proven with a bef
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Measurement Infrastructure & Compute Baselines | 3/3 | Complete    | 2026-08-10 |
-| 2. Accuracy Harness & Statistical Methodology | 2/4 | In Progress|  |
+| 2. Accuracy Harness & Statistical Methodology | 3/4 | In Progress|  |
 | 3. Numerical Robustness & Coverage Baseline | 0/? | Not started | - |
 | 4. Prioritized Improvement Backlog & Top-Value Fixes | 0/? | Not started | - |
 
