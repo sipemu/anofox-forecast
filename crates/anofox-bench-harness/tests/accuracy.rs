@@ -20,7 +20,19 @@
 //! 1. Temporal integrity: every fold satisfies `train_end <= test_start` (ACCUR-02).
 //! 2. No silent NaN in per-frequency aggregates (ACCUR-03).
 //! 3. Per-frequency stratification: Yearly/Quarterly/Monthly reported separately (ACCUR-07).
-//! 4. AutoETS M3-monthly MASE anchor (ACCUR-08) — committed by Plan 04.
+//! 4. AutoETS M3-monthly MASE anchor (ACCUR-08): within 0.02 of the pinned
+//!    statsforecast reference value from `.planning/baselines/statsforecast_reference.json`.
+//!    NOTE: the reference is pinned at statsforecast 2.0.3 (monthly MASE=0.8633),
+//!    which differs from the historical published 0.93 (statsforecast 1.x). The
+//!    comparison is apples-to-apples within the pinned env (provenance block in
+//!    the fixture documents the exact version). See Plan 03 SUMMARY for full context.
+//!
+//! ## accuracy.json emit (Plan 04)
+//! `emit_accuracy_json()` serialises per-frequency results into
+//! `.planning/baselines/accuracy.json` ONLY when both:
+//!   - `ANOFOX_WRITE_ACCURACY_BASELINE=1` is set, AND
+//!   - the ACCUR-08 anchor assertion has passed (monthly MASE within tolerance).
+//! Running plain `cargo test` without the write flag never overwrites the baseline.
 //!
 //! ## MSIS convention note (A4 / Pitfall 4)
 //! The reused `src/utils/metrics.rs::msis()` scales by mean absolute period-1
@@ -563,4 +575,442 @@ fn msis_coverage_present_monthly() {
         "Monthly interval metrics: MSIS={:.4} coverage={:.4}",
         msis_val, cov
     );
+}
+
+// ─── Reference fixture loader ─────────────────────────────────────────────────
+
+/// Load the pinned statsforecast reference monthly MASE from the committed fixture.
+///
+/// The fixture lives at `.planning/baselines/statsforecast_reference.json` and
+/// was regenerated once on a pinned Python env (statsforecast 2.0.3) with
+/// provenance block (D-06). The monthly MASE in the fixture (0.8633) differs
+/// from the historical published 0.93 (statsforecast 1.x) due to revised AutoETS
+/// implementation in 2.x. The comparison is apples-to-apples within the pinned
+/// env; see Plan 03 SUMMARY for full context.
+///
+/// Falls back to literal 0.93 if the fixture cannot be located (degraded mode),
+/// but this is not the expected path on a maintainer machine with the corpus set up.
+fn load_reference_monthly_mase() -> f64 {
+    // CARGO_MANIFEST_DIR = <workspace>/crates/anofox-bench-harness
+    // workspace root     = CARGO_MANIFEST_DIR/../../
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root = match manifest_dir.join("../..").canonicalize() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!(
+                "WARNING: could not canonicalize workspace root: {} — falling back to 0.93",
+                e
+            );
+            return 0.93;
+        }
+    };
+    let path = workspace_root.join(".planning/baselines/statsforecast_reference.json");
+    let content = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!(
+                "WARNING: statsforecast_reference.json not found at {} ({})\n\
+                 Regenerate with: uv run python3 validation/run_statsforecast.py --m3-reference\n\
+                 Falling back to literal 0.93 anchor",
+                path.display(),
+                e
+            );
+            return 0.93;
+        }
+    };
+    let json: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!(
+                "WARNING: statsforecast_reference.json is not valid JSON ({}): falling back to 0.93",
+                e
+            );
+            return 0.93;
+        }
+    };
+    json["datasets"]["M3"]["monthly"]["autoets_mase"]
+        .as_f64()
+        .unwrap_or_else(|| {
+            eprintln!(
+                "WARNING: datasets.M3.monthly.autoets_mase missing from fixture — falling back to 0.93"
+            );
+            0.93
+        })
+}
+
+// ─── ACCUR-08 anchor test ─────────────────────────────────────────────────────
+
+/// ACCUR-08: Whole-corpus AutoETS M3-monthly MASE anchor.
+///
+/// Validates that the anofox AutoETS M3-monthly MASE over the full 1428-series
+/// corpus is within ±0.02 of the pinned statsforecast reference value from
+/// `.planning/baselines/statsforecast_reference.json`.
+///
+/// The reference value is statsforecast 2.0.3 AutoETS on M3-monthly (0.8633),
+/// pinned with provenance (D-06). This differs from the historical published
+/// 0.93 (statsforecast 1.x); the comparison is apples-to-apples within the
+/// pinned env. See Plan 03 SUMMARY and fixture provenance block for details.
+///
+/// Diagnostic message: if the assertion fails, check:
+///   1. That the D-03 MASE-denominator fix is in effect (`src/utils/metrics.rs`).
+///   2. That `mase_scale()` uses the TRAINING-slice denominator, not the test slice.
+///   3. That the CvFoldGenerator single-origin split matches the Python harness.
+///   4. That the reference fixture is for the correct statsforecast version.
+///
+/// When `ANOFOX_DATASET_DIR` is not set, the test skips cleanly (ACCUR-01).
+#[test]
+fn accur08_anchor_m3_monthly_autoets() {
+    let results = run_accuracy_harness();
+
+    if results.is_empty() {
+        eprintln!("ANOFOX_DATASET_DIR not set — skipping accur08_anchor_m3_monthly_autoets");
+        return;
+    }
+
+    let monthly = results
+        .get("monthly")
+        .expect("monthly frequency bucket must exist in harness output");
+
+    let autoets_mase = monthly.autoets_mase;
+    let reference_mase = load_reference_monthly_mase();
+    let tolerance = 0.02_f64;
+
+    assert!(
+        autoets_mase.is_finite(),
+        "AutoETS M3-monthly MASE is NaN/Inf (ACCUR-08) — check D-03 fix and training denominator"
+    );
+
+    assert!(
+        (autoets_mase - reference_mase).abs() <= tolerance,
+        "ACCUR-08 anchor FAILED: AutoETS M3-monthly MASE={:.4} is outside ±{:.2} of reference {:.4}.\n\
+         Reference: statsforecast 2.0.3 pinned fixture ({}) — see Plan 03 SUMMARY.\n\
+         Diagnostic: check D-03 MASE denominator fix in src/utils/metrics.rs;\n\
+         check training-slice denominator in mase_scale() (Pitfall 1);\n\
+         check CvFoldGenerator single-origin split alignment with Python harness.",
+        autoets_mase,
+        tolerance,
+        reference_mase,
+        ".planning/baselines/statsforecast_reference.json"
+    );
+
+    eprintln!(
+        "ACCUR-08 PASSED: AutoETS M3-monthly MASE={:.4} (reference={:.4}, diff={:+.4}, tolerance=±{:.2})",
+        autoets_mase,
+        reference_mase,
+        autoets_mase - reference_mase,
+        tolerance
+    );
+}
+
+// ─── accuracy.json emit helper ────────────────────────────────────────────────
+
+/// Provenance block for `accuracy.json` (D-05).
+///
+/// Serialised into the `provenance` key of the JSON baseline.
+/// The `note` field records the D-03 MASE-fix before/after and the MSIS
+/// period-1 convention caveat (from Plan 02), making the number auditable.
+#[derive(serde::Serialize)]
+struct AccuracyProvenance {
+    /// Short git SHA at capture time.
+    git_sha: String,
+    /// ISO-8601 UTC timestamp of the capture run.
+    timestamp_iso: String,
+    /// Full `rustc --version` output.
+    rustc_version: String,
+    /// CPU model (from /proc/cpuinfo or "unknown").
+    host_cpu: String,
+    /// OS + kernel (from `uname -sr` or "unknown").
+    host_os: String,
+    /// Cargo features active during the capture.
+    active_features: Vec<String>,
+    /// Human-readable note on conventions and known caveats.
+    note: String,
+}
+
+/// Per-model metric row for one frequency in `accuracy.json`.
+#[derive(serde::Serialize)]
+struct ModelMetrics {
+    mase: f64,
+    smape: f64,
+    rmse: f64,
+    mae: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    msis: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    coverage: Option<f64>,
+}
+
+/// One frequency entry in `accuracy.json`.
+#[derive(serde::Serialize)]
+struct FrequencyEntry {
+    n_series: usize,
+    horizon: usize,
+    models: FrequencyModels,
+}
+
+/// Model pair for one frequency entry.
+#[derive(serde::Serialize)]
+struct FrequencyModels {
+    #[serde(rename = "AutoETS")]
+    autoets: ModelMetrics,
+    #[serde(rename = "Naive2")]
+    naive2: ModelMetrics,
+}
+
+/// Top-level `accuracy.json` document.
+#[derive(serde::Serialize)]
+struct AccuracyJson {
+    provenance: AccuracyProvenance,
+    datasets: AccuracyDatasets,
+}
+
+#[derive(serde::Serialize)]
+struct AccuracyDatasets {
+    #[serde(rename = "M3")]
+    m3: AccuracyM3,
+}
+
+#[derive(serde::Serialize)]
+struct AccuracyM3 {
+    monthly: FrequencyEntry,
+    quarterly: FrequencyEntry,
+    yearly: FrequencyEntry,
+}
+
+/// Collect provenance metadata for `accuracy.json`.
+fn collect_provenance() -> AccuracyProvenance {
+    // git SHA: read from `git rev-parse --short HEAD`
+    let git_sha = std::process::Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    // timestamp
+    let timestamp_iso = {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        format!(
+            "{}Z",
+            chrono::DateTime::from_timestamp(now as i64, 0)
+                .map(|dt: chrono::DateTime<chrono::Utc>| dt.format("%Y-%m-%dT%H:%M:%S").to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        )
+    };
+
+    // rustc version
+    let rustc_version = std::process::Command::new("rustc")
+        .arg("--version")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    // host CPU
+    let host_cpu = std::fs::read_to_string("/proc/cpuinfo")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("model name"))
+                .and_then(|l| l.split(':').nth(1))
+                .map(|s| s.trim().to_string())
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+
+    // host OS
+    let host_os = std::process::Command::new("uname")
+        .args(["-sr"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    // active features: standard harness defaults (no special feature flags)
+    let active_features = vec!["default".to_string(), "postprocess".to_string()];
+
+    AccuracyProvenance {
+        git_sha,
+        timestamp_iso,
+        rustc_version,
+        host_cpu,
+        host_os,
+        active_features,
+        note: concat!(
+            "D-03 MASE fix: training-slice seasonal-naive denominator with period-1 fallback ",
+            "when denominator collapses (constant series) — keeps series in aggregate instead ",
+            "of dropping as None/NaN. Matches statsforecast 2.x behavior. ",
+            "MSIS convention (A4/Pitfall 4): scaled by period-1 first-differences (not ",
+            "seasonal differences as in M4 competition MSIS); do not compare MSIS to M4 ",
+            "published benchmarks. ACCUR-08 anchor is MASE only. ",
+            "Reference: statsforecast 2.0.3 fixture (monthly MASE=0.8633); differs from ",
+            "historical 0.93 (statsforecast 1.x) due to revised AutoETS in 2.x."
+        )
+        .to_string(),
+    }
+}
+
+/// Write `.planning/baselines/accuracy.json` with per-frequency M3 results.
+///
+/// This function is ONLY called when:
+///   1. `ANOFOX_WRITE_ACCURACY_BASELINE=1` is set (explicit maintainer intent), AND
+///   2. The ACCUR-08 anchor has already been validated (monthly MASE within tolerance).
+///
+/// Running plain `cargo test` without the write flag never calls this function,
+/// so the committed baseline is never silently overwritten (Phase 1 CI-read-only rule).
+///
+/// # Guard contract
+///
+/// The anchor must pass BEFORE this function is called. The caller (Task 2 / checkpoint)
+/// enforces this ordering:
+///   1. Run `accur08_anchor_m3_monthly_autoets` and confirm it passes.
+///   2. Set `ANOFOX_WRITE_ACCURACY_BASELINE=1` and re-run the test suite.
+///   3. The guarded emit test below checks BOTH the env flag AND the anchor value.
+///
+/// If the anchor is outside tolerance when the write flag is set, this function
+/// panics with a descriptive message — it refuses to lock an unvalidated number.
+///
+/// # Schema
+///
+/// Writes the `accuracy.json` schema from RESEARCH.md:
+/// `{ provenance, datasets: { M3: { monthly/quarterly/yearly: { n_series, horizon, models: { AutoETS: {...}, Naive2: {...} } } } } }`
+pub fn emit_accuracy_json(results: &HashMap<String, FrequencyResult>, anchor_passed: bool) {
+    if !anchor_passed {
+        panic!(
+            "emit_accuracy_json called but anchor_passed=false. \
+             The ACCUR-08 anchor MUST pass before accuracy.json can be written. \
+             Check that AutoETS M3-monthly MASE is within ±0.02 of the reference."
+        );
+    }
+
+    // CARGO_MANIFEST_DIR-based workspace root (same as load_reference_monthly_mase).
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root = manifest_dir
+        .join("../..")
+        .canonicalize()
+        .expect("could not canonicalize workspace root from CARGO_MANIFEST_DIR");
+    let out_path = workspace_root.join(".planning/baselines/accuracy.json");
+
+    // Build the JSON document from FrequencyResult map.
+    let make_entry = |freq: &str| -> FrequencyEntry {
+        let r = results
+            .get(freq)
+            .unwrap_or_else(|| panic!("frequency '{}' missing from harness results", freq));
+        FrequencyEntry {
+            n_series: r.n_series,
+            horizon: r.horizon,
+            models: FrequencyModels {
+                autoets: ModelMetrics {
+                    mase: r.autoets_mase,
+                    smape: r.autoets_smape,
+                    rmse: r.autoets_rmse,
+                    mae: r.autoets_mae,
+                    msis: r.autoets_msis,
+                    coverage: r.autoets_coverage,
+                },
+                naive2: ModelMetrics {
+                    mase: r.naive2_mase,
+                    smape: r.naive2_smape,
+                    rmse: f64::NAN,
+                    mae: f64::NAN,
+                    msis: None,
+                    coverage: None,
+                },
+            },
+        }
+    };
+
+    let doc = AccuracyJson {
+        provenance: collect_provenance(),
+        datasets: AccuracyDatasets {
+            m3: AccuracyM3 {
+                monthly: make_entry("monthly"),
+                quarterly: make_entry("quarterly"),
+                yearly: make_entry("yearly"),
+            },
+        },
+    };
+
+    let json_str = serde_json::to_string_pretty(&doc).expect("accuracy.json serialization failed");
+
+    // Ensure the parent directory exists.
+    if let Some(parent) = out_path.parent() {
+        std::fs::create_dir_all(parent)
+            .unwrap_or_else(|e| panic!("could not create {:?}: {}", parent, e));
+    }
+
+    std::fs::write(&out_path, json_str)
+        .unwrap_or_else(|e| panic!("could not write accuracy.json to {:?}: {}", out_path, e));
+
+    eprintln!("accuracy.json written to {}", out_path.display());
+}
+
+/// Guarded baseline emit: write `accuracy.json` only when write flag + anchor pass.
+///
+/// This test runs the full harness, validates the ACCUR-08 anchor, and ONLY THEN
+/// calls `emit_accuracy_json()` to write `.planning/baselines/accuracy.json`.
+///
+/// Guard conditions (BOTH must be true to write):
+///   1. `ANOFOX_WRITE_ACCURACY_BASELINE=1` env var is set.
+///   2. AutoETS M3-monthly MASE is within ±0.02 of the pinned reference.
+///
+/// When the env flag is absent, the test skips cleanly without touching the file.
+/// When `ANOFOX_DATASET_DIR` is absent, the harness returns an empty map and the
+/// test also skips cleanly.
+///
+/// This test is designed to be run AFTER the checkpoint:decision confirms lock-now.
+#[test]
+fn emit_accuracy_baseline_if_write_flag_set() {
+    // Check write flag FIRST — skip immediately if not set (no harness run needed).
+    let write_flag = std::env::var("ANOFOX_WRITE_ACCURACY_BASELINE")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    if !write_flag {
+        eprintln!(
+            "ANOFOX_WRITE_ACCURACY_BASELINE not set — skipping accuracy.json emit \
+             (set to '1' after checkpoint:decision approves lock-now)"
+        );
+        return;
+    }
+
+    let results = run_accuracy_harness();
+    if results.is_empty() {
+        eprintln!(
+            "ANOFOX_DATASET_DIR not set — skipping accuracy.json emit \
+             (requires full M3 corpus)"
+        );
+        return;
+    }
+
+    // Validate the ACCUR-08 anchor before any write.
+    let monthly = results
+        .get("monthly")
+        .expect("monthly frequency bucket must exist");
+    let autoets_mase = monthly.autoets_mase;
+    let reference_mase = load_reference_monthly_mase();
+    let tolerance = 0.02_f64;
+
+    let anchor_passed =
+        autoets_mase.is_finite() && (autoets_mase - reference_mase).abs() <= tolerance;
+
+    if !anchor_passed {
+        panic!(
+            "ACCUR-08 anchor FAILED — refusing to write accuracy.json.\n\
+             AutoETS M3-monthly MASE={:.4} is outside ±{:.2} of reference {:.4}.\n\
+             accuracy.json must NOT be committed until the anchor passes (ACCUR-08).",
+            autoets_mase, tolerance, reference_mase
+        );
+    }
+
+    eprintln!(
+        "ACCUR-08 anchor PASSED (MASE={:.4}, ref={:.4}) — writing accuracy.json",
+        autoets_mase, reference_mase
+    );
+
+    emit_accuracy_json(&results, anchor_passed);
 }
