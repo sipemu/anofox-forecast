@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 2
-current_phase_name: Accuracy Harness & Statistical Methodology
+current_phase: 02
+current_phase_name: accuracy-harness-statistical-methodology
 status: executing
-stopped_at: Phase 2 context gathered
-last_updated: "2026-08-10T20:06:26.755Z"
+stopped_at: Completed 02-01-PLAN.md (tracer slice)
+last_updated: "2026-08-10T21:00:33.490Z"
 progress:
   total_phases: 2
   completed_phases: 1
   total_plans: 7
-  completed_plans: 3
+  completed_plans: 4
 ---
 
 # Project State: anofox-forecast — Performance & Validation Hardening
@@ -25,18 +25,18 @@ progress:
 
 **Core Value:** Every claimed capability is measured, and every improvement is proven with a before/after number.
 
-**Current Focus:** Phase 02 — Accuracy Harness & Statistical Methodology
+**Current Focus:** Phase 02 — accuracy-harness-statistical-methodology
 
 ---
 
 ## Current Position
 
-**Phase:** 2 — Accuracy Harness & Statistical Methodology
-**Plan:** Not started
+**Phase:** 02 (accuracy-harness-statistical-methodology) — EXECUTING
+**Plan:** 2 of 4
 **Status:** Ready to execute
 
 ```
-Progress: [█████░░░░░░░░░░░░░░░░] 1/4 phases complete
+Progress: [██████░░░░] 57%
 
 Phase 1 [COMPLETE]     █████
 Phase 2 [NOT STARTED]  ░░░░░
@@ -62,6 +62,7 @@ Phase 4 [NOT STARTED]  ░░░░░
 | Phase 01 P01 | 9 | 4 tasks | 7 files |
 | Phase 01 P02 | 10 | 3 tasks | 5 files |
 | Phase 01 P03 | 30 | 3 tasks | 7 files |
+| Phase 02 P01 | 330 | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -96,9 +97,9 @@ Phase 4 [NOT STARTED]  ░░░░░
 
 ## Session Continuity
 
-**Last session:** 2026-08-10T05:10:17.749Z
-**Stopped at:** Phase 2 context gathered
-**Resume file:** .planning/phases/02-accuracy-harness-statistical-methodology/02-CONTEXT.md
+**Last session:** 2026-08-10T21:00:33.482Z
+**Stopped at:** Completed 02-01-PLAN.md (tracer slice)
+**Resume file:** .planning/phases/02-accuracy-harness-statistical-methodology/02-02-PLAN.md
 
 ### What Was Done This Session
 
@@ -125,3 +126,5 @@ Start `/gsd-plan-phase 2` — Phase 2: Accuracy Harness & Statistical Methodolog
 - [Phase ?]: LaplaceForecaster gated behind cfg(distributional) in baseline_suite.rs — criterion_group! duplicated for cfg/no-cfg build variants
 - [Phase ?]: All 7 dhat families in one #[test] fn to avoid overlapping dhat::Profiler instances (dhat panics on concurrent profilers)
 - [Phase ?]: criterion.json committed as 0.0 placeholder (local-only capture, D-03); dhat.json committed with real values (native test, no env deps)
+- [Phase ?]: Period-1 naive fallback on seasonal MASE collapse (D-03/D-04): fix in src/utils/metrics.rs keeps series in aggregate instead of dropping with None/NaN — matches statsforecast behavior
+- [Phase ?]: mase_scale() training-denominator placed in loader.rs (harness) to keep competition-correct MASE separate from library calculate_mase which scales on test slice (Pitfall 1)

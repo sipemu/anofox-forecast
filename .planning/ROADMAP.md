@@ -64,11 +64,11 @@ Every claimed capability is measured, and every improvement is proven with a bef
   4. Accuracy is reported with per-frequency stratification (Yearly/Quarterly/Monthly/Weekly/Daily/Hourly); the committed `baselines/accuracy.json` matches published statsforecast AutoETS M3 monthly MASE ≈ 0.93 before being locked
   5. The cross-library comparison against the reference implementation runs on shared datasets/horizons/preprocessing; any accuracy-gap claim under 5% is gated by a Diebold-Mariano significance test
 
-**Plans**: 4 plans
+**Plans**: 1/4 plans executed
 
 **Wave 1**
 
-- [ ] 02-01-PLAN.md — Tracer: TSF loader + D-03 MASE collapse fix + one-path AutoETS training-denominator MASE end-to-end (ACCUR-01..04)
+- [x] 02-01-PLAN.md — Tracer: TSF loader + D-03 MASE collapse fix + one-path AutoETS training-denominator MASE end-to-end (ACCUR-01..04)
 
 **Wave 2** *(blocked on Wave 1)*
 
@@ -127,7 +127,7 @@ Every claimed capability is measured, and every improvement is proven with a bef
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Measurement Infrastructure & Compute Baselines | 3/3 | Complete    | 2026-08-10 |
-| 2. Accuracy Harness & Statistical Methodology | 0/? | Not started | - |
+| 2. Accuracy Harness & Statistical Methodology | 1/4 | In Progress|  |
 | 3. Numerical Robustness & Coverage Baseline | 0/? | Not started | - |
 | 4. Prioritized Improvement Backlog & Top-Value Fixes | 0/? | Not started | - |
 
