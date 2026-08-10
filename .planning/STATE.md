@@ -5,13 +5,13 @@ milestone_name: milestone
 current_phase: 02
 current_phase_name: accuracy-harness-statistical-methodology
 status: executing
-stopped_at: Completed 02-01-PLAN.md (tracer slice)
-last_updated: "2026-08-10T21:00:33.490Z"
+stopped_at: Completed 02-02-PLAN.md
+last_updated: "2026-08-10T21:12:09.568Z"
 progress:
   total_phases: 2
   completed_phases: 1
   total_plans: 7
-  completed_plans: 4
+  completed_plans: 5
 ---
 
 # Project State: anofox-forecast — Performance & Validation Hardening
@@ -32,11 +32,11 @@ progress:
 ## Current Position
 
 **Phase:** 02 (accuracy-harness-statistical-methodology) — EXECUTING
-**Plan:** 2 of 4
+**Plan:** 3 of 4
 **Status:** Ready to execute
 
 ```
-Progress: [██████░░░░] 57%
+Progress: [███████░░░] 71%
 
 Phase 1 [COMPLETE]     █████
 Phase 2 [NOT STARTED]  ░░░░░
@@ -63,6 +63,7 @@ Phase 4 [NOT STARTED]  ░░░░░
 | Phase 01 P02 | 10 | 3 tasks | 5 files |
 | Phase 01 P03 | 30 | 3 tasks | 7 files |
 | Phase 02 P01 | 330 | 3 tasks | 4 files |
+| Phase 02 P02 | 518 | 3 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -97,9 +98,9 @@ Phase 4 [NOT STARTED]  ░░░░░
 
 ## Session Continuity
 
-**Last session:** 2026-08-10T21:00:33.482Z
-**Stopped at:** Completed 02-01-PLAN.md (tracer slice)
-**Resume file:** .planning/phases/02-accuracy-harness-statistical-methodology/02-02-PLAN.md
+**Last session:** 2026-08-10T21:12:09.556Z
+**Stopped at:** Completed 02-02-PLAN.md
+**Resume file:** None
 
 ### What Was Done This Session
 
@@ -128,3 +129,5 @@ Start `/gsd-plan-phase 2` — Phase 2: Accuracy Harness & Statistical Methodolog
 - [Phase ?]: criterion.json committed as 0.0 placeholder (local-only capture, D-03); dhat.json committed with real values (native test, no env deps)
 - [Phase ?]: Period-1 naive fallback on seasonal MASE collapse (D-03/D-04): fix in src/utils/metrics.rs keeps series in aggregate instead of dropping with None/NaN — matches statsforecast behavior
 - [Phase ?]: mase_scale() training-denominator placed in loader.rs (harness) to keep competition-correct MASE separate from library calculate_mase which scales on test slice (Pitfall 1)
+- [Phase ?]: MSIS scoped to monthly only to bound runtime; monthly is ACCUR-08 anchor frequency with richest interval evaluation
+- [Phase ?]: msis() uses period-1 first-diff scaling (A4/Pitfall 4) — not seasonal-lag as M4 competition; documented in code; ACCUR-08 anchor = MASE only

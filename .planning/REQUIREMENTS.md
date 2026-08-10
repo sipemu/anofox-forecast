@@ -31,9 +31,9 @@ regression.
 - [x] **ACCUR-02**: The accuracy harness uses expanding-window (rolling-origin) CV with per-fold temporal-integrity assertions (`train_end < test_start`); no in-sample/`fitted_values()` metrics ever appear in accuracy tables
 - [x] **ACCUR-03**: MASE is computed with the correct seasonal denominator and a guard against denominator collapse on intermittent/constant series (no silent NaN/Inf in aggregates)
 - [x] **ACCUR-04**: sMAPE, RMSE, and MAE are implemented/verified with correct denominators
-- [ ] **ACCUR-05**: MSIS and an empirical interval-coverage check are implemented for prediction intervals
-- [ ] **ACCUR-06**: A Naive2 baseline (autocorrelation-gated seasonal/non-seasonal) is available as the accuracy reference
-- [ ] **ACCUR-07**: Accuracy is reported with per-frequency stratification (never a single cross-frequency aggregate)
+- [x] **ACCUR-05**: MSIS and an empirical interval-coverage check are implemented for prediction intervals
+- [x] **ACCUR-06**: A Naive2 baseline (autocorrelation-gated seasonal/non-seasonal) is available as the accuracy reference
+- [x] **ACCUR-07**: Accuracy is reported with per-frequency stratification (never a single cross-frequency aggregate)
 - [ ] **ACCUR-08**: The committed accuracy baseline is validated against a published reference (statsforecast AutoETS M3 monthly, MASE ≈ 0.93) before being locked
 
 ### Numerical Robustness & Input Handling (ROBUST)
@@ -112,9 +112,9 @@ Explicitly excluded. Documented to prevent scope creep.
 | ACCUR-02 | Phase 2 | Complete |
 | ACCUR-03 | Phase 2 | Complete |
 | ACCUR-04 | Phase 2 | Complete |
-| ACCUR-05 | Phase 2 | Pending |
-| ACCUR-06 | Phase 2 | Pending |
-| ACCUR-07 | Phase 2 | Pending |
+| ACCUR-05 | Phase 2 | Complete |
+| ACCUR-06 | Phase 2 | Complete |
+| ACCUR-07 | Phase 2 | Complete |
 | ACCUR-08 | Phase 2 | Pending |
 | BENCH-01 | Phase 2 | Pending |
 | BENCH-02 | Phase 2 | Pending |
