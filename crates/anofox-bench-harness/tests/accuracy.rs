@@ -209,7 +209,15 @@ fn run_accuracy_harness() -> HashMap<String, FrequencyResult> {
                 .map(|(a, p)| (a - p).abs())
                 .sum::<f64>()
                 / h as f64;
-            naive2_mases.push(n2_fmae / n2_denom);
+            // Convention (ACCUR-08 / WR-01): exclude MASE == 0.0 (degenerate
+            // perfect-fit / zero-denominator artifacts) to match the Python
+            // fixture and cross_library.rs which both require mase > 0.0.
+            // Zero-MASE series are still counted toward skipped_nonfinite so
+            // the aggregate denominator is transparent.
+            let n2_mase_val = n2_fmae / n2_denom;
+            if n2_mase_val.is_finite() && n2_mase_val > 0.0 {
+                naive2_mases.push(n2_mase_val);
+            }
             naive2_smapes.push(smape(test_slice, n2_pred_slice));
 
             // ── AutoETS (point metrics) ───────────────────────────────────────
@@ -237,7 +245,14 @@ fn run_accuracy_harness() -> HashMap<String, FrequencyResult> {
                 .map(|(a, p)| (a - p).abs())
                 .sum::<f64>()
                 / h_ae as f64;
-            autoets_mases.push(ae_fmae / ae_denom);
+            // Convention (ACCUR-08 / WR-01): exclude MASE == 0.0 to match the
+            // Python fixture (run_statsforecast.py: mase_val > 0) and
+            // cross_library.rs (mase > 0.0) — ensures the ACCUR-08 anchor
+            // compares over identical series sets.
+            let ae_mase_val = ae_fmae / ae_denom;
+            if ae_mase_val.is_finite() && ae_mase_val > 0.0 {
+                autoets_mases.push(ae_mase_val);
+            }
             autoets_smapes.push(smape(test_ae_slice, ae_pred_slice));
             autoets_rmses.push(rmse(test_ae_slice, ae_pred_slice));
             autoets_maes.push(mae(test_ae_slice, ae_pred_slice));
