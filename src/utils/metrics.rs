@@ -153,10 +153,11 @@ fn calculate_mase(
         .sum::<f64>()
         / (n - period) as f64;
 
-    // Denominator-collapse guard (D-04): when seasonal naive MAE is zero
-    // (constant training window at the seasonal lag), substitute a period-1
-    // naive denominator rather than dropping the series. Keeps series count in
-    // the aggregate stable and matches statsforecast MASE behavior.
+    // Denominator-collapse guard (D-03): when the seasonal naive MAE is zero
+    // (i.e. the actual test values repeat exactly at the seasonal lag — a
+    // degenerate test window), substitute a period-1 first-difference MAE
+    // computed from the same `actual` slice. Returns None only if that too
+    // is zero (truly constant test window with no variation at any scale).
     let naive_mae = if naive_mae == 0.0 {
         let p1_mae: f64 = actual
             .iter()
