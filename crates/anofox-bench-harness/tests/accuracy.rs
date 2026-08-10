@@ -743,12 +743,19 @@ struct AccuracyProvenance {
 }
 
 /// Per-model metric row for one frequency in `accuracy.json`.
+///
+/// `rmse` and `mae` are `Option<f64>` so that Naive2 rows (which do not
+/// collect these metrics) can omit the fields without emitting JSON `null`
+/// or the non-serialisable `f64::NAN`. Finite values are `Some(v)`; missing
+/// or non-finite values are `None` (field omitted via `skip_serializing_if`).
 #[derive(serde::Serialize)]
 struct ModelMetrics {
     mase: f64,
     smape: f64,
-    rmse: f64,
-    mae: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rmse: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mae: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     msis: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -923,16 +930,26 @@ pub fn emit_accuracy_json(results: &HashMap<String, FrequencyResult>, anchor_pas
                 autoets: ModelMetrics {
                     mase: r.autoets_mase,
                     smape: r.autoets_smape,
-                    rmse: r.autoets_rmse,
-                    mae: r.autoets_mae,
+                    // Map non-finite (NaN/Inf) to None so serde_json does not error.
+                    rmse: if r.autoets_rmse.is_finite() {
+                        Some(r.autoets_rmse)
+                    } else {
+                        None
+                    },
+                    mae: if r.autoets_mae.is_finite() {
+                        Some(r.autoets_mae)
+                    } else {
+                        None
+                    },
                     msis: r.autoets_msis,
                     coverage: r.autoets_coverage,
                 },
                 naive2: ModelMetrics {
                     mase: r.naive2_mase,
                     smape: r.naive2_smape,
-                    rmse: f64::NAN,
-                    mae: f64::NAN,
+                    // Naive2 does not collect RMSE/MAE — omit these fields from JSON.
+                    rmse: None,
+                    mae: None,
                     msis: None,
                     coverage: None,
                 },
