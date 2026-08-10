@@ -36,9 +36,7 @@ pub struct DatasetSeries {
 ///
 /// Value tokens that fail to parse as `f64`, or that are non-finite (NaN/Inf
 /// from malformed TSF), are silently dropped (security guard V5, T-02-NAN).
-pub fn parse_tsf_with_meta(
-    path: &Path,
-) -> std::io::Result<(String, usize, Vec<DatasetSeries>)> {
+pub fn parse_tsf_with_meta(path: &Path) -> std::io::Result<(String, usize, Vec<DatasetSeries>)> {
     // Latin-1 decode: MANDATORY — Monash .tsf is not UTF-8.
     // std::fs::read_to_string panics on accented category labels in the header.
     let bytes = fs::read(path)?;
@@ -191,8 +189,7 @@ S1:1990-01:1.0,2.0,NaN,4.0,5.0
 S2:1990-01:10.0,20.0,30.0
 ";
         let path = write_temp_tsf(content);
-        let (freq, horizon, series) = parse_tsf_with_meta(&path)
-            .expect("parse should succeed");
+        let (freq, horizon, series) = parse_tsf_with_meta(&path).expect("parse should succeed");
         std::fs::remove_file(&path).ok();
 
         assert_eq!(freq, "monthly", "frequency tag");
@@ -221,10 +218,7 @@ S2:1990-01:10.0,20.0,30.0
         // Ramp [0,1,2,3,4,5] with period=1: each diff is 1.0, mean = 1.0.
         let ramp: Vec<f64> = (0..6).map(|i| i as f64).collect();
         let scale = mase_scale(&ramp, 1);
-        assert!(
-            (scale - 1.0).abs() < 1e-10,
-            "expected 1.0, got {scale}"
-        );
+        assert!((scale - 1.0).abs() < 1e-10, "expected 1.0, got {scale}");
     }
 
     #[test]
@@ -247,10 +241,7 @@ S2:1990-01:10.0,20.0,30.0
         // season 0: [0,1,...,11]; season 1: [0.1,1.1,...,11.1]
         // diffs at lag 12: all 0.1 => mean = 0.1
         let scale = mase_scale(&vals, 12);
-        assert!(
-            (scale - 0.1).abs() < 1e-9,
-            "expected 0.1, got {scale}"
-        );
+        assert!((scale - 0.1).abs() < 1e-9, "expected 0.1, got {scale}");
     }
 
     #[test]
