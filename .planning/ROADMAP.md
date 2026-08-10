@@ -64,7 +64,23 @@ Every claimed capability is measured, and every improvement is proven with a bef
   4. Accuracy is reported with per-frequency stratification (Yearly/Quarterly/Monthly/Weekly/Daily/Hourly); the committed `baselines/accuracy.json` matches published statsforecast AutoETS M3 monthly MASE ≈ 0.93 before being locked
   5. The cross-library comparison against the reference implementation runs on shared datasets/horizons/preprocessing; any accuracy-gap claim under 5% is gated by a Diebold-Mariano significance test
 
-**Plans**: TBD
+**Plans**: 4 plans
+
+**Wave 1**
+
+- [ ] 02-01-PLAN.md — Tracer: TSF loader + D-03 MASE collapse fix + one-path AutoETS training-denominator MASE end-to-end (ACCUR-01..04)
+
+**Wave 2** *(blocked on Wave 1)*
+
+- [ ] 02-02-PLAN.md — Naive2 (ACF-gated) + full per-frequency stratified M3 Y/Q/M run + MSIS/coverage, NaN-guarded (ACCUR-02, ACCUR-05, ACCUR-06, ACCUR-07)
+
+**Wave 3** *(blocked on Wave 2)*
+
+- [ ] 02-03-PLAN.md — Diebold-Mariano test (HLN+HAC) + pinned statsforecast reference fixture + cross-library diff table (BENCH-01, BENCH-02)
+
+**Wave 4** *(blocked on Wave 3 — contains lock checkpoint)*
+
+- [ ] 02-04-PLAN.md — ACCUR-08 anchor validation, lock accuracy.json (decision checkpoint), workflow_dispatch-only accuracy.yml (ACCUR-07, ACCUR-08)
 
 ---
 
