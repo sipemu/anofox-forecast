@@ -2,11 +2,11 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 01
-current_phase_name: measurement-infrastructure-compute-baselines
-status: verifying
+current_phase: 2
+current_phase_name: Accuracy Harness & Statistical Methodology
+status: planning
 stopped_at: Completed 01-03-PLAN.md
-last_updated: "2026-08-09T21:09:53.018Z"
+last_updated: "2026-08-10T04:46:52.540Z"
 progress:
   total_phases: 1
   completed_phases: 1
@@ -16,8 +16,8 @@ progress:
 
 # Project State: anofox-forecast — Performance & Validation Hardening
 
-**Last Updated:** 2026-08-09
-**Session:** Roadmap initialization
+**Last Updated:** 2026-08-10
+**Session:** Phase 1 verified & complete
 
 ---
 
@@ -25,23 +25,23 @@ progress:
 
 **Core Value:** Every claimed capability is measured, and every improvement is proven with a before/after number.
 
-**Current Focus:** Phase 01 — measurement-infrastructure-compute-baselines
+**Current Focus:** Phase 02 — Accuracy Harness & Statistical Methodology
 
 ---
 
 ## Current Position
 
-**Phase:** 01 (measurement-infrastructure-compute-baselines) — EXECUTING
-**Plan:** 3 of 3
-**Status:** Phase complete — ready for verification
+**Phase:** 2 — Accuracy Harness & Statistical Methodology
+**Plan:** Not started
+**Status:** Ready to plan
 
 ```
-Progress: [██████████] 100%
+Progress: [█████░░░░░░░░░░░░░░░░] 1/4 phases complete
 
-Phase 1 [NOT STARTED] ░░░░░
-Phase 2 [NOT STARTED] ░░░░░
-Phase 3 [NOT STARTED] ░░░░░
-Phase 4 [NOT STARTED] ░░░░░
+Phase 1 [COMPLETE]     █████
+Phase 2 [NOT STARTED]  ░░░░░
+Phase 3 [NOT STARTED]  ░░░░░
+Phase 4 [NOT STARTED]  ░░░░░
 ```
 
 ---
@@ -86,31 +86,29 @@ Phase 4 [NOT STARTED] ░░░░░
 
 ### Todos
 
-- [ ] Plan Phase 1 via `/gsd-plan-phase 1`
+- [ ] Plan Phase 2 via `/gsd-plan-phase 2`
 
 ### Blockers
 
-None at this time.
+- ⚠️ [Phase 1] `iai.json` / `criterion.json` baselines committed as structural placeholders — real numbers require maintainer capture on a valgrind ≥ 3.20 machine (`scripts/update_iai.sh`) and a quiet local machine (`scripts/update_criterion.sh`). Harness/gates complete; numeric population is a documented manual step.
 
 ---
 
 ## Session Continuity
 
-**Last session:** 2026-08-09T21:09:53.006Z
-**Stopped at:** Completed 01-03-PLAN.md
+**Last session:** 2026-08-10
+**Stopped at:** Phase 1 complete (UAT 3/3 passed, verification passed), ready to plan Phase 2
 **Resume file:** None
 
 ### What Was Done This Session
 
-- Loaded PROJECT.md, REQUIREMENTS.md, research/SUMMARY.md, config.json, codebase/ARCHITECTURE.md
-- Derived 4 phases from 28 v1 requirements (MEAS×4 + PERF×6 + ACCUR×8 + ROBUST×3 + COVER×2 + BENCH×2 + IMPR×3)
-- Applied sequencing constraints: PERF-06 before PERF-05; ACCUR validation before BENCH claims; IMPR last
-- Wrote ROADMAP.md with 4 phases, success criteria, and progress table
-- Updated REQUIREMENTS.md traceability section
+- Resumed Phase 1 UAT; marked tests 2 (iai.json) and 3 (criterion.json) passed — 3/3 UAT passed, 0 issues
+- Canonicalized 01-VERIFICATION.md status human_needed → passed
+- Ran phase.complete: ROADMAP + STATE advanced to Phase 2; evolved PROJECT.md (2 requirements → Validated, 3 decisions logged)
 
 ### Resume Point
 
-Start `/gsd-plan-phase 1` — Phase 1: Measurement Infrastructure & Compute Baselines covers MEAS-01..04 and PERF-01..06.
+Start `/gsd-plan-phase 2` — Phase 2: Accuracy Harness & Statistical Methodology covers ACCUR-01..08 and BENCH-01..02.
 
 ---
 

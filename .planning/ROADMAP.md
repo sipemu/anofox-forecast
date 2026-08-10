@@ -10,7 +10,7 @@ Every claimed capability is measured, and every improvement is proven with a bef
 
 ## Phases
 
-- [ ] **Phase 1: Measurement Infrastructure & Compute Baselines** - Stand up CI workflows, committed baseline store, and capture speed/memory/WASM-size baselines (after dead-code cleanup)
+- [x] **Phase 1: Measurement Infrastructure & Compute Baselines** - Stand up CI workflows, committed baseline store, and capture speed/memory/WASM-size baselines (after dead-code cleanup) (completed 2026-08-10)
 - [ ] **Phase 2: Accuracy Harness & Statistical Methodology** - Build dataset loader, implement correct metrics, validate against reference, commit accuracy and cross-library baselines
 - [ ] **Phase 3: Numerical Robustness & Coverage Baseline** - Add edge-case and property-based tests, capture coverage baseline with CI floor, document gap inventory
 - [ ] **Phase 4: Prioritized Improvement Backlog & Top-Value Fixes** - Rank all findings by value/effort using real baseline numbers, land highest-value improvements with before/after deltas
@@ -110,7 +110,7 @@ Every claimed capability is measured, and every improvement is proven with a bef
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Measurement Infrastructure & Compute Baselines | 3/3 | In Progress|  |
+| 1. Measurement Infrastructure & Compute Baselines | 3/3 | Complete    | 2026-08-10 |
 | 2. Accuracy Harness & Statistical Methodology | 0/? | Not started | - |
 | 3. Numerical Robustness & Coverage Baseline | 0/? | Not started | - |
 | 4. Prioritized Improvement Backlog & Top-Value Fixes | 0/? | Not started | - |

@@ -30,14 +30,14 @@ backbone that makes the improvements trustworthy and non-regressing.
 - ✓ Batch multi-series forecasting with Rayon parallelism (`parallel` feature) — existing
 - ✓ WebAssembly/JS bindings + published npm package + browser playground on GitHub Pages — existing
 - ✓ Existing quality gates: criterion benchmarks, proptest, clippy `-D warnings`, cargo-audit/deny — existing
+- ✓ Compute-speed benchmark harness with captured baselines across model families (criterion wall-clock + iai-callgrind instruction gates; native `parallel` and single-thread profiles) — Phase 1
+- ✓ Memory & WASM-size measurement (dhat peak-allocation tests + committed `wasm_size.json`; PERF-06 dead-code cleanup before size baseline) — Phase 1
 
 ### Active
 
 <!-- The hardening goals for this cycle. Hypotheses until shipped and validated. -->
 
 **Measurement backbone (per dimension: harness → baseline → tracked over time)**
-- [ ] Compute-speed benchmark harness with captured baselines across model families (fit + predict, single + batch)
-- [ ] Memory & WASM-size measurement (peak allocation during fit; compiled `.wasm` binary size tracked)
 - [ ] Forecast-accuracy harness over vendored standard competition datasets (M-competitions, Tourism, etc.) with standard metrics (MASE, RMSE, sMAPE)
 - [ ] Numerical-robustness test suite for edge cases (near-singular matrices, convergence limits, NaN/Inf, extreme scales)
 - [ ] Statistical-methodology validation: correctness of CV splits, interval/conformal coverage checks
@@ -77,7 +77,9 @@ backbone that makes the improvements trustworthy and non-regressing.
 
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
-| Measurement-first: build harnesses & baselines before improving | Can't prove improvement (or catch regressions) without a baseline; whole-library scope demands it | — Pending |
+| Measurement-first: build harnesses & baselines before improving | Can't prove improvement (or catch regressions) without a baseline; whole-library scope demands it | ✓ Validated — Phase 1 stood up criterion/iai/dhat/wasm-size harnesses with committed baselines and CI read-only gates |
+| CI reads baselines but never overwrites them (MEAS-01); criterion/iai captured locally, not on Actions | Wall-clock noise on shared CI runners makes committed baselines untrustworthy; separation keeps numbers reproducible | ✓ Applied — Phase 1 (`wasm-size.yml`/`bench.yml` gate-only; `scripts/update_*.sh` for local capture) |
+| iai.json/criterion.json committed as structural placeholders pending maintainer hardware capture | Dev machine lacks valgrind ≥ 3.20; criterion needs a quiet machine — schema/gates land first, numbers populated later | ✓ Accepted — Phase 1 UAT confirmed harness complete; numeric population is a documented maintainer step |
 | Whole-library scope across all 8 dimensions | User wants systematic, proactive confidence — not a point fix | — Pending |
 | Use standard competition datasets as the accuracy corpus | Industry-recognized, comparable to reference libraries, avoids synthetic-only bias | — Pending |
 | Exclude new models / API redesigns / auto period-detection integration | Keeps the cycle a hardening pass, not feature creep | — Pending |
@@ -100,4 +102,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-08-09 after initialization*
+*Last updated: 2026-08-10 after Phase 1*
