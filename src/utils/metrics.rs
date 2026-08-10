@@ -153,9 +153,25 @@ fn calculate_mase(
         .sum::<f64>()
         / (n - period) as f64;
 
-    if naive_mae == 0.0 {
-        return None;
-    }
+    // Denominator-collapse guard (D-04): when seasonal naive MAE is zero
+    // (constant training window at the seasonal lag), substitute a period-1
+    // naive denominator rather than dropping the series. Keeps series count in
+    // the aggregate stable and matches statsforecast MASE behavior.
+    let naive_mae = if naive_mae == 0.0 {
+        let p1_mae: f64 = actual
+            .iter()
+            .skip(1)
+            .zip(actual.iter())
+            .map(|(curr, prev)| (curr - prev).abs())
+            .sum::<f64>()
+            / (n - 1) as f64;
+        if p1_mae == 0.0 {
+            return None; // truly constant series — no scaling possible
+        }
+        p1_mae
+    } else {
+        naive_mae
+    };
 
     // Calculate forecast MAE
     let forecast_mae: f64 = actual
@@ -1110,5 +1126,39 @@ mod tests {
     #[test]
     fn wrmsse_mismatched() {
         assert!(wrmsse(&[0.5], &[1.0, 2.0]).is_nan());
+    }
+
+    // --- D-03 MASE denominator-collapse guard regression tests ---
+
+    #[test]
+    fn mase_constant_series_no_nan() {
+        // A constant training window collapses the seasonal denominator to 0.
+        // D-03 fix: period-1 fallback must return a finite MASE, not None/NaN.
+        //
+        // Case 1: constant series at seasonal lag (period=4 repeating pattern
+        // [1,2,3,4] x5 — seasonal diffs are 0 but first diffs are non-zero).
+        let repeating: Vec<f64> = (0..5).flat_map(|_| [1.0, 2.0, 3.0, 4.0]).collect();
+        let predicted_r = vec![1.1_f64; 20];
+        let result_r = calculate_mase(&repeating, &predicted_r, Some(4));
+        // Before fix: seasonal diffs = 0 => returns None. After fix: period-1
+        // fallback (diffs between adjacent = 1.0) => Some(finite).
+        assert!(
+            result_r.is_some(),
+            "MASE must not be None on period-repeating series (D-03)"
+        );
+        assert!(
+            result_r.unwrap().is_finite(),
+            "MASE must be finite on period-repeating series (D-03)"
+        );
+
+        // Case 2: truly constant series — even period-1 fallback is 0, so
+        // the function should still return None (cannot scale by zero).
+        let constant = vec![5.0_f64; 20];
+        let predicted_c = vec![5.1_f64; 20];
+        let result_c = calculate_mase(&constant, &predicted_c, Some(12));
+        assert!(
+            result_c.is_none(),
+            "MASE must remain None on a truly constant series (no first-difference signal)"
+        );
     }
 }
