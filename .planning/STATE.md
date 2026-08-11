@@ -4,14 +4,14 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 03
 current_phase_name: numerical-robustness-coverage-baseline
-status: executing
-stopped_at: "03-03: Completed Tasks 1+2 (update_coverage.sh + 03-GAP-INVENTORY.md); paused at checkpoint:decision (Task 3 — baseline lock)"
-last_updated: "2026-08-11T18:38:40.016Z"
+status: verifying
+stopped_at: Completed 03-03-PLAN.md — coverage baseline + CI ratchet gate
+last_updated: "2026-08-11T18:46:16.853Z"
 progress:
   total_phases: 3
-  completed_phases: 2
+  completed_phases: 3
   total_plans: 10
-  completed_plans: 9
+  completed_plans: 10
 ---
 
 # Project State: anofox-forecast — Performance & Validation Hardening
@@ -33,10 +33,10 @@ progress:
 
 **Phase:** 03 (numerical-robustness-coverage-baseline) — EXECUTING
 **Plan:** 3 of 3
-**Status:** Ready to execute
+**Status:** Phase complete — ready for verification
 
 ```
-Progress: [█████████░] 90%
+Progress: [██████████] 100%
 
 Phase 1 [COMPLETE]     █████
 Phase 2 [NOT STARTED]  ░░░░░
@@ -68,6 +68,7 @@ Phase 4 [NOT STARTED]  ░░░░░
 | Phase 02 P04 | 12 | 2 tasks | 2 files |
 | Phase 03 P01 | 7 | 3 tasks | 4 files |
 | Phase 03 P02 | 43 | 3 tasks | 2 files |
+| Phase 03 P03 | ~15min | 4 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -103,8 +104,8 @@ Phase 4 [NOT STARTED]  ░░░░░
 
 ## Session Continuity
 
-**Last session:** 2026-08-11T18:38:34.153Z
-**Stopped at:** 03-03: Completed Tasks 1+2 (update_coverage.sh + 03-GAP-INVENTORY.md); paused at checkpoint:decision (Task 3 — baseline lock)
+**Last session:** 2026-08-11T18:46:16.844Z
+**Stopped at:** Completed 03-03-PLAN.md — coverage baseline + CI ratchet gate
 **Resume file:** None
 
 ### What Was Done This Session
@@ -148,3 +149,5 @@ Start `/gsd-plan-phase 2` — Phase 2: Accuracy Harness & Statistical Methodolog
 - [Phase ?]: MSTLResult.seasonal_components field (not seasonal) accessed for property assertions — confirmed in mstl.rs:17
 - [Phase ?]: update_coverage.sh scoped to --package anofox-forecast --all-features (not workspace-wide) to avoid bench-harness distorting line %
 - [Phase ?]: ratchet_floor_percent = lines_percent - 1.0 (91.30% measured → 90.3% floor); mirrors Phase 2 accuracy-lock baseline-lock pattern
+- [Phase ?]: Lock coverage baseline as-measured: 91.30% measured, floor 90.3%, scope --package anofox-forecast --all-features; CI enforces via --fail-under-lines in existing coverage: job (COVER-01)
+- [Phase ?]: Gap inventory 03-GAP-INVENTORY.md filed with 5 P1 / 9 P2 / 6 P3 rows (20 total) for Phase 4 backlog; highest-value P1 targets are V-01 to V-04 raw-vec NaN guards and G-01 GlobalTheta 0% coverage (COVER-02)

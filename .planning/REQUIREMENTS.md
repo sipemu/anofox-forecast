@@ -44,8 +44,8 @@ regression.
 
 ### Code Correctness & Coverage (COVER)
 
-- [ ] **COVER-01**: A code-coverage baseline is captured via cargo-llvm-cov and committed; a coverage floor is enforced in CI
-- [ ] **COVER-02**: A gap inventory identifies uncovered paths and assertion-free tests, filed as improvement-backlog candidates (assertion density, not just line %)
+- [x] **COVER-01**: A code-coverage baseline is captured via cargo-llvm-cov and committed; a coverage floor is enforced in CI
+- [x] **COVER-02**: A gap inventory identifies uncovered paths and assertion-free tests, filed as improvement-backlog candidates (assertion density, not just line %)
 
 ### Reference-Library Benchmarking (BENCH)
 
@@ -121,8 +121,8 @@ Explicitly excluded. Documented to prevent scope creep.
 | ROBUST-01 | Phase 3 | Complete |
 | ROBUST-02 | Phase 3 | Complete |
 | ROBUST-03 | Phase 3 | Complete |
-| COVER-01 | Phase 3 | Pending |
-| COVER-02 | Phase 3 | Pending |
+| COVER-01 | Phase 3 | Complete |
+| COVER-02 | Phase 3 | Complete |
 | IMPR-01 | Phase 4 | Pending |
 | IMPR-02 | Phase 4 | Pending |
 | IMPR-03 | Phase 4 | Pending |
