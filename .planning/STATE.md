@@ -5,8 +5,8 @@ milestone_name: milestone
 current_phase: 03
 current_phase_name: numerical-robustness-coverage-baseline
 status: executing
-stopped_at: Completed 03-02-PLAN.md — ROBUST-03 property suite green
-last_updated: "2026-08-11T18:05:20.198Z"
+stopped_at: "03-03: Completed Tasks 1+2 (update_coverage.sh + 03-GAP-INVENTORY.md); paused at checkpoint:decision (Task 3 — baseline lock)"
+last_updated: "2026-08-11T18:38:40.016Z"
 progress:
   total_phases: 3
   completed_phases: 2
@@ -103,8 +103,8 @@ Phase 4 [NOT STARTED]  ░░░░░
 
 ## Session Continuity
 
-**Last session:** 2026-08-11T18:05:20.189Z
-**Stopped at:** Completed 03-02-PLAN.md — ROBUST-03 property suite green
+**Last session:** 2026-08-11T18:38:34.153Z
+**Stopped at:** 03-03: Completed Tasks 1+2 (update_coverage.sh + 03-GAP-INVENTORY.md); paused at checkpoint:decision (Task 3 — baseline lock)
 **Resume file:** None
 
 ### What Was Done This Session
@@ -146,3 +146,5 @@ Start `/gsd-plan-phase 2` — Phase 2: Accuracy Harness & Statistical Methodolog
 - [Phase ?]: ROBUST-02: validate_series_complete(series)? added at fit() entry in gpd_tails.rs and multiscale.rs (delegation wrapper boundary guard); 4 raw-vec global models deferred to P1 gap inventory
 - [Phase ?]: Three separate proptest blocks used (50/30/100 cases each subsystem) to permit different runtime bounds per block
 - [Phase ?]: MSTLResult.seasonal_components field (not seasonal) accessed for property assertions — confirmed in mstl.rs:17
+- [Phase ?]: update_coverage.sh scoped to --package anofox-forecast --all-features (not workspace-wide) to avoid bench-harness distorting line %
+- [Phase ?]: ratchet_floor_percent = lines_percent - 1.0 (91.30% measured → 90.3% floor); mirrors Phase 2 accuracy-lock baseline-lock pattern
