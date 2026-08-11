@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-current_phase: 4
-current_phase_name: Prioritized Improvement Backlog & Top-Value Fixes
-status: planning
-stopped_at: Completed 03-03-PLAN.md — coverage baseline + CI ratchet gate
-last_updated: "2026-08-11T19:05:16.161Z"
+current_phase: 04
+current_phase_name: prioritized-improvement-backlog-top-value-fixes
+status: executing
+stopped_at: Completed 04-01-PLAN.md
+last_updated: "2026-08-11T20:47:14.559Z"
 progress:
-  total_phases: 3
+  total_phases: 4
   completed_phases: 3
-  total_plans: 10
-  completed_plans: 10
+  total_plans: 13
+  completed_plans: 11
 ---
 
 # Project State: anofox-forecast — Performance & Validation Hardening
@@ -25,18 +25,18 @@ progress:
 
 **Core Value:** Every claimed capability is measured, and every improvement is proven with a before/after number.
 
-**Current Focus:** Phase 03 — numerical-robustness-coverage-baseline
+**Current Focus:** Phase 04 — prioritized-improvement-backlog-top-value-fixes
 
 ---
 
 ## Current Position
 
-**Phase:** 4 — Prioritized Improvement Backlog & Top-Value Fixes
-**Plan:** Not started
-**Status:** Ready to plan
+**Phase:** 04 (prioritized-improvement-backlog-top-value-fixes) — EXECUTING
+**Plan:** 2 of 3
+**Status:** Ready to execute
 
 ```
-Progress: [██████████] 100%
+Progress: [█████████░] 85%
 
 Phase 1 [COMPLETE]     █████
 Phase 2 [NOT STARTED]  ░░░░░
@@ -69,6 +69,7 @@ Phase 4 [NOT STARTED]  ░░░░░
 | Phase 03 P01 | 7 | 3 tasks | 4 files |
 | Phase 03 P02 | 43 | 3 tasks | 2 files |
 | Phase 03 P03 | ~15min | 4 tasks | 5 files |
+| Phase 04 P01 | 75 | 4 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -104,8 +105,8 @@ Phase 4 [NOT STARTED]  ░░░░░
 
 ## Session Continuity
 
-**Last session:** 2026-08-11T18:46:16.844Z
-**Stopped at:** Completed 03-03-PLAN.md — coverage baseline + CI ratchet gate
+**Last session:** 2026-08-11T20:47:13.779Z
+**Stopped at:** Completed 04-01-PLAN.md
 **Resume file:** None
 
 ### What Was Done This Session
@@ -151,3 +152,6 @@ Start `/gsd-plan-phase 2` — Phase 2: Accuracy Harness & Statistical Methodolog
 - [Phase ?]: ratchet_floor_percent = lines_percent - 1.0 (91.30% measured → 90.3% floor); mirrors Phase 2 accuracy-lock baseline-lock pattern
 - [Phase ?]: Lock coverage baseline as-measured: 91.30% measured, floor 90.3%, scope --package anofox-forecast --all-features; CI enforces via --fail-under-lines in existing coverage: job (COVER-01)
 - [Phase ?]: Gap inventory 03-GAP-INVENTORY.md filed with 5 P1 / 9 P2 / 6 P3 rows (20 total) for Phase 4 backlog; highest-value P1 targets are V-01 to V-04 raw-vec NaN guards and G-01 GlobalTheta 0% coverage (COVER-02)
+- [Phase ?]: Used !v.is_finite() predicate for NaN/Inf guards in GlobalETS/GlobalCroston/GlobalTheta fit() paths — clippy-preferred, matches VAR::fit pattern
+- [Phase ?]: V-04 (VAR MissingValues vs InvalidParameter variant divergence) deferred to 04-03 backlog — document-only, no refactor this phase
+- [Phase ?]: Coverage baseline committed separately per IMPR-03: 91.30% → 91.44%, floor 90.3% → 90.4%

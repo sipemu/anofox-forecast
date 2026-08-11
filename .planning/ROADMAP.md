@@ -130,11 +130,11 @@ Every claimed capability is measured, and every improvement is proven with a bef
   2. Each landed improvement has a documented before/after delta in the relevant baseline file (e.g., MASE delta in `accuracy.json`, instruction-count delta in the iai baseline, size delta in `wasm_size.json`)
   3. Baseline updates after an improvement are committed in a separate, deliberate change — never auto-written by CI; updated regression guards in CI reflect the new tighter thresholds
 
-**Plans**: 3 plans
+**Plans**: 1/3 plans executed
 
 **Wave 1**
 
-- [ ] 04-01-PLAN.md — NaN guards (V-01/V-02/V-03) + GlobalTheta smoke test (G-01) + coverage before/after delta and floor ratchet (IMPR-02, IMPR-03)
+- [x] 04-01-PLAN.md — NaN guards (V-01/V-02/V-03) + GlobalTheta smoke test (G-01) + coverage before/after delta and floor ratchet (IMPR-02, IMPR-03)
 
 **Wave 2** *(blocked on Wave 1)*
 
@@ -153,7 +153,7 @@ Every claimed capability is measured, and every improvement is proven with a bef
 | 1. Measurement Infrastructure & Compute Baselines | 3/3 | Complete    | 2026-08-10 |
 | 2. Accuracy Harness & Statistical Methodology | 4/4 | Complete    | 2026-08-11 |
 | 3. Numerical Robustness & Coverage Baseline | 3/3 | Complete    | 2026-08-11 |
-| 4. Prioritized Improvement Backlog & Top-Value Fixes | 0/? | Not started | - |
+| 4. Prioritized Improvement Backlog & Top-Value Fixes | 1/3 | In Progress|  |
 
 ---
 *Roadmap created: 2026-08-09*
