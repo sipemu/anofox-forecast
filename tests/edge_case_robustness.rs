@@ -718,7 +718,10 @@ fn var_n2_no_panic() {
     // VAR(1) with n=2: n > p=1, n_eff=1 — may succeed or fail at OLS. Must not panic.
     let result = VARForecaster::new(1).fit(&ts);
     // Tautological assert: ensures the call completed without panic (is_err || is_ok covers everything).
-    assert!(result.is_err() || result.is_ok(), "unexpected state after VAR fit on n=2");
+    assert!(
+        result.is_err() || result.is_ok(),
+        "unexpected state after VAR fit on n=2"
+    );
 }
 
 #[test]

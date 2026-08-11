@@ -156,6 +156,11 @@ jobs:
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: Generate coverage
         run: cargo llvm-cov --all-features --lcov --output-path lcov.info
+      - name: Enforce coverage floor
+        run: |
+          FLOOR=$(jq '.coverage.ratchet_floor_percent' .planning/baselines/coverage.json)
+          echo "Coverage ratchet floor: ${FLOOR}%"
+          cargo llvm-cov --package anofox-forecast --all-features --summary-only --fail-under-lines "$FLOOR"
       - name: Upload to Codecov
         uses: codecov/codecov-action@v4
         with:
