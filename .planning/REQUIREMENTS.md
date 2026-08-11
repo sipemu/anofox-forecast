@@ -54,7 +54,7 @@ regression.
 
 ### Improvement Delivery (IMPR)
 
-- [ ] **IMPR-01**: A consolidated improvement backlog ranks findings across all 8 dimensions by value vs. effort using real baseline numbers
+- [x] **IMPR-01**: A consolidated improvement backlog ranks findings across all 8 dimensions by value vs. effort using real baseline numbers
 - [x] **IMPR-02**: The highest-value improvements are landed, each with a documented before/after delta in the relevant baseline file and a regression guard
 - [x] **IMPR-03**: Baseline updates after an improvement are committed deliberately (separate change), never auto-written by CI
 
@@ -123,7 +123,7 @@ Explicitly excluded. Documented to prevent scope creep.
 | ROBUST-03 | Phase 3 | Complete |
 | COVER-01 | Phase 3 | Complete |
 | COVER-02 | Phase 3 | Complete |
-| IMPR-01 | Phase 4 | Pending |
+| IMPR-01 | Phase 4 | Complete |
 | IMPR-02 | Phase 4 | Complete |
 | IMPR-03 | Phase 4 | Complete |
 

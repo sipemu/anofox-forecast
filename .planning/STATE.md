@@ -4,14 +4,14 @@ milestone: v1.0
 milestone_name: milestone
 current_phase: 04
 current_phase_name: prioritized-improvement-backlog-top-value-fixes
-status: executing
-stopped_at: "Completed 04-02-PLAN.md (defer branch: accuracy.json deferred, period=12 fix retained, +0.0290 gap handed to 04-03)"
-last_updated: "2026-08-11T21:21:31.587Z"
+status: verifying
+stopped_at: Completed 04-03-PLAN.md (Phase 4 complete — all 3 plans done)
+last_updated: "2026-08-11T21:27:41.241Z"
 progress:
   total_phases: 4
-  completed_phases: 3
+  completed_phases: 4
   total_plans: 13
-  completed_plans: 12
+  completed_plans: 13
 ---
 
 # Project State: anofox-forecast — Performance & Validation Hardening
@@ -33,10 +33,10 @@ progress:
 
 **Phase:** 04 (prioritized-improvement-backlog-top-value-fixes) — EXECUTING
 **Plan:** 3 of 3
-**Status:** Ready to execute
+**Status:** Phase complete — ready for verification
 
 ```
-Progress: [█████████░] 92%
+Progress: [██████████] 100%
 
 Phase 1 [COMPLETE]     █████
 Phase 2 [NOT STARTED]  ░░░░░
@@ -71,6 +71,7 @@ Phase 4 [NOT STARTED]  ░░░░░
 | Phase 03 P03 | ~15min | 4 tasks | 5 files |
 | Phase 04 P01 | 75 | 4 tasks | 6 files |
 | Phase 04 P02 | 15 | 3 tasks | 1 files |
+| Phase 04 P03 | 25 | 2 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -106,8 +107,8 @@ Phase 4 [NOT STARTED]  ░░░░░
 
 ## Session Continuity
 
-**Last session:** 2026-08-11T21:21:31.577Z
-**Stopped at:** Completed 04-02-PLAN.md (defer branch: accuracy.json deferred, period=12 fix retained, +0.0290 gap handed to 04-03)
+**Last session:** 2026-08-11T21:27:39.939Z
+**Stopped at:** Completed 04-03-PLAN.md (Phase 4 complete — all 3 plans done)
 **Resume file:** None
 
 ### What Was Done This Session
@@ -159,3 +160,5 @@ Start `/gsd-plan-phase 2` — Phase 2: Accuracy Harness & Statistical Methodolog
 - [Phase ?]: L3/L4 root-cause confirmed: AutoETS::new() without period=12 suppressed all seasonal candidates; period=12 fix reduces MASE from 1.0452 to 0.8923 (−14.6%) but anchor FAILED (0.8923 outside [0.8433,0.8833]); accuracy.json deferred pending checkpoint decision
 - [Phase ?]: L3/L4 root-cause confirmed: AutoETS::new() without period=12 suppressed all seasonal candidates; fix is harness-only (AutoETS::with_period(period))
 - [Phase ?]: MASE improved 1.0452 → 0.8923 (−14.6%), but anchor FAILED (0.8923 > 0.8833 upper tolerance); decision=DEFER: accuracy.json stays absent, residual +0.0290 gap is #1 backlog item for 04-03
+- [Phase ?]: ACC-01 (AutoETS MASE gap 0.8923 vs ref 0.8633) ranked #1 open backlog item; two source-level levers L1/L2 documented with locations
+- [Phase ?]: IMPR-01 satisfied: BACKLOG.md ranks 17 open items across 8 measurement dimensions with real evidence; iai/criterion placeholder rows marked manual-capture-pending
