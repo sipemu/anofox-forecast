@@ -20,7 +20,7 @@ use super::forecaster::LaplaceForecaster;
 use super::DistributionalForecaster;
 use crate::core::{Forecast, TimeSeries};
 use crate::error::Result;
-use crate::models::traits::Forecaster;
+use crate::models::traits::{validate_series_complete, Forecaster};
 
 /// Fitted GPD-tail parameters for a body predictive whose PIT push-through
 /// to N(0,1) is approximately calibrated in the bulk. `t_*` are frozen
@@ -450,6 +450,7 @@ impl GpdTailsForecaster {
 
 impl Forecaster for GpdTailsForecaster {
     fn fit(&mut self, series: &TimeSeries) -> Result<()> {
+        validate_series_complete(series)?;
         self.inner.fit(series)?;
         self.per_horizon_params.clear();
         // Prefer per-horizon parade PIT if available.

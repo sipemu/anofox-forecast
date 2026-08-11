@@ -23,7 +23,7 @@ use super::forecaster::LaplaceForecaster;
 use super::DistributionalForecaster;
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
-use crate::models::traits::Forecaster;
+use crate::models::traits::{validate_series_complete, Forecaster};
 use chrono::{Duration, TimeZone, Utc};
 
 /// A stack of `LaplaceForecaster` instances at decimated strides.
@@ -186,6 +186,7 @@ impl MultiScaleLaplace {
 
 impl Forecaster for MultiScaleLaplace {
     fn fit(&mut self, series: &TimeSeries) -> Result<()> {
+        validate_series_complete(series)?;
         let n = series.primary_values().len();
         // Streaming leaves need enough decimated obs to converge. Empirical
         // fev-27 tuning:
