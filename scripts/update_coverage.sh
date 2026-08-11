@@ -91,26 +91,30 @@ echo "  ratchet_floor:        $FLOOR%"
 # ---------------------------------------------------------------------------
 mkdir -p "$REPO_ROOT/.planning/baselines"
 
-python3 - <<EOF > "$REPO_ROOT/.planning/baselines/coverage.json"
-import json
+GIT_SHA="$GIT_SHA" TIMESTAMP="$TIMESTAMP" RUSTC="$RUSTC" \
+COV_VER="$COV_VER" OS="$OS" CPU="$CPU" \
+LINES_TOTAL="$LINES_TOTAL" LINES_COVERED="$LINES_COVERED" \
+LINES_PCT="$LINES_PCT" FLOOR="$FLOOR" \
+python3 - <<'EOF' > "$REPO_ROOT/.planning/baselines/coverage.json"
+import json, os
 
 data = {
   "provenance": {
-    "git_sha": "$GIT_SHA",
-    "timestamp_iso": "$TIMESTAMP",
-    "rustc_version": "$RUSTC",
-    "cargo_llvm_cov_version": "$COV_VER",
-    "host_cpu": "$CPU",
-    "host_os": "$OS",
+    "git_sha": os.environ["GIT_SHA"],
+    "timestamp_iso": os.environ["TIMESTAMP"],
+    "rustc_version": os.environ["RUSTC"],
+    "cargo_llvm_cov_version": os.environ["COV_VER"],
+    "host_cpu": os.environ["CPU"],
+    "host_os": os.environ["OS"],
     "active_features": "all (parallel + postprocess + forecastability + seasonal-detection + serde + distributional + anomaly + js)"
   },
   "coverage": {
     "metric": "line",
     "invocation": "cargo llvm-cov --package anofox-forecast --all-features --json --summary-only",
-    "lines_total": $LINES_TOTAL,
-    "lines_covered": $LINES_COVERED,
-    "lines_percent": $LINES_PCT,
-    "ratchet_floor_percent": $FLOOR
+    "lines_total": int(os.environ["LINES_TOTAL"]),
+    "lines_covered": int(os.environ["LINES_COVERED"]),
+    "lines_percent": float(os.environ["LINES_PCT"]),
+    "ratchet_floor_percent": float(os.environ["FLOOR"])
   }
 }
 print(json.dumps(data, indent=2))
