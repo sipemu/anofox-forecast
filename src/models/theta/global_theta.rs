@@ -72,6 +72,16 @@ impl GlobalTheta {
             });
         }
 
+        // V-03: per-series NaN/Inf guard — raw &[Vec<f64>] API bypasses validate_series_complete()
+        for (i, s) in all_series.iter().enumerate() {
+            if s.iter().any(|v| !v.is_finite()) {
+                return Err(ForecastError::InvalidParameter(format!(
+                    "series {} contains NaN or Inf values",
+                    i
+                )));
+            }
+        }
+
         // Optimize α: minimize total SSE across all series
         let result = nelder_mead(
             |params| {
