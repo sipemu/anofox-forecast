@@ -130,7 +130,19 @@ Every claimed capability is measured, and every improvement is proven with a bef
   2. Each landed improvement has a documented before/after delta in the relevant baseline file (e.g., MASE delta in `accuracy.json`, instruction-count delta in the iai baseline, size delta in `wasm_size.json`)
   3. Baseline updates after an improvement are committed in a separate, deliberate change — never auto-written by CI; updated regression guards in CI reflect the new tighter thresholds
 
-**Plans**: TBD
+**Plans**: 3 plans
+
+**Wave 1**
+
+- [ ] 04-01-PLAN.md — NaN guards (V-01/V-02/V-03) + GlobalTheta smoke test (G-01) + coverage before/after delta and floor ratchet (IMPR-02, IMPR-03)
+
+**Wave 2** *(blocked on Wave 1)*
+
+- [ ] 04-02-PLAN.md — Time-boxed accuracy investigation (period=12 root cause) + conditional accuracy.json lock via decision checkpoint (IMPR-02)
+
+**Wave 3** *(blocked on Waves 1-2)*
+
+- [ ] 04-03-PLAN.md — Consolidated ranked improvement backlog across all 8 measurement dimensions (IMPR-01)
 
 ---
 
