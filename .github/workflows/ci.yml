@@ -155,7 +155,7 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: Generate coverage
-        run: cargo llvm-cov --all-features --lcov --output-path lcov.info
+        run: cargo llvm-cov --package anofox-forecast --all-features --lcov --output-path lcov.info
       - name: Enforce coverage floor
         run: |
           FLOOR=$(jq '.coverage.ratchet_floor_percent' .planning/baselines/coverage.json)
