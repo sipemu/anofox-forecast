@@ -225,7 +225,7 @@ fn run_accuracy_harness() -> HashMap<String, FrequencyResult> {
                 Ok(ts) => ts,
                 Err(_) => continue,
             };
-            let mut autoets = AutoETS::new();
+            let mut autoets = AutoETS::with_period(period);
             if autoets.fit(&train_ts).is_err() {
                 continue;
             }
