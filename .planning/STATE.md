@@ -5,13 +5,13 @@ milestone_name: milestone
 current_phase: 04
 current_phase_name: prioritized-improvement-backlog-top-value-fixes
 status: executing
-stopped_at: Completed 04-01-PLAN.md
-last_updated: "2026-08-11T20:47:14.559Z"
+stopped_at: "04-02-PLAN.md Task 1 complete — checkpoint:decision awaiting human input"
+last_updated: "2026-08-11T20:58:40.256Z"
 progress:
   total_phases: 4
   completed_phases: 3
   total_plans: 13
-  completed_plans: 11
+  completed_plans: 12
 ---
 
 # Project State: anofox-forecast — Performance & Validation Hardening
@@ -105,9 +105,9 @@ Phase 4 [NOT STARTED]  ░░░░░
 
 ## Session Continuity
 
-**Last session:** 2026-08-11T20:47:13.779Z
-**Stopped at:** Completed 04-01-PLAN.md
-**Resume file:** None
+**Last session:** 2026-08-11T20:58:35.701Z
+**Stopped at:** 04-02-PLAN.md Task 1 complete — checkpoint:decision awaiting human input
+**Resume file:** 04-02-PLAN.md
 
 ### What Was Done This Session
 
@@ -155,3 +155,4 @@ Start `/gsd-plan-phase 2` — Phase 2: Accuracy Harness & Statistical Methodolog
 - [Phase ?]: Used !v.is_finite() predicate for NaN/Inf guards in GlobalETS/GlobalCroston/GlobalTheta fit() paths — clippy-preferred, matches VAR::fit pattern
 - [Phase ?]: V-04 (VAR MissingValues vs InvalidParameter variant divergence) deferred to 04-03 backlog — document-only, no refactor this phase
 - [Phase ?]: Coverage baseline committed separately per IMPR-03: 91.30% → 91.44%, floor 90.3% → 90.4%
+- [Phase ?]: L3/L4 root-cause confirmed: AutoETS::new() without period=12 suppressed all seasonal candidates; period=12 fix reduces MASE from 1.0452 to 0.8923 (−14.6%) but anchor FAILED (0.8923 outside [0.8433,0.8833]); accuracy.json deferred pending checkpoint decision
