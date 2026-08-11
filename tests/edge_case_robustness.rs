@@ -725,12 +725,16 @@ fn var_empty_returns_empty_data() {
 fn var_n2_no_panic() {
     let ts = make_ts(&[1.0, 2.0]);
     // VAR(1) with n=2: n > p=1, n_eff=1 — may succeed or fail at OLS. Must not panic.
-    let result = VARForecaster::new(1).fit(&ts);
-    // Tautological assert: ensures the call completed without panic (is_err || is_ok covers everything).
-    assert!(
-        result.is_err() || result.is_ok(),
-        "unexpected state after VAR fit on n=2"
-    );
+    let mut model = VARForecaster::new(1);
+    match model.fit(&ts) {
+        Ok(()) => {
+            // If fit succeeded with n=2, predict must also not panic and produce finite output.
+            assert_predict_finite(&model, "VARForecaster(1) on n=2 series");
+        }
+        Err(_) => {
+            // Error is acceptable for n=2 VAR(1) — insufficient effective observations for OLS.
+        }
+    }
 }
 
 #[test]
