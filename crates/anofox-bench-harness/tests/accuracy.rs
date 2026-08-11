@@ -430,6 +430,9 @@ fn tracer_m3_monthly_autoets_one_series() {
 
     // Build TimeSeries and fit AutoETS.
     let train_ts = make_ts_from_slice(train).expect("TimeSeries construction failed");
+    // AutoETS::new() (no period) is intentional here — the tracer checks pipeline integrity
+    // only (finite positive MASE), not seasonal accuracy. The per-frequency accuracy loop
+    // (above) uses AutoETS::with_period(period) for correct seasonal model selection.
     let mut model = AutoETS::new();
     model
         .fit(&train_ts)
