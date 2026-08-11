@@ -100,7 +100,7 @@ Every claimed capability is measured, and every improvement is proven with a bef
   4. A code-coverage baseline is committed to `baselines/coverage.json` via cargo-llvm-cov and a coverage floor is enforced in CI — CI fails if coverage drops below the floor
   5. A gap inventory lists uncovered paths and assertion-free tests with enough detail to serve as improvement-backlog input (file + function + missing invariant)
 
-**Plans**: 1/3 plans executed
+**Plans**: 2/3 plans executed
 
 **Wave 1**
 
@@ -108,7 +108,7 @@ Every claimed capability is measured, and every improvement is proven with a bef
 
 **Wave 2** *(blocked on Wave 1)*
 
-- [ ] 03-02-PLAN.md — Proptest suite: changepoint metrics, MSTL decomposition, CV boundaries — no-panic/no-NaN invariants (ROBUST-03)
+- [x] 03-02-PLAN.md — Proptest suite: changepoint metrics, MSTL decomposition, CV boundaries — no-panic/no-NaN invariants (ROBUST-03)
 
 **Wave 3** *(blocked on Waves 1-2 — contains coverage-lock decision checkpoint)*
 
@@ -140,7 +140,7 @@ Every claimed capability is measured, and every improvement is proven with a bef
 |-------|----------------|--------|-----------|
 | 1. Measurement Infrastructure & Compute Baselines | 3/3 | Complete    | 2026-08-10 |
 | 2. Accuracy Harness & Statistical Methodology | 4/4 | Complete    | 2026-08-11 |
-| 3. Numerical Robustness & Coverage Baseline | 1/3 | In Progress|  |
+| 3. Numerical Robustness & Coverage Baseline | 2/3 | In Progress|  |
 | 4. Prioritized Improvement Backlog & Top-Value Fixes | 0/? | Not started | - |
 
 ---
