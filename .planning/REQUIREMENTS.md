@@ -38,8 +38,8 @@ regression.
 
 ### Numerical Robustness & Input Handling (ROBUST)
 
-- [ ] **ROBUST-01**: An edge-case input suite covers constant series, n=2, all-zeros/intermittent, NaN/Inf-containing, zero-length, and extreme-scale inputs — each asserting the correct `ForecastError` variant (or valid output), never a panic
-- [ ] **ROBUST-02**: `fit()` paths are audited so that `validate_series_complete()` (or equivalent) runs before parameter estimation across model families
+- [x] **ROBUST-01**: An edge-case input suite covers constant series, n=2, all-zeros/intermittent, NaN/Inf-containing, zero-length, and extreme-scale inputs — each asserting the correct `ForecastError` variant (or valid output), never a panic
+- [x] **ROBUST-02**: `fit()` paths are audited so that `validate_series_complete()` (or equivalent) runs before parameter estimation across model families
 - [ ] **ROBUST-03**: Property-based tests (proptest) cover known-fragile areas (e.g., changepoint metrics, MSTL, CV boundary conditions) asserting no-panic / no-NaN invariants
 
 ### Code Correctness & Coverage (COVER)
@@ -118,8 +118,8 @@ Explicitly excluded. Documented to prevent scope creep.
 | ACCUR-08 | Phase 2 | Complete |
 | BENCH-01 | Phase 2 | Complete |
 | BENCH-02 | Phase 2 | Complete |
-| ROBUST-01 | Phase 3 | Pending |
-| ROBUST-02 | Phase 3 | Pending |
+| ROBUST-01 | Phase 3 | Complete |
+| ROBUST-02 | Phase 3 | Complete |
 | ROBUST-03 | Phase 3 | Pending |
 | COVER-01 | Phase 3 | Pending |
 | COVER-02 | Phase 3 | Pending |
