@@ -1,7 +1,7 @@
 {
   "provenance": {
-    "git_sha": "5a02aa3b76d41517bfd910ccd2ddef4047ad2cce",
-    "timestamp_iso": "2026-08-11T18:08:14Z",
+    "git_sha": "3fc82aaeb0942637db5e694123155efdcdb83b19",
+    "timestamp_iso": "2026-08-11T20:23:19Z",
     "rustc_version": "rustc 1.97.0 (2d8144b78 2026-07-07)",
     "cargo_llvm_cov_version": "cargo-llvm-cov 0.8.4",
     "host_cpu": "13th Gen Intel(R) Core(TM) i9-13900H",
@@ -11,9 +11,9 @@
   "coverage": {
     "metric": "line",
     "invocation": "cargo llvm-cov --package anofox-forecast --all-features --json --summary-only",
-    "lines_total": 77743,
-    "lines_covered": 70982,
-    "lines_percent": 91.30339709041328,
-    "ratchet_floor_percent": 90.3
+    "lines_total": 77767,
+    "lines_covered": 71112,
+    "lines_percent": 91.44238558771715,
+    "ratchet_floor_percent": 90.4
   }
 }
