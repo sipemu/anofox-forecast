@@ -1,10 +1,31 @@
 #!/usr/bin/env python3
-"""Run statsforecast models on synthetic time series data.
+"""Run statsforecast models on synthetic time series data and M3 M3-reference fixture.
 
-This script loads the synthetic time series from CSV files and runs
-equivalent statsforecast models, saving the results for comparison
-with the Rust implementation.
+SYNTHETIC MODE (default / --synthetic):
+    Loads the synthetic time series from CSV files and runs equivalent
+    statsforecast models, saving the results for comparison with the Rust
+    implementation.
+
+M3 REFERENCE FIXTURE (--m3-reference):
+    Runs AutoETS over M3 Yearly/Quarterly/Monthly using the same single-origin
+    train/test split the Rust harness uses (train = all but last H steps, test =
+    last H steps, no shuffle). Writes .planning/baselines/statsforecast_reference.json
+    with a provenance block recording the pinned environment versions.
+
+    IMPORTANT (D-06): This mode is a MANUAL MAINTAINER STEP. CI must never run it.
+    Regenerate only when updating the pinned Python environment (uv.lock) or when
+    the M3 preprocessing changes. After regeneration, verify that AutoETS M3-monthly
+    MASE ≈ 0.93 (ACCUR-08) before committing the fixture.
+
+    Run with:
+        uv run python validation/run_statsforecast.py --m3-reference
 """
+
+import json
+import platform
+import sys
+from datetime import timezone, datetime
+import importlib.metadata
 
 import pandas as pd
 import numpy as np
@@ -226,6 +247,204 @@ def run_forecasts(df: pd.DataFrame, series_type: str) -> tuple[pd.DataFrame, pd.
     return pd.DataFrame(point_results), pd.DataFrame(ci_results)
 
 
+def _read_provenance() -> dict:
+    """Read pinned environment versions at runtime (never hard-coded)."""
+    def _ver(pkg: str) -> str:
+        try:
+            return importlib.metadata.version(pkg)
+        except importlib.metadata.PackageNotFoundError:
+            return "unknown"
+
+    return {
+        "statsforecast_version": _ver("statsforecast"),
+        "numpy_version": _ver("numpy"),
+        "pandas_version": _ver("pandas"),
+        "python_version": platform.python_version(),
+        "timestamp_iso": datetime.now(tz=timezone.utc).isoformat(),
+        "m3_preprocessing": (
+            "Single-origin expanding-window split: train = all values except last H steps, "
+            "test = last H steps. Horizons: yearly=6, quarterly=8, monthly=18. "
+            "TSF files read with Latin-1 byte decode. Series shorter than horizon+1 skipped. "
+            "AutoETS season_length: yearly=1, quarterly=4, monthly=12. "
+            "Reported MASE uses training-slice seasonal-naive denominator (same as Rust harness)."
+        ),
+    }
+
+
+def _parse_tsf_m3(path: Path) -> tuple[str, int, list[tuple[str, list[float]]]]:
+    """Parse a Monash .tsf file; return (frequency, horizon, [(id, values), ...]).
+
+    Reads bytes as Latin-1 to handle accented category labels in M3 files.
+    Values are guarded: non-parseable tokens are dropped (is_finite equivalent).
+    """
+    raw = path.read_bytes()
+    content = "".join(chr(b) for b in raw)  # Latin-1 byte decode
+
+    frequency = ""
+    horizon = 0
+    series = []
+    in_data = False
+
+    for line in content.splitlines():
+        stripped = line.strip()
+        if not in_data:
+            if stripped.startswith("@frequency"):
+                frequency = stripped[len("@frequency"):].strip()
+            elif stripped.startswith("@horizon"):
+                try:
+                    horizon = int(stripped[len("@horizon"):].strip())
+                except ValueError:
+                    pass
+            elif stripped.startswith("@data"):
+                in_data = True
+            continue
+
+        parts = stripped.split(":", 2)
+        if len(parts) < 3:
+            continue
+        series_id = parts[0]
+        vals_str = parts[2]
+        values = []
+        for tok in vals_str.split(","):
+            try:
+                v = float(tok.strip())
+                if not (v != v or v == float("inf") or v == float("-inf")):  # is_finite
+                    values.append(v)
+            except ValueError:
+                pass
+        if values:
+            series.append((series_id, values))
+
+    return frequency, horizon, series
+
+
+def _mase_scale(train: list[float], period: int) -> float:
+    """Seasonal-naive training-denominator (same as Rust mase_scale in loader.rs)."""
+    if len(train) <= period:
+        return 1.0
+    diffs = [abs(train[i] - train[i - period]) for i in range(period, len(train))]
+    mean_diff = sum(diffs) / len(diffs)
+    return max(mean_diff, 1e-9)
+
+
+def _compute_mase(train: list[float], actual: list[float], predicted: list[float], period: int) -> float:
+    """MASE with training-slice denominator (competition-correct, matches Rust harness)."""
+    denom = _mase_scale(train, period)
+    h = min(len(actual), len(predicted))
+    if h == 0:
+        return float("nan")
+    fmae = sum(abs(actual[i] - predicted[i]) for i in range(h)) / h
+    return fmae / denom
+
+
+def generate_m3_reference(data_dir: Path, output_path: Path) -> None:
+    """Generate the M3 AutoETS reference fixture with provenance block (D-06).
+
+    Reads M3 Y/Q/M .tsf files from data_dir, runs AutoETS (statsforecast) with
+    the same single-origin train/test split the Rust harness uses (A3 alignment),
+    computes MASE with training-slice denominator, and writes the fixture JSON.
+
+    IMPORTANT (D-06): This is a MANUAL MAINTAINER STEP. CI must never invoke this
+    function. Regenerate only on the pinned env (uv.lock) when necessary.
+    """
+    tsf_configs = [
+        ("m3_yearly.tsf",    "yearly",    1,  6),
+        ("m3_quarterly.tsf", "quarterly", 4,  8),
+        ("m3_monthly.tsf",   "monthly",   12, 18),
+    ]
+
+    result: dict = {
+        "provenance": _read_provenance(),
+        "datasets": {"M3": {}},
+    }
+
+    for filename, freq_name, period, horizon in tsf_configs:
+        tsf_path = data_dir / filename
+        if not tsf_path.exists():
+            print(f"  WARNING: {tsf_path} not found — skipping {freq_name}")
+            continue
+
+        print(f"  Processing M3-{freq_name} (period={period}, horizon={horizon})...")
+        _freq, _h, all_series = _parse_tsf_m3(tsf_path)
+
+        autoets_mases = []
+        n_series_used = 0
+        n_series_skipped = 0
+
+        for series_id, values in all_series:
+            n = len(values)
+            if n <= horizon:
+                n_series_skipped += 1
+                continue
+
+            # Single-origin expanding-window split: same as Rust CvFoldGenerator
+            # with min_initial_window = n - horizon.
+            # Train = values[0 .. n-horizon], Test = values[n-horizon .. n].
+            train = values[: n - horizon]
+            test = values[n - horizon:]
+
+            if len(train) < 2 or len(test) == 0:
+                n_series_skipped += 1
+                continue
+
+            # Build statsforecast-compatible DataFrame (single series).
+            idx = pd.date_range("2000-01-01", periods=len(train), freq="MS")
+            df = pd.DataFrame({"unique_id": series_id, "ds": idx, "y": train})
+
+            try:
+                sf = StatsForecast(
+                    models=[AutoETS(season_length=period)],
+                    freq="MS",
+                    n_jobs=1,
+                    verbose=False,
+                )
+                sf.fit(df)
+                fc = sf.predict(h=horizon)
+                # Column name is "AutoETS" in statsforecast 2.x
+                pred_col = [c for c in fc.columns if c not in ("unique_id", "ds")][0]
+                predicted = fc[pred_col].tolist()
+                mase_val = _compute_mase(train, test, predicted, period)
+                if mase_val == mase_val and mase_val > 0:  # is_finite and positive
+                    autoets_mases.append(mase_val)
+                    n_series_used += 1
+                else:
+                    n_series_skipped += 1
+            except Exception as exc:
+                print(f"    WARNING: AutoETS failed on {series_id}: {exc}")
+                n_series_skipped += 1
+
+        if autoets_mases:
+            mean_mase = sum(autoets_mases) / len(autoets_mases)
+        else:
+            mean_mase = float("nan")
+
+        print(f"    n_series_used={n_series_used} skipped={n_series_skipped} AutoETS_MASE={mean_mase:.4f}")
+
+        result["datasets"]["M3"][freq_name] = {
+            "n_series": n_series_used,
+            "horizon": horizon,
+            "seasonal_period": period,
+            "autoets_mase": mean_mase,
+        }
+
+    # Verify monthly MASE is approximately 0.93 (ACCUR-08 anchor).
+    monthly_mase = result["datasets"]["M3"].get("monthly", {}).get("autoets_mase", float("nan"))
+    if monthly_mase != monthly_mase:
+        print("\n  WARNING: monthly MASE is NaN — fixture may be invalid.")
+    elif abs(monthly_mase - 0.93) > 0.10:
+        print(
+            f"\n  WARNING: monthly MASE={monthly_mase:.4f} deviates from expected ≈0.93 by "
+            f"more than 0.10 — check preprocessing alignment (A3)."
+        )
+    else:
+        print(f"\n  AutoETS M3-monthly MASE={monthly_mase:.4f} — within expected range of ≈0.93 ✓")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w") as f:
+        json.dump(result, f, indent=2)
+    print(f"  Fixture written to: {output_path}")
+
+
 def main():
     """Run all statsforecast models on all series types."""
     print("=== statsforecast Validation ===\n")
@@ -279,4 +498,15 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if "--m3-reference" in sys.argv:
+        # D-06: MANUAL MAINTAINER STEP — never run in CI.
+        # Regenerate the M3 AutoETS reference fixture with pinned provenance.
+        _data_dir = DATA_DIR
+        _output = Path(__file__).parent.parent / ".planning" / "baselines" / "statsforecast_reference.json"
+        print("=== M3 Reference Fixture Generation (D-06) ===\n")
+        print(f"  Data dir : {_data_dir}")
+        print(f"  Output   : {_output}\n")
+        generate_m3_reference(_data_dir, _output)
+        print("\n=== Done — review MASE output above before committing the fixture ===")
+    else:
+        main()

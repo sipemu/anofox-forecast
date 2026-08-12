@@ -1,0 +1,9 @@
+# This directory tracks proptest regression cases for deterministic CI replay.
+#
+# proptest writes shrunk counterexamples here automatically when a property test fails.
+# Committing this directory means discovered cases replay on the same seed in CI
+# rather than silently changing between runs (ROBUST-03 / T-03-07).
+#
+# Do NOT gitignore this directory.
+# When a test failure is found and a regression file appears here, commit it so
+# the counterexample is stable across CI runs and local runs.

@@ -1994,9 +1994,9 @@ mod tests {
         // min_initial_window=10 but only 5 data points
         let config = CVConfig::expanding(10, 1);
         // Should either error or return 0 folds
-        match cross_validate(&config, &ts, Naive::new) {
-            Ok(results) => assert_eq!(results.n_folds, 0),
-            Err(_) => {} // also acceptable
+        // Ok => must be 0 folds; Err is also acceptable
+        if let Ok(results) = cross_validate(&config, &ts, Naive::new) {
+            assert_eq!(results.n_folds, 0);
         }
     }
 

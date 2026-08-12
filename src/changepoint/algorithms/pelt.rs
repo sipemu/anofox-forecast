@@ -161,7 +161,7 @@ mod tests {
     fn make_level_shift(n_per: usize, levels: &[f64]) -> Vec<f64> {
         let mut out = Vec::with_capacity(n_per * levels.len());
         for &lvl in levels {
-            out.extend(std::iter::repeat(lvl).take(n_per));
+            out.extend(std::iter::repeat_n(lvl, n_per));
         }
         out
     }

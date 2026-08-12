@@ -1,9 +1,7 @@
 //! Benchmark GlobalAutoETS, GlobalCroston, and STL batch.
 
 use anofox_forecast::core::TimeSeries;
-use anofox_forecast::models::exponential::{
-    AutoETS, AutoETSConfig, ETSSpec, GlobalAutoETS, ModelPool, ETS,
-};
+use anofox_forecast::models::exponential::{AutoETS, AutoETSConfig, GlobalAutoETS, ModelPool};
 use anofox_forecast::models::intermittent::{Croston, GlobalCroston};
 use anofox_forecast::models::Forecaster;
 use anofox_forecast::seasonality::STL;

@@ -84,6 +84,7 @@ fn run(dataset: &str, path: &str, horizon: usize) {
     let mut auto_wqls = Vec::new();
     let mut skaters_wqls = Vec::new();
     let mut nosticky_wqls = Vec::new();
+    #[allow(clippy::type_complexity)]
     let mut worst_details: Vec<(
         usize,
         f64,

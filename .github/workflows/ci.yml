@@ -155,7 +155,12 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: Generate coverage
-        run: cargo llvm-cov --all-features --lcov --output-path lcov.info
+        run: cargo llvm-cov --package anofox-forecast --all-features --lcov --output-path lcov.info
+      - name: Enforce coverage floor
+        run: |
+          FLOOR=$(jq '.coverage.ratchet_floor_percent' .planning/baselines/coverage.json)
+          echo "Coverage ratchet floor: ${FLOOR}%"
+          cargo llvm-cov --package anofox-forecast --all-features --summary-only --fail-under-lines "$FLOOR"
       - name: Upload to Codecov
         uses: codecov/codecov-action@v4
         with:
@@ -166,7 +171,7 @@ jobs:
   publish:
     name: Publish to crates.io
     runs-on: ubuntu-latest
-    needs: [test, clippy, fmt, docs, audit, deny, wasm, wasm-test, js-test]
+    needs: [test, clippy, fmt, docs, audit, deny, wasm, wasm-test, js-test, coverage]
     if: github.event_name == 'release'
     steps:
       - uses: actions/checkout@v4

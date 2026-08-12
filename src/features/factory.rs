@@ -900,7 +900,7 @@ mod tests {
             .feature(Feature::LargeStandardDeviation { r: 0.25 })
             .compute(&series);
 
-        for (_, &val) in &result {
+        for &val in result.values() {
             assert!(
                 val == 0.0 || val == 1.0,
                 "Bool feature should be 0 or 1, got {val}"
@@ -920,7 +920,7 @@ mod tests {
             .feature(Feature::LongestStrikeBelowMean)
             .compute(&series);
 
-        for (_, &val) in &result {
+        for &val in result.values() {
             assert_relative_eq!(val, val.round(), epsilon = 1e-10);
         }
     }

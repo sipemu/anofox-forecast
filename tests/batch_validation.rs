@@ -114,9 +114,9 @@ fn batch_auto_ets_matches_individual() {
         );
 
         // Same forecasts
-        for h in 0..horizon {
+        for (h, v) in batch_vals.iter().enumerate().take(horizon) {
             assert!(
-                (ind.0[h] - batch_vals[h]).abs() < 1e-10,
+                (ind.0[h] - v).abs() < 1e-10,
                 "Series {} h={}: individual={:.6} batch={:.6}",
                 i,
                 h,
@@ -314,7 +314,7 @@ fn benchmark_global_ets_ann_vs_individual() {
         let start = Instant::now();
         let mut global = GlobalETS::new(ETSSpec::ann(), period);
         global.fit(&values).unwrap();
-        let global_fc = global.predict(horizon);
+        let _global_fc = global.predict(horizon);
         let global_ms = start.elapsed().as_secs_f64() * 1000.0;
 
         let (alpha, _, _, _) = global.params();

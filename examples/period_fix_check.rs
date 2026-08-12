@@ -4,7 +4,7 @@
 //! Tests two configs on a small sample:
 //! - `AutoETS::new()` — no period (the old handicapped fev_benchmark)
 //! - `AutoETS::with_period(P)` — with fev's canonical period
-//! Same for AutoTheta.
+//!   Same for AutoTheta.
 //!
 //! Datasets: m3_monthly (period=12, THE fix should matter), m5 (period=1
 //! per fev, fix is a no-op there — sanity check).

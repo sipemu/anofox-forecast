@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.9] - 2026-08-12
+
+Correctness fixes from the v1.0 Performance & Validation Hardening cycle. These are the
+user-facing library changes; the cycle also added measurement harnesses, committed baselines,
+edge/property test suites, and a CI coverage floor (internal — not part of the published API).
+
+### Fixed
+
+- **MASE denominator collapse (D-03).** `calculate_mase` now falls back to a period-1 naive
+  denominator on constant / repeat-at-lag series instead of returning `NaN`, so no silent `NaN`
+  enters downstream accuracy aggregates. Only truly constant series with no first-difference
+  signal still return `None`.
+- **Silent NaN/Inf on panel & Laplace fits.** `GlobalETS`, `GlobalAutoETS`, `GlobalCroston`, and
+  `GlobalTheta` `fit()` on raw `&[Vec<f64>]` input, and the Laplace `gpd_tails` / `multiscale`
+  wrappers, now reject `NaN`/`Inf` values with an explicit `ForecastError` before parameter
+  estimation instead of silently producing an invalid fit (previously `GlobalAutoETS::fit` could
+  return `Ok` with no fitted candidate and then predict zeros).
+
 ## [0.15.8] - 2026-07-14
 
 Feature release adding the four missing Croston-variant intermittent-demand methods alongside the existing `IntermittentLeaf` (plain Croston 1972). All four are **opt-in** — measured neutral on fev-27's m5, kept out of the auto-gate.

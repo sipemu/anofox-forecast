@@ -35,15 +35,8 @@ fn investigate_outliers() {
 
     println!("\n=== AutoARIMA Outlier Investigation ===");
     println!(
-        "{:<8} {:>6} {:>10} {:>10} {:>10}  {:>12} {:>12}  {}",
-        "Series",
-        "n",
-        "MAE_def",
-        "MAE_full",
-        "Improve%",
-        "Order_def",
-        "Order_full",
-        "Time_def/full"
+        "{:<8} {:>6} {:>10} {:>10} {:>10}  {:>12} {:>12}  Time_def/full",
+        "Series", "n", "MAE_def", "MAE_full", "Improve%", "Order_def", "Order_full"
     );
 
     for (uid, series_data) in &data {

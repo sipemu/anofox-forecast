@@ -1,0 +1,60 @@
+name: Bench Gate
+
+# Triggers: push and pull_request on [main, master].
+# This job only reads .planning/baselines/iai.json — it never writes or commits
+# anything under .planning/baselines/ (MEAS-01 CI-read-only invariant).
+#
+# D-10: iai instruction-count gate runs on pinned stable Rust ONLY.
+# Beta and nightly are excluded because instruction-count drift between
+# toolchain generations causes false positives on those channels.
+"on":
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  iai-gate:
+    name: iai-callgrind Instruction Gate
+    runs-on: ubuntu-latest    # ubuntu-latest = Ubuntu 24.04, ships valgrind 3.22 (>= required 3.20)
+    # Least-privilege: this job installs tooling and runs benchmarks.
+    # It needs no write access to the repository (T-01-06, T-01-07).
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      # D-10: pinned stable only — beta/nightly drift in instruction counts
+      # causes false positives and are therefore excluded from the gate job.
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Valgrind is available in the ubuntu-latest (24.04) apt repository at
+      # version 3.22, satisfying the iai-callgrind >= 3.20 requirement (Pitfall 2).
+      - name: Install Valgrind
+        run: sudo apt-get update && sudo apt-get install -y valgrind
+
+      # Install the companion runner binary at EXACTLY 0.16.1 --locked.
+      # The runner and the iai-callgrind crate use a versioned protocol; a
+      # mismatch causes the bench to abort before any measurements are taken
+      # (T-01-05, Pitfall 1).
+      - name: Install iai-callgrind-runner
+        run: cargo install iai-callgrind-runner --version 0.16.1 --locked
+
+      # Run the iai instruction gate.
+      # The 1% Ir soft limit is encoded in iai_suite.rs via:
+      #   LibraryBenchmarkConfig::default().tool(Callgrind::default().soft_limits([(EventKind::Ir, 1.0f64)]))
+      # When instruction count rises strictly greater than 1% vs the prior run's
+      # stored callgrind output, iai-callgrind exits non-zero, failing CI (D-10).
+      #
+      # NOTE: criterion wall-clock timing in CI is forbidden (D-03/D-04 locked
+      # constraint) — only the iai instruction gate runs here; criterion
+      # baselines are local-only captures via scripts/update_criterion.sh.
+      # NOTE: no step in this workflow writes, git adds, or commits under
+      # .planning/baselines/ (MEAS-01 CI-read-only).
+      - name: Run iai bench (instruction gate)
+        run: cargo bench -p anofox-bench-harness --bench iai_suite

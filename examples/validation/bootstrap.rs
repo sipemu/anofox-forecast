@@ -35,7 +35,7 @@ fn main() {
     println!("Time series: {} observations", ts.len());
     println!(
         "First 10 values: {:?}\n",
-        &ts.primary_values()[..10]
+        ts.primary_values()[..10]
             .iter()
             .map(|v| format!("{:.2}", v))
             .collect::<Vec<_>>()

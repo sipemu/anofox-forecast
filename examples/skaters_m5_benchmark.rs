@@ -97,7 +97,7 @@ fn main() {
 
     // Filter: non-intermittent + long enough.
     let mut kept: Vec<(String, Vec<f64>)> = Vec::new();
-    for (name, values) in series_names.iter().zip(cols.into_iter()) {
+    for (name, values) in series_names.iter().zip(cols) {
         if values.len() < MIN_LEN {
             continue;
         }
@@ -277,8 +277,8 @@ fn main() {
         if all_ok {
             characteristics.push(chars);
         } else {
-            for s in 0..N_MODELS {
-                results[s].truncate(n0);
+            for slot in results.iter_mut().take(N_MODELS) {
+                slot.truncate(n0);
             }
         }
     }
@@ -292,7 +292,7 @@ fn main() {
     let summaries: Vec<ModelSummary> = labels
         .iter()
         .zip(results.iter())
-        .map(|(name, r)| summarize(*name, r))
+        .map(|(name, r)| summarize(name, r))
         .collect();
 
     print_summary(&summaries);
@@ -571,6 +571,7 @@ fn print_sliced_analysis(
         wins as f64 / m as f64
     };
 
+    #[allow(clippy::type_complexity)]
     let dims: [(&str, Box<dyn Fn(&Characteristics) -> f64>); 3] = [
         (
             "trend_strength",

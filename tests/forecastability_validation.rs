@@ -12,8 +12,8 @@
 #![cfg(feature = "forecastability")]
 
 use anofox_forecast::forecastability::{
-    ami_curve, ar1_theoretical_ami, distance_correlation, gcmi, gcmi_curve, kendall_curve,
-    knn_mutual_information, pearson_curve, spearman_curve,
+    ami_curve, ar1_theoretical_ami, distance_correlation, gcmi, gcmi_curve, knn_mutual_information,
+    pearson_curve, spearman_curve,
 };
 use approx::assert_relative_eq;
 use rand::rngs::StdRng;
@@ -253,7 +253,7 @@ fn spearman_curve_ar1_decays() {
 fn kendall_exact_concordance() {
     // Python reference: concordant_kendall = 1.0
     let x: Vec<f64> = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-    let y = x.clone();
+    let _y = x.clone();
     // kendall_curve is for lagged autocorrelation; test the raw function
     // by constructing a series where lag-1 pairs are perfectly concordant.
     let series: Vec<f64> = (0..50).map(|i| i as f64).collect();
@@ -275,20 +275,6 @@ fn kendall_perfect_reversal() {
 }
 
 // ── 6. Digamma function at exact integer values ─────────────────────────
-
-/// Python reference: scipy.special.digamma(1..10)
-const DIGAMMA_REF: [f64; 10] = [
-    -0.5772156649015329,
-    0.42278433509846713,
-    0.9227843350984671,
-    1.2561176684318003,
-    1.5061176684318003,
-    1.7061176684318005,
-    1.872784335098467,
-    2.0156414779556098,
-    2.1406414779556098,
-    2.251752589066721,
-];
 
 #[test]
 fn digamma_matches_scipy() {

@@ -151,6 +151,7 @@ fn main() {
     );
     println!("{:-<79}", "");
 
+    #[allow(clippy::type_complexity)]
     let methods: Vec<(&str, &Vec<(String, Vec<f64>)>)> = vec![
         ("Base", &base_forecasts),
         ("BottomUp", &bottom_up),
@@ -231,6 +232,7 @@ fn print_coherence_check(forecasts: &[(String, Vec<f64>)], horizon: usize) {
         .collect();
 
     let mut coherent = true;
+    #[allow(clippy::needless_range_loop)]
     for h in 0..horizon {
         let north_sum = lookup["N1"][h] + lookup["N2"][h];
         let south_sum = lookup["S1"][h] + lookup["S2"][h];

@@ -1212,8 +1212,8 @@ fn main() {
     println!();
     for (ai, arch) in Archetype::ALL.iter().enumerate() {
         print!("{:<34}", arch.name());
-        for mi in 0..N_MODELS {
-            let g = geomean(&mase_by_arch[ai][mi]);
+        for cell in mase_by_arch[ai].iter().take(N_MODELS) {
+            let g = geomean(cell);
             print!("{:>18.4}", g);
         }
         println!();
@@ -1238,8 +1238,8 @@ fn main() {
     println!();
     for (ai, arch) in Archetype::ALL.iter().enumerate() {
         print!("{:<34}", arch.name());
-        for mi in 0..N_MODELS {
-            let g = geomean(&wql_by_arch[ai][mi]);
+        for cell in wql_by_arch[ai].iter().take(N_MODELS) {
+            let g = geomean(cell);
             print!("{:>18.4}", g);
         }
         println!();
@@ -1247,8 +1247,8 @@ fn main() {
 
     println!("\n=== Router validation (2026-07-22) ===");
     println!(
-        "{:<34}{:<28}{:<28}{}",
-        "archetype", "expected recipe", "picked (mode)", "match?"
+        "{:<34}{:<28}{:<28}match?",
+        "archetype", "expected recipe", "picked (mode)"
     );
     for (ai, arch) in Archetype::ALL.iter().enumerate() {
         // Mode of picks.
@@ -1282,9 +1282,11 @@ fn main() {
     let mut wins = vec![0usize; N_MODELS];
     // Per-archetype winner, kept for the segmented report below.
     let mut winner_per_arch = Vec::with_capacity(Archetype::ALL.len());
-    for ai in 0..Archetype::ALL.len() {
-        let geos: Vec<f64> = (0..N_MODELS)
-            .map(|mi| geomean(&mase_by_arch[ai][mi]))
+    for arch_rows in mase_by_arch.iter().take(Archetype::ALL.len()) {
+        let geos: Vec<f64> = arch_rows
+            .iter()
+            .take(N_MODELS)
+            .map(|cell| geomean(cell))
             .collect();
         let (best_i, _) = geos
             .iter()
@@ -1343,7 +1345,7 @@ fn main() {
         Category::Neutral,
     ] {
         print!("{:<34}", cat.name());
-        for mi in 0..N_MODELS {
+        for (mi, _) in mase_by_arch[0].iter().enumerate().take(N_MODELS) {
             let per_arch: Vec<f64> = Archetype::ALL
                 .iter()
                 .enumerate()
@@ -1364,8 +1366,7 @@ fn main() {
     println!();
     for (ai, arch) in Archetype::ALL.iter().enumerate() {
         print!("{:<34}", arch.name());
-        for mi in 0..N_MODELS {
-            let xs = &fit_by_arch[ai][mi];
+        for xs in fit_by_arch[ai].iter().take(N_MODELS) {
             let mean = if xs.is_empty() {
                 f64::NAN
             } else {

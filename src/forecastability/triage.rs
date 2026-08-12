@@ -451,18 +451,6 @@ mod tests {
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
 
-    fn make_ar1(n: usize, phi: f64, seed: u64) -> Vec<f64> {
-        let mut rng = StdRng::seed_from_u64(seed);
-        let mut x = vec![0.0; n];
-        for t in 1..n {
-            let u1: f64 = rng.gen::<f64>().max(f64::MIN_POSITIVE);
-            let u2: f64 = rng.gen();
-            x[t] =
-                phi * x[t - 1] + (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
-        }
-        x
-    }
-
     fn make_white_noise(n: usize, seed: u64) -> Vec<f64> {
         let mut rng = StdRng::seed_from_u64(seed);
         (0..n)
@@ -481,16 +469,6 @@ mod tests {
             x[t] = 3.9 * x[t - 1] * (1.0 - x[t - 1]);
         }
         x
-    }
-
-    fn make_seasonal(n: usize, period: usize) -> Vec<f64> {
-        (0..n)
-            .map(|i| {
-                (2.0 * std::f64::consts::PI * i as f64 / period as f64).sin()
-                    + 0.3 * (4.0 * std::f64::consts::PI * i as f64 / period as f64).cos()
-                    + ((i * 7 + 3) % 11) as f64 * 0.05
-            })
-            .collect()
     }
 
     #[test]
@@ -571,7 +549,7 @@ mod tests {
         );
         // All lags should be 1-based and ≤ max_lag
         for &lag in &result.recommended_lags {
-            assert!(lag >= 1 && lag <= 20, "lag {} out of range", lag);
+            assert!((1..=20).contains(&lag), "lag {} out of range", lag);
         }
     }
 

@@ -1,0 +1,36 @@
+{
+  "provenance": {
+    "git_sha": "9f943088e2800650e97179e565d7be969018b151",
+    "timestamp_iso": "2026-08-09T21:06:51Z",
+    "rustc_version": "rustc 1.97.0 (2d8144b78 2026-07-07)",
+    "host_cpu": "13th Gen Intel(R) Core(TM) i9-13900H",
+    "host_os": "Linux 6.18.36-1-MANJARO",
+    "active_features": []
+  },
+  "benchmarks": [
+    {
+      "name": "auto_arima_n1000",
+      "peak_bytes": 191268
+    },
+    {
+      "name": "auto_ensemble_n1000",
+      "peak_bytes": 199976
+    },
+    {
+      "name": "auto_ets_n1000",
+      "peak_bytes": 290440
+    },
+    {
+      "name": "auto_theta_n1000",
+      "peak_bytes": 133456
+    },
+    {
+      "name": "croston_n1000",
+      "peak_bytes": 76792
+    },
+    {
+      "name": "naive_n1000",
+      "peak_bytes": 60024
+    }
+  ]
+}

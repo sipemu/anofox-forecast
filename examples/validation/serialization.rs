@@ -49,7 +49,7 @@ fn serialization_demo() {
     println!("Sample data: {} observations", ts.len());
     println!(
         "First 10: {:?}\n",
-        &ts.primary_values()[..10]
+        ts.primary_values()[..10]
             .iter()
             .map(|v| format!("{:.1}", v))
             .collect::<Vec<_>>()

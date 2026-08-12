@@ -41,7 +41,7 @@ fn main() {
     println!("\nTransformed series (first 10):");
     println!(
         "{:?}",
-        &result
+        result
             .data
             .iter()
             .take(10)

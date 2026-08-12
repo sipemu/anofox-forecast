@@ -89,8 +89,8 @@ fn main() {
     let b_point = bounded.primary();
     println!("{:>4} {:>10}", "h", "Point");
     println!("{:-<16}", "");
-    for i in 0..bounded.horizon() {
-        println!("{:>4} {:>10.2}", i + 1, b_point[i]);
+    for (i, p) in b_point.iter().enumerate().take(bounded.horizon()) {
+        println!("{:>4} {:>10.2}", i + 1, p);
     }
     println!(
         "All in [2, 30]: {}",
@@ -111,8 +111,8 @@ fn main() {
     let c_point = clamped.primary();
     println!("{:>4} {:>10}", "h", "Point");
     println!("{:-<16}", "");
-    for i in 0..clamped.horizon() {
-        println!("{:>4} {:>10.2}", i + 1, c_point[i]);
+    for (i, p) in c_point.iter().enumerate().take(clamped.horizon()) {
+        println!("{:>4} {:>10.2}", i + 1, p);
     }
 
     // -----------------------------------------------------------------------

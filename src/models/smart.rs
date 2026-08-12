@@ -196,7 +196,7 @@ fn trend_r_squared(values: &[f64]) -> f64 {
         .enumerate()
         .map(|(i, y)| (y - intercept - slope * i as f64).powi(2))
         .sum();
-    (1.0 - ss_res / ss_tot).max(0.0).min(1.0)
+    (1.0 - ss_res / ss_tot).clamp(0.0, 1.0)
 }
 
 /// Absolute autocorrelation at `lag`. Cheap detector for seasonal

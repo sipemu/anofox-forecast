@@ -537,11 +537,7 @@ fn cauchy_input_produces_well_formed_forecast() {
             // Cauchy(0,1) via inverse CDF; guard the uniform away from
             // the exact endpoints so tan doesn't literally return ±∞.
             let mut u = r.next();
-            if u <= 1e-9 {
-                u = 1e-9;
-            } else if u >= 1.0 - 1e-9 {
-                u = 1.0 - 1e-9;
-            }
+            u = u.clamp(1e-9, 1.0 - 1e-9);
             (std::f64::consts::PI * (u - 0.5)).tan()
         })
         .collect();

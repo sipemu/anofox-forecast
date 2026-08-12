@@ -82,6 +82,16 @@ impl GlobalCroston {
             });
         }
 
+        // V-02: per-series NaN/Inf guard — raw &[Vec<f64>] API bypasses validate_series_complete()
+        for (i, s) in all_series.iter().enumerate() {
+            if s.iter().any(|v| !v.is_finite()) {
+                return Err(ForecastError::InvalidParameter(format!(
+                    "series {} contains NaN or Inf values",
+                    i
+                )));
+            }
+        }
+
         // Pre-extract demands and intervals for all series
         let extracted: Vec<Option<(Vec<f64>, Vec<f64>)>> = all_series
             .iter()

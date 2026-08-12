@@ -1,10 +1,10 @@
 [workspace]
-members = [".", "crates/anofox-forecast-js"]
+members = [".", "crates/anofox-forecast-js", "crates/anofox-bench-harness"]
 resolver = "2"
 
 [package]
 name = "anofox-forecast"
-version = "0.15.8"
+version = "0.15.9"
 edition = "2021"
 authors = ["Simon Müller"]
 description = "Time series forecasting library"
@@ -105,6 +105,10 @@ harness = false
 
 [[bench]]
 name = "comprehensive_benchmark"
+harness = false
+
+[[bench]]
+name = "baseline_suite"
 harness = false
 
 # Examples

@@ -100,6 +100,16 @@ impl GlobalETS {
             });
         }
 
+        // V-01: per-series NaN/Inf guard — raw &[Vec<f64>] API bypasses validate_series_complete()
+        for (i, s) in all_series.iter().enumerate() {
+            if s.iter().any(|v| !v.is_finite()) {
+                return Err(ForecastError::InvalidParameter(format!(
+                    "series {} contains NaN or Inf values",
+                    i
+                )));
+            }
+        }
+
         // Initialize per-series states using heuristics
         self.states = all_series
             .iter()
@@ -631,6 +641,19 @@ impl GlobalAutoETS {
                 got: 0,
                 hint: Some("GlobalAutoETS requires at least one series".into()),
             });
+        }
+
+        // V-01 (auto-wrapper): per-series NaN/Inf guard — must be checked before the candidate
+        // loop, which swallows inner GlobalETS::fit errors with `.is_err() → continue`. Without
+        // this guard, NaN input causes every candidate spec to fail silently, leaving the model
+        // in a poisoned zero-state that unconditionally returns Ok(()) and emits zero forecasts.
+        for (i, s) in all_series.iter().enumerate() {
+            if s.iter().any(|v| !v.is_finite()) {
+                return Err(ForecastError::InvalidParameter(format!(
+                    "series {} contains NaN or Inf values",
+                    i
+                )));
+            }
         }
 
         let n_series = all_series.len();
