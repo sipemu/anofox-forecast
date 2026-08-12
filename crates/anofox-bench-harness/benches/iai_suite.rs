@@ -43,9 +43,7 @@ fn setup_batch_100() -> Vec<Vec<f64>> {
         let mut rng_state: u64 = s.wrapping_add(1).wrapping_mul(6364136223846793005);
         let values: Vec<f64> = (0..100)
             .map(|i| {
-                rng_state = rng_state
-                    .wrapping_mul(6364136223846793005)
-                    .wrapping_add(1);
+                rng_state = rng_state.wrapping_mul(6364136223846793005).wrapping_add(1);
                 let noise = ((rng_state >> 33) as f64 / (1u64 << 31) as f64 - 1.0) * 0.3;
                 let seasonal = 5.0 * (2.0 * std::f64::consts::PI * i as f64 / 12.0).sin();
                 let trend = 0.05 * i as f64;
