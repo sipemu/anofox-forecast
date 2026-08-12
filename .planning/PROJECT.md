@@ -17,6 +17,26 @@ before/after delta. It is aimed at the maintainers of the library, not a new end
 number.** No unquantified "it feels faster" or "it looks more accurate" — measurement is the
 backbone that makes the improvements trustworthy and non-regressing.
 
+## Current State
+
+**Shipped: v1.0 — Performance & Validation Hardening (2026-08-12).** Phases 1–4 complete, 28/28
+requirements satisfied, milestone audit INTEGRATED. Delivered: committed measurement baselines per
+dimension (speed/memory/WASM-size/coverage) with CI guards; a statistically correct accuracy harness
+(competition MASE, Naive2, Diebold-Mariano, pinned statsforecast cross-library reference);
+numerical-robustness edge-case + property suites with per-family NaN/Inf guards; a CI-enforced
+coverage floor (90.4%); and a ranked improvement backlog with top-value fixes landed (each proven by a
+before/after delta).
+
+**Open (carried to next milestone, see `baselines/BACKLOG.md`):** #1 AutoETS M3-monthly accuracy gap
+(period=12 fix cut MASE 1.0452→0.8923; still +0.0290 above the 0.8633 reference anchor, so
+`accuracy.json` remains deferred/unlocked); iai/criterion baselines await manual hardware capture;
+optional Nyquist validation for Phases 3–4.
+
+## Next Milestone Goals
+
+To be defined via `/gsd-new-milestone`. The v1.0 backlog is the natural seed — the AutoETS accuracy
+gap is the highest-value candidate.
+
 ## Requirements
 
 ### Validated
