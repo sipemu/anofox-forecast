@@ -747,7 +747,7 @@ mod tests {
             extended_names
         );
         assert!(
-            extended_names.iter().any(|n| *n == "MFLES"),
+            extended_names.contains(&"MFLES"),
             "extended scores missing MFLES: {:?}",
             extended_names
         );

@@ -13,7 +13,6 @@ use anofox_forecast::models::{Forecaster, LaplaceForecaster};
 
 use chrono::{Duration, TimeZone, Utc};
 use std::fs;
-use std::time::Instant;
 
 struct Dataset {
     name: &'static str,

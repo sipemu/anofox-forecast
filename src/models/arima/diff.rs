@@ -530,7 +530,7 @@ mod tests {
         let result = fractional_difference(&series, 0.5, 1e-4);
         // Result is shorter by (weight_count - 1) elements
         assert!(result.len() < series.len());
-        assert!(result.len() > 0);
+        assert!(!result.is_empty());
     }
 
     #[test]

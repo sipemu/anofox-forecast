@@ -79,6 +79,7 @@ fn main() {
 
     let base = Utc.with_ymd_and_hms(2015, 1, 1, 0, 0, 0).unwrap();
 
+    #[allow(clippy::type_complexity)]
     let configs: Vec<(&str, Box<dyn Fn() -> LaplaceForecaster>)> = vec![
         (
             "skaters (full)",

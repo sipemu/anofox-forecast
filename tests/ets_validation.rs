@@ -633,7 +633,7 @@ fn holt_winters_additive_parameters_reasonable() {
         alpha
     );
     assert!(
-        beta >= 0.0 && beta < 1.0,
+        (0.0..1.0).contains(&beta),
         "beta {:.4} out of range [0,1)",
         beta
     );

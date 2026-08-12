@@ -355,7 +355,7 @@ mod tests {
     fn online_update_slides_window() {
         let actuals: Vec<f64> = (0..50).map(|i| i as f64).collect();
         let preds: Vec<f64> = actuals.iter().map(|&a| a + 0.5).collect();
-        let mask = vec![false; 50 * 1];
+        let mask = vec![false; 50];
 
         let enbpi = EnbPiPredictor::new(0.90);
         let mut result = enbpi.fit(&preds, &mask, &actuals, 1).unwrap();

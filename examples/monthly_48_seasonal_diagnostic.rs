@@ -287,6 +287,7 @@ fn run_variable(label: &str, start_amp: f64, end_amp: f64, noise_amp: f64) {
         })
         .collect();
 
+    #[allow(clippy::type_complexity)]
     let cfgs: [(&str, Box<dyn Fn() -> LaplaceForecaster>); 2] = [
         (
             ".auto().auto_with_seasonal_period(12)",

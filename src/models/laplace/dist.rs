@@ -355,7 +355,7 @@ mod tests {
     #[cfg(feature = "serde")]
     #[test]
     fn gaussian_serde_round_trip_is_bit_identical() {
-        let g = Gaussian::new(-3.141_592_653_589_793, 2.718_281_828_459_045);
+        let g = Gaussian::new(-std::f64::consts::PI, std::f64::consts::E);
         let json = serde_json::to_string(&g).unwrap();
         let round: Gaussian = serde_json::from_str(&json).unwrap();
         assert_eq!(g.mean.to_bits(), round.mean.to_bits());

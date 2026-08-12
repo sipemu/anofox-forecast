@@ -158,7 +158,7 @@ fn auto_arima_selects_reasonable_order() {
     );
     // Forecasts should be in a reasonable range for the continuation
     let fc = model.predict(3).unwrap();
-    let last_value = 10.0 + 0.5 * (n - 1) as f64; // 59.5
+    let _last_value = 10.0 + 0.5 * (n - 1) as f64; // 59.5
     for &v in fc.primary() {
         assert!(
             v.is_finite() && v > 0.0,

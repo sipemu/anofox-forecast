@@ -90,7 +90,7 @@ fn main() {
     );
 
     let mut kept: Vec<(String, Vec<f64>)> = Vec::new();
-    for (name, values) in names.iter().zip(cols.into_iter()) {
+    for (name, values) in names.iter().zip(cols) {
         if values.len() >= MIN_LEN {
             kept.push((name.to_string(), values));
         }
@@ -209,6 +209,7 @@ fn main() {
                     Some(F::RegularPositive) => smart_regular_positive += 1,
                     Some(F::RegularNormal) => smart_regular_normal += 1,
                     Some(F::Fallback) => smart_fallback += 1,
+                    Some(F::AutoETSStructural) | Some(F::AutoThetaShortHistory) => {}
                     None => {}
                 }
             }
@@ -219,7 +220,7 @@ fn main() {
     let total_wall = start.elapsed().as_secs_f64();
     eprintln!("\nDone in {:.1}s", total_wall);
 
-    let mut summary = |label: &str, mut xs: Vec<f64>, time_us: u128| {
+    let summary = |label: &str, mut xs: Vec<f64>, time_us: u128| {
         let n = xs.len();
         let mean: f64 = xs.iter().sum::<f64>() / n.max(1) as f64;
         let med = median(&mut xs);

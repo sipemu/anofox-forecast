@@ -99,14 +99,9 @@ fn order_selection_comparison() {
     println!();
 
     // Count matches
-    let matches = [
-        &rust1 == &py1,
-        &rust2 == &py2,
-        &rust3 == &py3,
-        &rust4 == &py4,
-    ]
-    .iter()
-    .filter(|&&m| m)
-    .count();
+    let matches = [rust1 == py1, rust2 == py2, rust3 == py3, rust4 == py4]
+        .iter()
+        .filter(|&&m| m)
+        .count();
     println!("Matches: {}/4", matches);
 }

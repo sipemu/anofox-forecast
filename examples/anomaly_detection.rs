@@ -61,8 +61,8 @@ fn main() {
     println!("----\t--------\t--------\t--------\t----\t----");
 
     let mut n_flagged = 0;
-    for i in N_TRAIN..N_TOTAL {
-        det.observe(vals[i]).expect("observe failed");
+    for (i, v) in vals.iter().enumerate().take(N_TOTAL).skip(N_TRAIN) {
+        det.observe(*v).expect("observe failed");
         let out = det.state();
         let (d2, p) = match (out.d2, out.p_value) {
             (Some(a), Some(b)) => (a, b),
@@ -77,7 +77,7 @@ fn main() {
         if flag || !note.is_empty() {
             println!(
                 "{}\t{:+.3}\t{:.2}\t\t{:.2e}\t{}\t{}",
-                i, vals[i], d2, p, out.run, note
+                i, *v, d2, p, out.run, note
             );
             if flag {
                 n_flagged += 1;

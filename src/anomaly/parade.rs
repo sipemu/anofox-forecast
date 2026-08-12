@@ -224,13 +224,9 @@ mod tests {
                 let seed = (i as u64)
                     .wrapping_mul(6_364_136_223_846_793_005)
                     .wrapping_add(1);
-                let u1 = ((seed >> 33) as f64 / (1u64 << 31) as f64)
-                    .max(1e-12)
-                    .min(1.0 - 1e-12);
+                let u1 = ((seed >> 33) as f64 / (1u64 << 31) as f64).clamp(1e-12, 1.0 - 1e-12);
                 let seed2 = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
-                let u2 = ((seed2 >> 33) as f64 / (1u64 << 31) as f64)
-                    .max(1e-12)
-                    .min(1.0 - 1e-12);
+                let u2 = ((seed2 >> 33) as f64 / (1u64 << 31) as f64).clamp(1e-12, 1.0 - 1e-12);
                 (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
             })
             .collect();

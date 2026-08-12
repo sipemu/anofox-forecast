@@ -137,7 +137,7 @@ fn main() {
             if !fit_ok {
                 n_fail.fetch_add(1, Ordering::Relaxed);
                 let done = progress.fetch_add(1, Ordering::Relaxed) + 1;
-                if done % 500 == 0 {
+                if done.is_multiple_of(500) {
                     eprintln!("  [{}/{}]", done, eligible.len());
                 }
                 return;
@@ -197,7 +197,7 @@ fn main() {
             }
 
             let done = progress.fetch_add(1, Ordering::Relaxed) + 1;
-            if done % 500 == 0 {
+            if done.is_multiple_of(500) {
                 let succ = n_success.load(Ordering::Relaxed);
                 let fail = n_fail.load(Ordering::Relaxed);
                 let wall = pool_start.elapsed().as_secs_f64();
@@ -258,7 +258,7 @@ fn main() {
         println!("  Avg sMAPE:       {:.2}%", avg_smape * 100.0);
 
         let mut model_counts: Vec<_> = selected_models.into_inner().unwrap().into_iter().collect();
-        model_counts.sort_by(|a, b| b.1.cmp(&a.1));
+        model_counts.sort_by_key(|b| std::cmp::Reverse(b.1));
         println!("  Top selected models:");
         for (model, count) in model_counts.iter().take(7) {
             println!(

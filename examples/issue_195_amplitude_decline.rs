@@ -15,7 +15,7 @@
 use anofox_forecast::models::laplace::LaplaceForecaster;
 use anofox_forecast::models::{DistributionalForecaster, Forecaster};
 use anofox_forecast::prelude::TimeSeries;
-use chrono::{DateTime, Duration, TimeZone, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 
 const BASE: f64 = 5000.0;
 const NOISE: f64 = 0.12;
@@ -190,13 +190,14 @@ fn main() {
 
     // ---- Extended regression panel: increasing / phase-shift / other ----
     println!("\n\n=== EXTENDED PANEL ===");
+    #[allow(clippy::type_complexity)]
     let scenarios: &[(&str, Box<dyn Fn(usize) -> f64>, f64)] = &[
         // (label, function returning the value at index i, target ratio the
         //  next-cycle forecast should aim for)
         (
             "declining amplitude (issue #195 shape)",
             Box::new(|i| {
-                let month = (i % 12) as usize;
+                let month = i % 12;
                 let year_off = i / 12;
                 let amp = if year_off >= 3 { 0.45 } else { 1.0 };
                 let n = NOISE * noise_at(i, 0x1_deca);
@@ -208,7 +209,7 @@ fn main() {
         (
             "increasing amplitude (retail expanding)",
             Box::new(|i| {
-                let month = (i % 12) as usize;
+                let month = i % 12;
                 let year_off = i / 12;
                 // amp grows 0.4 → 1.4 over 4 cycles.
                 let amp = 0.4 + 0.33 * (year_off.min(3) as f64);
@@ -236,7 +237,7 @@ fn main() {
         (
             "constant amplitude control (no change)",
             Box::new(|i| {
-                let month = (i % 12) as usize;
+                let month = i % 12;
                 let n = NOISE * noise_at(i, 0x4_C047);
                 (BASE * (1.0 + 1.0 * (SEAS[month] - 1.0)) * (1.0 + n)).max(0.0)
             }),
@@ -246,7 +247,7 @@ fn main() {
         (
             "additive drift + seasonal (upward trend + fixed amp)",
             Box::new(|i| {
-                let month = (i % 12) as usize;
+                let month = i % 12;
                 // linear drift +100 per month
                 let drift = 100.0 * i as f64;
                 let n = NOISE * noise_at(i, 0x5_D71F);
@@ -257,7 +258,7 @@ fn main() {
         (
             "recent regime change (year 4 is anomalous / near-flat)",
             Box::new(|i| {
-                let month = (i % 12) as usize;
+                let month = i % 12;
                 let year_off = i / 12;
                 // Full seasonal for years 1-3, then amplitude → 0.1 for year 4.
                 let amp = if year_off >= 3 { 0.1 } else { 1.0 };
@@ -283,8 +284,7 @@ fn main() {
             // Map (year_off, month_idx) into a scenario-friendly cycle index.
             // For simplicity feed the scenario a linear index that wraps
             // month_idx correctly:
-            let year_off =
-                ((d.year() - 2023) as usize).saturating_sub(if d.month() < 6 { 0 } else { 0 });
+            let year_off = ((d.year() - 2023) as usize).saturating_sub(0);
             let scenario_i = year_off * 12 + month_idx;
             vals2.push(f(scenario_i));
             stamps2.push(d);

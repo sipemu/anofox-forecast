@@ -138,7 +138,7 @@ mod tests {
         // Constant excesses → denom ≈ 0 → clamp branch fires.
         let samples = vec![1.0; 20];
         let (gamma, sigma) = gpd_fit_pwm(&samples);
-        assert!(gamma <= 0.95 && gamma >= -0.5);
+        assert!((-0.5..=0.95).contains(&gamma));
         assert!(sigma > 0.0);
     }
 }

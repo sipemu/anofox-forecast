@@ -1151,7 +1151,7 @@ mod tests {
         for (name, values) in &feats {
             for (i, &v) in values.iter().enumerate() {
                 assert!(
-                    v >= -1.0 && v <= 1.0,
+                    (-1.0..=1.0).contains(&v),
                     "Feature '{}' at index {} has value {} outside [-1, 1]",
                     name,
                     i,

@@ -113,13 +113,13 @@ fn main() {
 
     println!("{:>4} {:>12} {:>12}", "h", "y1_hat", "y2_hat");
     println!("{:-<30}", "");
-    for h in 0..horizon {
-        println!(
-            "{:>4} {:>12.4} {:>12.4}",
-            h + 1,
-            forecasts[0][h],
-            forecasts[1][h]
-        );
+    for (h, (y1, y2)) in forecasts[0]
+        .iter()
+        .zip(forecasts[1].iter())
+        .enumerate()
+        .take(horizon)
+    {
+        println!("{:>4} {:>12.4} {:>12.4}", h + 1, y1, y2);
     }
 
     // -----------------------------------------------------------------------
@@ -172,13 +172,8 @@ fn main() {
 
     let preds2 = var2.predict(5).unwrap();
     println!("\n5-step forecast:");
-    for h in 0..5 {
-        println!(
-            "  h={}: z1={:.4}, z2={:.4}",
-            h + 1,
-            preds2[0][h],
-            preds2[1][h]
-        );
+    for (h, (z1, z2)) in preds2[0].iter().zip(preds2[1].iter()).enumerate().take(5) {
+        println!("  h={}: z1={:.4}, z2={:.4}", h + 1, z1, z2);
     }
 
     // -----------------------------------------------------------------------

@@ -173,7 +173,7 @@ fn main() {
     let summaries: Vec<ModelSummary> = labels
         .iter()
         .zip(results.iter())
-        .map(|(name, r)| summarize(*name, r))
+        .map(|(name, r)| summarize(name, r))
         .collect();
     print_summary(&summaries);
     print_pairwise(&labels, &results);

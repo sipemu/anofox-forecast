@@ -12,8 +12,6 @@
 //! Configure: `SAMPLE_SIZE=1000` to limit series.
 
 use anofox_forecast::core::TimeSeries;
-use anofox_forecast::models::exponential::AutoETS;
-use anofox_forecast::models::theta::AutoTheta;
 use anofox_forecast::models::{Forecaster, LaplaceForecaster, SmartForecaster};
 use chrono::{Duration, TimeZone, Utc};
 use std::fs;

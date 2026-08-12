@@ -100,11 +100,13 @@ fn full_comparison_and_benchmark() {
         println!("--- {} (n={}, period={}) ---", name, n, period);
 
         // Run each model
+        #[allow(clippy::type_complexity)]
         let models: Vec<(&str, Box<dyn FnOnce() -> (Vec<f64>, f64)>)> = {
             let ts = &ts;
             let h = horizon;
             let p = *period;
 
+            #[allow(clippy::type_complexity)]
             let mut m: Vec<(&str, Box<dyn FnOnce() -> (Vec<f64>, f64)>)> = Vec::new();
 
             // Naive
@@ -308,8 +310,8 @@ fn full_comparison_and_benchmark() {
         };
 
         println!(
-            "  {:<20} {:>8} {:>8} {:>8}  {:>8}  {}",
-            "Model", "MAD", "RMSE", "MaxDiff", "Time(ms)", "Match"
+            "  {:<20} {:>8} {:>8} {:>8}  {:>8}  Match",
+            "Model", "MAD", "RMSE", "MaxDiff", "Time(ms)"
         );
 
         for (model_name, run_fn) in models {
@@ -380,8 +382,8 @@ fn full_comparison_and_benchmark() {
 
         println!("--- intermittent (n=60) ---");
         println!(
-            "  {:<20} {:>8} {:>8} {:>8}  {:>8}  {}",
-            "Model", "MAD", "RMSE", "MaxDiff", "Time(ms)", "Match"
+            "  {:<20} {:>8} {:>8} {:>8}  {:>8}  Match",
+            "Model", "MAD", "RMSE", "MaxDiff", "Time(ms)"
         );
 
         let start = Instant::now();

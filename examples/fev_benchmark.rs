@@ -301,7 +301,7 @@ fn inv_normal_cdf(q: f64) -> f64 {
         -3.969683028665376e+01,
         2.209460984245205e+02,
         -2.759285104469687e+02,
-        1.383577518672690e+02,
+        1.383_577_518_672_69e2,
         -3.066479806614716e+01,
         2.506628277459239e+00,
     ];
@@ -406,6 +406,7 @@ struct DatasetResult {
     /// One WQL per model, arithmetic mean across series.
     wql_mean: [f64; N_MODELS],
     /// One count per model, series that succeeded.
+    #[allow(dead_code)] // clippy: retained for parity with model columns
     n_ok: [usize; N_MODELS],
     /// Total fit time in seconds per model.
     total_s: [f64; N_MODELS],
@@ -687,7 +688,7 @@ fn main() {
             (0..N_MODELS)
                 .map(|i| {
                     let name = MODEL_NAMES[i].to_ascii_lowercase().replace(' ', "");
-                    requested.iter().any(|r| *r == name)
+                    requested.contains(&name)
                 })
                 .collect()
         }
@@ -758,8 +759,8 @@ fn main() {
     println!();
 
     println!("\n=== total fit time per model (s) ===");
-    for i in 0..N_MODELS {
+    for (i, name) in MODEL_NAMES.iter().enumerate().take(N_MODELS) {
         let total: f64 = results.iter().map(|r| r.total_s[i]).sum();
-        println!("  {:<20}{:>10.1}s", MODEL_NAMES[i], total);
+        println!("  {:<20}{:>10.1}s", name, total);
     }
 }

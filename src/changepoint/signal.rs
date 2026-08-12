@@ -94,7 +94,7 @@ mod tests {
 
     #[test]
     fn univariate_from_slice_round_trip() {
-        let values = vec![1.0, 2.0, 3.0, 4.0];
+        let values = [1.0, 2.0, 3.0, 4.0];
         let s: Signal = (&values[..]).into();
         assert_eq!(s.n(), 4);
         assert_eq!(s.d(), 1);

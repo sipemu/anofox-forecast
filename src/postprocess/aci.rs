@@ -238,7 +238,7 @@ mod tests {
         aci.fit(&[1.0, 2.0, 3.0, 4.0, 5.0]).unwrap();
         // Radius is the (1-α_t) quantile of {1,2,3,4,5} ≈ 5
         let r = aci.current_radius();
-        assert!(r >= 4.0 && r <= 5.0);
+        assert!((4.0..=5.0).contains(&r));
     }
 
     #[test]

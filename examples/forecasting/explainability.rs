@@ -97,30 +97,24 @@ fn main() {
     println!("  Level:    yes ({} values)", explanation.level.len());
     println!(
         "  Trend:    {}",
-        if explanation.trend.is_some() {
-            format!("yes ({} values)", explanation.trend.as_ref().unwrap().len())
+        if let Some(t) = &explanation.trend {
+            format!("yes ({} values)", t.len())
         } else {
             "no".to_string()
         }
     );
     println!(
         "  Seasonal: {}",
-        if explanation.seasonal.is_some() {
-            format!(
-                "yes ({} values)",
-                explanation.seasonal.as_ref().unwrap().len()
-            )
+        if let Some(s) = &explanation.seasonal {
+            format!("yes ({} values)", s.len())
         } else {
             "no".to_string()
         }
     );
     println!(
         "  Residual: {}",
-        if explanation.residual.is_some() {
-            format!(
-                "yes ({} values)",
-                explanation.residual.as_ref().unwrap().len()
-            )
+        if let Some(r) = &explanation.residual {
+            format!("yes ({} values)", r.len())
         } else {
             "no".to_string()
         }
