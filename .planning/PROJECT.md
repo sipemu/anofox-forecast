@@ -32,10 +32,24 @@ before/after delta).
 `accuracy.json` remains deferred/unlocked); iai/criterion baselines await manual hardware capture;
 optional Nyquist validation for Phases 3–4.
 
-## Next Milestone Goals
+## Current Milestone: v1.1 Robustness Fixes & ERM Reconciliation
 
-To be defined via `/gsd-new-milestone`. The v1.0 backlog is the natural seed — the AutoETS accuracy
-gap is the highest-value candidate.
+**Goal:** Close a silent multiplicative-mode over-forecast bug class and add ERM hierarchical
+reconciliation — each proven against a baseline, keeping the "every improvement has a before/after
+number" discipline.
+
+**Target features:**
+- Fix the MFLES auto-multiplicative runaway (#219): tighten the guard (min/level ratio, not just
+  `all(v > 0)`), floor/winsorize the `ln()` transform, clamp the multiplicative back-transform —
+  proven with the repro series (~13× over-forecast → ~level).
+- Audit every model with an auto-multiplicative/log path for the same too-loose-guard failure class
+  (#10 AutoETS / #219 MFLES lineage); fix any found and add regression guards.
+- Add `ReconciliationMethod::Erm { lambda }` (Ben Taieb & Koo 2019) with a training-history API and a
+  Ledoit-Wolf-style auto-λ default, validated end-to-end on a grouped/crossed hierarchy against a
+  MinTrace/unreconciled baseline.
+
+The v1.0 backlog (ACC-01 accuracy gap, MEM-01, WSZ-01, coverage gaps) remains in `baselines/BACKLOG.md`
+and is not the focus of this milestone.
 
 ## Requirements
 
@@ -50,28 +64,31 @@ gap is the highest-value candidate.
 - ✓ Batch multi-series forecasting with Rayon parallelism (`parallel` feature) — existing
 - ✓ WebAssembly/JS bindings + published npm package + browser playground on GitHub Pages — existing
 - ✓ Existing quality gates: criterion benchmarks, proptest, clippy `-D warnings`, cargo-audit/deny — existing
-- ✓ Compute-speed benchmark harness with captured baselines across model families (criterion wall-clock + iai-callgrind instruction gates; native `parallel` and single-thread profiles) — Phase 1
-- ✓ Memory & WASM-size measurement (dhat peak-allocation tests + committed `wasm_size.json`; PERF-06 dead-code cleanup before size baseline) — Phase 1
+- ✓ Compute-speed benchmark harness with captured baselines across model families (criterion wall-clock + iai-callgrind instruction gates; native `parallel` and single-thread profiles) — v1.0 Phase 1
+- ✓ Memory & WASM-size measurement (dhat peak-allocation tests + committed `wasm_size.json`; PERF-06 dead-code cleanup before size baseline) — v1.0 Phase 1
+- ✓ Forecast-accuracy harness over vendored competition datasets with standard metrics (competition MASE, Naive2, Diebold-Mariano; pinned statsforecast cross-library reference) — v1.0 Phase 2
+- ✓ Numerical-robustness + property suites with per-family NaN/Inf guards; input-robustness edge cases — v1.0 Phase 3
+- ✓ Statistical-methodology validation (CV splits, interval/conformal coverage) — v1.0 Phase 2/3
+- ✓ CI-enforced coverage floor (90.4%) with gap inventory across model families — v1.0 Phase 3
+- ✓ Consolidated, prioritized improvement backlog with top-value fixes landed, each proven by a before/after delta — v1.0 Phase 4
 
 ### Active
 
-<!-- The hardening goals for this cycle. Hypotheses until shipped and validated. -->
+<!-- The v1.1 goals for this milestone. Hypotheses until shipped and validated. -->
 
-**Measurement backbone (per dimension: harness → baseline → tracked over time)**
-- [ ] Forecast-accuracy harness over vendored standard competition datasets (M-competitions, Tourism, etc.) with standard metrics (MASE, RMSE, sMAPE)
-- [ ] Numerical-robustness test suite for edge cases (near-singular matrices, convergence limits, NaN/Inf, extreme scales)
-- [ ] Statistical-methodology validation: correctness of CV splits, interval/conformal coverage checks
-- [ ] Code-correctness & coverage baseline: test-coverage measurement + gap identification across model families
-- [ ] Input-robustness suite: missing values, too-short series, wrong/irregular frequency, empty/constant input
-- [ ] Cross-reference benchmark comparing accuracy/behavior against a reference implementation on shared datasets
+**Workstream A — Multiplicative-guard robustness**
+- [ ] MFLES auto-multiplicative runaway fix (#219): guard tightened to a min/level ratio, `ln()` floored/winsorized, back-transform clamped; proven with the repro series (~13× → ~level)
+- [ ] Bug-class audit: every model with an auto-multiplicative/log path checked for the same too-loose guard; any found are fixed with regression guards
 
-**Prioritization & improvement**
-- [ ] Consolidated, prioritized improvement backlog ranking findings across all 8 dimensions by value/effort
-- [ ] Land the highest-value improvements, each with a documented before/after delta and a guard against regression
+**Workstream B — ERM reconciliation**
+- [ ] `ReconciliationMethod::Erm { lambda }` variant (Ben Taieb & Koo 2019) added, backward-compatible with existing BottomUp/TopDown/MinTrace* variants
+- [ ] Training-history API surface (base forecasts + leaf actuals across nodes) feeding the ERM ridge solve `P = B'Ŷ(Ŷ'Ŷ + λI)⁻¹`
+- [ ] Ledoit-Wolf-style auto-λ default matching `MinTraceShrink` ergonomics, plus a caller-supplied fixed-λ path
+- [ ] End-to-end validation on a grouped/crossed hierarchy against a MinTrace/unreconciled baseline (before/after proof)
 
 ### Out of Scope
 
-- New forecasting models or model families — this is a hardening cycle, not feature expansion
+- New forecasting models or model families — still excluded; ERM (v1.1) is a hierarchical *reconciliation method* on existing forecasts, not a new forecaster
 - New automatic seasonal-period-detection integration into models — deliberately excluded
 - API/breaking redesigns of the public `Forecaster` trait — improvements must stay backward-compatible unless a fix demands otherwise (logged as a Key Decision if so)
 - New Python bindings — out of scope for this cycle
@@ -103,6 +120,9 @@ gap is the highest-value candidate.
 | Whole-library scope across all 8 dimensions | User wants systematic, proactive confidence — not a point fix | — Pending |
 | Use standard competition datasets as the accuracy corpus | Industry-recognized, comparable to reference libraries, avoids synthetic-only bias | — Pending |
 | Exclude new models / API redesigns / auto period-detection integration | Keeps the cycle a hardening pass, not feature creep | — Pending |
+| v1.1: fix MFLES (#219) AND audit the whole multiplicative-guard bug class, not just the reported model | #10 (AutoETS) + #219 (MFLES) are the same "auto-mult guard too loose" pattern; a systematic sweep matches the v1.0 whole-library ethos | — Pending |
+| v1.1: ship ERM (#216) at full depth — auto-λ + grouped/crossed validation, not a minimal fixed-λ stub | Downstream consumer (site×material hierarchy) needs grouped reconciliation; auto-λ matches `MinTraceShrink` ergonomics | — Pending |
+| v1.1 admits one feature (ERM) into an otherwise hardening-oriented project | ERM is a reconciliation statistic over existing forecasts with a concrete downstream need, not a new forecaster; the model-family exclusion still holds | — Pending |
 
 ## Evolution
 
@@ -122,4 +142,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-08-10 after Phase 1*
+*Last updated: 2026-09-08 — started milestone v1.1 (Robustness Fixes & ERM Reconciliation)*
