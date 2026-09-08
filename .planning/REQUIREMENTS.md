@@ -63,24 +63,24 @@ Which phases cover which requirements. Populated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| MULT-01 | TBD | Pending |
-| MULT-02 | TBD | Pending |
-| MULT-03 | TBD | Pending |
-| MULT-04 | TBD | Pending |
-| MULT-05 | TBD | Pending |
-| MULT-06 | TBD | Pending |
-| ERM-01 | TBD | Pending |
-| ERM-02 | TBD | Pending |
-| ERM-03 | TBD | Pending |
-| ERM-04 | TBD | Pending |
-| ERM-05 | TBD | Pending |
-| ERM-06 | TBD | Pending |
+| MULT-01 | Phase 5 | Pending |
+| MULT-02 | Phase 5 | Pending |
+| MULT-03 | Phase 5 | Pending |
+| MULT-04 | Phase 5 | Pending |
+| MULT-05 | Phase 6 | Pending |
+| MULT-06 | Phase 6 | Pending |
+| ERM-01 | Phase 7 | Pending |
+| ERM-02 | Phase 7 | Pending |
+| ERM-03 | Phase 7 | Pending |
+| ERM-04 | Phase 8 | Pending |
+| ERM-05 | Phase 7 | Pending |
+| ERM-06 | Phase 8 | Pending |
 
 **Coverage:**
 - v1.1 requirements: 12 total
-- Mapped to phases: 0 (pending roadmap)
-- Unmapped: 12 ⚠️
+- Mapped to phases: 12 (Phase 5: 4, Phase 6: 2, Phase 7: 4, Phase 8: 2) ✓
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-09-08*
-*Last updated: 2026-09-08 after initial definition*
+*Last updated: 2026-09-08 — traceability populated during v1.1 roadmap creation*
