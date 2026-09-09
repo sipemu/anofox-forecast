@@ -27,12 +27,29 @@ numerical-robustness edge-case + property suites with per-family NaN/Inf guards;
 coverage floor (90.4%); and a ranked improvement backlog with top-value fixes landed (each proven by a
 before/after delta).
 
-**Open (carried to next milestone, see `baselines/BACKLOG.md`):** #1 AutoETS M3-monthly accuracy gap
+**Shipped: v1.1 — Robustness Fixes & ERM Reconciliation (2026-09-09).** Phases 5–8 complete, 12/12
+requirements satisfied, milestone audit PASSED. Delivered: the MFLES auto-multiplicative runaway
+(#219) fixed at all three failure points with a committed ~13×→~level regression; a 19-model
+bug-class audit finding zero new offenders (blow-up class unique to MFLES); ERM hierarchical
+reconciliation (`ReconciliationMethod::Erm { lambda: Option<f64> }`, Ben Taieb & Koo 2019) with an
+in-house Cholesky ridge solve proven correct against hand-computed + asymmetric independent oracles;
+and a Ledoit-Wolf-style auto-λ default validated end-to-end on a grouped/crossed hierarchy
+(coherence hard-asserted, RMSSE −59.7% vs unreconciled).
+
+**Open (carried forward, see `baselines/BACKLOG.md`):** #1 AutoETS M3-monthly accuracy gap
 (period=12 fix cut MASE 1.0452→0.8923; still +0.0290 above the 0.8633 reference anchor, so
 `accuracy.json` remains deferred/unlocked); iai/criterion baselines await manual hardware capture;
-optional Nyquist validation for Phases 3–4.
+optional Nyquist validation for Phases 3–8 (v1.1 phases seeded `status: draft`); stale tracked
+`src/hierarchy/mod.rs.bak` recommended for deletion.
 
-## Current Milestone: v1.1 Robustness Fixes & ERM Reconciliation
+## Next Milestone
+
+**TBD** — run `/gsd-new-milestone` to define the next milestone (questioning → research →
+requirements → roadmap). Candidate directions: close the ACC-01 accuracy gap, expand ERM auto-λ
+targets, or resume the broader whole-library performance-hardening backlog.
+
+<details>
+<summary>v1.1 milestone goal (shipped 2026-09-09)</summary>
 
 **Goal:** Close a silent multiplicative-mode over-forecast bug class and add ERM hierarchical
 reconciliation — each proven against a baseline, keeping the "every improvement has a before/after
@@ -50,6 +67,8 @@ number" discipline.
 
 The v1.0 backlog (ACC-01 accuracy gap, MEM-01, WSZ-01, coverage gaps) remains in `baselines/BACKLOG.md`
 and is not the focus of this milestone.
+
+</details>
 
 ## Requirements
 
@@ -71,20 +90,16 @@ and is not the focus of this milestone.
 - ✓ Statistical-methodology validation (CV splits, interval/conformal coverage) — v1.0 Phase 2/3
 - ✓ CI-enforced coverage floor (90.4%) with gap inventory across model families — v1.0 Phase 3
 - ✓ Consolidated, prioritized improvement backlog with top-value fixes landed, each proven by a before/after delta — v1.0 Phase 4
+- ✓ MFLES auto-multiplicative runaway fix (#219): min/median guard (τ=0.10), `ln()` winsorized to 0.01×median, back-transform clamped to 10×in-sample max; #219 repro ~13× → ~level, committed regression — v1.1 Phase 5
+- ✓ Multiplicative-guard bug-class audit: 19-model auditable sweep, zero new offenders (blow-up class architecturally unique to MFLES); Theta/AutoETS guard-assertion tests — v1.1 Phase 6
+- ✓ `ReconciliationMethod::Erm { lambda: Option<f64> }` variant (Ben Taieb & Koo 2019), backward-compatible; training-history API + in-house Cholesky ridge solve `P = BŶᵀ(ŶŶᵀ+λI)⁻¹`, proven correct against a hand-computed + asymmetric independent oracle — v1.1 Phase 7
+- ✓ Ledoit-Wolf-style auto-λ default (self-consistent with the uncentered Gram) + caller fixed-λ path; end-to-end grouped/crossed validation, coherence hard-asserted, RMSSE −59.7% vs unreconciled (drift-locked) — v1.1 Phase 8
 
 ### Active
 
-<!-- The v1.1 goals for this milestone. Hypotheses until shipped and validated. -->
+<!-- Next milestone goals — TBD. Populate via /gsd-new-milestone. -->
 
-**Workstream A — Multiplicative-guard robustness**
-- [ ] MFLES auto-multiplicative runaway fix (#219): guard tightened to a min/level ratio, `ln()` floored/winsorized, back-transform clamped; proven with the repro series (~13× → ~level)
-- [ ] Bug-class audit: every model with an auto-multiplicative/log path checked for the same too-loose guard; any found are fixed with regression guards
-
-**Workstream B — ERM reconciliation**
-- [ ] `ReconciliationMethod::Erm { lambda }` variant (Ben Taieb & Koo 2019) added, backward-compatible with existing BottomUp/TopDown/MinTrace* variants
-- [ ] Training-history API surface (base forecasts + leaf actuals across nodes) feeding the ERM ridge solve `P = B'Ŷ(Ŷ'Ŷ + λI)⁻¹`
-- [ ] Ledoit-Wolf-style auto-λ default matching `MinTraceShrink` ergonomics, plus a caller-supplied fixed-λ path
-- [ ] End-to-end validation on a grouped/crossed hierarchy against a MinTrace/unreconciled baseline (before/after proof)
+(None — v1.1 shipped. Run `/gsd-new-milestone` to define the next milestone.)
 
 ### Out of Scope
 
@@ -142,4 +157,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-09-08 — started milestone v1.1 (Robustness Fixes & ERM Reconciliation)*
+*Last updated: 2026-09-09 — after v1.1 milestone (Robustness Fixes & ERM Reconciliation) shipped*

@@ -2,19 +2,19 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Robustness Fixes & ERM Reconciliation
-current_phase: 08
-status: completed
+status: Awaiting next milestone
 stopped_at: Phase 08 complete — all phases complete
-last_updated: "2026-09-09T10:41:15.729Z"
+last_updated: "2026-09-09T11:52:08.570Z"
 last_activity: 2026-09-09
-last_activity_desc: Phase 08 complete
-state_head: 9f7cc28c233ab900268945fe645a49dbd0aae2b7
+last_activity_desc: Milestone v1.1 completed and archived
+state_head: 27952f0840022add5f900f4bea41f421ac191bf7
 progress:
   total_phases: 4
   completed_phases: 4
   total_plans: 4
   completed_plans: 4
   percent: 100
+current_phase: 08
 ---
 
 # Project State: anofox-forecast — Performance & Validation Hardening
@@ -34,10 +34,10 @@ progress:
 
 ## Current Position
 
-Phase: 08
-Plan: Not started
-Status: All phases complete
-Last activity: 2026-09-09 — Phase 08 complete
+Phase: Milestone v1.1 complete
+Plan: —
+Status: Awaiting next milestone
+Last activity: 2026-09-09 — Milestone v1.1 completed and archived
 
 ## Performance Metrics
 
@@ -126,3 +126,7 @@ satisfied across Phases 1–4.
 - [Phase 07]: T < n not hard-blocked in ERM validation — lambda rescues rank-deficient Gram; SingularMatrix returned when Cholesky fails
 - [Phase 07]: All ERM tasks committed atomically in one commit — single-file implementation indivisible without artificial broken intermediate states
 - [Phase 08]: Option<f64> for Erm lambda (not ErmAuto variant) — mirrors MinTraceShrink ergonomics, minimizes API surface — Locked CONTEXT.md decision; Option<f64> is the idiomatic Rust pattern for optional caller-supplied parameter with a computed default
+
+## Operator Next Steps
+
+- Start the next milestone with /gsd-new-milestone
