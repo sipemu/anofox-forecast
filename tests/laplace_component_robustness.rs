@@ -19,6 +19,8 @@
 //! These tests would have caught both bugs immediately on adversarial
 //! inputs; they guard the fixes going forward.
 
+#![cfg(feature = "distributional")]
+
 use anofox_forecast::models::laplace::leaves::{Ar1Leaf, Ar2Leaf, EmaLeaf, GarchWrappedLeaf};
 use anofox_forecast::models::laplace::Leaf;
 

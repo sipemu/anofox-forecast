@@ -401,3 +401,43 @@ required-features = ["distributional"]
 name = "multiscale_diagnostic"
 path = "examples/multiscale_diagnostic.rs"
 required-features = ["distributional"]
+
+[[example]]
+name = "leaf_init_pathology_sweep"
+path = "examples/leaf_init_pathology_sweep.rs"
+required-features = ["distributional"]
+
+[[example]]
+name = "issue_195_amplitude_decline"
+path = "examples/issue_195_amplitude_decline.rs"
+required-features = ["distributional"]
+
+[[example]]
+name = "issue_195_intermittent"
+path = "examples/issue_195_intermittent.rs"
+required-features = ["distributional"]
+
+[[example]]
+name = "issue_198_seasonal_underuse"
+path = "examples/issue_198_seasonal_underuse.rs"
+required-features = ["distributional"]
+
+[[example]]
+name = "monthly_48_seasonal_diagnostic"
+path = "examples/monthly_48_seasonal_diagnostic.rs"
+required-features = ["distributional"]
+
+[[example]]
+name = "synthetic_bakeoff"
+path = "examples/synthetic_bakeoff.rs"
+required-features = ["distributional"]
+
+[[example]]
+name = "wql_outlier_diagnosis"
+path = "examples/wql_outlier_diagnosis.rs"
+required-features = ["distributional"]
+
+[[example]]
+name = "m5_wape"
+path = "examples/m5_wape.rs"
+required-features = ["distributional"]
