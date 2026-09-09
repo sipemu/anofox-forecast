@@ -24,11 +24,11 @@ the closed #10). Every fix is proven with a before/after on a repro series and g
 Adds ERM (empirical-risk-minimization) hierarchical reconciliation (Ben Taieb & Koo 2019, KDD) as a
 `ReconciliationMethod` variant (GitHub #216). Backward-compatible; validated against a baseline.
 
-- [ ] **ERM-01**: `ReconciliationMethod::Erm { lambda }` exists alongside BottomUp/TopDown/MiddleOut/MinTrace*, fully backward-compatible (existing hierarchy code compiles unchanged).
-- [ ] **ERM-02**: A training-history API accepts base forecasts + leaf actuals across all nodes (T periods) for ERM to consume.
-- [ ] **ERM-03**: ERM computes the projection via the regularized ridge solve `P = B'Ŷ(Ŷ'Ŷ + λI)⁻¹`; reconciled bottom = `P·ŷ`, reconciled all = `S·P·ŷ`.
+- [x] **ERM-01**: `ReconciliationMethod::Erm { lambda }` exists alongside BottomUp/TopDown/MiddleOut/MinTrace*, fully backward-compatible (existing hierarchy code compiles unchanged).
+- [x] **ERM-02**: A training-history API accepts base forecasts + leaf actuals across all nodes (T periods) for ERM to consume.
+- [x] **ERM-03**: ERM computes the projection via the regularized ridge solve `P = B'Ŷ(Ŷ'Ŷ + λI)⁻¹`; reconciled bottom = `P·ŷ`, reconciled all = `S·P·ŷ`.
 - [ ] **ERM-04**: A Ledoit-Wolf-style auto-λ default is available (matching `MinTraceShrink` ergonomics), with a caller-supplied fixed-λ path also supported.
-- [ ] **ERM-05**: ERM correctness is verified against the reference formula on a known small hierarchy (numerical agreement within tolerance).
+- [x] **ERM-05**: ERM correctness is verified against the reference formula on a known small hierarchy (numerical agreement within tolerance).
 - [ ] **ERM-06**: ERM is validated end-to-end on a grouped/crossed hierarchy against a MinTrace/unreconciled baseline, with the accuracy before/after committed.
 
 ## Future Requirements
@@ -69,11 +69,11 @@ Which phases cover which requirements. Populated during roadmap creation.
 | MULT-04 | Phase 5 | Complete |
 | MULT-05 | Phase 6 | Complete |
 | MULT-06 | Phase 6 | Complete |
-| ERM-01 | Phase 7 | Pending |
-| ERM-02 | Phase 7 | Pending |
-| ERM-03 | Phase 7 | Pending |
+| ERM-01 | Phase 7 | Complete |
+| ERM-02 | Phase 7 | Complete |
+| ERM-03 | Phase 7 | Complete |
 | ERM-04 | Phase 8 | Pending |
-| ERM-05 | Phase 7 | Pending |
+| ERM-05 | Phase 7 | Complete |
 | ERM-06 | Phase 8 | Pending |
 
 **Coverage:**

@@ -2,19 +2,19 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Robustness Fixes & ERM Reconciliation
-current_phase: 7
+current_phase: 07
 current_phase_name: ERM Reconciliation Variant & Ridge Solve
-status: planning
-stopped_at: Phase 06 complete, ready to plan Phase 7
-last_updated: "2026-09-09T07:49:05.666Z"
+status: verifying
+stopped_at: Completed 07-01-PLAN.md
+last_updated: "2026-09-09T08:39:40.213Z"
 last_activity: 2026-09-09
-last_activity_desc: Phase 06 complete, transitioned to Phase 7
-state_head: 8758efd4747aa0663230f3d17d4520bb3142a521
+last_activity_desc: Phase 07 execution started
+state_head: d40e294f5eafc049c99a34458ae7ad11b3133404
 progress:
   total_phases: 4
   completed_phases: 2
-  total_plans: 2
-  completed_plans: 2
+  total_plans: 3
+  completed_plans: 3
   percent: 50
 ---
 
@@ -29,16 +29,16 @@ progress:
 
 **Core Value:** Every claimed capability is measured, and every improvement is proven with a before/after number.
 
-**Current Focus:** Phase 06 — Multiplicative-Guard Bug-Class Audit
+**Current Focus:** Phase 07 — ERM Reconciliation Variant & Ridge Solve
 
 ---
 
 ## Current Position
 
-Phase: 7 — ERM Reconciliation Variant & Ridge Solve
-Plan: Not started
-Status: Ready to plan
-Last activity: 2026-09-09 — Phase 06 complete, transitioned to Phase 7
+Phase: 07 (ERM Reconciliation Variant & Ridge Solve) — EXECUTING
+Plan: 1 of 1
+Status: Phase complete — ready for verification
+Last activity: 2026-09-09 — Phase 07 execution started
 
 ## Performance Metrics
 
@@ -54,6 +54,7 @@ Last activity: 2026-09-09 — Phase 06 complete, transitioned to Phase 7
 | Plan | Duration | Tasks | Files |
 |------|----------|-------|-------|
 | Phase 06-multiplicative-guard-bug-class-audit P01 | 4 | 3 tasks | 2 files |
+| Phase 07-erm-reconciliation-variant-ridge-solve P01 | 25 | 3 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -90,8 +91,8 @@ Last activity: 2026-09-09 — Phase 06 complete, transitioned to Phase 7
 
 ## Session Continuity
 
-**Last session:** 2026-09-09T07:32:31.038Z
-**Stopped at:** Phase 06 complete, ready to plan Phase 7
+**Last session:** 2026-09-09T08:39:40.167Z
+**Stopped at:** Completed 07-01-PLAN.md
 **Resume file:** None
 
 ### What Was Done This Session
@@ -121,3 +122,6 @@ satisfied across Phases 1–4.
 
 - [Phase 06]: All 19 in-scope auto-multiplicative/log paths are PASS or N/A — MULT-06 satisfied by evidence, no production code change required
 - [Phase 06]: MFLES ln→boosting→exp blow-up class is architecturally unique; guard-assertion tests empirically confirm Theta and AutoETS stay at level for near-zero series
+- [Phase 07]: Eq derive dropped from ReconciliationMethod — f64 is not Eq; PartialEq retained, zero downstream breakage
+- [Phase 07]: T < n not hard-blocked in ERM validation — lambda rescues rank-deficient Gram; SingularMatrix returned when Cholesky fails
+- [Phase 07]: All ERM tasks committed atomically in one commit — single-file implementation indivisible without artificial broken intermediate states

@@ -104,10 +104,11 @@ the reference formula on a known small hierarchy.
   4. On a known small hierarchy with a hand-computable answer, ERM's output matches the reference formula within numerical tolerance (correctness proof, not just "it runs")
   5. Work respects `serde`/feature gates as applicable, the npm/WASM package still builds, and clippy `-D warnings` + cargo-audit/deny remain green
 
-**Plans**: 1 plan
+**Plans**: 1/1 plans executed
 
 Plans:
-- [ ] 07-01-PLAN.md — ERM variant + Eq-drop, training-history API, ridge solve `P = B'Ŷ(Ŷ'Ŷ+λI)⁻¹`, hand-computed correctness + coherence tests (ERM-01/02/03/05)
+
+- [x] 07-01-PLAN.md — ERM variant + Eq-drop, training-history API, ridge solve `P = B'Ŷ(Ŷ'Ŷ+λI)⁻¹`, hand-computed correctness + coherence tests (ERM-01/02/03/05)
 
 ### Phase 8: Auto-λ & Grouped/Crossed Validation
 
@@ -140,7 +141,7 @@ the default sequencing.
 | 4. Prioritized Improvement Backlog & Top-Value Fixes | v1.0 | 3/3 | Complete | 2026-08-12 |
 | 5. MFLES Multiplicative-Guard Fix | v1.1 | 1/1 | Complete    | 2026-09-09 |
 | 6. Multiplicative-Guard Bug-Class Audit | v1.1 | 1/1 | Complete    | 2026-09-09 |
-| 7. ERM Reconciliation Variant & Ridge Solve | v1.1 | 0/TBD | Not started | - |
+| 7. ERM Reconciliation Variant & Ridge Solve | v1.1 | 1/1 | In Progress|  |
 | 8. Auto-λ & Grouped/Crossed Validation | v1.1 | 0/TBD | Not started | - |
 
 ---
