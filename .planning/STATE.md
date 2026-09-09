@@ -2,19 +2,19 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Robustness Fixes & ERM Reconciliation
-current_phase: 6
+current_phase: 06
 current_phase_name: Multiplicative-Guard Bug-Class Audit
-status: planning
-stopped_at: Phase 05 complete, ready to plan Phase 6
-last_updated: "2026-09-09T06:39:07.074Z"
+status: verifying
+stopped_at: Completed 06-01-PLAN.md (MULT-05 audit inventory + guard-assertion tests)
+last_updated: "2026-09-09T07:32:31.138Z"
 last_activity: 2026-09-09
-last_activity_desc: Phase 05 complete, transitioned to Phase 6
-state_head: bdb104572eb8efe3946058e1f7ee3d80b478eab0
+last_activity_desc: Phase 06 execution started
+state_head: d6a1f78e9edf352f2d74f7a2bb5e934020898b6d
 progress:
   total_phases: 4
   completed_phases: 1
-  total_plans: 1
-  completed_plans: 1
+  total_plans: 2
+  completed_plans: 2
   percent: 25
 ---
 
@@ -29,16 +29,16 @@ progress:
 
 **Core Value:** Every claimed capability is measured, and every improvement is proven with a before/after number.
 
-**Current Focus:** Phase 05 — MFLES Multiplicative-Guard Fix
+**Current Focus:** Phase 06 — Multiplicative-Guard Bug-Class Audit
 
 ---
 
 ## Current Position
 
-Phase: 6 — Multiplicative-Guard Bug-Class Audit
-Plan: Not started
-Status: Ready to plan
-Last activity: 2026-09-09 — Phase 05 complete, transitioned to Phase 6
+Phase: 06 (Multiplicative-Guard Bug-Class Audit) — EXECUTING
+Plan: 1 of 1
+Status: Phase complete — ready for verification
+Last activity: 2026-09-09 — Phase 06 execution started
 
 ## Performance Metrics
 
@@ -49,6 +49,11 @@ Last activity: 2026-09-09 — Phase 05 complete, transitioned to Phase 6
 | v1.1 plans complete | — | — | — |
 
 ---
+**Per-Plan Metrics:**
+
+| Plan | Duration | Tasks | Files |
+|------|----------|-------|-------|
+| Phase 06-multiplicative-guard-bug-class-audit P01 | 4 | 3 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -85,8 +90,8 @@ Last activity: 2026-09-09 — Phase 05 complete, transitioned to Phase 6
 
 ## Session Continuity
 
-**Last session:** 2026-09-08 — v1.1 roadmap creation
-**Stopped at:** Phase 05 complete, ready to plan Phase 6
+**Last session:** 2026-09-09T07:32:31.038Z
+**Stopped at:** Completed 06-01-PLAN.md (MULT-05 audit inventory + guard-assertion tests)
 **Resume file:** None
 
 ### What Was Done This Session
@@ -111,3 +116,8 @@ Full v1.0 phase history, per-plan metrics, and decision log are preserved in
 [`milestones/v1.0-ROADMAP.md`](milestones/v1.0-ROADMAP.md), [`v1.0-MILESTONE-AUDIT.md`](v1.0-MILESTONE-AUDIT.md),
 and [`baselines/BACKLOG.md`](baselines/BACKLOG.md). v1.0 shipped 2026-08-12 with 28/28 requirements
 satisfied across Phases 1–4.
+
+## Decisions
+
+- [Phase 06]: All 19 in-scope auto-multiplicative/log paths are PASS or N/A — MULT-06 satisfied by evidence, no production code change required
+- [Phase 06]: MFLES ln→boosting→exp blow-up class is architecturally unique; guard-assertion tests empirically confirm Theta and AutoETS stay at level for near-zero series

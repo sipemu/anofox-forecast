@@ -85,9 +85,9 @@ fixed and guarded against regression.
   4. Models audited and found already-safe are recorded as such with the evidence (why the existing guard is tight enough), so the inventory is a complete, auditable sweep
   5. Public `Forecaster` API is unchanged, the npm/WASM package still builds, and clippy `-D warnings` + cargo-audit/deny remain green
 
-**Plans**: 1 plan
+**Plans**: 1/1 plans executed
 
-- [ ] 06-01-PLAN.md — Commit the MULT-05 19-row inventory doc + Theta/AutoETS near-zero guard-assertion tests; record MULT-06 zero-offender satisfied-by-evidence
+- [x] 06-01-PLAN.md — Commit the MULT-05 19-row inventory doc + Theta/AutoETS near-zero guard-assertion tests; record MULT-06 zero-offender satisfied-by-evidence
 
 ### Phase 7: ERM Reconciliation Variant & Ridge Solve
 
@@ -136,7 +136,7 @@ the default sequencing.
 | 3. Numerical Robustness & Coverage Baseline | v1.0 | 3/3 | Complete | 2026-08-11 |
 | 4. Prioritized Improvement Backlog & Top-Value Fixes | v1.0 | 3/3 | Complete | 2026-08-12 |
 | 5. MFLES Multiplicative-Guard Fix | v1.1 | 1/1 | Complete    | 2026-09-09 |
-| 6. Multiplicative-Guard Bug-Class Audit | v1.1 | 0/TBD | Not started | - |
+| 6. Multiplicative-Guard Bug-Class Audit | v1.1 | 1/1 | In Progress|  |
 | 7. ERM Reconciliation Variant & Ridge Solve | v1.1 | 0/TBD | Not started | - |
 | 8. Auto-λ & Grouped/Crossed Validation | v1.1 | 0/TBD | Not started | - |
 

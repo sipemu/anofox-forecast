@@ -16,8 +16,8 @@ the closed #10). Every fix is proven with a before/after on a repro series and g
 - [x] **MULT-02**: MFLES multiplicative mode floors/winsorizes the `ln()` transform so a single near-zero observation cannot create a log-space crater.
 - [x] **MULT-03**: MFLES multiplicative back-transform is clamped so a forecast cannot exceed a bounded multiple of the in-sample level (runaway backstop).
 - [x] **MULT-04**: The #219 repro series (near-zero month, level ≈ 2k) forecasts at ~level instead of ~13×; the before/after delta is committed as a regression guard.
-- [ ] **MULT-05**: Every model with an auto-multiplicative/log selection path is inventoried and audited for the same too-loose-guard failure class (the #10/#219 lineage).
-- [ ] **MULT-06**: Any additional model exhibiting the failure class is fixed and guarded by a regression test proving the pre-fix blow-up no longer occurs.
+- [x] **MULT-05**: Every model with an auto-multiplicative/log selection path is inventoried and audited for the same too-loose-guard failure class (the #10/#219 lineage).
+- [x] **MULT-06**: Any additional model exhibiting the failure class is fixed and guarded by a regression test proving the pre-fix blow-up no longer occurs.
 
 ### ERM Reconciliation
 
@@ -67,8 +67,8 @@ Which phases cover which requirements. Populated during roadmap creation.
 | MULT-02 | Phase 5 | Complete |
 | MULT-03 | Phase 5 | Complete |
 | MULT-04 | Phase 5 | Complete |
-| MULT-05 | Phase 6 | Pending |
-| MULT-06 | Phase 6 | Pending |
+| MULT-05 | Phase 6 | Complete |
+| MULT-06 | Phase 6 | Complete |
 | ERM-01 | Phase 7 | Pending |
 | ERM-02 | Phase 7 | Pending |
 | ERM-03 | Phase 7 | Pending |
