@@ -125,7 +125,9 @@ MinTrace/unreconciled baseline with the accuracy before/after committed.
   4. The auto-λ default is exercised in the end-to-end validation (not only the fixed-λ path), demonstrating the shrink default behaves sensibly on real crossed data
   5. Public API stays backward-compatible, the npm/WASM package still builds, and clippy `-D warnings` + cargo-audit/deny remain green
 
-**Plans**: TBD
+**Plans**: 1 plan
+
+- [ ] 08-01-PLAN.md — Erm { lambda: Option<f64> } auto-λ (None) + erm_auto_lambda helper + Phase-7 test migration, grouped/crossed end-to-end coherence + RMSSE before/after vs unreconciled + MinTraceStruct, committed results note
 
 ## Progress
 
