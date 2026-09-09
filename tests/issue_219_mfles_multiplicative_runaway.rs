@@ -26,29 +26,9 @@ use chrono::{Duration, TimeZone, Utc};
 /// All values are strictly positive, so the old code selects multiplicative.
 fn make_issue_219_series() -> TimeSeries {
     let values = vec![
-        2100.0_f64,
-        1950.0,
-        2200.0,
-        1800.0,
-        2050.0,
-        2300.0,
-        1900.0,
-        2150.0,
-        1850.0,
-        2400.0,
-        2000.0,
+        2100.0_f64, 1950.0, 2200.0, 1800.0, 2050.0, 2300.0, 1900.0, 2150.0, 1850.0, 2400.0, 2000.0,
         1.0, // near-zero outlier: min/median ≈ 0.0005, far below τ = 0.10
-        2050.0,
-        1950.0,
-        2100.0,
-        1800.0,
-        2200.0,
-        1900.0,
-        2050.0,
-        2300.0,
-        1850.0,
-        2150.0,
-        2000.0,
+        2050.0, 1950.0, 2100.0, 1800.0, 2200.0, 1900.0, 2050.0, 2300.0, 1850.0, 2150.0, 2000.0,
         2100.0,
     ];
     let base = Utc.with_ymd_and_hms(2022, 1, 1, 0, 0, 0).unwrap();
@@ -71,10 +51,7 @@ fn issue_219_mfles_no_multiplicative_runaway() {
     let fc = model.predict(12).unwrap();
     let preds = fc.primary();
 
-    let forecast_max = preds
-        .iter()
-        .copied()
-        .fold(f64::NEG_INFINITY, f64::max);
+    let forecast_max = preds.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let level = 2000.0_f64;
 
     // Post-fix: must be below 2.5× level (a generous margin that the
@@ -88,10 +65,7 @@ fn issue_219_mfles_no_multiplicative_runaway() {
     );
 
     // Also verify forecasts are positive (not floored to zero).
-    let forecast_min = preds
-        .iter()
-        .copied()
-        .fold(f64::INFINITY, f64::min);
+    let forecast_min = preds.iter().copied().fold(f64::INFINITY, f64::min);
     assert!(
         forecast_min > 0.0,
         "forecast should remain positive, got min={:.2}",
@@ -140,10 +114,7 @@ fn issue_219_mfles_explicit_multiplicative_with_floor_and_clamp() {
     // In-sample max ≈ 2400; cap = 24000.
     let insample_max_approx = 2400.0_f64;
     let cap = 10.0 * insample_max_approx;
-    let forecast_max = preds
-        .iter()
-        .copied()
-        .fold(f64::NEG_INFINITY, f64::max);
+    let forecast_max = preds.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     assert!(
         forecast_max <= cap,
         "explicit multiplicative with clamp: forecast_max={:.0} exceeds cap={:.0}",

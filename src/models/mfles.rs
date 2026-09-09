@@ -91,6 +91,11 @@ pub struct MFLES {
     /// Training-time exogenous regressors, retained for the
     /// residual-Ridge shim.
     training_regressors_store: Option<std::collections::HashMap<String, Vec<f64>>>,
+    /// In-sample maximum value (original scale), stored at fit time for the
+    /// multiplicative back-transform clamp (issue #219).
+    /// `None` on the additive path (or for old deserialized models) — clamp
+    /// is then inert (cap = f64::INFINITY).
+    insample_max: Option<f64>,
 }
 
 /// Builder for constructing an [`MFLES`] model with custom parameters.
@@ -223,6 +228,24 @@ impl MFLESBuilder {
 }
 
 impl MFLES {
+    /// Minimum ratio of series minimum to series median below which auto mode
+    /// selects additive instead of multiplicative (issue #219 mode-selection
+    /// guard, MULT-01). A near-zero observation with `min / median < τ` would
+    /// open a log-space crater; falling back to additive eliminates this.
+    const MULT_AUTO_TAU: f64 = 0.10;
+
+    /// Floor fraction applied to each value before `ln()` in multiplicative
+    /// mode: the input is winsorized to `v.max(MULT_LOG_FLOOR_FRAC × median)`
+    /// before taking the logarithm, preventing a near-zero observation from
+    /// creating a log-space crater even when multiplicative is forced (issue
+    /// #219, MULT-02).
+    const MULT_LOG_FLOOR_FRAC: f64 = 0.01;
+
+    /// Back-transform cap multiple: every multiplicative `exp()` forecast is
+    /// clamped to `MULT_BACK_CLAMP_K × insample_max` to prevent runaway
+    /// exp() output regardless of log-space distortion (issue #219, MULT-03).
+    const MULT_BACK_CLAMP_K: f64 = 10.0;
+
     /// Create a builder for constructing an MFLES model.
     pub fn builder() -> MFLESBuilder {
         MFLESBuilder::new()
@@ -259,6 +282,7 @@ impl MFLES {
             seasonal_full: None,
             training_values_store: None,
             training_regressors_store: None,
+            insample_max: None,
         }
     }
 
@@ -935,7 +959,17 @@ impl MFLES {
 
             // Inverse transform
             let mut pred_original = if self.is_multiplicative {
-                pred.exp()
+                let raw = pred.exp();
+                // Clamp to [0, K × in-sample max] — runaway backstop so a
+                // distorted log-space fit cannot produce an astronomically
+                // large back-transformed forecast (issue #219, MULT-03).
+                // When insample_max is None (additive-path serialised model),
+                // cap is f64::INFINITY — clamp is inert.
+                let cap = self
+                    .insample_max
+                    .map(|m| Self::MULT_BACK_CLAMP_K * m)
+                    .unwrap_or(f64::INFINITY);
+                raw.max(0.0).min(cap)
             } else {
                 let mean_val = self.mean.unwrap_or(0.0);
                 let std_val = self.std.unwrap_or(1.0);
@@ -998,8 +1032,21 @@ impl Forecaster for MFLES {
         let use_multiplicative = match self.multiplicative {
             Some(m) => m,
             None => {
-                // Auto: multiplicative if positive and seasonal
-                self.season_length > 0 && values.iter().all(|&v| v > 0.0)
+                // Auto: multiplicative only if every value is positive AND the
+                // series does not contain a near-zero outlier relative to its
+                // level (issue #219 guard, MULT-01). A near-zero value with
+                // min / median < τ would open a log-space crater and cause a
+                // runaway back-transform; falling back to additive is safer.
+                let all_positive = self.season_length > 0 && values.iter().all(|&v| v > 0.0);
+                if all_positive {
+                    let median = Self::median_scalar(values);
+                    let min_val = values.iter().copied().fold(f64::INFINITY, f64::min);
+                    // Guard: if min / median < τ, a near-zero value would distort
+                    // log-space — fall back to additive.
+                    median > 0.0 && (min_val / median) >= Self::MULT_AUTO_TAU
+                } else {
+                    false
+                }
             }
         };
         self.is_multiplicative = use_multiplicative;
@@ -1007,11 +1054,21 @@ impl Forecaster for MFLES {
         // Transform data
         let y: Vec<f64>;
         if use_multiplicative {
-            let min_val = values.iter().copied().fold(f64::INFINITY, |a, b| a.min(b));
+            let min_val = values.iter().copied().fold(f64::INFINITY, f64::min);
+            let max_val = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let median = Self::median_scalar(values);
+            // Floor fraction prevents a near-zero value from opening a
+            // log-space crater (issue #219, MULT-02). Values below
+            // `floor_frac × median` are winsorized up before ln().
+            let floor = Self::MULT_LOG_FLOOR_FRAC * median;
             self.const_val = Some(min_val);
-            y = values.iter().map(|&v| v.ln()).collect();
+            // Store in-sample max so predict_internal() can clamp the
+            // back-transform (issue #219, MULT-03).
+            self.insample_max = Some(max_val);
+            y = values.iter().map(|&v| v.max(floor).ln()).collect();
         } else {
             self.const_val = None;
+            self.insample_max = None;
             let mean_val = values.iter().sum::<f64>() / n as f64;
             let std_val = (values.iter().map(|v| (v - mean_val).powi(2)).sum::<f64>() / n as f64)
                 .sqrt()
