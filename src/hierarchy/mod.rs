@@ -3342,7 +3342,7 @@ mod tests {
             / unrec_rmsse.iter().filter(|v| v.is_finite()).count() as f64;
 
         // --- Method 2: MinTraceStruct ---
-        let mut tree_mt =
+        let tree_mt =
             HierarchyTree::from_summing_matrix(&node_names, &leaf_names, &leaf_ancestors).unwrap();
         let base_mt = base_from_slice(&base_holdout_all);
         let mt_result = tree_mt
@@ -3402,18 +3402,24 @@ mod tests {
             approx_eq(erm_map["ProdY"][step], ay + by_, 1e-8);
         }
 
+        // Compute the auto-λ value for the results note (same inputs as erm_reconcile uses).
+        let y_stored_for_lw: Vec<Vec<f64>> = base_hist_all.clone();
+        let auto_lw = erm_auto_lambda(&y_stored_for_lw, 9, t_train).unwrap();
+
         // --- Headline numbers (observable with --nocapture) ---
         println!("=== ERM Grouped/Crossed Validation — Mean RMSSE across 9 nodes ===");
         println!("  Unreconciled:   {:.6}", unrec_mean);
         println!("  MinTraceStruct: {:.6}", mt_mean);
         println!("  ERM auto-λ:     {:.6}", erm_mean);
+        println!("  Auto-λ selected: {:.6}", auto_lw);
 
-        // --- SOFT: ERM should not dramatically exceed unreconciled ---
+        // --- SOFT: ERM RMSSE ≤ unreconciled × 1.1 (tightened from 1.5 after capturing real values) ---
+        // Observed ratio: ERM ({:.6}) / unreconciled ({:.6}) ≈ 0.362 — well within 1.1×.
         assert!(
-            erm_mean <= unrec_mean * 1.5,
-            "ERM auto-lambda mean RMSSE ({:.6}) should not greatly exceed unreconciled ({:.6})",
+            erm_mean <= unrec_mean * 1.1,
+            "ERM auto-lambda mean RMSSE ({:.6}) should not exceed unreconciled * 1.1 ({:.6})",
             erm_mean,
-            unrec_mean
+            unrec_mean * 1.1
         );
     }
 }
