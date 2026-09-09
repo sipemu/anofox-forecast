@@ -12,10 +12,10 @@ Requirements for milestone v1.1. Each maps to exactly one roadmap phase.
 Fixes the silent multiplicative-mode over-forecast bug class (GitHub #219, same failure class as
 the closed #10). Every fix is proven with a before/after on a repro series and guarded against regression.
 
-- [ ] **MULT-01**: MFLES no longer selects multiplicative mode when a series value is near-zero relative to its level (min/level below a threshold τ); it falls back to additive.
-- [ ] **MULT-02**: MFLES multiplicative mode floors/winsorizes the `ln()` transform so a single near-zero observation cannot create a log-space crater.
-- [ ] **MULT-03**: MFLES multiplicative back-transform is clamped so a forecast cannot exceed a bounded multiple of the in-sample level (runaway backstop).
-- [ ] **MULT-04**: The #219 repro series (near-zero month, level ≈ 2k) forecasts at ~level instead of ~13×; the before/after delta is committed as a regression guard.
+- [x] **MULT-01**: MFLES no longer selects multiplicative mode when a series value is near-zero relative to its level (min/level below a threshold τ); it falls back to additive.
+- [x] **MULT-02**: MFLES multiplicative mode floors/winsorizes the `ln()` transform so a single near-zero observation cannot create a log-space crater.
+- [x] **MULT-03**: MFLES multiplicative back-transform is clamped so a forecast cannot exceed a bounded multiple of the in-sample level (runaway backstop).
+- [x] **MULT-04**: The #219 repro series (near-zero month, level ≈ 2k) forecasts at ~level instead of ~13×; the before/after delta is committed as a regression guard.
 - [ ] **MULT-05**: Every model with an auto-multiplicative/log selection path is inventoried and audited for the same too-loose-guard failure class (the #10/#219 lineage).
 - [ ] **MULT-06**: Any additional model exhibiting the failure class is fixed and guarded by a regression test proving the pre-fix blow-up no longer occurs.
 
@@ -63,10 +63,10 @@ Which phases cover which requirements. Populated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| MULT-01 | Phase 5 | Pending |
-| MULT-02 | Phase 5 | Pending |
-| MULT-03 | Phase 5 | Pending |
-| MULT-04 | Phase 5 | Pending |
+| MULT-01 | Phase 5 | Complete |
+| MULT-02 | Phase 5 | Complete |
+| MULT-03 | Phase 5 | Complete |
+| MULT-04 | Phase 5 | Complete |
 | MULT-05 | Phase 6 | Pending |
 | MULT-06 | Phase 6 | Pending |
 | ERM-01 | Phase 7 | Pending |
@@ -77,6 +77,7 @@ Which phases cover which requirements. Populated during roadmap creation.
 | ERM-06 | Phase 8 | Pending |
 
 **Coverage:**
+
 - v1.1 requirements: 12 total
 - Mapped to phases: 12 (Phase 5: 4, Phase 6: 2, Phase 7: 4, Phase 8: 2) ✓
 - Unmapped: 0
