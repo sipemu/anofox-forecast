@@ -104,7 +104,10 @@ the reference formula on a known small hierarchy.
   4. On a known small hierarchy with a hand-computable answer, ERM's output matches the reference formula within numerical tolerance (correctness proof, not just "it runs")
   5. Work respects `serde`/feature gates as applicable, the npm/WASM package still builds, and clippy `-D warnings` + cargo-audit/deny remain green
 
-**Plans**: TBD
+**Plans**: 1 plan
+
+Plans:
+- [ ] 07-01-PLAN.md — ERM variant + Eq-drop, training-history API, ridge solve `P = B'Ŷ(Ŷ'Ŷ+λI)⁻¹`, hand-computed correctness + coherence tests (ERM-01/02/03/05)
 
 ### Phase 8: Auto-λ & Grouped/Crossed Validation
 
