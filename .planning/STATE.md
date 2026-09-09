@@ -2,19 +2,19 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Robustness Fixes & ERM Reconciliation
-current_phase: 8
+current_phase: 08
 current_phase_name: Auto-λ & Grouped/Crossed Validation
-status: planning
-stopped_at: Phase 07 complete, ready to plan Phase 8
-last_updated: "2026-09-09T08:58:34.300Z"
+status: verifying
+stopped_at: Completed 08-01-PLAN.md (Phase 8 final plan — all 12 v1.1 requirements satisfied)
+last_updated: "2026-09-09T10:14:58.945Z"
 last_activity: 2026-09-09
-last_activity_desc: Phase 07 complete, transitioned to Phase 8
-state_head: 3544cdcba6e985a27bbacf1585b2330216a2f512
+last_activity_desc: Phase 08 execution started
+state_head: bc79526ccc4a92650605e022b91ad21f257c8d02
 progress:
   total_phases: 4
   completed_phases: 3
-  total_plans: 3
-  completed_plans: 3
+  total_plans: 4
+  completed_plans: 4
   percent: 75
 ---
 
@@ -29,16 +29,16 @@ progress:
 
 **Core Value:** Every claimed capability is measured, and every improvement is proven with a before/after number.
 
-**Current Focus:** Phase 07 — ERM Reconciliation Variant & Ridge Solve
+**Current Focus:** Phase 08 — Auto-λ & Grouped/Crossed Validation
 
 ---
 
 ## Current Position
 
-Phase: 8 — Auto-λ & Grouped/Crossed Validation
-Plan: Not started
-Status: Ready to plan
-Last activity: 2026-09-09 — Phase 07 complete, transitioned to Phase 8
+Phase: 08 (Auto-λ & Grouped/Crossed Validation) — EXECUTING
+Plan: 1 of 1
+Status: Phase complete — ready for verification
+Last activity: 2026-09-09 — Phase 08 execution started
 
 ## Performance Metrics
 
@@ -55,6 +55,7 @@ Last activity: 2026-09-09 — Phase 07 complete, transitioned to Phase 8
 |------|----------|-------|-------|
 | Phase 06-multiplicative-guard-bug-class-audit P01 | 4 | 3 tasks | 2 files |
 | Phase 07-erm-reconciliation-variant-ridge-solve P01 | 25 | 3 tasks | 1 files |
+| Phase 08 P01 | 8 min | 3 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -91,8 +92,8 @@ Last activity: 2026-09-09 — Phase 07 complete, transitioned to Phase 8
 
 ## Session Continuity
 
-**Last session:** 2026-09-09T08:39:40.167Z
-**Stopped at:** Phase 07 complete, ready to plan Phase 8
+**Last session:** 2026-09-09T10:14:58.842Z
+**Stopped at:** Completed 08-01-PLAN.md (Phase 8 final plan — all 12 v1.1 requirements satisfied)
 **Resume file:** None
 
 ### What Was Done This Session
@@ -125,3 +126,4 @@ satisfied across Phases 1–4.
 - [Phase 07]: Eq derive dropped from ReconciliationMethod — f64 is not Eq; PartialEq retained, zero downstream breakage
 - [Phase 07]: T < n not hard-blocked in ERM validation — lambda rescues rank-deficient Gram; SingularMatrix returned when Cholesky fails
 - [Phase 07]: All ERM tasks committed atomically in one commit — single-file implementation indivisible without artificial broken intermediate states
+- [Phase 08]: Option<f64> for Erm lambda (not ErmAuto variant) — mirrors MinTraceShrink ergonomics, minimizes API surface — Locked CONTEXT.md decision; Option<f64> is the idiomatic Rust pattern for optional caller-supplied parameter with a computed default

@@ -125,9 +125,9 @@ MinTrace/unreconciled baseline with the accuracy before/after committed.
   4. The auto-λ default is exercised in the end-to-end validation (not only the fixed-λ path), demonstrating the shrink default behaves sensibly on real crossed data
   5. Public API stays backward-compatible, the npm/WASM package still builds, and clippy `-D warnings` + cargo-audit/deny remain green
 
-**Plans**: 1 plan
+**Plans**: 1/1 plans executed
 
-- [ ] 08-01-PLAN.md — Erm { lambda: Option<f64> } auto-λ (None) + erm_auto_lambda helper + Phase-7 test migration, grouped/crossed end-to-end coherence + RMSSE before/after vs unreconciled + MinTraceStruct, committed results note
+- [x] 08-01-PLAN.md — Erm { lambda: Option<f64> } auto-λ (None) + erm_auto_lambda helper + Phase-7 test migration, grouped/crossed end-to-end coherence + RMSSE before/after vs unreconciled + MinTraceStruct, committed results note
 
 ## Progress
 
@@ -144,7 +144,7 @@ the default sequencing.
 | 5. MFLES Multiplicative-Guard Fix | v1.1 | 1/1 | Complete    | 2026-09-09 |
 | 6. Multiplicative-Guard Bug-Class Audit | v1.1 | 1/1 | Complete    | 2026-09-09 |
 | 7. ERM Reconciliation Variant & Ridge Solve | v1.1 | 1/1 | Complete    | 2026-09-09 |
-| 8. Auto-λ & Grouped/Crossed Validation | v1.1 | 0/TBD | Not started | - |
+| 8. Auto-λ & Grouped/Crossed Validation | v1.1 | 1/1 | In Progress|  |
 
 ---
 *Roadmap created: 2026-08-09*
