@@ -97,17 +97,20 @@ pub enum ReconciliationMethod {
     MinTraceStruct,
     /// Empirical Risk Minimization (ERM) reconciliation.
     ///
-    /// Computes the regularized ridge projection `P = B'Ŷ(Ŷ'Ŷ + λI)⁻¹`,
-    /// where `Ŷ` is the matrix of historical base forecasts (nodes×T) and
-    /// `B` is the matrix of historical leaf actuals (leaves×T). The
-    /// reconciled bottom-level forecasts are `P·ŷ` and the full coherent
-    /// vector is `S·P·ŷ`.
+    /// Computes the regularized ridge projection `P = B Ŷᵀ (Ŷ Ŷᵀ + λI)⁻¹`,
+    /// where `Ŷ` is the matrix of historical base forecasts (nodes×T, rows=nodes)
+    /// and `B` is the matrix of historical leaf actuals (leaves×T, rows=leaves).
+    /// The Gram matrix `Ŷ Ŷᵀ` is nodes×nodes (n×n). The reconciled
+    /// bottom-level forecasts are `P·ŷ` and the full coherent vector is `S·P·ŷ`.
+    ///
+    /// (This is the same ERM estimator as Ben Taieb & Koo (2019), written for
+    /// this codebase's row-major node×T layout rather than column-major T×n.)
     ///
     /// `lambda` is the ridge regularization strength. Larger values shrink
     /// `P` toward zero, increasing robustness when `T` (training periods) is
     /// small relative to `n` (node count). Set `lambda` to 0.0 only when
     /// `T >> n` and the base forecasts are well-conditioned; otherwise the
-    /// Gram matrix `Ŷ'Ŷ` may be rank-deficient and the solve will fail with a
+    /// Gram matrix `Ŷ Ŷᵀ` may be rank-deficient and the solve will fail with a
     /// `SingularMatrix` error.
     ///
     /// Requires [`HierarchyTree::with_erm_training`] to have been called.
@@ -778,7 +781,7 @@ impl HierarchyTree {
             .collect())
     }
 
-    /// ERM reconciliation: P = B'Ŷ (Ŷ'Ŷ + λI)⁻¹, reconciled = S·P·ŷ.
+    /// ERM reconciliation: P = B Ŷᵀ (Ŷ Ŷᵀ + λI)⁻¹, reconciled = S·P·ŷ.
     ///
     /// Requires `with_erm_training` to have been called with valid base forecast
     /// history (`Ŷ_stored`, nodes×T) and leaf-actual history (`B_stored`, leaves×T).
@@ -791,6 +794,14 @@ impl HierarchyTree {
         horizon: usize,
         lambda: f64,
     ) -> Result<Vec<(String, Vec<f64>)>> {
+        // Guard: λ must be finite and non-negative. A negative λ amplifies
+        // rather than regularizes; NaN bypasses the Cholesky guard silently.
+        if !lambda.is_finite() || lambda < 0.0 {
+            return Err(ForecastError::InvalidParameter(format!(
+                "ERM: lambda must be finite and non-negative, got {lambda}"
+            )));
+        }
+
         let n = self.nodes.len();
         let leaves = self.leaves();
         let m = leaves.len();
@@ -851,6 +862,14 @@ impl HierarchyTree {
         }
 
         let t_cap = t_base;
+
+        // Guard: at least one training period is required. T=0 makes the Gram
+        // matrix zero (only λI), producing a zero P and silent zero forecasts.
+        if t_cap == 0 {
+            return Err(ForecastError::InvalidParameter(
+                "ERM: training history must contain at least one time period (T ≥ 1)".into(),
+            ));
+        }
 
         // 4. Build Ŷ_stored (n×T): rows = nodes in internal index order, cols = time.
         let y_stored: Vec<Vec<f64>> = (0..n)
@@ -2695,6 +2714,290 @@ mod tests {
         assert!(tree
             .reconcile(&base, ReconciliationMethod::Erm { lambda: 1.0 })
             .is_err());
+    }
+
+    /// ERM: base_history node with wrong length returns Err.
+    ///
+    /// Exercises the code path at lines 822–835 that validates every node's
+    /// base_history vector is the same length as the first node's vector.
+    #[test]
+    fn erm_shape_mismatch_base_hist() {
+        let mut tree = HierarchyTree::new(vec![("Total", &["A", "B"])]).unwrap();
+
+        // Node "B" has 3 time steps; Total and A have 2 — length mismatch.
+        let mut base_hist = HashMap::new();
+        base_hist.insert("Total".into(), vec![1.0, 0.0]);
+        base_hist.insert("A".into(), vec![1.0, 0.0]);
+        base_hist.insert("B".into(), vec![0.0, 1.0, 0.5]); // wrong length
+
+        let mut leaf_hist = HashMap::new();
+        leaf_hist.insert("A".into(), vec![1.0, 0.0]);
+        leaf_hist.insert("B".into(), vec![0.0, 1.0]);
+
+        tree.with_erm_training(base_hist, leaf_hist);
+
+        let base = vec![
+            ("Total".into(), vec![10.0]),
+            ("A".into(), vec![6.0]),
+            ("B".into(), vec![5.0]),
+        ];
+        assert!(tree
+            .reconcile(&base, ReconciliationMethod::Erm { lambda: 1.0 })
+            .is_err());
+    }
+
+    /// ERM: negative lambda returns InvalidParameter error.
+    #[test]
+    fn erm_negative_lambda_returns_err() {
+        let mut tree = HierarchyTree::new(vec![("Total", &["A", "B"])]).unwrap();
+
+        let mut base_hist = HashMap::new();
+        base_hist.insert("Total".into(), vec![1.0, 0.0]);
+        base_hist.insert("A".into(), vec![1.0, 0.0]);
+        base_hist.insert("B".into(), vec![0.0, 1.0]);
+
+        let mut leaf_hist = HashMap::new();
+        leaf_hist.insert("A".into(), vec![1.0, 0.0]);
+        leaf_hist.insert("B".into(), vec![0.0, 1.0]);
+
+        tree.with_erm_training(base_hist, leaf_hist);
+
+        let base = vec![
+            ("Total".into(), vec![10.0]),
+            ("A".into(), vec![6.0]),
+            ("B".into(), vec![5.0]),
+        ];
+        assert!(tree
+            .reconcile(&base, ReconciliationMethod::Erm { lambda: -0.3 })
+            .is_err());
+    }
+
+    /// ERM: NaN lambda returns InvalidParameter error.
+    #[test]
+    fn erm_nan_lambda_returns_err() {
+        let mut tree = HierarchyTree::new(vec![("Total", &["A", "B"])]).unwrap();
+
+        let mut base_hist = HashMap::new();
+        base_hist.insert("Total".into(), vec![1.0, 0.0]);
+        base_hist.insert("A".into(), vec![1.0, 0.0]);
+        base_hist.insert("B".into(), vec![0.0, 1.0]);
+
+        let mut leaf_hist = HashMap::new();
+        leaf_hist.insert("A".into(), vec![1.0, 0.0]);
+        leaf_hist.insert("B".into(), vec![0.0, 1.0]);
+
+        tree.with_erm_training(base_hist, leaf_hist);
+
+        let base = vec![
+            ("Total".into(), vec![10.0]),
+            ("A".into(), vec![6.0]),
+            ("B".into(), vec![5.0]),
+        ];
+        assert!(tree
+            .reconcile(&base, ReconciliationMethod::Erm { lambda: f64::NAN })
+            .is_err());
+    }
+
+    /// ERM: T=0 training history returns InvalidParameter error.
+    #[test]
+    fn erm_empty_training_history_returns_err() {
+        let mut tree = HierarchyTree::new(vec![("Total", &["A", "B"])]).unwrap();
+
+        // All vectors have length 0 — T=0.
+        let mut base_hist = HashMap::new();
+        base_hist.insert("Total".into(), vec![]);
+        base_hist.insert("A".into(), vec![]);
+        base_hist.insert("B".into(), vec![]);
+
+        let mut leaf_hist = HashMap::new();
+        leaf_hist.insert("A".into(), vec![]);
+        leaf_hist.insert("B".into(), vec![]);
+
+        tree.with_erm_training(base_hist, leaf_hist);
+
+        let base = vec![
+            ("Total".into(), vec![10.0]),
+            ("A".into(), vec![6.0]),
+            ("B".into(), vec![5.0]),
+        ];
+        assert!(tree
+            .reconcile(&base, ReconciliationMethod::Erm { lambda: 1.0 })
+            .is_err());
+    }
+
+    /// ERM asymmetric correctness test with independent dense oracle.
+    ///
+    /// Hierarchy: Total → {A, B, C}, n=4 nodes, m=3 leaves, T=4, λ=1.0.
+    /// Every node has a DISTINCT training history, so any index-transposition
+    /// or ordering bug in y_stored/gram/cross/p/y_hat will cause the
+    /// erm_reconcile path and the independent oracle to disagree.
+    ///
+    /// The oracle implements P = B Ŷᵀ (Ŷ Ŷᵀ + λI)⁻¹ from scratch using
+    /// Gauss-Jordan elimination — it does NOT reuse any production code path.
+    #[test]
+    #[allow(clippy::needless_range_loop)]
+    fn erm_correctness_asymmetric() {
+        // --- Hierarchy setup ---
+        let mut tree = HierarchyTree::new(vec![("Total", &["A", "B", "C"])]).unwrap();
+
+        // Distinct histories for all 4 nodes (n=4) over T=4 time steps.
+        // Rows are nodes in internal index order (Total, A, B, C).
+        //   Total = [2,1,0,1]
+        //   A     = [1,0,0,0]
+        //   B     = [0,1,0,0]
+        //   C     = [0,0,1,0]
+        let mut base_hist = HashMap::new();
+        base_hist.insert("Total".into(), vec![2.0, 1.0, 0.0, 1.0]);
+        base_hist.insert("A".into(), vec![1.0, 0.0, 0.0, 0.0]);
+        base_hist.insert("B".into(), vec![0.0, 1.0, 0.0, 0.0]);
+        base_hist.insert("C".into(), vec![0.0, 0.0, 1.0, 0.0]);
+
+        // Leaf actuals (m=3 leaves) over T=4 time steps.
+        //   A_actual = [1,0,0,0]
+        //   B_actual = [0,1,0,0]
+        //   C_actual = [0,0,1,0]
+        let mut leaf_hist = HashMap::new();
+        leaf_hist.insert("A".into(), vec![1.0, 0.0, 0.0, 0.0]);
+        leaf_hist.insert("B".into(), vec![0.0, 1.0, 0.0, 0.0]);
+        leaf_hist.insert("C".into(), vec![0.0, 0.0, 1.0, 0.0]);
+
+        tree.with_erm_training(base_hist, leaf_hist);
+
+        // Base forecast at horizon 1.
+        let base = vec![
+            ("Total".into(), vec![10.0]),
+            ("A".into(), vec![3.0]),
+            ("B".into(), vec![4.0]),
+            ("C".into(), vec![5.0]),
+        ];
+
+        let result = tree
+            .reconcile(&base, ReconciliationMethod::Erm { lambda: 1.0 })
+            .unwrap();
+        let map: HashMap<&str, &Vec<f64>> = result.iter().map(|(k, v)| (k.as_str(), v)).collect();
+
+        // --- Independent oracle ---
+        // n=4 nodes, m=3 leaves, T=4, λ=1.0.
+        // Ŷ (n×T): rows = [Total, A, B, C]
+        let n = 4usize;
+        let t = 4usize;
+        let m = 3usize;
+        let lambda = 1.0_f64;
+
+        // y_hat[node][t]
+        let y_hat_hist: [[f64; 4]; 4] = [
+            [2.0, 1.0, 0.0, 1.0], // Total
+            [1.0, 0.0, 0.0, 0.0], // A
+            [0.0, 1.0, 0.0, 0.0], // B
+            [0.0, 0.0, 1.0, 0.0], // C
+        ];
+        // b_hist[leaf][t]
+        let b_hist: [[f64; 4]; 3] = [
+            [1.0, 0.0, 0.0, 0.0], // A_actual
+            [0.0, 1.0, 0.0, 0.0], // B_actual
+            [0.0, 0.0, 1.0, 0.0], // C_actual
+        ];
+
+        // Gram G = Ŷ Ŷᵀ (n×n) + λI.
+        let mut gram = [[0.0_f64; 4]; 4];
+        for i in 0..n {
+            for j in 0..n {
+                gram[i][j] = (0..t).map(|tt| y_hat_hist[i][tt] * y_hat_hist[j][tt]).sum();
+            }
+            gram[i][i] += lambda;
+        }
+
+        // Cross C = B Ŷᵀ (m×n).
+        let mut cross = [[0.0_f64; 4]; 3];
+        for i in 0..m {
+            for j in 0..n {
+                cross[i][j] = (0..t).map(|tt| b_hist[i][tt] * y_hat_hist[j][tt]).sum();
+            }
+        }
+
+        // Invert gram via Gauss-Jordan elimination (4×4 augmented system).
+        let mut aug = [[0.0_f64; 8]; 4];
+        for i in 0..n {
+            for j in 0..n {
+                aug[i][j] = gram[i][j];
+            }
+            aug[i][n + i] = 1.0;
+        }
+        for col in 0..n {
+            // Pivot: find row with largest abs value in this column.
+            let pivot = (col..n)
+                .max_by(|&a, &b| aug[a][col].abs().partial_cmp(&aug[b][col].abs()).unwrap())
+                .unwrap();
+            aug.swap(col, pivot);
+            let diag = aug[col][col];
+            for k in 0..2 * n {
+                aug[col][k] /= diag;
+            }
+            for row in 0..n {
+                if row != col {
+                    let factor = aug[row][col];
+                    for k in 0..2 * n {
+                        aug[row][k] -= factor * aug[col][k];
+                    }
+                }
+            }
+        }
+        let mut gram_inv = [[0.0_f64; 4]; 4];
+        for i in 0..n {
+            for j in 0..n {
+                gram_inv[i][j] = aug[i][n + j];
+            }
+        }
+
+        // P = C · gram_inv (m×n).
+        let mut p_oracle = [[0.0_f64; 4]; 3];
+        for i in 0..m {
+            for j in 0..n {
+                p_oracle[i][j] = (0..n).map(|k| cross[i][k] * gram_inv[k][j]).sum();
+            }
+        }
+
+        // ŷ at horizon 0 (internal node order: Total=10, A=3, B=4, C=5).
+        let y_now = [10.0_f64, 3.0, 4.0, 5.0];
+
+        // bottom = P · ŷ (m-vector).
+        let bottom_oracle: Vec<f64> = (0..m)
+            .map(|i| (0..n).map(|j| p_oracle[i][j] * y_now[j]).sum())
+            .collect();
+
+        // Summing matrix S (n×m): leaf j is 1 at position j and at all ancestors.
+        // Leaf order: A=index 0, B=index 1, C=index 2 (leaves() order).
+        // Internal node order: Total=0, A=1, B=2, C=3.
+        // S[Total][A]=1, S[Total][B]=1, S[Total][C]=1
+        // S[A][A]=1, S[B][B]=1, S[C][C]=1
+        let s_oracle = [
+            [1.0_f64, 1.0, 1.0], // Total
+            [1.0, 0.0, 0.0],     // A
+            [0.0, 1.0, 0.0],     // B
+            [0.0, 0.0, 1.0],     // C
+        ];
+        let all_oracle: Vec<f64> = (0..n)
+            .map(|i| (0..m).map(|j| s_oracle[i][j] * bottom_oracle[j]).sum())
+            .collect();
+
+        // Internal node order for oracle output: [Total, A, B, C].
+        let oracle_total = all_oracle[0];
+        let oracle_a = all_oracle[1];
+        let oracle_b = all_oracle[2];
+        let oracle_c = all_oracle[3];
+
+        // Assert erm_reconcile matches the independent oracle within 1e-9.
+        approx_eq(map["A"][0], oracle_a, 1e-9);
+        approx_eq(map["B"][0], oracle_b, 1e-9);
+        approx_eq(map["C"][0], oracle_c, 1e-9);
+        approx_eq(map["Total"][0], oracle_total, 1e-9);
+
+        // Coherence: Total = A + B + C.
+        approx_eq(
+            map["Total"][0],
+            map["A"][0] + map["B"][0] + map["C"][0],
+            1e-9,
+        );
     }
 
     /// ERM-03: coherence holds across horizon > 1.
