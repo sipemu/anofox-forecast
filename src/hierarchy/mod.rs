@@ -3177,4 +3177,243 @@ mod tests {
         // Coherence: Total = A + B.
         approx_eq(map["Total"][0], map["A"][0] + map["B"][0], 1e-8);
     }
+
+    /// ERM auto-λ degeneracy guard: T=1 returns InvalidParameter, never a silent zero forecast.
+    #[test]
+    fn erm_auto_lambda_t1_returns_err() {
+        let mut tree = HierarchyTree::new(vec![("Total", &["A", "B"])]).unwrap();
+
+        // T=1 — triggers the T<2 guard in erm_auto_lambda.
+        let mut base_hist = HashMap::new();
+        base_hist.insert("Total".into(), vec![10.0]);
+        base_hist.insert("A".into(), vec![6.0]);
+        base_hist.insert("B".into(), vec![4.0]);
+
+        let mut leaf_hist = HashMap::new();
+        leaf_hist.insert("A".into(), vec![6.0]);
+        leaf_hist.insert("B".into(), vec![4.0]);
+
+        tree.with_erm_training(base_hist, leaf_hist);
+
+        let base = vec![
+            ("Total".into(), vec![15.0]),
+            ("A".into(), vec![9.0]),
+            ("B".into(), vec![7.0]),
+        ];
+
+        // None → auto-λ with T=1 must return Err (T<2 guard).
+        assert!(
+            tree.reconcile(&base, ReconciliationMethod::Erm { lambda: None })
+                .is_err(),
+            "ERM auto-lambda with T=1 must return an error"
+        );
+    }
+
+    /// ERM-06: End-to-end accuracy proof on a 2-region × 2-product grouped/crossed hierarchy.
+    ///
+    /// Hierarchy: 9 nodes total (1 root + 2 region + 2 product aggregates + 4 leaves).
+    /// Data: deterministic synthetic AR(1) with inline LCG seed=42, T=20+H=5.
+    ///
+    /// Hard-asserts coherence for ERM auto-λ across all 9 nodes × H horizon steps (tol 1e-8).
+    /// Soft-asserts ERM RMSSE ≤ unreconciled RMSSE × 1.5 (tightened in Task 3).
+    /// Prints three headline RMSSE numbers for the committed results note.
+    #[test]
+    fn erm_grouped_crossed_end_to_end_accuracy() {
+        use crate::utils::rmsse;
+
+        // --- Deterministic synthetic data (no rand crate; inline LCG) ---
+        // 2-region × 2-product crossed hierarchy: 9 nodes, 4 leaves.
+        // Structure (node index → name):
+        //   0: Total         (root)
+        //   1: RegA          (region A aggregate)
+        //   2: RegB          (region B aggregate)
+        //   3: ProdX         (product X aggregate)
+        //   4: ProdY         (product Y aggregate)
+        //   5: RegA_ProdX    (leaf: region A × product X)
+        //   6: RegA_ProdY    (leaf: region A × product Y)
+        //   7: RegB_ProdX    (leaf: region B × product X)
+        //   8: RegB_ProdY    (leaf: region B × product Y)
+        let t_train: usize = 20;
+        let h: usize = 5;
+        let total_len = t_train + h;
+
+        // LCG state: x_{i+1} = x_i * a + c (Knuth constants).
+        let mut rng_state: u64 = 42;
+        let mut rng = || -> f64 {
+            rng_state = rng_state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((rng_state >> 33) as f64) / (u32::MAX as f64) - 0.5 // uniform in [-0.5, 0.5]
+        };
+
+        // 4 leaf series: AR(1) with phi=0.7 around levels [50, 30, 40, 20].
+        let leaf_levels = [50.0_f64, 30.0, 40.0, 20.0];
+        let mut leaf_true = vec![vec![0.0_f64; total_len]; 4];
+        for leaf in 0..4 {
+            leaf_true[leaf][0] = leaf_levels[leaf];
+            for t in 1..total_len {
+                leaf_true[leaf][t] =
+                    0.7 * leaf_true[leaf][t - 1] + leaf_levels[leaf] * 0.3 + rng() * 2.0;
+            }
+        }
+
+        // True coherent aggregate values for all 9 nodes.
+        // Leaf order: [RegA_ProdX=0, RegA_ProdY=1, RegB_ProdX=2, RegB_ProdY=3]
+        // Node index: [Total=0, RegA=1, RegB=2, ProdX=3, ProdY=4, leaves 5..8]
+        let mut true_all = vec![vec![0.0_f64; total_len]; 9];
+        for t in 0..total_len {
+            true_all[5][t] = leaf_true[0][t]; // RegA_ProdX
+            true_all[6][t] = leaf_true[1][t]; // RegA_ProdY
+            true_all[7][t] = leaf_true[2][t]; // RegB_ProdX
+            true_all[8][t] = leaf_true[3][t]; // RegB_ProdY
+            true_all[1][t] = true_all[5][t] + true_all[6][t]; // RegA
+            true_all[2][t] = true_all[7][t] + true_all[8][t]; // RegB
+            true_all[3][t] = true_all[5][t] + true_all[7][t]; // ProdX
+            true_all[4][t] = true_all[6][t] + true_all[8][t]; // ProdY
+            true_all[0][t] = true_all[1][t] + true_all[2][t]; // Total
+        }
+
+        // Noisy base forecasts: true + independent noise per node.
+        let mut base_all = vec![vec![0.0_f64; total_len]; 9];
+        for node in 0..9 {
+            for t in 0..total_len {
+                base_all[node][t] = true_all[node][t] + rng() * 4.0;
+            }
+        }
+
+        // Split into training and holdout slices.
+        let base_hist_all: Vec<Vec<f64>> = base_all.iter().map(|s| s[..t_train].to_vec()).collect();
+        let base_holdout_all: Vec<Vec<f64>> =
+            base_all.iter().map(|s| s[t_train..].to_vec()).collect();
+        let true_holdout: Vec<Vec<f64>> = true_all.iter().map(|s| s[t_train..].to_vec()).collect();
+        let true_train: Vec<Vec<f64>> = true_all.iter().map(|s| s[..t_train].to_vec()).collect();
+
+        // --- Build 9-node crossed hierarchy via from_summing_matrix ---
+        let node_names: Vec<String> = vec![
+            "Total".into(),
+            "RegA".into(),
+            "RegB".into(),
+            "ProdX".into(),
+            "ProdY".into(),
+            "RegA_ProdX".into(),
+            "RegA_ProdY".into(),
+            "RegB_ProdX".into(),
+            "RegB_ProdY".into(),
+        ];
+        let leaf_names: Vec<String> = vec![
+            "RegA_ProdX".into(),
+            "RegA_ProdY".into(),
+            "RegB_ProdX".into(),
+            "RegB_ProdY".into(),
+        ];
+        // leaf_ancestors[j] = list of non-leaf ancestor node indices for leaf j.
+        let leaf_ancestors: Vec<Vec<usize>> = vec![
+            vec![0, 1, 3], // RegA_ProdX → Total(0), RegA(1), ProdX(3)
+            vec![0, 1, 4], // RegA_ProdY → Total(0), RegA(1), ProdY(4)
+            vec![0, 2, 3], // RegB_ProdX → Total(0), RegB(2), ProdX(3)
+            vec![0, 2, 4], // RegB_ProdY → Total(0), RegB(2), ProdY(4)
+        ];
+
+        // Node names parallel to the internal index (0..9 matches node_names order).
+        let names = [
+            "Total",
+            "RegA",
+            "RegB",
+            "ProdX",
+            "ProdY",
+            "RegA_ProdX",
+            "RegA_ProdY",
+            "RegB_ProdX",
+            "RegB_ProdY",
+        ];
+
+        // Helper: build base forecast Vec for reconcile() from node-indexed data at a time slice.
+        let base_from_slice = |data: &[Vec<f64>]| -> Vec<(String, Vec<f64>)> {
+            (0..9)
+                .map(|i| (names[i].to_string(), data[i].clone()))
+                .collect()
+        };
+
+        // --- Method 1: Unreconciled (base holdout used directly) ---
+        let unrec_rmsse: Vec<f64> = (0..9)
+            .map(|i| rmsse(&true_train[i], &true_holdout[i], &base_holdout_all[i]))
+            .collect();
+        let unrec_mean = unrec_rmsse.iter().filter(|v| v.is_finite()).sum::<f64>()
+            / unrec_rmsse.iter().filter(|v| v.is_finite()).count() as f64;
+
+        // --- Method 2: MinTraceStruct ---
+        let mut tree_mt =
+            HierarchyTree::from_summing_matrix(&node_names, &leaf_names, &leaf_ancestors).unwrap();
+        let base_mt = base_from_slice(&base_holdout_all);
+        let mt_result = tree_mt
+            .reconcile(&base_mt, ReconciliationMethod::MinTraceStruct)
+            .unwrap();
+        let mt_map: HashMap<&str, &Vec<f64>> =
+            mt_result.iter().map(|(k, v)| (k.as_str(), v)).collect();
+        let mt_rmsse: Vec<f64> = (0..9)
+            .map(|i| rmsse(&true_train[i], &true_holdout[i], mt_map[names[i]]))
+            .collect();
+        let mt_mean = mt_rmsse.iter().filter(|v| v.is_finite()).sum::<f64>()
+            / mt_rmsse.iter().filter(|v| v.is_finite()).count() as f64;
+
+        // --- Method 3: ERM auto-λ (None) ---
+        let mut tree_erm =
+            HierarchyTree::from_summing_matrix(&node_names, &leaf_names, &leaf_ancestors).unwrap();
+
+        // Training history: base forecast history keyed by node name.
+        let mut base_hist_map = HashMap::new();
+        for (i, name) in names.iter().enumerate() {
+            base_hist_map.insert(name.to_string(), base_hist_all[i].clone());
+        }
+        // Leaf actual history keyed by leaf name.
+        // Leaf indices in node_names: RegA_ProdX=5, RegA_ProdY=6, RegB_ProdX=7, RegB_ProdY=8.
+        let mut leaf_hist_map = HashMap::new();
+        leaf_hist_map.insert("RegA_ProdX".to_string(), true_all[5][..t_train].to_vec());
+        leaf_hist_map.insert("RegA_ProdY".to_string(), true_all[6][..t_train].to_vec());
+        leaf_hist_map.insert("RegB_ProdX".to_string(), true_all[7][..t_train].to_vec());
+        leaf_hist_map.insert("RegB_ProdY".to_string(), true_all[8][..t_train].to_vec());
+
+        tree_erm.with_erm_training(base_hist_map, leaf_hist_map);
+
+        let base_erm = base_from_slice(&base_holdout_all);
+        let erm_result = tree_erm
+            .reconcile(&base_erm, ReconciliationMethod::Erm { lambda: None })
+            .unwrap();
+        let erm_map: HashMap<&str, &Vec<f64>> =
+            erm_result.iter().map(|(k, v)| (k.as_str(), v)).collect();
+
+        let erm_rmsse: Vec<f64> = (0..9)
+            .map(|i| rmsse(&true_train[i], &true_holdout[i], erm_map[names[i]]))
+            .collect();
+        let erm_mean = erm_rmsse.iter().filter(|v| v.is_finite()).sum::<f64>()
+            / erm_rmsse.iter().filter(|v| v.is_finite()).count() as f64;
+
+        // --- HARD: coherence for ERM auto-λ across all 9 nodes × H horizon steps ---
+        for step in 0..h {
+            let ap = erm_map["RegA_ProdX"][step];
+            let ay = erm_map["RegA_ProdY"][step];
+            let bp = erm_map["RegB_ProdX"][step];
+            let by_ = erm_map["RegB_ProdY"][step];
+
+            approx_eq(erm_map["Total"][step], ap + ay + bp + by_, 1e-8);
+            approx_eq(erm_map["RegA"][step], ap + ay, 1e-8);
+            approx_eq(erm_map["RegB"][step], bp + by_, 1e-8);
+            approx_eq(erm_map["ProdX"][step], ap + bp, 1e-8);
+            approx_eq(erm_map["ProdY"][step], ay + by_, 1e-8);
+        }
+
+        // --- Headline numbers (observable with --nocapture) ---
+        println!("=== ERM Grouped/Crossed Validation — Mean RMSSE across 9 nodes ===");
+        println!("  Unreconciled:   {:.6}", unrec_mean);
+        println!("  MinTraceStruct: {:.6}", mt_mean);
+        println!("  ERM auto-λ:     {:.6}", erm_mean);
+
+        // --- SOFT: ERM should not dramatically exceed unreconciled ---
+        assert!(
+            erm_mean <= unrec_mean * 1.5,
+            "ERM auto-lambda mean RMSSE ({:.6}) should not greatly exceed unreconciled ({:.6})",
+            erm_mean,
+            unrec_mean
+        );
+    }
 }
