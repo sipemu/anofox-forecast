@@ -62,7 +62,8 @@ before/after on the repro series.
   3. The #219 repro series (near-zero month, level ≈ 2k) forecasts at ~level; a regression test asserts the forecast is within a bounded multiple of level (no ~13× blow-up)
   4. The before/after delta (~13× → ~level) is committed as the regression guard, honoring the Core Value's before/after proof discipline
   5. Public `Forecaster` API is unchanged, the npm/WASM package still builds, and clippy `-D warnings` + cargo-audit/deny remain green
-**Plans**: TBD
+**Plans**: 1 plan
+- [ ] 05-01-PLAN.md — Mode guard + log floor + back-transform clamp in mfles.rs, with committed #219 before/after regression (MULT-01..04)
 
 ### Phase 6: Multiplicative-Guard Bug-Class Audit
 **Goal**: Every model with an auto-multiplicative/log selection path is inventoried and audited for
@@ -118,7 +119,7 @@ the default sequencing.
 | 2. Accuracy Harness & Statistical Methodology | v1.0 | 4/4 | Complete | 2026-08-11 |
 | 3. Numerical Robustness & Coverage Baseline | v1.0 | 3/3 | Complete | 2026-08-11 |
 | 4. Prioritized Improvement Backlog & Top-Value Fixes | v1.0 | 3/3 | Complete | 2026-08-12 |
-| 5. MFLES Multiplicative-Guard Fix | v1.1 | 0/TBD | Not started | - |
+| 5. MFLES Multiplicative-Guard Fix | v1.1 | 0/1 | Planned | - |
 | 6. Multiplicative-Guard Bug-Class Audit | v1.1 | 0/TBD | Not started | - |
 | 7. ERM Reconciliation Variant & Ridge Solve | v1.1 | 0/TBD | Not started | - |
 | 8. Auto-λ & Grouped/Crossed Validation | v1.1 | 0/TBD | Not started | - |
