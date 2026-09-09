@@ -57,7 +57,7 @@ struct Node {
 }
 
 /// Reconciliation method.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ReconciliationMethod {
     /// Aggregate bottom-level forecasts upward. Upper-level base forecasts are
     /// discarded and replaced by the sum of their children.
@@ -95,6 +95,30 @@ pub enum ReconciliationMethod {
     /// Uses W = diag(1/n_leaves_below). No residuals needed.
     /// Memory: O(N + M²). Safe for N > 100k.
     MinTraceStruct,
+    /// Empirical Risk Minimization (ERM) reconciliation.
+    ///
+    /// Computes the regularized ridge projection `P = B'Ŷ(Ŷ'Ŷ + λI)⁻¹`,
+    /// where `Ŷ` is the matrix of historical base forecasts (nodes×T) and
+    /// `B` is the matrix of historical leaf actuals (leaves×T). The
+    /// reconciled bottom-level forecasts are `P·ŷ` and the full coherent
+    /// vector is `S·P·ŷ`.
+    ///
+    /// `lambda` is the ridge regularization strength. Larger values shrink
+    /// `P` toward zero, increasing robustness when `T` (training periods) is
+    /// small relative to `n` (node count). Set `lambda` to 0.0 only when
+    /// `T >> n` and the base forecasts are well-conditioned; otherwise the
+    /// Gram matrix `Ŷ'Ŷ` may be rank-deficient and the solve will fail with a
+    /// `SingularMatrix` error.
+    ///
+    /// Requires [`HierarchyTree::with_erm_training`] to have been called.
+    ///
+    /// Reference: Ben Taieb & Koo (2019), "Regularized regression for
+    /// hierarchical forecasting without unbiasedness conditions", KDD 2019.
+    Erm {
+        /// Ridge regularization strength (λ ≥ 0). A value of 1.0 is a
+        /// reasonable default; increase if the solve is unstable or T < n.
+        lambda: f64,
+    },
 }
 
 /// A hierarchical tree of named nodes with reconciliation support.
@@ -111,6 +135,12 @@ pub struct HierarchyTree {
     actuals: Option<HashMap<String, Vec<f64>>>,
     /// Historical residuals per node, used for MinTraceShrink covariance.
     residuals: Option<HashMap<String, Vec<f64>>>,
+    /// Historical base-forecast matrix for all nodes (node_name → Vec<f64> of length T).
+    /// Used by ERM reconciliation. T = number of training time steps.
+    erm_base_history: Option<HashMap<String, Vec<f64>>>,
+    /// Historical leaf-actual matrix (leaf_name → Vec<f64> of length T).
+    /// Used by ERM reconciliation. Only leaf nodes; length T must match erm_base_history.
+    erm_leaf_history: Option<HashMap<String, Vec<f64>>>,
 }
 
 impl HierarchyTree {
@@ -204,6 +234,8 @@ impl HierarchyTree {
             root,
             actuals: None,
             residuals: None,
+            erm_base_history: None,
+            erm_leaf_history: None,
         })
     }
 
@@ -408,6 +440,8 @@ impl HierarchyTree {
             root,
             actuals: None,
             residuals: None,
+            erm_base_history: None,
+            erm_leaf_history: None,
         })
     }
 
@@ -447,6 +481,29 @@ impl HierarchyTree {
     /// the same length.
     pub fn set_residuals(&mut self, residuals: HashMap<String, Vec<f64>>) {
         self.residuals = Some(residuals);
+    }
+
+    /// Provide training history for ERM reconciliation.
+    ///
+    /// `base_history`: map from **every node name** to a `Vec<f64>` of length `T`
+    /// (historical base forecasts). `T` should be at least `n` (the number of nodes)
+    /// for a well-conditioned ridge solve; when `T < n` the Gram matrix `Ŷ'Ŷ` is
+    /// rank-deficient and a positive `lambda` is essential to obtain a valid solution.
+    ///
+    /// `leaf_history`: map from **every leaf node name** to a `Vec<f64>` of length `T`
+    /// (historical leaf-level actuals). Upper-node actuals are recovered by `S·bottom`
+    /// and must NOT be included here.
+    ///
+    /// Shape validation (missing entries, unequal lengths, `T < n`) is deferred to
+    /// solve time inside `erm_reconcile` so that callers can call this setter
+    /// incrementally.
+    pub fn with_erm_training(
+        &mut self,
+        base_history: HashMap<String, Vec<f64>>,
+        leaf_history: HashMap<String, Vec<f64>>,
+    ) {
+        self.erm_base_history = Some(base_history);
+        self.erm_leaf_history = Some(leaf_history);
     }
 
     /// Names of all nodes in BFS (top-down) order.
@@ -529,6 +586,7 @@ impl HierarchyTree {
             ReconciliationMethod::MinTraceStruct => {
                 self.min_trace_diagonal(&base_map, horizon, false)
             }
+            ReconciliationMethod::Erm { lambda } => self.erm_reconcile(&base_map, horizon, lambda),
         }
     }
 
@@ -718,6 +776,155 @@ impl HierarchyTree {
             .iter()
             .map(|&idx| (self.nodes[idx].name.clone(), reconciled[idx].clone()))
             .collect())
+    }
+
+    /// ERM reconciliation: P = B'Ŷ (Ŷ'Ŷ + λI)⁻¹, reconciled = S·P·ŷ.
+    ///
+    /// Requires `with_erm_training` to have been called with valid base forecast
+    /// history (`Ŷ_stored`, nodes×T) and leaf-actual history (`B_stored`, leaves×T).
+    ///
+    /// The ridge parameter `lambda` prevents the Gram matrix from being singular
+    /// when `T < n` or when the base forecasts are nearly collinear.
+    fn erm_reconcile(
+        &self,
+        base_map: &HashMap<&str, &Vec<f64>>,
+        horizon: usize,
+        lambda: f64,
+    ) -> Result<Vec<(String, Vec<f64>)>> {
+        let n = self.nodes.len();
+        let leaves = self.leaves();
+        let m = leaves.len();
+
+        // 1. Retrieve training history.
+        let base_hist = self.erm_base_history.as_ref().ok_or_else(|| {
+            ForecastError::InvalidParameter(
+                "ERM reconciliation requires training history; call with_erm_training() first"
+                    .into(),
+            )
+        })?;
+        let leaf_hist = self.erm_leaf_history.as_ref().ok_or_else(|| {
+            ForecastError::InvalidParameter(
+                "ERM reconciliation requires training history; call with_erm_training() first"
+                    .into(),
+            )
+        })?;
+
+        // 2. Validate that every node has a base_history entry and derive T.
+        let t_base = base_hist
+            .get(self.nodes[0].name.as_str())
+            .map(|v| v.len())
+            .ok_or_else(|| {
+                ForecastError::InvalidParameter(format!(
+                    "ERM: base_history is missing an entry for node '{}'",
+                    self.nodes[0].name
+                ))
+            })?;
+        for i in 0..n {
+            let name = self.nodes[i].name.as_str();
+            let vec = base_hist.get(name).ok_or_else(|| {
+                ForecastError::InvalidParameter(format!(
+                    "ERM: base_history is missing an entry for node '{name}'"
+                ))
+            })?;
+            if vec.len() != t_base {
+                return Err(ForecastError::DimensionMismatch {
+                    expected: t_base,
+                    got: vec.len(),
+                });
+            }
+        }
+
+        // 3. Validate every leaf has a leaf_history entry of length T.
+        for &leaf_idx in &leaves {
+            let name = self.nodes[leaf_idx].name.as_str();
+            let vec = leaf_hist.get(name).ok_or_else(|| {
+                ForecastError::InvalidParameter(format!(
+                    "ERM: leaf_history is missing an entry for leaf '{name}'"
+                ))
+            })?;
+            if vec.len() != t_base {
+                return Err(ForecastError::DimensionMismatch {
+                    expected: t_base,
+                    got: vec.len(),
+                });
+            }
+        }
+
+        let t_cap = t_base;
+
+        // 4. Build Ŷ_stored (n×T): rows = nodes in internal index order, cols = time.
+        let y_stored: Vec<Vec<f64>> = (0..n)
+            .map(|i| base_hist[self.nodes[i].name.as_str()].clone())
+            .collect();
+
+        // 5. Build B_stored (m×T): rows = leaves in leaves() order, cols = time.
+        let b_stored: Vec<Vec<f64>> = leaves
+            .iter()
+            .map(|&leaf_idx| leaf_hist[self.nodes[leaf_idx].name.as_str()].clone())
+            .collect();
+
+        // 6. Compute Gram G = Ŷ_stored Ŷ_stored' (n×n) and add λI.
+        let mut gram = vec![0.0_f64; n * n];
+        for i in 0..n {
+            for j in i..n {
+                let dot: f64 = (0..t_cap).map(|t| y_stored[i][t] * y_stored[j][t]).sum();
+                gram[i * n + j] = dot;
+                gram[j * n + i] = dot;
+            }
+            gram[i * n + i] += lambda;
+        }
+
+        // 7. Compute cross term C = B_stored Ŷ_stored' (m×n).
+        let mut cross = vec![vec![0.0_f64; n]; m];
+        for i in 0..m {
+            for j in 0..n {
+                cross[i][j] = (0..t_cap).map(|t| b_stored[i][t] * y_stored[j][t]).sum();
+            }
+        }
+
+        // 8. Cholesky-factor (G + λI) once.
+        let l = cholesky(n, &gram).map_err(|_| {
+            ForecastError::SingularMatrix(
+                "ERM: Gram matrix Ŷ'Ŷ + λI is singular; \
+                 increase lambda or provide more training periods"
+                    .into(),
+            )
+        })?;
+
+        // 9. Solve for each row of P (m×n): (G+λI) P[i]^T = C[i]^T.
+        let p: Vec<Vec<f64>> = (0..m)
+            .map(|i| cholesky_solve_vec(n, &l, &cross[i]))
+            .collect();
+
+        // 10. Build summing matrix S (n×m) — identical to min_trace_ols.
+        let mut s = vec![vec![0.0_f64; m]; n];
+        for (j, &leaf) in leaves.iter().enumerate() {
+            s[leaf][j] = 1.0;
+            for anc in self.ancestors_of(leaf) {
+                s[anc][j] = 1.0;
+            }
+        }
+
+        // 11. For each horizon step h: bottom = P·ŷ (m-vector), all = S·bottom (n-vector).
+        let mut reconciled = vec![vec![0.0_f64; horizon]; n];
+        for h in 0..horizon {
+            // ŷ in internal node index order.
+            let y_hat: Vec<f64> = (0..n)
+                .map(|i| base_map[self.nodes[i].name.as_str()][h])
+                .collect();
+
+            // bottom[i] = Σ_j P[i][j] · ŷ[j]
+            let bottom: Vec<f64> = (0..m)
+                .map(|i| (0..n).map(|j| p[i][j] * y_hat[j]).sum())
+                .collect();
+
+            // all[node] = Σ_i S[node][i] · bottom[i]
+            for node in 0..n {
+                reconciled[node][h] = (0..m).map(|i| s[node][i] * bottom[i]).sum();
+            }
+        }
+
+        Ok(self.to_named_output(&reconciled))
     }
 
     /// Maximum depth in the hierarchy (root is level 0).
@@ -2403,6 +2610,123 @@ mod tests {
                 part_sum += map[&format!("s{}_p{}", s, p)][0];
             }
             approx_eq(map[&format!("part_{}", p)][0], part_sum, 0.05);
+        }
+    }
+
+    // ── ERM reconciliation ─────────────────────────────────────────────
+
+    /// ERM-03 + ERM-05: hand-computed reference formula.
+    ///
+    /// Hierarchy Total→{A,B}, n=3 nodes, m=2 leaves, T=2, λ=1.0.
+    /// P = [[1/3, 1/3, 0], [0, 0, 1/2]]
+    /// bottom_A = 16/3, bottom_B = 5/2, Total = 47/6.
+    #[test]
+    fn erm_correctness_reference_formula() {
+        let mut tree = HierarchyTree::new(vec![("Total", &["A", "B"])]).unwrap();
+
+        let mut base_hist = HashMap::new();
+        base_hist.insert("Total".into(), vec![1.0, 0.0]);
+        base_hist.insert("A".into(), vec![1.0, 0.0]);
+        base_hist.insert("B".into(), vec![0.0, 1.0]);
+
+        let mut leaf_hist = HashMap::new();
+        leaf_hist.insert("A".into(), vec![1.0, 0.0]);
+        leaf_hist.insert("B".into(), vec![0.0, 1.0]);
+
+        tree.with_erm_training(base_hist, leaf_hist);
+
+        let base = vec![
+            ("Total".into(), vec![10.0]),
+            ("A".into(), vec![6.0]),
+            ("B".into(), vec![5.0]),
+        ];
+
+        let result = tree
+            .reconcile(&base, ReconciliationMethod::Erm { lambda: 1.0 })
+            .unwrap();
+        let map: HashMap<&str, &Vec<f64>> = result.iter().map(|(k, v)| (k.as_str(), v)).collect();
+
+        // Reference values: P = [[1/3,1/3,0],[0,0,1/2]]
+        // bottom_A = 16/3, bottom_B = 5/2, Total = 47/6
+        approx_eq(map["A"][0], 16.0 / 3.0, 1e-10);
+        approx_eq(map["B"][0], 5.0 / 2.0, 1e-10);
+        approx_eq(map["Total"][0], 47.0 / 6.0, 1e-10);
+
+        // Coherence: Total = A + B
+        approx_eq(map["Total"][0], map["A"][0] + map["B"][0], 1e-10);
+    }
+
+    /// ERM-02: selecting Erm without calling with_erm_training returns Err.
+    #[test]
+    fn erm_requires_training() {
+        let tree = HierarchyTree::new(vec![("Total", &["A", "B"])]).unwrap();
+        let base = vec![
+            ("Total".into(), vec![100.0]),
+            ("A".into(), vec![50.0]),
+            ("B".into(), vec![50.0]),
+        ];
+        assert!(tree
+            .reconcile(&base, ReconciliationMethod::Erm { lambda: 1.0 })
+            .is_err());
+    }
+
+    /// ERM-02: mismatched leaf-history vector length returns Err.
+    #[test]
+    fn erm_shape_mismatch() {
+        let mut tree = HierarchyTree::new(vec![("Total", &["A", "B"])]).unwrap();
+
+        let mut base_hist = HashMap::new();
+        base_hist.insert("Total".into(), vec![1.0, 0.0]);
+        base_hist.insert("A".into(), vec![1.0, 0.0]);
+        base_hist.insert("B".into(), vec![0.0, 1.0]);
+
+        // B leaf history has length 3 — mismatch with T=2 from base_hist.
+        let mut leaf_hist = HashMap::new();
+        leaf_hist.insert("A".into(), vec![1.0, 0.0]);
+        leaf_hist.insert("B".into(), vec![0.0, 1.0, 0.5]); // wrong length
+
+        tree.with_erm_training(base_hist, leaf_hist);
+
+        let base = vec![
+            ("Total".into(), vec![10.0]),
+            ("A".into(), vec![6.0]),
+            ("B".into(), vec![5.0]),
+        ];
+        assert!(tree
+            .reconcile(&base, ReconciliationMethod::Erm { lambda: 1.0 })
+            .is_err());
+    }
+
+    /// ERM-03: coherence holds across horizon > 1.
+    #[test]
+    fn erm_coherent_multi_horizon() {
+        let mut tree = HierarchyTree::new(vec![("Total", &["A", "B"])]).unwrap();
+
+        let mut base_hist = HashMap::new();
+        base_hist.insert("Total".into(), vec![1.0, 0.0]);
+        base_hist.insert("A".into(), vec![1.0, 0.0]);
+        base_hist.insert("B".into(), vec![0.0, 1.0]);
+
+        let mut leaf_hist = HashMap::new();
+        leaf_hist.insert("A".into(), vec![1.0, 0.0]);
+        leaf_hist.insert("B".into(), vec![0.0, 1.0]);
+
+        tree.with_erm_training(base_hist, leaf_hist);
+
+        let base = vec![
+            ("Total".into(), vec![10.0, 20.0]),
+            ("A".into(), vec![6.0, 12.0]),
+            ("B".into(), vec![5.0, 9.0]),
+        ];
+
+        let result = tree
+            .reconcile(&base, ReconciliationMethod::Erm { lambda: 1.0 })
+            .unwrap();
+        let map: HashMap<&str, &Vec<f64>> = result.iter().map(|(k, v)| (k.as_str(), v)).collect();
+
+        // Coherence must hold at every horizon step.
+        for h in 0..2 {
+            approx_eq(map["Total"][h], map["A"][h] + map["B"][h], 1e-10);
         }
     }
 }
