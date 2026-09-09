@@ -1673,11 +1673,16 @@ fn cholesky_solve_vec(n: usize, l: &[f64], b: &[f64]) -> Vec<f64> {
 
 /// Compute the Ledoit-Wolf-style auto-lambda for ERM ridge regularization.
 ///
-/// Adapts the LW shrinkage-intensity formula to the ERM Gram matrix
-/// G = Ŷ Ŷᵀ (n×n), shrinking toward a scaled identity target F = (tr(G_c)/n)·I,
-/// where G_c is the centered Gram (subtracting per-node means).
+/// Estimates the shrinkage intensity from the **uncentered** Gram matrix
+/// `G = Ŷ Ŷᵀ` (n×n) — the same matrix that `erm_reconcile` regularizes —
+/// so that `λ_auto` is self-consistent with the matrix it is applied to.
 ///
-/// Returns λ ≥ 0 suitable for use in `(G + λI)` Cholesky solve.
+/// Shrinkage target: `F = (tr(G)/n) · I` (scaled identity using the average
+/// Gram diagonal). The LW intensity `α` is estimated using the centered
+/// outer-product deviations (noise estimation requires zero-mean residuals),
+/// while `diag_ref = tr(G)/n` keeps λ on the scale of G's eigenvalues.
+///
+/// Returns `λ ≥ 1e-6` suitable for use in `(G + λI)` Cholesky solve.
 /// Returns `Err` if T < 2 (insufficient training periods for LW estimation).
 fn erm_auto_lambda(y_stored: &[Vec<f64>], n: usize, t_cap: usize) -> Result<f64> {
     if t_cap < 2 {
@@ -1687,13 +1692,48 @@ fn erm_auto_lambda(y_stored: &[Vec<f64>], n: usize, t_cap: usize) -> Result<f64>
     }
     let tf = t_cap as f64;
 
-    // Per-node means
+    // Uncentered Gram G[i][j] = Σ_t y[i][t] * y[j][t]
+    // This is the same matrix that erm_reconcile builds (before adding λI).
+    let mut g_uncentered = vec![0.0_f64; n * n];
+    for i in 0..n {
+        for j in i..n {
+            let dot: f64 = (0..t_cap).map(|t| y_stored[i][t] * y_stored[j][t]).sum();
+            g_uncentered[i * n + j] = dot;
+            g_uncentered[j * n + i] = dot;
+        }
+    }
+
+    // Shrinkage target: scaled identity with diag_ref = tr(G) / n (uncentered).
+    // Scaling λ to the mean Gram diagonal keeps regularization proportional to
+    // the magnitude of G regardless of absolute forecast levels.
+    let trace_g: f64 = (0..n).map(|i| g_uncentered[i * n + i]).sum();
+    let diag_ref = if n > 0 { trace_g / n as f64 } else { 0.0 };
+
+    // delta = ||G - diag_ref * I||_F^2  (how far G already is from diagonal target)
+    let mut delta = 0.0_f64;
+    for i in 0..n {
+        for j in 0..n {
+            let target = if i == j { diag_ref } else { 0.0 };
+            let diff = g_uncentered[i * n + j] - target;
+            delta += diff * diff;
+        }
+    }
+
+    if delta < 1e-30 {
+        // G already diagonal — return full-shrink lambda.
+        // Apply the 1e-6 floor to prevent λ=0 when diag_ref = 0
+        // (e.g., all base forecasts are constant, making G_c the zero matrix).
+        return Ok(diag_ref.max(1e-6));
+    }
+
+    // Per-node means (for centering in the gamma noise estimator).
     let means: Vec<f64> = y_stored
         .iter()
         .map(|row| row.iter().sum::<f64>() / tf)
         .collect();
 
     // Centered Gram G_c[i][j] = Σ_t (y[i][t] - mean_i)(y[j][t] - mean_j)
+    // Used only inside the gamma estimator to compute zero-mean outer-product deviations.
     let mut g_centered = vec![0.0_f64; n * n];
     for i in 0..n {
         for j in i..n {
@@ -1705,26 +1745,8 @@ fn erm_auto_lambda(y_stored: &[Vec<f64>], n: usize, t_cap: usize) -> Result<f64>
         }
     }
 
-    // Shrinkage target: scaled identity with diag_ref = tr(G_c) / n
-    let trace_g: f64 = (0..n).map(|i| g_centered[i * n + i]).sum();
-    let diag_ref = if n > 0 { trace_g / n as f64 } else { 0.0 };
-
-    // delta = ||G_c - diag_ref * I||_F^2
-    let mut delta = 0.0_f64;
-    for i in 0..n {
-        for j in 0..n {
-            let target = if i == j { diag_ref } else { 0.0 };
-            let diff = g_centered[i * n + j] - target;
-            delta += diff * diff;
-        }
-    }
-
-    if delta < 1e-30 {
-        // G_c already diagonal — return full-shrink lambda
-        return Ok(diag_ref.max(0.0));
-    }
-
     // gamma = Σ_{i,j} (1/T) Σ_k ((y[i][k]-mean_i)(y[j][k]-mean_j) - G_c[i][j])^2
+    // Estimates the variance of the outer-product entries, used to scale alpha.
     let mut gamma = 0.0_f64;
     for i in 0..n {
         for j in 0..n {
@@ -1744,7 +1766,9 @@ fn erm_auto_lambda(y_stored: &[Vec<f64>], n: usize, t_cap: usize) -> Result<f64>
     let alpha = (gamma / (tf * delta)).clamp(0.0, 1.0);
     let lambda = alpha * diag_ref.max(0.0);
 
-    // Fallback: if diag_ref ≈ 0, all base forecasts are near-zero; use minimal regularization.
+    // Fallback: if diag_ref ≈ 0, the centered Gram has negligible variance
+    // (either all base forecasts are near-zero OR all are nearly constant with zero
+    // across-time variation). Use minimal regularization to prevent a singular solve.
     let resolved = if lambda < 1e-15 { 1e-6 } else { lambda };
 
     // Final guard: NaN/Inf in training data can propagate through the computation.
@@ -3209,13 +3233,35 @@ mod tests {
         );
     }
 
+    /// CR-01 regression: constant base forecasts must return λ ≥ 1e-6 (the floor), never 0.0.
+    ///
+    /// Constant base forecasts → uncentered Gram G is a scaled rank-1 matrix → diag_ref = T·c²
+    /// (for constant c across T steps). But the centered Gram G_c = 0 matrix → delta = 0 in the
+    /// centered-based approach (old code). After WR-01/CR-01 fix, delta is computed from G
+    /// (uncentered), and even if G happens to already be diagonal (e.g. n=1), the early-return
+    /// path applies the 1e-6 floor. For n>1, constant-but-equal forecasts yield a non-diagonal
+    /// G (all entries equal), so delta > 0 and gamma = 0, giving α=0, λ=0 → floor returns 1e-6.
+    #[test]
+    fn erm_auto_lambda_constant_forecasts_returns_floor() {
+        // Constant base forecasts across 3 nodes, T=3: G_c = 0, uncentered G has all
+        // entries equal to T * c^2 = 3 * 25 = 75. diag_ref = 75. delta > 0 (off-diagonal).
+        // gamma = 0 (zero variance in outer products after centering). α = 0. λ = 0 → floor.
+        let y = vec![vec![5.0_f64; 3]; 3]; // 3 nodes × T=3, all constant at 5.0
+        let lam = erm_auto_lambda(&y, 3, 3).unwrap();
+        assert!(
+            lam >= 1e-7,
+            "floor must prevent λ=0 for constant base forecasts, got {}",
+            lam
+        );
+    }
+
     /// ERM-06: End-to-end accuracy proof on a 2-region × 2-product grouped/crossed hierarchy.
     ///
     /// Hierarchy: 9 nodes total (1 root + 2 region + 2 product aggregates + 4 leaves).
     /// Data: deterministic synthetic AR(1) with inline LCG seed=42, T=20+H=5.
     ///
     /// Hard-asserts coherence for ERM auto-λ across all 9 nodes × H horizon steps (tol 1e-8).
-    /// Soft-asserts ERM RMSSE ≤ unreconciled RMSSE × 1.5 (tightened in Task 3).
+    /// Soft-asserts ERM RMSSE ≤ unreconciled RMSSE × 1.1.
     /// Prints three headline RMSSE numbers for the committed results note.
     #[test]
     fn erm_grouped_crossed_end_to_end_accuracy() {
@@ -3388,6 +3434,21 @@ mod tests {
         let erm_mean = erm_rmsse.iter().filter(|v| v.is_finite()).sum::<f64>()
             / erm_rmsse.iter().filter(|v| v.is_finite()).count() as f64;
 
+        // --- IN-01: Incoherence spot-check: base holdout forecasts must violate coherence
+        // (independent per-node noise guarantees this; asserting it makes the ERM coherence
+        // proof meaningful by demonstrating that a real transformation occurred).
+        let base_total_0 = base_holdout_all[0][0];
+        let base_sum_leaves_0 = base_holdout_all[5][0]
+            + base_holdout_all[6][0]
+            + base_holdout_all[7][0]
+            + base_holdout_all[8][0];
+        assert!(
+            (base_total_0 - base_sum_leaves_0).abs() > 1e-6,
+            "base forecasts must be incoherent for the coherence proof to be meaningful \
+             (|total - sum(leaves)| = {})",
+            (base_total_0 - base_sum_leaves_0).abs()
+        );
+
         // --- HARD: coherence for ERM auto-λ across all 9 nodes × H horizon steps ---
         for step in 0..h {
             let ap = erm_map["RegA_ProdX"][step];
@@ -3413,8 +3474,29 @@ mod tests {
         println!("  ERM auto-λ:     {:.6}", erm_mean);
         println!("  Auto-λ selected: {:.6}", auto_lw);
 
-        // --- SOFT: ERM RMSSE ≤ unreconciled × 1.1 (tightened from 1.5 after capturing real values) ---
-        // Observed ratio: ERM ({:.6}) / unreconciled ({:.6}) ≈ 0.362 — well within 1.1×.
+        // --- WR-04: Drift-lock assertions (±1% tolerance) ---
+        // Observed values (post WR-01 uncentered-Gram fix, seed=42, T=20, H=5):
+        //   Unreconciled: 2.287392, MinTraceStruct: 2.110507,
+        //   ERM auto-λ: 0.921839, λ_auto: 0.000197
+        // ERM ratio: 0.921839 / 2.287392 ≈ 0.403 — well within 1.1×.
+        assert!(
+            (unrec_mean - 2.287392).abs() < 0.023,
+            "unreconciled RMSSE drifted: got {:.6}, expected ~2.287392 (±1%)",
+            unrec_mean
+        );
+        assert!(
+            (mt_mean - 2.110507).abs() < 0.022,
+            "MinTraceStruct RMSSE drifted: got {:.6}, expected ~2.110507 (±1%)",
+            mt_mean
+        );
+        assert!(
+            (erm_mean - 0.921839).abs() < 0.010,
+            "ERM auto-lambda RMSSE drifted: got {:.6}, expected ~0.921839 (±1%)",
+            erm_mean
+        );
+
+        // --- SOFT: ERM RMSSE ≤ unreconciled × 1.1 ---
+        // Observed ratio: ERM (0.921839) / unreconciled (2.287392) ≈ 0.403 — well within 1.1×.
         assert!(
             erm_mean <= unrec_mean * 1.1,
             "ERM auto-lambda mean RMSSE ({:.6}) should not exceed unreconciled * 1.1 ({:.6})",
