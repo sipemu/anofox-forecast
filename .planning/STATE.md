@@ -2,20 +2,20 @@
 gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Robustness Fixes & ERM Reconciliation
-current_phase: 07
-current_phase_name: ERM Reconciliation Variant & Ridge Solve
-status: verifying
-stopped_at: Completed 07-01-PLAN.md
-last_updated: "2026-09-09T08:39:40.213Z"
+current_phase: 8
+current_phase_name: Auto-λ & Grouped/Crossed Validation
+status: planning
+stopped_at: Phase 07 complete, ready to plan Phase 8
+last_updated: "2026-09-09T08:58:34.300Z"
 last_activity: 2026-09-09
-last_activity_desc: Phase 07 execution started
-state_head: d40e294f5eafc049c99a34458ae7ad11b3133404
+last_activity_desc: Phase 07 complete, transitioned to Phase 8
+state_head: 3544cdcba6e985a27bbacf1585b2330216a2f512
 progress:
   total_phases: 4
-  completed_phases: 2
+  completed_phases: 3
   total_plans: 3
   completed_plans: 3
-  percent: 50
+  percent: 75
 ---
 
 # Project State: anofox-forecast — Performance & Validation Hardening
@@ -35,10 +35,10 @@ progress:
 
 ## Current Position
 
-Phase: 07 (ERM Reconciliation Variant & Ridge Solve) — EXECUTING
-Plan: 1 of 1
-Status: Phase complete — ready for verification
-Last activity: 2026-09-09 — Phase 07 execution started
+Phase: 8 — Auto-λ & Grouped/Crossed Validation
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-09-09 — Phase 07 complete, transitioned to Phase 8
 
 ## Performance Metrics
 
@@ -92,7 +92,7 @@ Last activity: 2026-09-09 — Phase 07 execution started
 ## Session Continuity
 
 **Last session:** 2026-09-09T08:39:40.167Z
-**Stopped at:** Completed 07-01-PLAN.md
+**Stopped at:** Phase 07 complete, ready to plan Phase 8
 **Resume file:** None
 
 ### What Was Done This Session
