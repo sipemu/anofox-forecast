@@ -118,9 +118,16 @@ pub enum ReconciliationMethod {
     /// Reference: Ben Taieb & Koo (2019), "Regularized regression for
     /// hierarchical forecasting without unbiasedness conditions", KDD 2019.
     Erm {
-        /// Ridge regularization strength (λ ≥ 0). A value of 1.0 is a
-        /// reasonable default; increase if the solve is unstable or T < n.
-        lambda: f64,
+        /// Ridge regularization strength.
+        ///
+        /// - `None` (default): use the Ledoit-Wolf-style auto-λ estimator,
+        ///   which adapts the shrinkage intensity of the ERM Gram matrix
+        ///   to T (training periods) and n (node count). Requires T ≥ 2.
+        /// - `Some(λ)`: use a caller-supplied fixed λ ≥ 0. The Phase 7
+        ///   guards (finite, non-negative) still apply.
+        ///
+        /// `None` mirrors the `MinTraceShrink` ergonomics (no explicit tuning needed).
+        lambda: Option<f64>,
     },
 }
 
@@ -792,16 +799,8 @@ impl HierarchyTree {
         &self,
         base_map: &HashMap<&str, &Vec<f64>>,
         horizon: usize,
-        lambda: f64,
+        lambda: Option<f64>,
     ) -> Result<Vec<(String, Vec<f64>)>> {
-        // Guard: λ must be finite and non-negative. A negative λ amplifies
-        // rather than regularizes; NaN bypasses the Cholesky guard silently.
-        if !lambda.is_finite() || lambda < 0.0 {
-            return Err(ForecastError::InvalidParameter(format!(
-                "ERM: lambda must be finite and non-negative, got {lambda}"
-            )));
-        }
-
         let n = self.nodes.len();
         let leaves = self.leaves();
         let m = leaves.len();
@@ -876,13 +875,26 @@ impl HierarchyTree {
             .map(|i| base_hist[self.nodes[i].name.as_str()].clone())
             .collect();
 
+        // Resolve lambda: compute auto if None, validate if Some.
+        let resolved_lambda: f64 = match lambda {
+            Some(lam) => {
+                if !lam.is_finite() || lam < 0.0 {
+                    return Err(ForecastError::InvalidParameter(format!(
+                        "ERM: lambda must be finite and non-negative, got {lam}"
+                    )));
+                }
+                lam
+            }
+            None => erm_auto_lambda(&y_stored, n, t_cap)?,
+        };
+
         // 5. Build B_stored (m×T): rows = leaves in leaves() order, cols = time.
         let b_stored: Vec<Vec<f64>> = leaves
             .iter()
             .map(|&leaf_idx| leaf_hist[self.nodes[leaf_idx].name.as_str()].clone())
             .collect();
 
-        // 6. Compute Gram G = Ŷ_stored Ŷ_stored' (n×n) and add λI.
+        // 6. Compute Gram G = Ŷ_stored Ŷ_stored' (n×n) and add resolved_lambda·I.
         let mut gram = vec![0.0_f64; n * n];
         for i in 0..n {
             for j in i..n {
@@ -890,7 +902,7 @@ impl HierarchyTree {
                 gram[i * n + j] = dot;
                 gram[j * n + i] = dot;
             }
-            gram[i * n + i] += lambda;
+            gram[i * n + i] += resolved_lambda;
         }
 
         // 7. Compute cross term C = B_stored Ŷ_stored' (m×n).
@@ -1657,6 +1669,93 @@ fn cholesky_solve_vec(n: usize, l: &[f64], b: &[f64]) -> Vec<f64> {
         x[i] = (z[i] - s) / l[i * n + i];
     }
     x
+}
+
+/// Compute the Ledoit-Wolf-style auto-lambda for ERM ridge regularization.
+///
+/// Adapts the LW shrinkage-intensity formula to the ERM Gram matrix
+/// G = Ŷ Ŷᵀ (n×n), shrinking toward a scaled identity target F = (tr(G_c)/n)·I,
+/// where G_c is the centered Gram (subtracting per-node means).
+///
+/// Returns λ ≥ 0 suitable for use in `(G + λI)` Cholesky solve.
+/// Returns `Err` if T < 2 (insufficient training periods for LW estimation).
+fn erm_auto_lambda(y_stored: &[Vec<f64>], n: usize, t_cap: usize) -> Result<f64> {
+    if t_cap < 2 {
+        return Err(ForecastError::InvalidParameter(
+            "ERM auto-lambda requires at least 2 training periods (T ≥ 2)".into(),
+        ));
+    }
+    let tf = t_cap as f64;
+
+    // Per-node means
+    let means: Vec<f64> = y_stored
+        .iter()
+        .map(|row| row.iter().sum::<f64>() / tf)
+        .collect();
+
+    // Centered Gram G_c[i][j] = Σ_t (y[i][t] - mean_i)(y[j][t] - mean_j)
+    let mut g_centered = vec![0.0_f64; n * n];
+    for i in 0..n {
+        for j in i..n {
+            let dot: f64 = (0..t_cap)
+                .map(|t| (y_stored[i][t] - means[i]) * (y_stored[j][t] - means[j]))
+                .sum();
+            g_centered[i * n + j] = dot;
+            g_centered[j * n + i] = dot;
+        }
+    }
+
+    // Shrinkage target: scaled identity with diag_ref = tr(G_c) / n
+    let trace_g: f64 = (0..n).map(|i| g_centered[i * n + i]).sum();
+    let diag_ref = if n > 0 { trace_g / n as f64 } else { 0.0 };
+
+    // delta = ||G_c - diag_ref * I||_F^2
+    let mut delta = 0.0_f64;
+    for i in 0..n {
+        for j in 0..n {
+            let target = if i == j { diag_ref } else { 0.0 };
+            let diff = g_centered[i * n + j] - target;
+            delta += diff * diff;
+        }
+    }
+
+    if delta < 1e-30 {
+        // G_c already diagonal — return full-shrink lambda
+        return Ok(diag_ref.max(0.0));
+    }
+
+    // gamma = Σ_{i,j} (1/T) Σ_k ((y[i][k]-mean_i)(y[j][k]-mean_j) - G_c[i][j])^2
+    let mut gamma = 0.0_f64;
+    for i in 0..n {
+        for j in 0..n {
+            let g_ij = g_centered[i * n + j];
+            let sum_sq: f64 = (0..t_cap)
+                .map(|k| {
+                    let zi = y_stored[i][k] - means[i];
+                    let zj = y_stored[j][k] - means[j];
+                    let dev = zi * zj - g_ij;
+                    dev * dev
+                })
+                .sum();
+            gamma += sum_sq / tf;
+        }
+    }
+
+    let alpha = (gamma / (tf * delta)).clamp(0.0, 1.0);
+    let lambda = alpha * diag_ref.max(0.0);
+
+    // Fallback: if diag_ref ≈ 0, all base forecasts are near-zero; use minimal regularization.
+    let resolved = if lambda < 1e-15 { 1e-6 } else { lambda };
+
+    // Final guard: NaN/Inf in training data can propagate through the computation.
+    if !resolved.is_finite() {
+        return Err(ForecastError::InvalidParameter(
+            "ERM auto-lambda: computed lambda is non-finite; check training data for NaN/Inf"
+                .into(),
+        ));
+    }
+
+    Ok(resolved)
 }
 
 /// Compute the optimal Ledoit-Wolf shrinkage intensity.
@@ -2661,7 +2760,7 @@ mod tests {
         ];
 
         let result = tree
-            .reconcile(&base, ReconciliationMethod::Erm { lambda: 1.0 })
+            .reconcile(&base, ReconciliationMethod::Erm { lambda: Some(1.0) })
             .unwrap();
         let map: HashMap<&str, &Vec<f64>> = result.iter().map(|(k, v)| (k.as_str(), v)).collect();
 
@@ -2685,7 +2784,7 @@ mod tests {
             ("B".into(), vec![50.0]),
         ];
         assert!(tree
-            .reconcile(&base, ReconciliationMethod::Erm { lambda: 1.0 })
+            .reconcile(&base, ReconciliationMethod::Erm { lambda: Some(1.0) })
             .is_err());
     }
 
@@ -2712,7 +2811,7 @@ mod tests {
             ("B".into(), vec![5.0]),
         ];
         assert!(tree
-            .reconcile(&base, ReconciliationMethod::Erm { lambda: 1.0 })
+            .reconcile(&base, ReconciliationMethod::Erm { lambda: Some(1.0) })
             .is_err());
     }
 
@@ -2742,7 +2841,7 @@ mod tests {
             ("B".into(), vec![5.0]),
         ];
         assert!(tree
-            .reconcile(&base, ReconciliationMethod::Erm { lambda: 1.0 })
+            .reconcile(&base, ReconciliationMethod::Erm { lambda: Some(1.0) })
             .is_err());
     }
 
@@ -2768,7 +2867,7 @@ mod tests {
             ("B".into(), vec![5.0]),
         ];
         assert!(tree
-            .reconcile(&base, ReconciliationMethod::Erm { lambda: -0.3 })
+            .reconcile(&base, ReconciliationMethod::Erm { lambda: Some(-0.3) })
             .is_err());
     }
 
@@ -2794,7 +2893,12 @@ mod tests {
             ("B".into(), vec![5.0]),
         ];
         assert!(tree
-            .reconcile(&base, ReconciliationMethod::Erm { lambda: f64::NAN })
+            .reconcile(
+                &base,
+                ReconciliationMethod::Erm {
+                    lambda: Some(f64::NAN)
+                }
+            )
             .is_err());
     }
 
@@ -2821,7 +2925,7 @@ mod tests {
             ("B".into(), vec![5.0]),
         ];
         assert!(tree
-            .reconcile(&base, ReconciliationMethod::Erm { lambda: 1.0 })
+            .reconcile(&base, ReconciliationMethod::Erm { lambda: Some(1.0) })
             .is_err());
     }
 
@@ -2872,7 +2976,7 @@ mod tests {
         ];
 
         let result = tree
-            .reconcile(&base, ReconciliationMethod::Erm { lambda: 1.0 })
+            .reconcile(&base, ReconciliationMethod::Erm { lambda: Some(1.0) })
             .unwrap();
         let map: HashMap<&str, &Vec<f64>> = result.iter().map(|(k, v)| (k.as_str(), v)).collect();
 
@@ -3023,7 +3127,7 @@ mod tests {
         ];
 
         let result = tree
-            .reconcile(&base, ReconciliationMethod::Erm { lambda: 1.0 })
+            .reconcile(&base, ReconciliationMethod::Erm { lambda: Some(1.0) })
             .unwrap();
         let map: HashMap<&str, &Vec<f64>> = result.iter().map(|(k, v)| (k.as_str(), v)).collect();
 
@@ -3031,5 +3135,46 @@ mod tests {
         for h in 0..2 {
             approx_eq(map["Total"][h], map["A"][h] + map["B"][h], 1e-10);
         }
+    }
+
+    /// ERM auto-λ basic smoke test: None routes through erm_auto_lambda to a finite
+    /// positive ridge and produces a successful, finite reconciliation.
+    #[test]
+    fn erm_auto_lambda_basic() {
+        let mut tree = HierarchyTree::new(vec![("Total", &["A", "B"])]).unwrap();
+
+        // T=5 training periods — satisfies the T≥2 guard for auto-λ.
+        let mut base_hist = HashMap::new();
+        base_hist.insert("Total".into(), vec![10.0, 12.0, 11.0, 13.0, 14.0]);
+        base_hist.insert("A".into(), vec![6.0, 7.0, 6.5, 8.0, 8.5]);
+        base_hist.insert("B".into(), vec![4.0, 5.0, 4.5, 5.0, 5.5]);
+
+        let mut leaf_hist = HashMap::new();
+        leaf_hist.insert("A".into(), vec![6.0, 7.0, 6.5, 8.0, 8.5]);
+        leaf_hist.insert("B".into(), vec![4.0, 5.0, 4.5, 5.0, 5.5]);
+
+        tree.with_erm_training(base_hist, leaf_hist);
+
+        let base = vec![
+            ("Total".into(), vec![15.0]),
+            ("A".into(), vec![9.0]),
+            ("B".into(), vec![7.0]),
+        ];
+
+        // None → auto-λ path: should succeed and produce finite reconciled values.
+        let result = tree
+            .reconcile(&base, ReconciliationMethod::Erm { lambda: None })
+            .unwrap();
+        let map: HashMap<&str, &Vec<f64>> = result.iter().map(|(k, v)| (k.as_str(), v)).collect();
+
+        assert!(
+            map["Total"][0].is_finite(),
+            "reconciled Total must be finite"
+        );
+        assert!(map["A"][0].is_finite(), "reconciled A must be finite");
+        assert!(map["B"][0].is_finite(), "reconciled B must be finite");
+
+        // Coherence: Total = A + B.
+        approx_eq(map["Total"][0], map["A"][0] + map["B"][0], 1e-8);
     }
 }
