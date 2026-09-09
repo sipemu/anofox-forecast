@@ -37,14 +37,24 @@ fn make_near_zero_series(period: usize) -> TimeSeries {
     TimeSeries::univariate(timestamps, values).unwrap()
 }
 
-/// MULT-05 SC4: Theta seasonal-factor guard fires for near-zero series.
+/// MULT-05 SC4: Theta stays bounded near level on a near-zero series.
 ///
-/// `Theta::seasonal(12)` requests multiplicative decomposition by default.
-/// `determine_decomposition()` Rule 2 (`any(seasonal_factor < 0.01)`) triggers
-/// because the near-zero month (1.0) produces a seasonal index ≈ 0.0005 — causing
-/// an additive fallback. Forecast must therefore stay near level (< 2.5× level).
+/// `Theta::seasonal(12)` requests multiplicative decomposition by default. On this
+/// near-zero series the forecast must stay BOUNDED and CENTERED near level — it must
+/// neither blow up (the #10/#219 failure class) nor collapse. Theta is safe here by
+/// two reinforcing properties: the seasonal-factor guard (Rule 2:
+/// `any(seasonal_factor < 0.01)`, `src/models/theta/model.rs:486`) selects additive
+/// because the near-zero month yields a factor ≈ 0.0005, AND Theta has no
+/// `ln()→boosting→exp()` pipeline, so even multiplicative decomposition stays bounded.
+/// This test is a regression guard for the failure CLASS: if a future refactor
+/// introduced an MFLES-style log-boosting path into Theta, the upper bound below
+/// would trip.
 ///
-/// Equivalent guard site: `src/models/theta/model.rs:486`.
+/// Assertions are two-sided: max < 2.5× level (no blow-up) AND the forecast mean
+/// stays within 0.5× level of the series level (centered, not collapsed). The mean
+/// is used rather than a per-point min because the recurring seasonal trough is a
+/// legitimately low month in additive mode too — only the *aggregate* level is a
+/// meaningful safety signal here.
 #[test]
 fn theta_seasonal_factor_guard_catches_near_zero() {
     let ts = make_near_zero_series(12);
@@ -57,26 +67,38 @@ fn theta_seasonal_factor_guard_catches_near_zero() {
     let forecast_max = preds.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     assert!(
         forecast_max < 2.5 * level,
-        "Theta near-zero guard: forecast_max={:.0} >= {:.0} (2.5× level). \
-         Seasonal-factor guard (Rule 2: any(s < 0.01)) should have selected additive \
-         — the near-zero month produces a factor ≈ 0.0005.",
+        "Theta near-zero safety: forecast_max={:.0} >= {:.0} (2.5× level) — a blow-up \
+         of the #10/#219 class. Theta must keep the near-zero series bounded.",
         forecast_max,
         2.5 * level,
     );
+
+    let mean_forecast: f64 = preds.iter().sum::<f64>() / preds.len() as f64;
+    assert!(
+        (mean_forecast - level).abs() < 0.5 * level,
+        "Theta near-zero safety: mean forecast={:.0} is not within 0.5× level of {:.0} \
+         — the forecast is not centered at level (blow-up or collapse).",
+        mean_forecast,
+        level,
+    );
 }
 
-/// MULT-05 SC4: AutoETS AIC selection rejects multiplicative for near-zero series.
+/// MULT-05 SC4: AutoETS stays bounded near level on a near-zero series.
 ///
-/// `AutoETS::with_period(12)` evaluates both additive and multiplicative candidates
-/// when all values are positive. For a near-zero series the multiplicative model
-/// fits the trough seasonal phase to ≈ 0.0005, but future visits to that phase
-/// will have values ~2000 → very high squared error → much worse AIC than additive.
-/// AIC selection must therefore prefer additive, keeping forecasts bounded.
+/// `AutoETS::with_period(12)` evaluates additive and multiplicative candidates when
+/// all values are positive. Safety here rests on two properties: AIC-based selection
+/// penalises the multiplicative candidate (its trough seasonal factor ≈ 0.0005 gives
+/// huge squared error at future visits to that phase → worse AIC than additive), AND
+/// ETS multiplicative uses state-space RATIO updates (`y/s`, `level×s`), not an
+/// `ln()→boosting→exp()` pipeline — so it cannot produce the #10/#219 crater blow-up.
 ///
-/// Asserts: (a) max forecast < 2.5× level; (b) all forecasts > 0.
+/// Assertions are two-sided: max < 2.5× level (no blow-up) AND the forecast mean
+/// stays within 0.5× level of the series level (centered, not collapsed) AND all
+/// forecasts are positive. The mean (not a per-point min) is the meaningful signal:
+/// the recurring seasonal trough is a legitimately low month, so only the aggregate
+/// level distinguishes safe behavior from a blow-up/collapse.
 ///
-/// Equivalent guard sites: `src/models/exponential/auto_ets.rs:422`
-/// (non-positive guard) plus AIC-based selection in ETS candidate ranking.
+/// Non-positive guard site: `src/models/exponential/auto_ets.rs:422`.
 #[test]
 fn auto_ets_aicselection_rejects_mult_for_near_zero() {
     let ts = make_near_zero_series(12);
@@ -89,18 +111,25 @@ fn auto_ets_aicselection_rejects_mult_for_near_zero() {
     let forecast_max = preds.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     assert!(
         forecast_max < 2.5 * level,
-        "AutoETS near-zero: forecast_max={:.0} >= {:.0} (2.5× level). \
-         AIC protection should reject multiplicative — the near-zero trough \
-         produces a seasonal factor ≈ 0.0005, making multiplicative AIC much worse.",
+        "AutoETS near-zero safety: forecast_max={:.0} >= {:.0} (2.5× level) — a blow-up \
+         of the #10/#219 class.",
         forecast_max,
         2.5 * level,
+    );
+
+    let mean_forecast: f64 = preds.iter().sum::<f64>() / preds.len() as f64;
+    assert!(
+        (mean_forecast - level).abs() < 0.5 * level,
+        "AutoETS near-zero safety: mean forecast={:.0} is not within 0.5× level of {:.0} \
+         — the forecast is not centered at level (blow-up or collapse).",
+        mean_forecast,
+        level,
     );
 
     let forecast_min = preds.iter().copied().fold(f64::INFINITY, f64::min);
     assert!(
         forecast_min > 0.0,
-        "AutoETS near-zero: forecasts should be positive, got min={:.2}. \
-         A multiplicative blow-up or additive under-forecast may have occurred.",
+        "AutoETS near-zero safety: forecasts should be positive, got min={:.2}.",
         forecast_min,
     );
 }
