@@ -145,10 +145,10 @@ pub struct HierarchyTree {
     actuals: Option<HashMap<String, Vec<f64>>>,
     /// Historical residuals per node, used for MinTraceShrink covariance.
     residuals: Option<HashMap<String, Vec<f64>>>,
-    /// Historical base-forecast matrix for all nodes (node_name → Vec<f64> of length T).
+    /// Historical base-forecast matrix for all nodes (node_name → `Vec<f64>` of length T).
     /// Used by ERM reconciliation. T = number of training time steps.
     erm_base_history: Option<HashMap<String, Vec<f64>>>,
-    /// Historical leaf-actual matrix (leaf_name → Vec<f64> of length T).
+    /// Historical leaf-actual matrix (leaf_name → `Vec<f64>` of length T).
     /// Used by ERM reconciliation. Only leaf nodes; length T must match erm_base_history.
     erm_leaf_history: Option<HashMap<String, Vec<f64>>>,
 }

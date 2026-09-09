@@ -1054,8 +1054,7 @@ impl Forecaster for MFLES {
         self.is_multiplicative = use_multiplicative;
 
         // Transform data
-        let y: Vec<f64>;
-        if use_multiplicative {
+        let y: Vec<f64> = if use_multiplicative {
             let min_val = values.iter().copied().fold(f64::INFINITY, f64::min);
             let max_val = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
             let median = Self::median_scalar(values);
@@ -1067,7 +1066,7 @@ impl Forecaster for MFLES {
             // Store in-sample max so predict_internal() can clamp the
             // back-transform (issue #219, MULT-03).
             self.insample_max = Some(max_val);
-            y = values.iter().map(|&v| v.max(floor).ln()).collect();
+            values.iter().map(|&v| v.max(floor).ln()).collect()
         } else {
             self.const_val = None;
             self.insample_max = None;
@@ -1077,8 +1076,8 @@ impl Forecaster for MFLES {
                 .max(1e-10);
             self.mean = Some(mean_val);
             self.std = Some(std_val);
-            y = values.iter().map(|&v| (v - mean_val) / std_val).collect();
-        }
+            values.iter().map(|&v| (v - mean_val) / std_val).collect()
+        };
 
         // Check for constant series
         let all_same = y.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
