@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.10] - 2026-09-09
+
+Robustness fixes and a new ERM hierarchical-reconciliation method from the v1.1 Robustness Fixes &
+ERM Reconciliation cycle. Backward-compatible: additive public API only.
+
+### Added
+
+- **`ReconciliationMethod::Erm { lambda: Option<f64> }`** — Empirical Risk Minimization
+  reconciliation (Ben Taieb & Koo, 2019) alongside the existing BottomUp/TopDown/MiddleOut/MinTrace*
+  methods. Fed by a new `HierarchyTree::with_erm_training(...)` training-history API and computed via
+  an in-house Cholesky ridge solve `P = BŶᵀ(ŶŶᵀ + λI)⁻¹` (reconciled bottom `P·ŷ`, all `S·P·ŷ`). No
+  new dependency and no feature gate. Correctness proven against a hand-computed reference and an
+  independent Gauss-Jordan oracle.
+- **Ledoit-Wolf-style auto-λ default** for ERM: pass `lambda: None` to shrink automatically
+  (matching `MinTraceShrink` ergonomics); `lambda: Some(x)` supplies a fixed ridge penalty. Validated
+  end-to-end on a grouped/crossed hierarchy (coherence guaranteed; RMSSE −59.7% vs unreconciled base
+  forecasts on the committed benchmark).
+
+### Fixed
+
+- **MFLES multiplicative-mode runaway (#219).** Auto mode now selects additive when a series has a
+  near-zero value relative to its level (`min/median < 0.10`); the multiplicative `ln()` transform is
+  winsorized to `0.01 × median` so a single near-zero observation can no longer open a log-space
+  crater; and the multiplicative back-transform is clamped to `[0, 10 × in-sample max]` in `predict`
+  (leaving the `fit` decomposition invariant intact). The #219 repro series (near-zero month, level
+  ≈ 2k) now forecasts at ~level instead of ~13×, guarded by a committed regression test.
+
+### Changed
+
+- **`ReconciliationMethod` no longer derives `Eq`** (it now carries an `f64`); it still derives
+  `PartialEq` + `Copy`. Source-compatible for all existing usage.
+- Audited every model with an auto-multiplicative/log selection path (AutoETS/ETS family, Theta,
+  TBATS, Box-Cox/Yeo-Johnson transforms, Laplace leaves) for the #10/#219 too-loose-guard failure
+  class — no additional offenders found; guard-assertion tests added for Theta and AutoETS. See
+  `docs/audits/multiplicative-guard-audit.md`.
+
 ## [0.15.9] - 2026-08-12
 
 Correctness fixes from the v1.0 Performance & Validation Hardening cycle. These are the
