@@ -47,7 +47,7 @@ Two technically independent workstreams:
 - [x] **Phase 5: MFLES Multiplicative-Guard Fix** - Tighten the MFLES min/level guard, floor the ln() transform, clamp the back-transform; prove the #219 repro series drops from ~13× to ~level (completed 2026-09-09)
 - [x] **Phase 6: Multiplicative-Guard Bug-Class Audit** - Inventory every auto-multiplicative/log selection path across models; fix any exhibiting the too-loose-guard failure class with regression guards (completed 2026-09-09)
 - [x] **Phase 7: ERM Reconciliation Variant & Ridge Solve** - Add the `Erm { lambda }` variant, training-history API, and the `P = B'Ŷ(Ŷ'Ŷ + λI)⁻¹` fixed-λ solve, verified against the reference formula (completed 2026-09-09)
-- [ ] **Phase 8: Auto-λ & Grouped/Crossed Validation** - Add the Ledoit-Wolf-style auto-λ default and validate ERM end-to-end on a grouped/crossed hierarchy against a MinTrace/unreconciled baseline
+- [x] **Phase 8: Auto-λ & Grouped/Crossed Validation** - Add the Ledoit-Wolf-style auto-λ default and validate ERM end-to-end on a grouped/crossed hierarchy against a MinTrace/unreconciled baseline (completed 2026-09-09)
 
 ## Phase Details
 
@@ -144,7 +144,7 @@ the default sequencing.
 | 5. MFLES Multiplicative-Guard Fix | v1.1 | 1/1 | Complete    | 2026-09-09 |
 | 6. Multiplicative-Guard Bug-Class Audit | v1.1 | 1/1 | Complete    | 2026-09-09 |
 | 7. ERM Reconciliation Variant & Ridge Solve | v1.1 | 1/1 | Complete    | 2026-09-09 |
-| 8. Auto-λ & Grouped/Crossed Validation | v1.1 | 1/1 | In Progress|  |
+| 8. Auto-λ & Grouped/Crossed Validation | v1.1 | 1/1 | Complete    | 2026-09-09 |
 
 ---
 *Roadmap created: 2026-08-09*
