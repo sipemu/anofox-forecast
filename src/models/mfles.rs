@@ -94,7 +94,9 @@ pub struct MFLES {
     /// In-sample maximum value (original scale), stored at fit time for the
     /// multiplicative back-transform clamp (issue #219).
     /// `None` on the additive path (or for old deserialized models) — clamp
-    /// is then inert (cap = f64::INFINITY).
+    /// is then inert (cap = f64::INFINITY). `serde(default)` keeps JSON
+    /// payloads written before this field existed deserializable to `None`.
+    #[cfg_attr(feature = "serde", serde(default))]
     insample_max: Option<f64>,
 }
 

@@ -111,9 +111,14 @@ fn issue_219_mfles_explicit_multiplicative_with_floor_and_clamp() {
     let preds = fc.primary();
 
     // With floor + clamp the forecast must stay below 10 × in-sample max.
-    // In-sample max ≈ 2400; cap = 24000.
-    let insample_max_approx = 2400.0_f64;
-    let cap = 10.0 * insample_max_approx;
+    // Derive the in-sample max from the fixture itself (not a hardcoded
+    // constant) so the cap tracks any future change to the series.
+    let insample_max = make_issue_219_series()
+        .primary_values()
+        .iter()
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max);
+    let cap = 10.0 * insample_max;
     let forecast_max = preds.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     assert!(
         forecast_max <= cap,
