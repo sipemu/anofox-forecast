@@ -96,7 +96,7 @@ coverage:
     human_judgment: false
 
   - id: D5
-    description: "Committed before/after RMSSE table: unreconciled 2.287, MinTraceStruct 2.110, ERM auto-λ 0.827 (−63.8%)"
+    description: "Committed before/after RMSSE table: unreconciled 2.287, MinTraceStruct 2.110, ERM auto-λ 0.922 (−59.7%)"
     requirement: ERM-06
     verification:
       - kind: unit
@@ -111,7 +111,7 @@ status: complete
 
 # Phase 8 Plan 01: Auto-λ & Grouped/Crossed Validation Summary
 
-**Ledoit-Wolf auto-λ ERM via Option<f64> variant, proven coherent on a 9-node 2×2 crossed hierarchy with RMSSE −63.8% vs unreconciled (0.827 vs 2.287, seeded deterministic)**
+**Ledoit-Wolf auto-λ ERM via Option<f64> variant, proven coherent on a 9-node 2×2 crossed hierarchy with RMSSE −59.7% vs unreconciled (0.922 vs 2.287, seeded deterministic)**
 
 ## Performance
 
@@ -127,7 +127,7 @@ status: complete
 - Added private `erm_auto_lambda`: centered Gram G_c = ŶŶᵀ with per-node means subtracted; shrinkage target (tr(G_c)/n)·I; LW intensity α = clamp(γ/Tδ, 0, 1); λ_auto = α·tr(G_c)/n; T<2 guard, 1e-6 floor, NaN/Inf final guard
 - Migrated all 9 Phase-7 ERM test call sites from bare `f64` to `Some(<literal>)`; crate compiles and all 9 tests pass unmodified
 - Added 3 new tests: `erm_auto_lambda_basic` (smoke: None → finite coherent), `erm_auto_lambda_t1_returns_err` (T=1 degeneracy), `erm_grouped_crossed_end_to_end_accuracy` (9-node 2×2 crossed hierarchy, coherence HARD + RMSSE SOFT)
-- RMSSE: ERM auto-λ 0.827239, MinTraceStruct 2.110507, Unreconciled 2.287392; auto-λ selected 1.492916
+- RMSSE: ERM auto-λ 0.921839, MinTraceStruct 2.110507, Unreconciled 2.287392; auto-λ selected 0.000197 (self-consistent with the uncentered Gram after code-review WR-01)
 - Committed `docs/audits/erm-grouped-validation-results.md` with the real captured 3-row table
 - All 44 hierarchy tests pass; `cargo clippy --all-targets --all-features -- -D warnings` clean
 
