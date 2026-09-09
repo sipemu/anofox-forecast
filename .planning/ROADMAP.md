@@ -85,7 +85,9 @@ fixed and guarded against regression.
   4. Models audited and found already-safe are recorded as such with the evidence (why the existing guard is tight enough), so the inventory is a complete, auditable sweep
   5. Public `Forecaster` API is unchanged, the npm/WASM package still builds, and clippy `-D warnings` + cargo-audit/deny remain green
 
-**Plans**: TBD
+**Plans**: 1 plan
+
+- [ ] 06-01-PLAN.md — Commit the MULT-05 19-row inventory doc + Theta/AutoETS near-zero guard-assertion tests; record MULT-06 zero-offender satisfied-by-evidence
 
 ### Phase 7: ERM Reconciliation Variant & Ridge Solve
 
