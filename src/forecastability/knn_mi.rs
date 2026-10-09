@@ -286,8 +286,8 @@ mod tests {
 
     #[test]
     fn digamma_at_1_is_neg_euler() {
-        // ψ(1) = -γ ≈ -0.5772156649
-        assert_relative_eq!(digamma(1.0), -0.5772156649, epsilon = 1e-6);
+        // ψ(1) = -γ
+        assert_relative_eq!(digamma(1.0), -std::f64::consts::EULER_GAMMA, epsilon = 1e-6);
     }
 
     #[test]

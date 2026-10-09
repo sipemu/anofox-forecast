@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - Unreleased
+
+Statistical correctness fixes for the ADF and KPSS stationarity tests
+(DIAG-01, DIAG-02). Backward-compatible: `adf_test`/`kpss_test`/
+`test_stationarity` keep their public signatures and `StationarityResult`/
+`CriticalValues` keep their field layout; new functionality is additive.
+
+> **Note:** this CHANGELOG section may show entries from sibling Phase 11
+> fix PRs that land first — that overlap is expected (all Phase 11 branches
+> share the same `0.16.0` section header) and is resolved by keeping every
+> block when merging, not by dropping one.
+
+### Fixed
+
+- **ADF test is now genuinely augmented.** `adf_test`/`adf_test_with_options`
+  regress `Δy_t` on the deterministic term, `y_{t-1}` **and** the lagged
+  differences `Δy_{t-1}..Δy_{t-lag}` — previously the "selected" lag only
+  trimmed the sample, so the lagged differences never entered the
+  regression at all. Measured on a 2000-rep Monte-Carlo: IMA(1,1)
+  (θ = −0.5) unit-root rejection at the 5% level dropped from **63.5%** to
+  **8.70%** (174/2000); random-walk size at 5% is **6.95%** (139/2000),
+  within the nominal [3.5%, 7.5%] band.
+- **ADF p-values and critical values now come from MacKinnon's response
+  surfaces** (as shipped in `statsmodels.tsa.adfvalues`: MacKinnon 1994 for
+  p-values, MacKinnon 2010 for finite-sample critical values) instead of a
+  9-step lookup table and three hard-coded constants (`-3.43`/`-2.86`/
+  `-2.57`, which were only ever correct for the constant-only regression).
+  Statistic, used lag, p-value and critical values now match
+  `statsmodels.tsa.stattools.adfuller` and `urca::ur.df` to `1e-8`/`1e-10`
+  on every fixture series, for every regression type (`none`/`drift`/
+  `trend`) and lag-selection method (AIC/BIC/t-stat/fixed).
+- **KPSS p-value bounded to `[0.01, 0.10]`**, matching
+  `tseries::kpss.test(null = "Level", lshort = TRUE)` exactly via linear
+  interpolation within its four-point table — previously the p-value
+  extrapolated linearly outside the table (toward 0 for large statistics,
+  toward 1 for very small ones) and skipped the table's 2.5% point
+  entirely.
+
+### Added
+
+- `AdfRegression` (`NoConstant`/`Constant`/`ConstantTrend`),
+  `AdfLagSelection` (`Aic`/`Bic`/`TStat`/`Fixed`) and `AdfOptions`
+  (`with_regression`/`with_max_lags`/`with_lag_selection`) for explicit
+  control over the ADF regression and lag selection.
+- `adf_test_with_options(series, &AdfOptions) -> StationarityResult` — the
+  options-taking ADF entry point; `adf_test` is now a thin delegation to it
+  with `Constant` regression and `Aic` lag selection (unchanged defaults).
+- `mackinnon_p_value(statistic, regression) -> f64` and
+  `mackinnon_critical_values(regression, nobs) -> CriticalValues` — public
+  ports of `statsmodels.tsa.adfvalues.mackinnonp`/`mackinnoncrit` (`N = 1`).
+- `kpss_p_value(statistic) -> f64` — public, bounded KPSS p-value function
+  (previously private), for parity with the ADF side.
+
+### Changed
+
+- `StationarityResult.lags` may now be `0` for the ADF test when AIC/BIC/
+  t-stat selection picks no augmentation at all (previously always `>= 1`
+  by construction of the old, non-augmented regression).
+
 ## [0.15.10] - 2026-09-09
 
 Robustness fixes and a new ERM hierarchical-reconciliation method from the v1.1 Robustness Fixes &
