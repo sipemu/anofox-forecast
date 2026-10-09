@@ -716,12 +716,11 @@ impl KalmanFilter {
                 .fold(0.0_f64, f64::max);
             let degenerate = s_max_diag < 1e-30;
 
-            let ll;
-            if degenerate {
+            let ll = if degenerate {
                 // S is effectively zero: perfect prediction, no update needed.
                 x = x_pred;
                 p.copy_from(&scratch.p_pred);
-                ll = 0.0;
+                0.0
             } else {
                 // Kalman gain: K = P_pred * H^T * S^{-1}
                 dm_inv_spd(
@@ -765,8 +764,8 @@ impl KalmanFilter {
                     &mut scratch.l_obs,
                     &mut scratch.y_buf,
                 )?;
-                ll = -0.5 * (no as f64 * (2.0 * std::f64::consts::PI).ln() + log_det + quad);
-            }
+                -0.5 * (no as f64 * (2.0 * std::f64::consts::PI).ln() + log_det + quad)
+            };
 
             results.push(KalmanState {
                 state: x.clone(),

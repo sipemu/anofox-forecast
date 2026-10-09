@@ -27,15 +27,48 @@ numerical-robustness edge-case + property suites with per-family NaN/Inf guards;
 coverage floor (90.4%); and a ranked improvement backlog with top-value fixes landed (each proven by a
 before/after delta).
 
-**Open (carried to next milestone, see `baselines/BACKLOG.md`):** #1 AutoETS M3-monthly accuracy gap
+**Shipped: v1.1 — Robustness Fixes & ERM Reconciliation (2026-09-09).** Phases 5–8 complete, 12/12
+requirements satisfied, milestone audit PASSED. Delivered: the MFLES auto-multiplicative runaway
+(#219) fixed at all three failure points with a committed ~13×→~level regression; a 19-model
+bug-class audit finding zero new offenders (blow-up class unique to MFLES); ERM hierarchical
+reconciliation (`ReconciliationMethod::Erm { lambda: Option<f64> }`, Ben Taieb & Koo 2019) with an
+in-house Cholesky ridge solve proven correct against hand-computed + asymmetric independent oracles;
+and a Ledoit-Wolf-style auto-λ default validated end-to-end on a grouped/crossed hierarchy
+(coherence hard-asserted, RMSSE −59.7% vs unreconciled).
+
+**Open (carried forward, see `baselines/BACKLOG.md`):** #1 AutoETS M3-monthly accuracy gap
 (period=12 fix cut MASE 1.0452→0.8923; still +0.0290 above the 0.8633 reference anchor, so
 `accuracy.json` remains deferred/unlocked); iai/criterion baselines await manual hardware capture;
-optional Nyquist validation for Phases 3–4.
+optional Nyquist validation for Phases 3–8 (v1.1 phases seeded `status: draft`); stale tracked
+`src/hierarchy/mod.rs.bak` recommended for deletion.
 
-## Next Milestone Goals
+## Next Milestone
 
-To be defined via `/gsd-new-milestone`. The v1.0 backlog is the natural seed — the AutoETS accuracy
-gap is the highest-value candidate.
+**TBD** — run `/gsd-new-milestone` to define the next milestone (questioning → research →
+requirements → roadmap). Candidate directions: close the ACC-01 accuracy gap, expand ERM auto-λ
+targets, or resume the broader whole-library performance-hardening backlog.
+
+<details>
+<summary>v1.1 milestone goal (shipped 2026-09-09)</summary>
+
+**Goal:** Close a silent multiplicative-mode over-forecast bug class and add ERM hierarchical
+reconciliation — each proven against a baseline, keeping the "every improvement has a before/after
+number" discipline.
+
+**Target features:**
+- Fix the MFLES auto-multiplicative runaway (#219): tighten the guard (min/level ratio, not just
+  `all(v > 0)`), floor/winsorize the `ln()` transform, clamp the multiplicative back-transform —
+  proven with the repro series (~13× over-forecast → ~level).
+- Audit every model with an auto-multiplicative/log path for the same too-loose-guard failure class
+  (#10 AutoETS / #219 MFLES lineage); fix any found and add regression guards.
+- Add `ReconciliationMethod::Erm { lambda }` (Ben Taieb & Koo 2019) with a training-history API and a
+  Ledoit-Wolf-style auto-λ default, validated end-to-end on a grouped/crossed hierarchy against a
+  MinTrace/unreconciled baseline.
+
+The v1.0 backlog (ACC-01 accuracy gap, MEM-01, WSZ-01, coverage gaps) remains in `baselines/BACKLOG.md`
+and is not the focus of this milestone.
+
+</details>
 
 ## Requirements
 
@@ -50,28 +83,27 @@ gap is the highest-value candidate.
 - ✓ Batch multi-series forecasting with Rayon parallelism (`parallel` feature) — existing
 - ✓ WebAssembly/JS bindings + published npm package + browser playground on GitHub Pages — existing
 - ✓ Existing quality gates: criterion benchmarks, proptest, clippy `-D warnings`, cargo-audit/deny — existing
-- ✓ Compute-speed benchmark harness with captured baselines across model families (criterion wall-clock + iai-callgrind instruction gates; native `parallel` and single-thread profiles) — Phase 1
-- ✓ Memory & WASM-size measurement (dhat peak-allocation tests + committed `wasm_size.json`; PERF-06 dead-code cleanup before size baseline) — Phase 1
+- ✓ Compute-speed benchmark harness with captured baselines across model families (criterion wall-clock + iai-callgrind instruction gates; native `parallel` and single-thread profiles) — v1.0 Phase 1
+- ✓ Memory & WASM-size measurement (dhat peak-allocation tests + committed `wasm_size.json`; PERF-06 dead-code cleanup before size baseline) — v1.0 Phase 1
+- ✓ Forecast-accuracy harness over vendored competition datasets with standard metrics (competition MASE, Naive2, Diebold-Mariano; pinned statsforecast cross-library reference) — v1.0 Phase 2
+- ✓ Numerical-robustness + property suites with per-family NaN/Inf guards; input-robustness edge cases — v1.0 Phase 3
+- ✓ Statistical-methodology validation (CV splits, interval/conformal coverage) — v1.0 Phase 2/3
+- ✓ CI-enforced coverage floor (90.4%) with gap inventory across model families — v1.0 Phase 3
+- ✓ Consolidated, prioritized improvement backlog with top-value fixes landed, each proven by a before/after delta — v1.0 Phase 4
+- ✓ MFLES auto-multiplicative runaway fix (#219): min/median guard (τ=0.10), `ln()` winsorized to 0.01×median, back-transform clamped to 10×in-sample max; #219 repro ~13× → ~level, committed regression — v1.1 Phase 5
+- ✓ Multiplicative-guard bug-class audit: 19-model auditable sweep, zero new offenders (blow-up class architecturally unique to MFLES); Theta/AutoETS guard-assertion tests — v1.1 Phase 6
+- ✓ `ReconciliationMethod::Erm { lambda: Option<f64> }` variant (Ben Taieb & Koo 2019), backward-compatible; training-history API + in-house Cholesky ridge solve `P = BŶᵀ(ŶŶᵀ+λI)⁻¹`, proven correct against a hand-computed + asymmetric independent oracle — v1.1 Phase 7
+- ✓ Ledoit-Wolf-style auto-λ default (self-consistent with the uncentered Gram) + caller fixed-λ path; end-to-end grouped/crossed validation, coherence hard-asserted, RMSSE −59.7% vs unreconciled (drift-locked) — v1.1 Phase 8
 
 ### Active
 
-<!-- The hardening goals for this cycle. Hypotheses until shipped and validated. -->
+<!-- Next milestone goals — TBD. Populate via /gsd-new-milestone. -->
 
-**Measurement backbone (per dimension: harness → baseline → tracked over time)**
-- [ ] Forecast-accuracy harness over vendored standard competition datasets (M-competitions, Tourism, etc.) with standard metrics (MASE, RMSE, sMAPE)
-- [ ] Numerical-robustness test suite for edge cases (near-singular matrices, convergence limits, NaN/Inf, extreme scales)
-- [ ] Statistical-methodology validation: correctness of CV splits, interval/conformal coverage checks
-- [ ] Code-correctness & coverage baseline: test-coverage measurement + gap identification across model families
-- [ ] Input-robustness suite: missing values, too-short series, wrong/irregular frequency, empty/constant input
-- [ ] Cross-reference benchmark comparing accuracy/behavior against a reference implementation on shared datasets
-
-**Prioritization & improvement**
-- [ ] Consolidated, prioritized improvement backlog ranking findings across all 8 dimensions by value/effort
-- [ ] Land the highest-value improvements, each with a documented before/after delta and a guard against regression
+(None — v1.1 shipped. Run `/gsd-new-milestone` to define the next milestone.)
 
 ### Out of Scope
 
-- New forecasting models or model families — this is a hardening cycle, not feature expansion
+- New forecasting models or model families — still excluded; ERM (v1.1) is a hierarchical *reconciliation method* on existing forecasts, not a new forecaster
 - New automatic seasonal-period-detection integration into models — deliberately excluded
 - API/breaking redesigns of the public `Forecaster` trait — improvements must stay backward-compatible unless a fix demands otherwise (logged as a Key Decision if so)
 - New Python bindings — out of scope for this cycle
@@ -103,6 +135,9 @@ gap is the highest-value candidate.
 | Whole-library scope across all 8 dimensions | User wants systematic, proactive confidence — not a point fix | — Pending |
 | Use standard competition datasets as the accuracy corpus | Industry-recognized, comparable to reference libraries, avoids synthetic-only bias | — Pending |
 | Exclude new models / API redesigns / auto period-detection integration | Keeps the cycle a hardening pass, not feature creep | — Pending |
+| v1.1: fix MFLES (#219) AND audit the whole multiplicative-guard bug class, not just the reported model | #10 (AutoETS) + #219 (MFLES) are the same "auto-mult guard too loose" pattern; a systematic sweep matches the v1.0 whole-library ethos | — Pending |
+| v1.1: ship ERM (#216) at full depth — auto-λ + grouped/crossed validation, not a minimal fixed-λ stub | Downstream consumer (site×material hierarchy) needs grouped reconciliation; auto-λ matches `MinTraceShrink` ergonomics | — Pending |
+| v1.1 admits one feature (ERM) into an otherwise hardening-oriented project | ERM is a reconciliation statistic over existing forecasts with a concrete downstream need, not a new forecaster; the model-family exclusion still holds | — Pending |
 
 ## Evolution
 
@@ -122,4 +157,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-08-10 after Phase 1*
+*Last updated: 2026-09-09 — after v1.1 milestone (Robustness Fixes & ERM Reconciliation) shipped*

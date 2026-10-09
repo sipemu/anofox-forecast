@@ -1,23 +1,26 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.0
-milestone_name: milestone
-current_phase: 04
-status: completed
-stopped_at: Completed 04-03-PLAN.md (Phase 4 complete — all 3 plans done)
-last_updated: "2026-08-12T05:18:02.624Z"
+milestone: v1.1
+milestone_name: Robustness Fixes & ERM Reconciliation
+status: Awaiting next milestone
+stopped_at: Phase 08 complete — all phases complete
+last_updated: "2026-09-09T11:52:08.570Z"
+last_activity: 2026-09-09
+last_activity_desc: Milestone v1.1 completed and archived
+state_head: 27952f0840022add5f900f4bea41f421ac191bf7
 progress:
   total_phases: 4
   completed_phases: 4
-  total_plans: 13
-  completed_plans: 13
-current_phase_name: prioritized-improvement-backlog-top-value-fixes
+  total_plans: 4
+  completed_plans: 4
+  percent: 100
+current_phase: 08
 ---
 
 # Project State: anofox-forecast — Performance & Validation Hardening
 
-**Last Updated:** 2026-08-10
-**Session:** Phase 1 verified & complete
+**Last Updated:** 2026-09-08
+**Session:** v1.1 roadmap created (Phases 5–8)
 
 ---
 
@@ -25,140 +28,105 @@ current_phase_name: prioritized-improvement-backlog-top-value-fixes
 
 **Core Value:** Every claimed capability is measured, and every improvement is proven with a before/after number.
 
-**Current Focus:** Phase 04 — prioritized-improvement-backlog-top-value-fixes
+**Current Focus:** Phase 08 — Auto-λ & Grouped/Crossed Validation
 
 ---
 
 ## Current Position
 
-**Phase:** 04
-**Plan:** Not started
-**Status:** All phases complete
-
-```
-Progress: [██████████] 100%
-
-Phase 1 [COMPLETE]     █████
-Phase 2 [NOT STARTED]  ░░░░░
-Phase 3 [NOT STARTED]  ░░░░░
-Phase 4 [NOT STARTED]  ░░░░░
-```
-
----
+Phase: Milestone v1.1 complete
+Plan: —
+Status: Awaiting next milestone
+Last activity: 2026-09-09 — Milestone v1.1 completed and archived
 
 ## Performance Metrics
 
 | Metric | Baseline | Current | Delta |
 |--------|----------|---------|-------|
-| Requirements mapped | 28/28 | 28/28 | — |
-| Phases complete | 0/4 | 0/4 | — |
-| Plans complete | — | — | — |
+| v1.1 requirements mapped | 12/12 | 12/12 | — |
+| v1.1 phases complete | 0/4 | 0/4 | — |
+| v1.1 plans complete | — | — | — |
 
 ---
 **Per-Plan Metrics:**
 
 | Plan | Duration | Tasks | Files |
 |------|----------|-------|-------|
-| Phase 01 P01 | 9 | 4 tasks | 7 files |
-| Phase 01 P02 | 10 | 3 tasks | 5 files |
-| Phase 01 P03 | 30 | 3 tasks | 7 files |
-| Phase 02 P01 | 330 | 3 tasks | 4 files |
-| Phase 02 P02 | 518 | 3 tasks | 3 files |
-| Phase 02-accuracy-harness-statistical-methodology P03 | 678 | 3 tasks | 5 files |
-| Phase 02 P04 | 12 | 2 tasks | 2 files |
-| Phase 03 P01 | 7 | 3 tasks | 4 files |
-| Phase 03 P02 | 43 | 3 tasks | 2 files |
-| Phase 03 P03 | ~15min | 4 tasks | 5 files |
-| Phase 04 P01 | 75 | 4 tasks | 6 files |
-| Phase 04 P02 | 15 | 3 tasks | 1 files |
-| Phase 04 P03 | 25 | 2 tasks | 1 files |
+| Phase 06-multiplicative-guard-bug-class-audit P01 | 4 | 3 tasks | 2 files |
+| Phase 07-erm-reconciliation-variant-ridge-solve P01 | 25 | 3 tasks | 1 files |
+| Phase 08 P01 | 8 min | 3 tasks | 2 files |
 
 ## Accumulated Context
 
-### Key Decisions
+### Key Decisions (v1.1)
 
 | Decision | Rationale | Phase |
 |----------|-----------|-------|
-| PERF-06 (dead-code cleanup) assigned to Phase 1 before PERF-05 (WASM size baseline) | Baseline would overstate current size if captured before cleanup; sequencing constraint from research | Phase 1 |
-| accuracy.yml is workflow_dispatch-only from the start | Must never gate PR merges per explicit requirement MEAS-03 | Phase 2 |
-| BENCH-01/BENCH-02 assigned to Phase 2, not Phase 4 | Cross-library comparison depends on a correct accuracy harness (ACCUR-08 validates against reference first); accuracy and benchmarking form one coherent delivery boundary | Phase 2 |
-| ROBUST/COVER assigned to Phase 3, after accuracy harness | Gap inventory (COVER-02) benefits from knowing which code paths the harness exercises; no hard dependency but logical ordering improves coverage relevance | Phase 3 |
-| IMPR-* assigned to Phase 4 (last) | Cannot rank backlog without real baseline numbers from all three preceding phases; research and requirements both mandate measurement-first | Phase 4 |
+| MFLES fix (MULT-01..04) is its own phase (5), separate from the broader bug-class audit (6) | The #219 fix has a concrete repro + before/after proof; the audit is an open-ended sweep. Separating keeps each phase independently verifiable and keeps the proven MFLES fix from being blocked on audit scope | Phase 5/6 |
+| Audit (MULT-05/06) depends on Phase 5 | The audit reuses the tightened-guard pattern (min/level threshold, floored transform, clamped back-transform) and regression-test shape established while fixing MFLES | Phase 6 |
+| ERM variant + solve + correctness (ERM-01/02/03/05) grouped in Phase 7; auto-λ + grouped validation (ERM-04/06) in Phase 8 | Phase 7 delivers a fixed-λ ERM proven correct against the reference formula (a testable unit); Phase 8 layers the Ledoit-Wolf auto-λ and the end-to-end accuracy before/after on top | Phase 7/8 |
+| ERM-05 (correctness vs reference formula) placed in Phase 7, not Phase 8 | Correctness of the ridge solve is a property of the solve itself and should be proven where the solve lands, before auto-λ and grouped validation build on it | Phase 7 |
+| Workstreams A and B kept technically independent (no forced coupling) | Different subsystems (src/models/mfles.rs + model audit vs hierarchy reconciliation); numeric order 5→6→7→8 is default sequencing, not a hard dependency between workstreams | — |
 
 ### Critical Constraints to Honor
 
-- All measurement code lives in `benches/`, `tests/`, `scripts/`, harness crate — nothing new enters `src/`
-- Criterion baselines captured on a quiet local machine, NOT on GitHub Actions (wall-clock noise)
-- `accuracy.yml` must be `workflow_dispatch`-only — never gates PR merges
-- wee_alloc must NOT be used (archived Aug 2025, known memory leaks)
-- WASM target forbids `parallel` (Rayon) feature — native and WASM profiles must be measured separately
-- No customer/client names in code, comments, or test names
+- Public `Forecaster` / hierarchy API stays backward-compatible; ERM is an additive enum variant + new API surface only
+- The published npm package `@sipemu/anofox-forecast` must keep building (WASM target forbids the `parallel` feature)
+- Every robustness fix needs a before/after proof (repro series ~13× → ~level); ERM needs a before/after accuracy proof vs a MinTrace/unreconciled baseline — no unquantified improvements
+- clippy `-D warnings` and cargo-audit/deny gates must stay green
+- Respect existing feature gates (`distributional`, `postprocess`, `anomaly`, `forecastability`, `seasonal-detection`, `parallel`, `serde`, `js`)
+- No customer/client names in code, comments, or test names (public crate)
+- Do not add automatic seasonal-period detection integration (out of scope, carried from v1.0)
 
 ### Todos
 
-- [ ] Plan Phase 2 via `/gsd-plan-phase 2`
+- [ ] Plan Phase 5 via `/gsd-plan-phase 5`
 
 ### Blockers
 
-- ⚠️ [Phase 1] `iai.json` / `criterion.json` baselines committed as structural placeholders — real numbers require maintainer capture on a valgrind ≥ 3.20 machine (`scripts/update_iai.sh`) and a quiet local machine (`scripts/update_criterion.sh`). Harness/gates complete; numeric population is a documented manual step.
+- None for v1.1.
+- ⚠️ (carried, NOT v1.1 scope) v1.0 `iai.json` / `criterion.json` baselines remain structural placeholders pending maintainer hardware capture; `accuracy.json` deferred (ACC-01 gap). Tracked in `baselines/BACKLOG.md`.
 
 ---
-- accuracy.json lock deferred (ACCUR-07 partial): ACCUR-08 anchor failed (anofox MASE=1.0452 vs ref=0.8633, gap=+21%, outside ±0.02). Must re-run emit_accuracy_baseline_if_write_flag_set with ANOFOX_WRITE_ACCURACY_BASELINE=1 after Phase 4 improvements close the MASE gap.
 
 ## Session Continuity
 
-**Last session:** 2026-08-11T21:27:39.939Z
-**Stopped at:** Completed 04-03-PLAN.md (Phase 4 complete — all 3 plans done)
+**Last session:** 2026-09-09T10:14:58.842Z
+**Stopped at:** Phase 08 complete — all phases complete
 **Resume file:** None
 
 ### What Was Done This Session
 
-- Resumed Phase 1 UAT; marked tests 2 (iai.json) and 3 (criterion.json) passed — 3/3 UAT passed, 0 issues
-- Canonicalized 01-VERIFICATION.md status human_needed → passed
-- Ran phase.complete: ROADMAP + STATE advanced to Phase 2; evolved PROJECT.md (2 requirements → Validated, 3 decisions logged)
+- Created v1.1 roadmap: Phases 5–8, continuing numbering from v1.0 (ended at Phase 4)
+- Mapped all 12 v1.1 requirements to phases (Phase 5: MULT-01..04; Phase 6: MULT-05/06; Phase 7: ERM-01/02/03/05; Phase 8: ERM-04/06)
+- Derived 5 observable success criteria per phase, each honoring the before/after proof discipline and backward-compat/CI constraints
+- Populated REQUIREMENTS.md traceability (no TBD rows remaining)
+- Collapsed v1.0 into a `<details>` summary in ROADMAP.md; v1.1 expanded
 
 ### Resume Point
 
-Start `/gsd-plan-phase 2` — Phase 2: Accuracy Harness & Statistical Methodology covers ACCUR-01..08 and BENCH-01..02.
+Start `/gsd-plan-phase 5` — Phase 5: MFLES Multiplicative-Guard Fix covers MULT-01..04 (the #219 fix with the ~13× → ~level repro before/after).
 
 ---
 
-*State initialized: 2026-08-09*
+*State initialized: 2026-08-09. Reset for v1.1 planning: 2026-09-08.*
+
+## v1.0 History (archived)
+
+Full v1.0 phase history, per-plan metrics, and decision log are preserved in
+[`milestones/v1.0-ROADMAP.md`](milestones/v1.0-ROADMAP.md), [`v1.0-MILESTONE-AUDIT.md`](v1.0-MILESTONE-AUDIT.md),
+and [`baselines/BACKLOG.md`](baselines/BACKLOG.md). v1.0 shipped 2026-08-12 with 28/28 requirements
+satisfied across Phases 1–4.
 
 ## Decisions
 
-- [Phase ?]: No [[bench]] in harness Cargo.toml yet — avoids compile error until source files exist in Plans 02-03
-- [Phase ?]: wasm-size.yml uses quoted 'on' key to avoid YAML boolean coercion; zero baseline write steps (MEAS-01 CI-read-only)
-- [Phase ?]: PERF-06 guard in update_wasm_size.sh enforces PERF-06-before-PERF-05 sequencing at runtime
-- [Phase ?]: LibraryBenchmarkConfig.tool() not .callgrind() — verified against iai-callgrind 0.16.1 source
-- [Phase ?]: iai.json placeholder values (instruction_count=0) — valgrind absent on dev machine; regenerate via update_iai.sh
-- [Phase ?]: Doc comments (///) rejected by #[library_benchmark] proc-macro — use // inline comments on bench fns
-- [Phase ?]: LaplaceForecaster gated behind cfg(distributional) in baseline_suite.rs — criterion_group! duplicated for cfg/no-cfg build variants
-- [Phase ?]: All 7 dhat families in one #[test] fn to avoid overlapping dhat::Profiler instances (dhat panics on concurrent profilers)
-- [Phase ?]: criterion.json committed as 0.0 placeholder (local-only capture, D-03); dhat.json committed with real values (native test, no env deps)
-- [Phase ?]: Period-1 naive fallback on seasonal MASE collapse (D-03/D-04): fix in src/utils/metrics.rs keeps series in aggregate instead of dropping with None/NaN — matches statsforecast behavior
-- [Phase ?]: mase_scale() training-denominator placed in loader.rs (harness) to keep competition-correct MASE separate from library calculate_mase which scales on test slice (Pitfall 1)
-- [Phase ?]: MSIS scoped to monthly only to bound runtime; monthly is ACCUR-08 anchor frequency with richest interval evaluation
-- [Phase ?]: msis() uses period-1 first-diff scaling (A4/Pitfall 4) — not seasonal-lag as M4 competition; documented in code; ACCUR-08 anchor = MASE only
-- [Phase ?]: DM gate exercised via synthetic vectors (fixture has only aggregate MASE, not per-step forecasts) — documented as fixture scope limitation; Plan 04 narrative must state DM gate data scope honestly
-- [Phase ?]: statsforecast 2.0.3 monthly MASE=0.8633 (not 0.93 from 1.x): provenance makes the version difference auditable; ACCUR-08 comparison is within the pinned env
-- [Phase ?]: CARGO_MANIFEST_DIR used for cross_library.rs fixture path: cargo integration tests for workspace member crates CWD is the crate dir, not workspace root
-- [Phase ?]: defer-lock: ACCUR-08 anchor failed (anofox MASE=1.0452 vs statsforecast 2.0.3 ref=0.8633, gap=+21%, outside ±0.02 tolerance); accuracy.json not committed until Phase 4 improvements close the gap
-- [Phase ?]: accuracy.yml (MEAS-03) delivered workflow_dispatch-only with contents:read permissions, read-only harness runner, never gates PR merges
-- [Phase ?]: emit_accuracy_json() helper committed with dual-key guard (write flag + anchor assertion); Phase 4 can lock baseline by running with ANOFOX_WRITE_ACCURACY_BASELINE=1 after anchor passes
-- [Phase ?]: ROBUST-01: One representative model per family (Naive, AutoETS, ARIMA(1,0,1), Theta, TBATS([12]), Croston, MSTLForecaster([12]), GARCH(1,1), VARForecaster(1), LaplaceForecaster) driven through constant/n=2/zeros/intermittent/NaN/Inf/empty/extreme edge-case inputs; 61 tests pass, zero panics
-- [Phase ?]: ROBUST-02: validate_series_complete(series)? added at fit() entry in gpd_tails.rs and multiscale.rs (delegation wrapper boundary guard); 4 raw-vec global models deferred to P1 gap inventory
-- [Phase ?]: Three separate proptest blocks used (50/30/100 cases each subsystem) to permit different runtime bounds per block
-- [Phase ?]: MSTLResult.seasonal_components field (not seasonal) accessed for property assertions — confirmed in mstl.rs:17
-- [Phase ?]: update_coverage.sh scoped to --package anofox-forecast --all-features (not workspace-wide) to avoid bench-harness distorting line %
-- [Phase ?]: ratchet_floor_percent = lines_percent - 1.0 (91.30% measured → 90.3% floor); mirrors Phase 2 accuracy-lock baseline-lock pattern
-- [Phase ?]: Lock coverage baseline as-measured: 91.30% measured, floor 90.3%, scope --package anofox-forecast --all-features; CI enforces via --fail-under-lines in existing coverage: job (COVER-01)
-- [Phase ?]: Gap inventory 03-GAP-INVENTORY.md filed with 5 P1 / 9 P2 / 6 P3 rows (20 total) for Phase 4 backlog; highest-value P1 targets are V-01 to V-04 raw-vec NaN guards and G-01 GlobalTheta 0% coverage (COVER-02)
-- [Phase ?]: Used !v.is_finite() predicate for NaN/Inf guards in GlobalETS/GlobalCroston/GlobalTheta fit() paths — clippy-preferred, matches VAR::fit pattern
-- [Phase ?]: V-04 (VAR MissingValues vs InvalidParameter variant divergence) deferred to 04-03 backlog — document-only, no refactor this phase
-- [Phase ?]: Coverage baseline committed separately per IMPR-03: 91.30% → 91.44%, floor 90.3% → 90.4%
-- [Phase ?]: L3/L4 root-cause confirmed: AutoETS::new() without period=12 suppressed all seasonal candidates; period=12 fix reduces MASE from 1.0452 to 0.8923 (−14.6%) but anchor FAILED (0.8923 outside [0.8433,0.8833]); accuracy.json deferred pending checkpoint decision
-- [Phase ?]: L3/L4 root-cause confirmed: AutoETS::new() without period=12 suppressed all seasonal candidates; fix is harness-only (AutoETS::with_period(period))
-- [Phase ?]: MASE improved 1.0452 → 0.8923 (−14.6%), but anchor FAILED (0.8923 > 0.8833 upper tolerance); decision=DEFER: accuracy.json stays absent, residual +0.0290 gap is #1 backlog item for 04-03
-- [Phase ?]: ACC-01 (AutoETS MASE gap 0.8923 vs ref 0.8633) ranked #1 open backlog item; two source-level levers L1/L2 documented with locations
-- [Phase ?]: IMPR-01 satisfied: BACKLOG.md ranks 17 open items across 8 measurement dimensions with real evidence; iai/criterion placeholder rows marked manual-capture-pending
+- [Phase 06]: All 19 in-scope auto-multiplicative/log paths are PASS or N/A — MULT-06 satisfied by evidence, no production code change required
+- [Phase 06]: MFLES ln→boosting→exp blow-up class is architecturally unique; guard-assertion tests empirically confirm Theta and AutoETS stay at level for near-zero series
+- [Phase 07]: Eq derive dropped from ReconciliationMethod — f64 is not Eq; PartialEq retained, zero downstream breakage
+- [Phase 07]: T < n not hard-blocked in ERM validation — lambda rescues rank-deficient Gram; SingularMatrix returned when Cholesky fails
+- [Phase 07]: All ERM tasks committed atomically in one commit — single-file implementation indivisible without artificial broken intermediate states
+- [Phase 08]: Option<f64> for Erm lambda (not ErmAuto variant) — mirrors MinTraceShrink ergonomics, minimizes API surface — Locked CONTEXT.md decision; Option<f64> is the idiomatic Rust pattern for optional caller-supplied parameter with a computed default
+
+## Operator Next Steps
+
+- Start the next milestone with /gsd-new-milestone
