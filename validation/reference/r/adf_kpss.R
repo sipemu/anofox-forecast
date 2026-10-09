@@ -152,8 +152,10 @@ n_mc <- 40
 n_obs <- 200
 
 mc_rw <- vector("list", n_mc)
+mc_rw_series <- vector("list", n_mc)
 for (i in seq_len(n_mc)) {
   y <- cumsum(rnorm(n_obs))
+  mc_rw_series[[i]] <- as.numeric(y)
   u <- ur.df(y, type = "drift", lags = 5, selectlags = "AIC")
   stat <- as.numeric(u@teststat[1, 1])
   cv5 <- as.numeric(u@cval["tau2", "5pct"])
@@ -161,8 +163,10 @@ for (i in seq_len(n_mc)) {
 }
 
 mc_ima <- vector("list", n_mc)
+mc_ima_series <- vector("list", n_mc)
 for (i in seq_len(n_mc)) {
   y <- cumsum(c(0, arima.sim(list(ma = -0.5), n = n_obs - 1)))
+  mc_ima_series[[i]] <- as.numeric(y)
   u <- ur.df(y, type = "drift", lags = 5, selectlags = "AIC")
   stat <- as.numeric(u@teststat[1, 1])
   cv5 <- as.numeric(u@cval["tau2", "5pct"])
@@ -178,7 +182,9 @@ fixture <- list(
   kpss = kpss_results,
   monte_carlo = list(
     random_walk = mc_rw,
-    ima_theta_neg_0_5 = mc_ima
+    ima_theta_neg_0_5 = mc_ima,
+    random_walk_series = mc_rw_series,
+    ima_theta_neg_0_5_series = mc_ima_series
   )
 )
 

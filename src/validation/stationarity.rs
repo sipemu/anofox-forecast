@@ -585,12 +585,18 @@ fn idx(key: &str) -> usize {
     }
 }
 
-// Placeholder tables: Task 2 replaces these with the values dumped from
-// statsmodels (`validation/reference/python/adf_statsmodels.py`), proven
-// equal via `mackinnon_tables_match_statsmodels`. The hard-coded "c" row
-// below is MacKinnon's documented tau_c constants so Task 1's fixed-lag
-// test (which does not call mackinnon_p_value / mackinnon_critical_values)
-// is unaffected.
+// MacKinnon coefficient tables, N = 1 rows only (single series believed
+// I(1) — the ADF case). These are statsmodels' own shipped values
+// (`statsmodels.tsa.adfvalues`: MacKinnon 1994 p-value surfaces / MacKinnon
+// 2010 critical-value surfaces; BSD-3-Clause, see THIRD_PARTY_NOTICES.md),
+// dumped programmatically into
+// `tests/data/r_reference/adf_statsmodels.json` by
+// `validation/reference/python/adf_statsmodels.py` and proven equal to the
+// constants below (1e-12) by `mackinnon_tables_match_statsmodels`.
+// statsmodels issue #10271 notes transcription-vs-paper discrepancies in a
+// few `tau_2010["c"]` cells; this crate reproduces statsmodels' shipped
+// values (not the paper) since that is the oracle these tests are proven
+// against.
 const TAU_MAX: [f64; 3] = [f64::INFINITY, 2.74, 0.7];
 const TAU_MIN: [f64; 3] = [-19.04, -18.83, -16.18];
 const TAU_STAR: [f64; 3] = [-1.04, -1.61, -2.89];
