@@ -8,6 +8,13 @@
 //! reports the t-statistic on `y_{t-1}` together with MacKinnon (1994, 2010)
 //! p-values and finite-sample critical values — matching `statsmodels.tsa.stattools.adfuller`
 //! and `urca::ur.df` to numerical tolerance (see `tests/adf_kpss_reference.rs`).
+//! `lags` in the returned [`StationarityResult`] may be `0` when AIC/BIC/t-stat
+//! selection picks no augmentation at all.
+//!
+//! The KPSS test (`kpss_test`) p-value matches `tseries::kpss.test`
+//! (`null = "Level"`, `lshort = TRUE`) exactly: linear interpolation within a
+//! four-point critical-value table, clamped to `[0.01, 0.10]` — `tseries`
+//! never reports a p-value outside that range, and neither does this crate.
 
 use statrs::distribution::{ContinuousCDF, Normal};
 
@@ -637,6 +644,11 @@ const TAU_2010: [[[f64; 4]; 3]; 3] = [
 /// Tests null hypothesis that series is (trend) stationary.
 /// Rejection implies non-stationarity.
 ///
+/// The p-value matches `tseries::kpss.test(null = "Level", lshort = TRUE)`:
+/// linear interpolation within the table `(0.347, 0.10)`, `(0.463, 0.05)`,
+/// `(0.574, 0.025)`, `(0.739, 0.01)`, clamped to `[0.01, 0.10]` outside it
+/// (see [`kpss_p_value`]).
+///
 /// # Arguments
 /// * `series` - Time series data
 /// * `lags` - Number of lags for HAC variance (default: 4*(n/100)^0.25)
@@ -717,22 +729,37 @@ pub fn kpss_test(series: &[f64], lags: Option<usize>) -> StationarityResult {
     }
 }
 
-/// Approximate p-value for KPSS test.
-fn kpss_p_value(stat: f64) -> f64 {
+/// `tseries::kpss.test`'s four-point table (`null = "Level"`): linear
+/// interpolation between these `(statistic, p_value)` pairs, clamped to
+/// `[0.01, 0.10]` at both ends (R's `approx(..., rule = 2)` — flat
+/// extrapolation, never linear beyond the table). `tseries` never reports a
+/// p-value outside this range because the table has no data outside it.
+const KPSS_TABLE: [(f64, f64); 4] = [(0.347, 0.10), (0.463, 0.05), (0.574, 0.025), (0.739, 0.01)];
+
+/// P-value for the KPSS test statistic, matching `tseries::kpss.test`
+/// (`null = "Level"`, `lshort = TRUE`) exactly: linear interpolation within
+/// the four-point critical-value table, clamped to `[0.01, 0.10]` outside
+/// it (never extrapolated toward 0 or 1).
+pub fn kpss_p_value(stat: f64) -> f64 {
     if stat.is_nan() {
         return f64::NAN;
     }
 
-    // Simplified approximation based on critical values
-    if stat < 0.347 {
-        0.10 + 0.90 * (1.0 - stat / 0.347)
-    } else if stat < 0.463 {
-        0.05 + 0.05 * (0.463 - stat) / (0.463 - 0.347)
-    } else if stat < 0.739 {
-        0.01 + 0.04 * (0.739 - stat) / (0.739 - 0.463)
-    } else {
-        0.01 * (1.0 - (stat - 0.739).min(1.0))
+    if stat <= KPSS_TABLE[0].0 {
+        return KPSS_TABLE[0].1;
     }
+    if stat >= KPSS_TABLE[KPSS_TABLE.len() - 1].0 {
+        return KPSS_TABLE[KPSS_TABLE.len() - 1].1;
+    }
+
+    for i in 0..KPSS_TABLE.len() - 1 {
+        let (x1, y1) = KPSS_TABLE[i];
+        let (x2, y2) = KPSS_TABLE[i + 1];
+        if stat >= x1 && stat <= x2 {
+            return y1 + (y2 - y1) * (stat - x1) / (x2 - x1);
+        }
+    }
+    unreachable!("stat is within table bounds by the checks above")
 }
 
 /// Combined stationarity test using both ADF and KPSS.
@@ -1089,25 +1116,34 @@ mod tests {
 
     #[test]
     fn kpss_p_value_boundaries() {
-        // stat < 0.347 -> p > 0.10
+        // Bounded like tseries::kpss.test (DIAG-02): p is always in
+        // [0.01, 0.10], clamped flat below/above the table, not extrapolated
+        // toward 0/1 as the old implementation did.
+
+        // stat < 0.347 -> clamped at p = 0.10 (was p > 0.10 before DIAG-02)
         let p1 = kpss_p_value(0.1);
-        assert!(p1 > 0.10);
+        assert_eq!(p1, 0.10);
 
-        // stat == 0.347 -> p ≈ 0.10
+        // stat == 0.347 -> p == 0.10 exactly (table endpoint)
         let p2 = kpss_p_value(0.347);
-        assert!((p2 - 0.10).abs() < 0.01);
+        assert_eq!(p2, 0.10);
 
-        // stat == 0.463 -> p ≈ 0.05
+        // stat == 0.463 -> p == 0.05 exactly (table endpoint)
         let p3 = kpss_p_value(0.463);
-        assert!((p3 - 0.05).abs() < 0.01);
+        assert_eq!(p3, 0.05);
 
-        // stat == 0.739 -> p ≈ 0.01
+        // stat == 0.739 -> p == 0.01 exactly (table endpoint)
         let p4 = kpss_p_value(0.739);
-        assert!((p4 - 0.01).abs() < 0.01);
+        assert_eq!(p4, 0.01);
 
-        // stat > 0.739 -> p < 0.01
+        // stat > 0.739 -> clamped at p = 0.01 (was p < 0.01 before DIAG-02)
         let p5 = kpss_p_value(1.0);
-        assert!(p5 < 0.01);
+        assert_eq!(p5, 0.01);
+
+        // stat == 0.574 -> p == 0.025 exactly (the table's 2.5% point, which
+        // the pre-DIAG-02 implementation skipped entirely)
+        let p6 = kpss_p_value(0.574);
+        assert_eq!(p6, 0.025);
 
         // NaN input -> NaN output
         let p_nan = kpss_p_value(f64::NAN);

@@ -129,6 +129,7 @@ adf_fixed_lag <- lapply(series_list, urdf_block)
 kpss_block <- function(y) {
   k <- suppressWarnings(tseries::kpss.test(y, null = "Level", lshort = TRUE))
   list(
+    values = as.numeric(y),
     statistic = as.numeric(k$statistic),
     p_value = as.numeric(k$p.value),
     lag = as.numeric(k$parameter)

@@ -13,8 +13,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use anofox_forecast::validation::{
-    adf_test, adf_test_with_options, mackinnon_critical_values, mackinnon_p_value, AdfLagSelection,
-    AdfOptions, AdfRegression,
+    adf_test, adf_test_with_options, kpss_p_value, kpss_test, mackinnon_critical_values,
+    mackinnon_p_value, AdfLagSelection, AdfOptions, AdfRegression,
 };
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -561,4 +561,89 @@ fn adf_size_monte_carlo() {
         "IMA(1,1) theta=-0.5 rejection at 5% should be <= 0.15, got {}",
         ima_rate
     );
+}
+
+#[test]
+fn kpss_matches_tseries() {
+    let fixture = load_fixture("adf_kpss_r");
+    let kpss_obj = fixture["kpss"].as_object().unwrap();
+
+    let mut checked = 0usize;
+    for (series_name, block) in kpss_obj {
+        // Every "kpss" entry (main battery + the extra ar_phi_* series that
+        // exercise all five tseries p-value regions) carries its own raw
+        // "values", independent of the top-level "series" block.
+        let series: Vec<f64> = block["values"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap())
+            .collect();
+
+        let expected_stat = block["statistic"].as_f64().unwrap();
+        let expected_lag = block["lag"].as_f64().unwrap() as usize;
+        let expected_p = block["p_value"].as_f64().unwrap();
+
+        let result = kpss_test(&series, None);
+
+        assert!(
+            (result.statistic - expected_stat).abs() <= 1e-8,
+            "series={}: statistic crate={} tseries={}",
+            series_name,
+            result.statistic,
+            expected_stat
+        );
+        assert_eq!(
+            result.lags, expected_lag,
+            "series={}: lag mismatch",
+            series_name
+        );
+        assert!(
+            (result.p_value - expected_p).abs() <= 1e-10,
+            "series={}: p_value crate={} tseries={}",
+            series_name,
+            result.p_value,
+            expected_p
+        );
+        assert!(
+            (0.01..=0.10).contains(&result.p_value),
+            "series={}: p_value {} outside [0.01, 0.10]",
+            series_name,
+            result.p_value
+        );
+        checked += 1;
+    }
+    assert!(checked > 0, "no fixture series were checked");
+}
+
+#[test]
+fn kpss_p_value_bounded_monotone() {
+    let mut prev: Option<f64> = None;
+    let mut stat = 0.0_f64;
+    while stat <= 2.0 {
+        let p = kpss_p_value(stat);
+        assert!(
+            (0.01..=0.10).contains(&p),
+            "stat={}: p={} outside [0.01, 0.10]",
+            stat,
+            p
+        );
+        if let Some(prev_p) = prev {
+            assert!(
+                p <= prev_p + 1e-12,
+                "stat={}: p={} should be <= previous p={} (non-increasing)",
+                stat,
+                p,
+                prev_p
+            );
+        }
+        prev = Some(p);
+        stat += 0.01;
+    }
+
+    assert_eq!(kpss_p_value(0.0), 0.10);
+    assert_eq!(kpss_p_value(0.347), 0.10);
+    assert_eq!(kpss_p_value(0.739), 0.01);
+    assert_eq!(kpss_p_value(2.0), 0.01);
+    assert_eq!(kpss_p_value(0.574), 0.025);
 }
