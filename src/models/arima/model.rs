@@ -327,16 +327,38 @@ impl ARIMA {
         q: usize,
         diff_series: &[f64],
         use_aic: bool,
+        allow_constant: bool,
+        common_start: usize,
     ) -> Option<f64> {
         let n = diff_series.len();
         let start = p.max(q);
         if n <= start + 2 {
             return None;
         }
+        // NOTE (D-06 scope decision): a per-candidate-common scoring
+        // window (dropping `max(common_start, start)` leading
+        // observations for every candidate, not just this one's own
+        // `start`) was implemented and verified to fix the random-walk
+        // d/D-vs-scoring inconsistency Pattern 5 describes -- but it also
+        // changed AutoARIMA's selected order on M4-Daily series D4047
+        // enough to push its MAE to 3.88x the statsforecast baseline
+        // (gate: 2x), an explicitly protected regression per this
+        // branch's interfaces contract ("M4 gate thresholds are not
+        // loosened"). Given the tension between the two explicit
+        // requirements, this branch keeps the original per-candidate
+        // `start` (not `common_start`) to preserve the M4 gate; the
+        // common-basis window fix is deferred, documented in SUMMARY as
+        // a known gap for 11-05. `common_start` is accepted for call-site
+        // symmetry with `SARIMA::score_order` but intentionally unused
+        // here.
+        let _ = common_start;
         let nstar = n as f64; // effective sample size (after differencing)
 
         if p == 0 && q == 0 {
             // Try both with-mean (drift) and without-mean variants, return best.
+            // D-06: a constant is only tried when `allow_constant` (d+D<=1);
+            // this is the one behavior change from the pre-D-06 code, which
+            // tried both unconditionally regardless of d+D.
             let mean = diff_series.iter().sum::<f64>() / nstar;
 
             // Use the same Gaussian loglik formula as non-(0,0) case for consistency.
@@ -367,13 +389,17 @@ impl ARIMA {
                 }
             };
 
-            // With drift: variance around mean, k = 2 (drift + sigma2)
-            let var_with = diff_series.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / nstar;
-            let score_with = score_variant(var_with, 2.0);
-
             // Without drift: variance around zero, k = 1 (sigma2 only)
             let var_without = diff_series.iter().map(|v| v * v).sum::<f64>() / nstar;
             let score_without = score_variant(var_without, 1.0);
+
+            let score_with = if allow_constant {
+                // With drift: variance around mean, k = 2 (drift + sigma2)
+                let var_with = diff_series.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / nstar;
+                score_variant(var_with, 2.0)
+            } else {
+                None
+            };
 
             return match (score_with, score_without) {
                 (Some(a), Some(b)) => Some(a.min(b)),
@@ -2237,6 +2263,8 @@ impl SARIMA {
         s: usize,
         diff_series: &[f64],
         use_aic: bool,
+        allow_constant: bool,
+        _common_start: usize,
     ) -> Option<f64> {
         let max_ar_lag = if cap_p > 0 && s > 1 {
             p + cap_p * s
@@ -2255,7 +2283,6 @@ impl SARIMA {
         }
 
         // For long series, use approximate scoring on the tail (matches R's approximation=TRUE).
-        // For long series, use approximate scoring on the tail (matches R's approximation=TRUE).
         let n_full = diff_series.len();
         let min_approx_len = start + 200;
         let score_series = if n_full > min_approx_len && n_full > 500 {
@@ -2265,111 +2292,161 @@ impl SARIMA {
         };
         let score_n = score_series.len();
 
-        let n_params = 1 + p + q + cap_p + cap_q;
+        // D-06: a constant is tried only when `allow_constant` (d+D<=1).
+        // `n_params`/`initial`/`bounds` are built per with_constant variant
+        // below (pre-D-06 code always included the constant).
+        let base_params = p + q + cap_p + cap_q;
 
         if p == 0 && q == 0 && cap_p == 0 && cap_q == 0 {
-            // Just intercept model
-            let mean = score_series.iter().sum::<f64>() / score_n as f64;
+            // Just intercept (or pure-zero-mean) model.
             let n_eff = (score_n - start) as f64;
-            let variance = score_series[start..]
-                .iter()
-                .map(|v| (v - mean).powi(2))
-                .sum::<f64>()
-                / n_eff;
-            if variance <= 0.0 || !variance.is_finite() {
+            if n_eff <= 0.0 {
                 return None;
             }
-            let k = 1.0;
-            let ll = -0.5 * n_eff * (1.0 + variance.ln() + (2.0 * std::f64::consts::PI).ln());
-            let score = if use_aic {
-                -2.0 * ll + 2.0 * k
+            let variance_without = score_series[start..].iter().map(|v| v * v).sum::<f64>() / n_eff;
+            let score_without = Self::sarima_ic(variance_without, n_eff, 1.0, use_aic);
+
+            let score_with = if allow_constant {
+                let mean = score_series.iter().sum::<f64>() / score_n as f64;
+                let variance_with = score_series[start..]
+                    .iter()
+                    .map(|v| (v - mean).powi(2))
+                    .sum::<f64>()
+                    / n_eff;
+                Self::sarima_ic(variance_with, n_eff, 2.0, use_aic)
             } else {
-                -2.0 * ll + k * n_eff.ln()
+                None
             };
-            return if score.is_finite() { Some(score) } else { None };
+
+            return match (score_with, score_without) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
+            };
         }
 
-        // Set up optimization (on scoring subseries)
-        let mean = score_series.iter().sum::<f64>() / score_n as f64;
-        let mut initial = vec![0.0; n_params];
-        initial[0] = mean;
+        // Run CSS optimization either with a free intercept (constant) or
+        // with intercept fixed at 0.0; npar differs by whether the
+        // constant is included (+1).
+        let run_variant = |with_constant: bool| -> Option<f64> {
+            let n_params = base_params + if with_constant { 1 } else { 0 };
+            let mean = score_series.iter().sum::<f64>() / score_n as f64;
+            let mut initial = vec![0.0; n_params];
+            let mut bounds = Vec::with_capacity(n_params);
+            let mut idx = 0;
+            if with_constant {
+                initial[0] = mean;
+                bounds.push((f64::NEG_INFINITY, f64::INFINITY));
+                idx = 1;
+            }
+            for i in 0..p {
+                initial[idx + i] = 0.1 / (i + 1) as f64;
+                bounds.push((-0.99, 0.99));
+            }
+            idx += p;
+            for i in 0..q {
+                initial[idx + i] = 0.1 / (i + 1) as f64;
+                bounds.push((-0.99, 0.99));
+            }
+            idx += q;
+            for i in 0..cap_p {
+                initial[idx + i] = 0.1 / (i + 1) as f64;
+                bounds.push((-0.99, 0.99));
+            }
+            idx += cap_p;
+            for i in 0..cap_q {
+                initial[idx + i] = 0.1 / (i + 1) as f64;
+                bounds.push((-0.99, 0.99));
+            }
 
-        let mut idx = 1;
-        for i in 0..p {
-            initial[idx + i] = 0.1 / (i + 1) as f64;
-        }
-        idx += p;
-        for i in 0..q {
-            initial[idx + i] = 0.1 / (i + 1) as f64;
-        }
-        idx += q;
-        for i in 0..cap_p {
-            initial[idx + i] = 0.1 / (i + 1) as f64;
-        }
-        idx += cap_p;
-        for i in 0..cap_q {
-            initial[idx + i] = 0.1 / (i + 1) as f64;
-        }
+            let lbfgs_config = LbfgsConfig {
+                max_iter: 50,
+                tolerance: 1e-6,
+                ..Default::default()
+            };
 
-        let mut bounds = vec![(f64::NEG_INFINITY, f64::INFINITY)];
-        for _ in 0..(p + q + cap_p + cap_q) {
-            bounds.push((-0.99, 0.99));
-        }
+            let residuals_buf = std::cell::RefCell::new(vec![0.0; score_n]);
+            let const_off = if with_constant { 1 } else { 0 };
 
-        // Use L-BFGS for fast convergence
-        let lbfgs_config = LbfgsConfig {
-            max_iter: 50,
-            tolerance: 1e-6,
-            ..Default::default()
+            let result = lbfgs_optimize(
+                |params| {
+                    let ar_end = const_off + p;
+                    let ma_end = ar_end + q;
+                    let sar_end = ma_end + cap_p;
+                    let sma_end = sar_end + cap_q;
+                    let intercept = if with_constant { params[0] } else { 0.0 };
+
+                    let mut buf = residuals_buf.borrow_mut();
+                    Self::calculate_css(
+                        score_series,
+                        p,
+                        q,
+                        cap_p,
+                        cap_q,
+                        s,
+                        &params[const_off..ar_end],
+                        &params[ar_end..ma_end],
+                        &params[ma_end..sar_end],
+                        &params[sar_end..sma_end],
+                        intercept,
+                        &mut buf,
+                    )
+                },
+                &initial,
+                Some(&bounds),
+                lbfgs_config,
+            );
+
+            // Compute AIC/BIC directly from CSS
+            let css = result.optimal_value;
+            if !css.is_finite() || css <= 0.0 {
+                return None;
+            }
+
+            let n_eff = (score_n - start) as f64;
+            let variance = css / n_eff;
+            let k = (n_params + 1) as f64; // + sigma2 -- Pattern 5 fix #2: AICc
+                                           // correction below, which the pre-D-06 code omitted entirely
+                                           // (it only ever computed plain AIC/BIC for this branch).
+            Self::sarima_ic(variance, n_eff, k, use_aic)
         };
 
-        let residuals_buf = std::cell::RefCell::new(vec![0.0; score_n]);
+        let score_without = run_variant(false);
+        let score_with = if allow_constant {
+            run_variant(true)
+        } else {
+            None
+        };
 
-        let result = lbfgs_optimize(
-            |params| {
-                let ar_end = 1 + p;
-                let ma_end = ar_end + q;
-                let sar_end = ma_end + cap_p;
-                let sma_end = sar_end + cap_q;
+        match (score_with, score_without) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        }
+    }
 
-                let mut buf = residuals_buf.borrow_mut();
-                Self::calculate_css(
-                    score_series,
-                    p,
-                    q,
-                    cap_p,
-                    cap_q,
-                    s,
-                    &params[1..ar_end],
-                    &params[ar_end..ma_end],
-                    &params[ma_end..sar_end],
-                    &params[sar_end..sma_end],
-                    params[0],
-                    &mut buf,
-                )
-            },
-            &initial,
-            Some(&bounds),
-            lbfgs_config,
-        );
-
-        // Compute AIC/BIC directly from CSS
-        let css = result.optimal_value;
-        if !css.is_finite() || css <= 0.0 {
+    /// Shared AIC/AICc/BIC-from-variance helper for `SARIMA::score_order`'s
+    /// two branches (Pattern 5 fix #2: the pre-D-06 code computed plain
+    /// `-2ll+2k` for the general branch with no AICc finite-sample
+    /// correction at all, while its own (0,0,0,0) branch used an
+    /// independent, slightly different formula -- this unifies both).
+    fn sarima_ic(variance: f64, n_eff: f64, k: f64, use_aic: bool) -> Option<f64> {
+        if variance <= 0.0 || !variance.is_finite() {
             return None;
         }
-
-        let n_eff = (score_n - start) as f64;
-        let variance = css / n_eff;
-        let k = n_params as f64;
         let ll = -0.5 * n_eff * (1.0 + variance.ln() + (2.0 * std::f64::consts::PI).ln());
-
         let score = if use_aic {
-            -2.0 * ll + 2.0 * k
+            let aic = -2.0 * ll + 2.0 * k;
+            if n_eff > k + 1.0 {
+                aic + 2.0 * k * (k + 1.0) / (n_eff - k - 1.0)
+            } else {
+                f64::MAX
+            }
         } else {
             -2.0 * ll + k * n_eff.ln()
         };
-
         if score.is_finite() {
             Some(score)
         } else {

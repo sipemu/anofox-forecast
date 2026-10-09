@@ -12,6 +12,6 @@ mod model;
 pub use auto_arima::{AutoARIMA, AutoARIMAConfig, ModelOrder};
 pub use diff::{
     difference, find_min_fractional_d, fractional_difference, fractional_weights, integrate,
-    ndiffs_kpss, seasonal_difference, seasonal_integrate, suggest_differencing,
+    ndiffs_kpss, nsdiffs_seas, seasonal_difference, seasonal_integrate, suggest_differencing,
 };
 pub use model::{ARIMASpec, SARIMASpec, ARIMA, SARIMA};

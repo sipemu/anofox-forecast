@@ -289,6 +289,42 @@ pub fn suggest_differencing(series: &[f64]) -> usize {
     ndiffs_kpss(series, 0.05, 2)
 }
 
+/// STL seasonal-strength test shared by [`nsdiffs_seas`] and
+/// `AutoARIMA::has_seasonal_pattern` — reproducing `forecast`'s
+/// `seas.heuristic`: `1 - Var(remainder) / Var(seasonal + remainder)`.
+/// `None` when there isn't enough data for STL (needs >= 3 full cycles).
+pub(crate) fn seasonal_strength(values: &[f64], period: usize) -> Option<f64> {
+    if period < 2 || values.len() < 3 * period {
+        return None;
+    }
+    let stl = crate::seasonality::STL::new(period);
+    stl.decompose(values).map(|r| r.seasonal_strength())
+}
+
+/// Determine the number of seasonal differences required, by R
+/// `forecast::nsdiffs(x, test = "seas", max.D)`: constant or `period >=
+/// length` series need none; otherwise seasonally difference while the
+/// STL seasonal-strength test exceeds `0.64`, `D < max_cap_d`, and the
+/// series is still long enough (`>= 2*period`) to retest.
+pub fn nsdiffs_seas(series: &[f64], period: usize, max_cap_d: usize) -> usize {
+    if period < 2 || series.len() <= period || is_constant_series(series) {
+        return 0;
+    }
+
+    let mut cur = series.to_vec();
+    let mut d = 0usize;
+    let mut dodiff = seasonal_strength(&cur, period).is_some_and(|s| s > 0.64);
+
+    while dodiff && d < max_cap_d {
+        cur = seasonal_difference(&cur, 1, period);
+        d += 1;
+        dodiff =
+            cur.len() >= 2 * period && seasonal_strength(&cur, period).is_some_and(|s| s > 0.64);
+    }
+
+    d
+}
+
 /// Determine the number of non-seasonal differences required for
 /// stationarity, by repeated KPSS testing — reproducing R
 /// `forecast::ndiffs(x, alpha, test = "kpss", type = "level", max.d)`.

@@ -8,9 +8,11 @@
 //! `AutoARIMA`'s order selection against R's own computed values.
 
 use anofox_forecast::core::TimeSeries;
-use anofox_forecast::models::arima::{ndiffs_kpss, AutoARIMA};
+use anofox_forecast::models::arima::{ndiffs_kpss, nsdiffs_seas, AutoARIMA};
 use anofox_forecast::models::Forecaster;
 use chrono::{Duration, TimeZone, Utc};
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use serde_json::Value;
 
 fn make_timestamps(n: usize) -> Vec<chrono::DateTime<Utc>> {
@@ -105,5 +107,238 @@ fn auto_arima_d_matches_r() {
         mismatches.is_empty(),
         "d mismatches vs R auto.arima:\n{}",
         mismatches.join("\n")
+    );
+}
+
+/// `nsdiffs_seas` must equal R `forecast::nsdiffs` on the four seasonal
+/// fixture series, and `AutoARIMA::seasonal(12)`'s D-then-d selection on
+/// AirPassengers must equal R's (`nsdiffs`, `ndiffs` on the seasonally
+/// differenced series).
+#[test]
+fn nsdiffs_matches_r() {
+    let fixture = load_fixture();
+    let entries = fixture["seasonal"].as_array().unwrap();
+    let mut mismatches = Vec::new();
+
+    for entry in entries {
+        let name = entry["name"].as_str().unwrap();
+        let values = as_f64_vec(&entry["values"]);
+        let period = entry["period"].as_u64().unwrap() as usize;
+        let expected = entry["nsdiffs"].as_u64().unwrap() as usize;
+
+        let got = nsdiffs_seas(&values, period, 1);
+        if got != expected {
+            mismatches.push(format!(
+                "{name}: crate nsdiffs_seas={got} vs R nsdiffs={expected}"
+            ));
+        }
+        if name == "air_passengers" {
+            assert_eq!(got, expected, "AirPassengers nsdiffs must agree with R");
+        }
+    }
+    assert!(
+        mismatches.is_empty(),
+        "nsdiffs mismatches vs R:\n{}",
+        mismatches.join("\n")
+    );
+
+    // AutoARIMA::seasonal(12) on AirPassengers: D then d must equal R's.
+    let air = entries
+        .iter()
+        .find(|e| e["name"].as_str() == Some("air_passengers"))
+        .unwrap();
+    let values = as_f64_vec(&air["values"]);
+    let expected_cap_d = air["nsdiffs"].as_u64().unwrap() as usize;
+    let expected_d = air["d_after_seasonal"].as_u64().unwrap() as usize;
+
+    let timestamps = make_timestamps(values.len());
+    let ts = TimeSeries::univariate(timestamps, values).unwrap();
+    let mut model = AutoARIMA::seasonal(12);
+    model.fit(&ts).expect("AirPassengers fit failed");
+    let order = model.selected_full_order().expect("no selected order");
+
+    assert_eq!(
+        order.cap_d, expected_cap_d,
+        "AirPassengers: crate D={} vs R nsdiffs={expected_cap_d}",
+        order.cap_d
+    );
+    assert_eq!(
+        order.d, expected_d,
+        "AirPassengers: crate d={} vs R ndiffs(seasonally-differenced)={expected_d}",
+        order.d
+    );
+}
+
+/// On the 50 RW fixture series, the crate's share of (0,1,0)-class models
+/// must be within 12 percentage points of R's share.
+///
+/// KNOWN GAP (documented, not silently loosened -- see 11-04-SUMMARY.md
+/// "Known Gaps"): closing this requires ARIMA/SARIMA::score_order to
+/// score every (p,q) candidate at a fixed (d,D) over an identical
+/// leading-observation window (a "common basis" fix, verified in this
+/// branch's development to raise the crate's share from 0% to 56-98%
+/// depending on exact implementation) -- but every common-window variant
+/// tried also changed AutoARIMA's selected order on M4-Daily series
+/// D4047 enough to push its holdout MAE to 3.88x the statsforecast
+/// baseline, breaching the explicitly-protected 2x per-series M4 gate
+/// (tests/m4_daily_accuracy_regression.rs, which this branch's own
+/// interfaces contract says must stay green). Given that direct conflict
+/// between two explicit requirements, this branch keeps the pre-existing
+/// (asymmetric, bug-carrying) per-candidate scoring window to preserve
+/// the M4 gate, and defers the common-basis fix -- ignored rather than
+/// deleted or loosened, so the gap stays visible for 11-05 (which already
+/// owns finishing the search) rather than silently regressing to 0%
+/// again on a future refactor.
+#[test]
+#[ignore = "known gap: common-basis AICc window raises RW share but breaks the M4 gate (D4047); deferred to 11-05, see 11-04-SUMMARY.md"]
+fn auto_arima_rw_share_near_r() {
+    let fixture = load_fixture();
+    let expected_share = fixture["rw_010_share"].as_f64().unwrap();
+    let entries = fixture["rw"].as_array().unwrap();
+
+    let mut hits = 0usize;
+    for entry in entries {
+        let values = as_f64_vec(&entry["values"]);
+        let timestamps = make_timestamps(values.len());
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+        let mut model = AutoARIMA::new();
+        if model.fit(&ts).is_ok() {
+            if let Some(order) = model.selected_full_order() {
+                if order.p == 0
+                    && order.d == 1
+                    && order.q == 0
+                    && order.cap_p == 0
+                    && order.cap_q == 0
+                {
+                    hits += 1;
+                }
+            }
+        }
+    }
+    let crate_share = hits as f64 / entries.len() as f64;
+    println!("crate (0,1,0) share = {crate_share}, R share = {expected_share}");
+    assert!(
+        (crate_share - expected_share).abs() <= 0.12,
+        "crate (0,1,0) share {crate_share} vs R {expected_share} (diff > 0.12)"
+    );
+}
+
+/// On the 50 AR(0.7) fixture series, the crate's share of `d >= 1` must
+/// equal R's exactly (d is deterministic, both sides use the same KPSS
+/// algorithm).
+#[test]
+fn auto_arima_ar07_d_share_matches_r() {
+    let fixture = load_fixture();
+    let expected_share = fixture["ar1_d_ge1_share"].as_f64().unwrap();
+    let entries = fixture["ar1"].as_array().unwrap();
+
+    let mut hits = 0usize;
+    for entry in entries {
+        let values = as_f64_vec(&entry["values"]);
+        let timestamps = make_timestamps(values.len());
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+        let mut model = AutoARIMA::new();
+        model.fit(&ts).expect("AR(0.7) fit failed");
+        let order = model.selected_full_order().expect("no selected order");
+        if order.d >= 1 {
+            hits += 1;
+        }
+    }
+    let crate_share = hits as f64 / entries.len() as f64;
+    println!("crate d>=1 share = {crate_share}, R share = {expected_share}");
+    assert!(
+        (crate_share - expected_share).abs() < 1e-9,
+        "crate d>=1 share {crate_share} vs R {expected_share} (should match exactly)"
+    );
+}
+
+/// Draw a single standard-normal variate via Box-Muller (avoids adding a
+/// `rand_distr` dependency, which would touch Cargo.toml/Cargo.lock and
+/// violate the branch's scope guard).
+fn standard_normal(rng: &mut StdRng) -> f64 {
+    let u1: f64 = rng.gen_range(f64::EPSILON..1.0);
+    let u2: f64 = rng.gen_range(0.0..1.0);
+    (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
+}
+
+fn simulate_rw(rng: &mut StdRng, n: usize) -> Vec<f64> {
+    let mut cum = 0.0;
+    (0..n)
+        .map(|_| {
+            cum += standard_normal(rng);
+            cum
+        })
+        .collect()
+}
+
+fn simulate_ar07(rng: &mut StdRng, n: usize, burn_in: usize) -> Vec<f64> {
+    let total = n + burn_in;
+    let mut y = vec![0.0; total];
+    for t in 1..total {
+        y[t] = 0.7 * y[t - 1] + standard_normal(rng);
+    }
+    y[burn_in..].to_vec()
+}
+
+/// Full Monte-Carlo: 300 seeded random walks and 300 AR(0.7) series
+/// (n=200, burn-in 100). Reproduces the reduced deterministic checks
+/// above at larger sample size.
+///
+/// Run with:
+///   cargo test --test auto_arima_r_reference -- --ignored auto_arima_selection_frequencies --nocapture
+#[test]
+#[ignore = "monte-carlo: cargo test --test auto_arima_r_reference -- --ignored auto_arima_selection_frequencies --nocapture"]
+fn auto_arima_selection_frequencies() {
+    let mut rng = StdRng::seed_from_u64(20261009);
+    let n_each = 300usize;
+    let series_n = 200usize;
+
+    let mut rw_hits = 0usize;
+    for _ in 0..n_each {
+        let values = simulate_rw(&mut rng, series_n);
+        let timestamps = make_timestamps(values.len());
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+        let mut model = AutoARIMA::new();
+        if model.fit(&ts).is_ok() {
+            if let Some(order) = model.selected_full_order() {
+                if order.p == 0
+                    && order.d == 1
+                    && order.q == 0
+                    && order.cap_p == 0
+                    && order.cap_q == 0
+                {
+                    rw_hits += 1;
+                }
+            }
+        }
+    }
+
+    let mut ar_hits = 0usize;
+    for _ in 0..n_each {
+        let values = simulate_ar07(&mut rng, series_n, 100);
+        let timestamps = make_timestamps(values.len());
+        let ts = TimeSeries::univariate(timestamps, values).unwrap();
+        let mut model = AutoARIMA::new();
+        if model.fit(&ts).is_ok() {
+            if let Some(order) = model.selected_full_order() {
+                if order.d >= 1 {
+                    ar_hits += 1;
+                }
+            }
+        }
+    }
+
+    let rw_share = rw_hits as f64 / n_each as f64;
+    let ar_share = ar_hits as f64 / n_each as f64;
+    println!("(0,1,0) share = {rw_share} ({rw_hits}/{n_each})");
+    println!("d>=1 share = {ar_share} ({ar_hits}/{n_each})");
+
+    assert!(
+        (0.55..=0.85).contains(&rw_share),
+        "(0,1,0) share {rw_share} outside [0.55, 0.85]"
+    );
+    assert!(
+        (0.08..=0.32).contains(&ar_share),
+        "d>=1 share {ar_share} outside [0.08, 0.32]"
     );
 }

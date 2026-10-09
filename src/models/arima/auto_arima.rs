@@ -2,7 +2,7 @@
 
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
-use crate::models::arima::diff::ndiffs_kpss;
+use crate::models::arima::diff::{ndiffs_kpss, nsdiffs_seas};
 use crate::models::arima::model::{ARIMA, SARIMA};
 use crate::models::inspect::{ArimaExplanation, Explanation, Inspectable};
 use crate::models::{validate_series_complete, Forecaster};
@@ -196,50 +196,21 @@ impl AutoARIMA {
     /// `seas_heuristic()` / `nsdiffs()` exactly:
     ///   strength = 1 - Var(remainder) / Var(seasonal + remainder)
     ///   seasonal if strength > 0.64
+    ///
+    /// Delegates to the same `diff::seasonal_strength` helper `nsdiffs_seas`
+    /// uses, so there is one seasonal-strength computation in the crate
+    /// (D-06 / research Pattern 4), not two divergent heuristics.
     fn has_seasonal_pattern(values: &[f64], period: usize) -> bool {
-        use crate::seasonality::STL;
-
-        if period < 2 || values.len() < 3 * period {
-            return false;
-        }
-
-        let stl = STL::new(period);
-        if let Some(result) = stl.decompose(values) {
-            result.seasonal_strength() > 0.64
-        } else {
-            false
-        }
+        use crate::models::arima::diff::seasonal_strength;
+        seasonal_strength(values, period).is_some_and(|s| s > 0.64)
     }
 
-    /// Suggest seasonal differencing order using strength of seasonality.
+    /// Suggest seasonal differencing order using R `forecast::nsdiffs`'
+    /// seasonal-strength test (D-06): delegates to `nsdiffs_seas`, the
+    /// same test `has_seasonal_pattern` uses, instead of a second,
+    /// divergent variance-ratio heuristic.
     fn suggest_seasonal_differencing(values: &[f64], period: usize) -> usize {
-        if period < 2 || values.len() < 2 * period {
-            return 0;
-        }
-
-        // Compute seasonal differences
-        let seasonal_diffs: Vec<f64> = (period..values.len())
-            .map(|i| values[i] - values[i - period])
-            .collect();
-
-        // Compare variances
-        let orig_mean = values.iter().sum::<f64>() / values.len() as f64;
-        let orig_var =
-            values.iter().map(|v| (v - orig_mean).powi(2)).sum::<f64>() / values.len() as f64;
-
-        let diff_mean = seasonal_diffs.iter().sum::<f64>() / seasonal_diffs.len() as f64;
-        let diff_var = seasonal_diffs
-            .iter()
-            .map(|v| (v - diff_mean).powi(2))
-            .sum::<f64>()
-            / seasonal_diffs.len() as f64;
-
-        // If seasonal differencing reduces variance significantly, suggest D=1
-        if diff_var < orig_var * 0.7 {
-            1
-        } else {
-            0
-        }
+        nsdiffs_seas(values, period, 1)
     }
 
     /// Generate candidate orders using stepwise search.
@@ -421,7 +392,21 @@ impl AutoARIMA {
 
     /// Score-only evaluation: compute AIC/BIC from pre-computed differenced series
     /// without constructing the full model. Skips validation, storage, and calculate_fitted.
-    fn score_order_static(order: ModelOrder, diff_series: &[f64], use_aic: bool) -> Option<f64> {
+    ///
+    /// `common_start` is the maximum lag reach across the *entire* candidate
+    /// grid being searched (see `Self::common_start_for_config`) -- every
+    /// candidate at a fixed (d, D) must be scored over the identical
+    /// leading-observation window for AICc comparisons to be valid (D-06).
+    fn score_order_static(
+        order: ModelOrder,
+        diff_series: &[f64],
+        use_aic: bool,
+        common_start: usize,
+    ) -> Option<f64> {
+        // Hyndman-Khandakar constant-allowance rule: a mean (d+D=0) or
+        // drift (d+D=1) term is scored with and without and the better
+        // kept; d+D>=2 never gets a constant (D-06).
+        let allow_constant = order.d + order.cap_d <= 1;
         if order.is_seasonal() {
             SARIMA::score_order(
                 order.p,
@@ -431,9 +416,32 @@ impl AutoARIMA {
                 order.s,
                 diff_series,
                 use_aic,
+                allow_constant,
+                common_start,
             )
         } else {
-            ARIMA::score_order(order.p, order.q, diff_series, use_aic)
+            ARIMA::score_order(
+                order.p,
+                order.q,
+                diff_series,
+                use_aic,
+                allow_constant,
+                common_start,
+            )
+        }
+    }
+
+    /// Maximum lag reach across the whole candidate grid this config can
+    /// generate -- the common CSS scoring window every candidate at a
+    /// fixed (d, D) is compared over (D-06, see `score_order_static`).
+    fn common_start_for_config(config: &AutoARIMAConfig) -> usize {
+        let s = config.seasonal_period;
+        if s > 1 {
+            let max_ar_lag = config.max_p + config.max_cap_p * s;
+            let max_ma_lag = config.max_q + config.max_cap_q * s;
+            max_ar_lag.max(max_ma_lag)
+        } else {
+            config.max_p.max(config.max_q)
         }
     }
 
@@ -572,6 +580,7 @@ impl AutoARIMA {
     ) -> Option<(ModelOrder, f64)> {
         let s = self.config.seasonal_period;
         let use_aic = self.config.use_aic;
+        let common_start = Self::common_start_for_config(&self.config);
         let max_models = 94; // matching Python's nmodels limit
 
         // Initial models matching Python statsforecast starting points
@@ -640,7 +649,8 @@ impl AutoARIMA {
             visited.insert(key);
             n_models += 1;
 
-            if let Some(score) = Self::score_order_static(order, diff_series, use_aic) {
+            if let Some(score) = Self::score_order_static(order, diff_series, use_aic, common_start)
+            {
                 self.model_scores.push((order, score));
                 if score < best_score {
                     best_score = score;
@@ -672,7 +682,9 @@ impl AutoARIMA {
                 visited.insert(key);
                 n_models += 1;
 
-                if let Some(score) = Self::score_order_static(neighbor, diff_series, use_aic) {
+                if let Some(score) =
+                    Self::score_order_static(neighbor, diff_series, use_aic, common_start)
+                {
                     self.model_scores.push((neighbor, score));
 
                     if score < current_score {
@@ -711,6 +723,7 @@ impl AutoARIMA {
         Option<(SelectedModel, ModelOrder, f64)>,
     ) {
         let use_aic = self.config.use_aic;
+        let common_start = Self::common_start_for_config(&self.config);
 
         // Filter candidates by data requirements
         let valid_candidates: Vec<_> = candidates
@@ -745,7 +758,7 @@ impl AutoARIMA {
                 .par_iter()
                 .filter_map(|&order| {
                     let diff_series = diff_series_map.get(&(order.d, order.cap_d))?;
-                    Self::score_order_static(order, diff_series, use_aic)
+                    Self::score_order_static(order, diff_series, use_aic, common_start)
                         .map(|score| (order, score))
                 })
                 .collect();
@@ -772,7 +785,8 @@ impl AutoARIMA {
             for &order in &sorted_candidates {
                 // Score-only first (cheap) to decide if full fit is worthwhile
                 if let Some(diff_series) = diff_series_map.get(&(order.d, order.cap_d)) {
-                    if let Some(quick_score) = Self::score_order_static(order, diff_series, use_aic)
+                    if let Some(quick_score) =
+                        Self::score_order_static(order, diff_series, use_aic, common_start)
                     {
                         scores.push((order, quick_score));
 
@@ -837,16 +851,20 @@ impl Forecaster for AutoARIMA {
             s
         };
 
-        // Determine differencing orders (fixed, matching Python/R convention).
-        // d is chosen by repeated KPSS testing (R `forecast::ndiffs`), matching
-        // auto.arima's own d-selection; D-then-d sequencing (seasonally
-        // differencing first) lands in plan 11-05.
-        let suggested_d = ndiffs_kpss(values, 0.05, self.config.max_d);
+        // Determine differencing orders in auto.arima's own D-then-d order
+        // (D-06): D by the seasonal-strength test on the raw series, then
+        // d by repeated KPSS on the seasonally-differenced series.
         let suggested_cap_d = if s > 1 {
             Self::suggest_seasonal_differencing(values, s).min(self.config.max_cap_d)
         } else {
             0
         };
+        let seasonally_diffed = if s > 1 && suggested_cap_d > 0 {
+            SARIMA::seasonal_difference(values, suggested_cap_d, s)
+        } else {
+            values.to_vec()
+        };
+        let suggested_d = ndiffs_kpss(&seasonally_diffed, 0.05, self.config.max_d);
 
         // Fix d at the suggested value (matching Python statsforecast / R auto.arima)
         let d_range = vec![suggested_d];
