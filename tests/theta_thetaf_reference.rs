@@ -16,7 +16,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use anofox_forecast::core::TimeSeries;
-use anofox_forecast::models::theta::Theta;
+use anofox_forecast::models::theta::{AutoTheta, Theta};
 use anofox_forecast::models::Forecaster;
 use chrono::{Duration, TimeZone, Utc};
 use serde::Deserialize;
@@ -138,5 +138,176 @@ fn theta_stm_matches_thetaf_rw() {
         "h=1 95% half-width {} not within 1% of R's {}",
         half_width,
         r_half_width_95
+    );
+}
+
+/// End-to-end: fit the crate's `Theta` model from scratch (estimation AND
+/// formula together) on all four fixture series and compare against
+/// thetaf's point/lower/upper forecasts. Non-seasonal series (rw/trend/ar)
+/// use `Theta::new()`; the seasonal `air` series uses `Theta::seasonal(12)`.
+#[test]
+fn theta_stm_matches_thetaf() {
+    let fixture = load_fixture();
+
+    for (name, use_seasonal, point_tol, bound_tol) in [
+        ("rw", false, 0.005, 0.01),
+        ("trend", false, 0.005, 0.01),
+        ("ar", false, 0.005, 0.01),
+        ("air", true, 0.01, 0.03),
+    ] {
+        let block = fixture
+            .series
+            .get(name)
+            .unwrap_or_else(|| panic!("{name} series missing from fixture"));
+
+        let timestamps = make_timestamps(block.values.len());
+        let ts = TimeSeries::univariate(timestamps, block.values.clone()).unwrap();
+
+        let mut model = if use_seasonal {
+            Theta::seasonal(12)
+        } else {
+            Theta::new()
+        };
+        model.fit(&ts).unwrap();
+
+        let alpha = model.alpha().expect("alpha must be set after fit");
+        assert!(
+            (alpha - block.alpha).abs() <= 0.01,
+            "{name}: alpha {} not within 0.01 of R's {}",
+            alpha,
+            block.alpha
+        );
+
+        let horizon = block.point.len();
+        let fc = model.predict_with_intervals(horizon, 0.95).unwrap();
+        let point = fc.primary();
+        let lower = fc.lower_series(0).unwrap();
+        let upper = fc.upper_series(0).unwrap();
+
+        for h in 0..horizon {
+            assert!(
+                relative_diff(point[h], block.point[h]) <= point_tol,
+                "{name} h={h}: point {} not within {} relative of R's {}",
+                point[h],
+                point_tol,
+                block.point[h]
+            );
+            assert!(
+                relative_diff(lower[h], block.lower_95[h]) <= bound_tol,
+                "{name} h={h}: lower {} not within {} relative of R's {}",
+                lower[h],
+                bound_tol,
+                block.lower_95[h]
+            );
+            assert!(
+                relative_diff(upper[h], block.upper_95[h]) <= bound_tol,
+                "{name} h={h}: upper {} not within {} relative of R's {}",
+                upper[h],
+                bound_tol,
+                block.upper_95[h]
+            );
+        }
+    }
+}
+
+/// In-sample fitted values (SES level before drift, x seasonal for the
+/// seasonal `air` series) match thetaf's `fitted(theta_model)` within 1%
+/// relative after the first observation (the first fitted value depends on
+/// the optimizer's l0 choice, which can legitimately differ slightly from
+/// R's within the alpha/l0 tolerance already asserted elsewhere).
+#[test]
+fn theta_fitted_convention_matches_thetaf() {
+    let fixture = load_fixture();
+
+    for (name, use_seasonal) in [
+        ("rw", false),
+        ("trend", false),
+        ("ar", false),
+        ("air", true),
+    ] {
+        let block = fixture
+            .series
+            .get(name)
+            .unwrap_or_else(|| panic!("{name} series missing from fixture"));
+
+        let timestamps = make_timestamps(block.values.len());
+        let ts = TimeSeries::univariate(timestamps, block.values.clone()).unwrap();
+
+        let mut model = if use_seasonal {
+            Theta::seasonal(12)
+        } else {
+            Theta::new()
+        };
+        model.fit(&ts).unwrap();
+
+        let fitted = model
+            .fitted_values()
+            .expect("fitted values must be set after fit");
+        assert_eq!(
+            fitted.len(),
+            block.fitted.len(),
+            "{name}: fitted length mismatch"
+        );
+
+        for (i, (&got, &want)) in fitted.iter().zip(block.fitted.iter()).enumerate().skip(1) {
+            assert!(
+                relative_diff(got, want) <= 0.01,
+                "{name} i={i}: fitted {} not within 1% relative of R's {}",
+                got,
+                want
+            );
+        }
+    }
+}
+
+/// AutoTheta's STM and OTM candidates stay distinct: on the seasonal
+/// AirPassengers fixture series, `AutoTheta::seasonal(12)` must produce
+/// `model_scores` for both STM and OTM with different MSE values (not
+/// accidentally collapsed to the same candidate by the alpha-estimation
+/// default change). `Theta::with_theta_value` must also keep the exact
+/// alpha it was given after `fit()` (warm-start parameters stay fixed).
+#[test]
+fn auto_theta_candidates_distinct() {
+    use anofox_forecast::models::theta::ThetaModelType;
+
+    let fixture = load_fixture();
+    let block = fixture
+        .series
+        .get("air")
+        .expect("air series missing from fixture");
+
+    let timestamps = make_timestamps(block.values.len());
+    let ts = TimeSeries::univariate(timestamps, block.values.clone()).unwrap();
+
+    let mut auto = AutoTheta::seasonal(12);
+    auto.fit(&ts).unwrap();
+
+    let scores = auto
+        .model_scores()
+        .expect("model_scores must be set after fit");
+    let stm_score = scores
+        .iter()
+        .find(|(t, _)| *t == ThetaModelType::STM)
+        .map(|(_, s)| *s)
+        .expect("STM candidate missing from model_scores");
+    let otm_score = scores
+        .iter()
+        .find(|(t, _)| *t == ThetaModelType::OTM)
+        .map(|(_, s)| *s)
+        .expect("OTM candidate missing from model_scores");
+
+    assert!(
+        (stm_score - otm_score).abs() > 1e-9,
+        "STM ({stm_score}) and OTM ({otm_score}) scores must differ"
+    );
+
+    // Theta::with_theta_value keeps its fixed alpha through fit().
+    let n = block.values.len();
+    let mut warm = Theta::with_theta_value(2.0, 0.37, 100.0, 1.5, n);
+    warm.fit(&ts).unwrap();
+    assert!(
+        (warm.alpha().unwrap() - 0.37).abs() < 1e-12,
+        "warm-start alpha must stay fixed at 0.37, got {}",
+        warm.alpha().unwrap()
     );
 }

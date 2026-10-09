@@ -10,7 +10,6 @@ use crate::models::explain::{Explainable, ForecastExplanation};
 use crate::models::{validate_series_complete, FittedParams, Forecaster};
 use crate::utils::ols::{ols_fit, ols_residuals, OLSResult};
 use crate::utils::optimization::{nelder_mead, NelderMeadConfig};
-use crate::utils::stats::quantile_normal;
 use statrs::distribution::{ContinuousCDF, Normal};
 use std::collections::HashMap;
 
@@ -38,7 +37,7 @@ pub enum DecompositionType {
 /// the state-space formulation from Fiorucci et al. (2016) which applies SES
 /// to the original series and uses the regression slope for the drift component.
 ///
-/// Forecast formula: `smoothed + (1 - 1/theta) * b * (1/alpha + h - 1)`
+/// Forecast formula (thetaf convention): `smoothed + (1 - 1/theta) * b * ((h - 1) + (1 - (1 - alpha)^n) / alpha)`
 ///
 /// For seasonal data, supports both additive and multiplicative decomposition.
 /// Default is multiplicative to match NIXTLA statsforecast behavior.
@@ -81,6 +80,15 @@ pub struct Theta {
     exog_ols: Option<OLSResult>,
     /// Whether to skip optimization when fit() is called (warm-start mode).
     skip_optimization: bool,
+}
+
+/// Precise standard-normal quantile (inverse CDF), used for prediction
+/// interval z-values. Replaces the crate-wide `utils::stats::quantile_normal`
+/// (an Abramowitz-Stegun rational approximation, accurate to ~1e-4) locally
+/// in Theta, since thetaf parity requires bounds accurate to 1e-8 relative
+/// (see `thetaf_formula_at_r_parameters` below).
+fn normal_quantile(p: f64) -> f64 {
+    Normal::new(0.0, 1.0).unwrap().inverse_cdf(p)
 }
 
 impl Theta {
@@ -128,12 +136,19 @@ impl Theta {
     /// If `fit()` is later called, the provided theta is used and optimization
     /// of alpha is skipped.
     ///
+    /// `n` is the ORIGINAL training sample size the parameters were estimated
+    /// from (required by the thetaf drift factor `(1 - (1 - alpha)^n) / alpha`,
+    /// added 0.16.0 -- pass the same `n` `fitted_params()`'s `"n"` entry
+    /// reports to reproduce the originating model's forecasts exactly without
+    /// calling `fit()` again).
+    ///
     /// # Arguments
     /// * `theta` - The theta parameter (typically 2.0 for STM)
     /// * `alpha` - Pre-fitted SES smoothing parameter
     /// * `level` - Pre-fitted level state
     /// * `b` - Pre-fitted regression slope
-    pub fn with_theta_value(theta: f64, alpha: f64, level: f64, b: f64) -> Self {
+    /// * `n` - Original training sample size (drives the drift's finite-sample term)
+    pub fn with_theta_value(theta: f64, alpha: f64, level: f64, b: f64, n: usize) -> Self {
         Self {
             theta,
             alpha: Some(alpha.clamp(0.0001, 0.9999)),
@@ -148,7 +163,7 @@ impl Theta {
             fitted: None,
             residuals: None,
             residual_variance: None,
-            n: 0,
+            n,
             exog_ols: None,
             skip_optimization: true,
         }
@@ -678,13 +693,19 @@ impl Theta {
             None
         };
 
-        // Fiorucci et al. (2016) state-space formulation matching statsforecast:
-        // forecast(h) = smoothed + (1 - 1/theta) * b * (1/alpha + h - 1)
+        // thetaf drift factor (forecast::forecast.theta_model):
+        // forecast(h) = smoothed + (1 - 1/theta) * b * ((h - 1) + (1 - (1 - alpha)^n) / alpha)
+        // Reduces to thetaf's `drift * (seq(h) - 1 + (1 - (1-alpha)^n)/alpha)` at theta=2
+        // (drift = b/2 = (1 - 1/theta)*b). Replaces the old `1/alpha + h - 1` factor, which
+        // ignored the finite-sample correction `(1 - (1-alpha)^n)` thetaf applies.
+        let n = self.n as f64;
         let mut predictions = Vec::with_capacity(horizon);
 
         for h in 1..=horizon {
-            let mut forecast =
-                smoothed + (1.0 - 1.0 / self.theta) * b * (1.0 / alpha + (h as f64 - 1.0));
+            let mut forecast = smoothed
+                + (1.0 - 1.0 / self.theta)
+                    * b
+                    * ((h as f64 - 1.0) + (1.0 - (1.0 - alpha).powf(n)) / alpha);
             if let Some(ref exog) = exog_contribution {
                 forecast += exog[h - 1];
             }
@@ -722,8 +743,13 @@ impl Explainable for Theta {
             });
         }
         let level_component = vec![smoothed; horizon];
+        let n = self.n as f64;
         let trend_component: Vec<f64> = (1..=horizon)
-            .map(|h| (1.0 - 1.0 / self.theta) * b * (1.0 / alpha + (h as f64 - 1.0)))
+            .map(|h| {
+                (1.0 - 1.0 / self.theta)
+                    * b
+                    * ((h as f64 - 1.0) + (1.0 - (1.0 - alpha).powf(n)) / alpha)
+            })
             .collect();
         let base_forecasts: Vec<f64> = level_component
             .iter()
@@ -958,7 +984,7 @@ impl Forecaster for Theta {
             return Ok(forecast);
         }
 
-        let z = quantile_normal((1.0 + level) / 2.0);
+        let z = normal_quantile((1.0 + level) / 2.0);
         let preds = forecast.primary();
 
         let mut lower = Vec::with_capacity(horizon);
@@ -966,14 +992,12 @@ impl Forecaster for Theta {
 
         let alpha = self.alpha.unwrap_or(0.3);
 
+        // thetaf interval convention (forecast::forecast.theta_model):
+        // se_h = sqrt(sigma2) * sqrt(1 + alpha^2 * (h - 1)); for seasonal models the
+        // point is reseasonalised (already done in predict_internal above) but the
+        // se itself is NOT multiplied by the seasonal index.
         for h in 1..=horizon {
-            let factor = if h == 1 {
-                1.0
-            } else {
-                let beta = 1.0 - alpha;
-                1.0 + beta.powi(2) * (1.0 - beta.powi(2 * (h as i32 - 1))) / (1.0 - beta.powi(2))
-            };
-            let se = (variance * factor).sqrt();
+            let se = (variance * (1.0 + alpha.powi(2) * (h as f64 - 1.0))).sqrt();
 
             lower.push(preds[h - 1] - z * se);
             upper.push(preds[h - 1] + z * se);
@@ -994,7 +1018,7 @@ impl Forecaster for Theta {
             return Ok(forecast);
         }
 
-        let z = quantile_normal((1.0 + confidence) / 2.0);
+        let z = normal_quantile((1.0 + confidence) / 2.0);
         let preds = forecast.primary();
 
         let mut lower = Vec::with_capacity(horizon);
@@ -1002,15 +1026,12 @@ impl Forecaster for Theta {
 
         let alpha = self.alpha.unwrap_or(0.3);
 
+        // thetaf interval convention (forecast::forecast.theta_model):
+        // se_h = sqrt(sigma2) * sqrt(1 + alpha^2 * (h - 1)); for seasonal models the
+        // point is reseasonalised (already done in predict() above) but the se
+        // itself is NOT multiplied by the seasonal index.
         for h in 1..=horizon {
-            // Variance increases with horizon
-            let factor = if h == 1 {
-                1.0
-            } else {
-                let beta = 1.0 - alpha;
-                1.0 + beta.powi(2) * (1.0 - beta.powi(2 * (h as i32 - 1))) / (1.0 - beta.powi(2))
-            };
-            let se = (variance * factor).sqrt();
+            let se = (variance * (1.0 + alpha.powi(2) * (h as f64 - 1.0))).sqrt();
 
             lower.push(preds[h - 1] - z * se);
             upper.push(preds[h - 1] + z * se);
@@ -1035,7 +1056,7 @@ impl Forecaster for Theta {
             return Some(Forecast::from_values(fitted.clone()));
         }
 
-        let z = quantile_normal((1.0 + level) / 2.0);
+        let z = normal_quantile((1.0 + level) / 2.0);
         let sigma = variance.sqrt();
 
         let lower: Vec<f64> = fitted.iter().map(|&f| f - z * sigma).collect();
@@ -1065,6 +1086,7 @@ impl Forecaster for Theta {
         params.insert("alpha".to_string(), alpha);
         params.insert("level".to_string(), level);
         params.insert("b".to_string(), b);
+        params.insert("n".to_string(), self.n as f64);
         Some(FittedParams {
             params,
             seasonal: self.seasonals.clone(),
@@ -1594,7 +1616,7 @@ mod tests {
     #[test]
     fn theta_warm_start_predict_without_fit() {
         // Create a warm-started Theta model and predict directly
-        let model = Theta::with_theta_value(2.0, 0.1, 50.0, 0.5);
+        let model = Theta::with_theta_value(2.0, 0.1, 50.0, 0.5, 50);
         let forecast = model.predict(5).unwrap();
         assert_eq!(forecast.horizon(), 5);
         for &v in forecast.primary() {
@@ -1619,8 +1641,9 @@ mod tests {
         let alpha = fp.params["alpha"];
         let level = fp.params["level"];
         let b = fp.params["b"];
+        let n = fp.params["n"] as usize;
 
-        let warm = Theta::with_theta_value(theta, alpha, level, b);
+        let warm = Theta::with_theta_value(theta, alpha, level, b, n);
         let forecast2 = warm.predict(5).unwrap();
 
         // Both should produce identical forecasts
@@ -1636,7 +1659,7 @@ mod tests {
         let ts = TimeSeries::univariate(timestamps, values).unwrap();
 
         // Warm-start with approximate params then fit
-        let mut model = Theta::with_theta_value(2.0, 0.1, 5.0, 0.1);
+        let mut model = Theta::with_theta_value(2.0, 0.1, 5.0, 0.1, 50);
         model.fit(&ts).unwrap();
 
         assert!(model.fitted_values().is_some());
@@ -1670,5 +1693,113 @@ mod tests {
         assert!(fp.params.contains_key("alpha"));
         assert!(fp.params.contains_key("level"));
         assert!(fp.params.contains_key("b"));
+        assert!(fp.params.contains_key("n"));
+    }
+
+    /// At R `thetaf`'s own estimated parameters (alpha, final level, b, n,
+    /// sigma2, and -- for the seasonal `air` series -- the seasonal
+    /// component), `predict_with_intervals` must reproduce R's point/lower/
+    /// upper forecasts at h = 1..24 for both the 80% and 95% levels to 1e-8
+    /// relative, for all four fixture series (rw/trend/ar non-seasonal,
+    /// air seasonal). This isolates the FORMULA (drift + interval factor)
+    /// from the ESTIMATION (alpha/l0 optimisation, covered by
+    /// tests/theta_thetaf_reference.rs).
+    #[test]
+    fn thetaf_formula_at_r_parameters() {
+        use serde_json::Value;
+
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("data")
+            .join("r_reference")
+            .join("theta_thetaf.json");
+        let raw = std::fs::read_to_string(&path)
+            .unwrap_or_else(|_| panic!("missing fixture: {}", path.display()));
+        let fixture: Value =
+            serde_json::from_str(&raw).unwrap_or_else(|e| panic!("malformed fixture: {}", e));
+
+        let as_f64_vec = |v: &Value| -> Vec<f64> {
+            v.as_array()
+                .unwrap()
+                .iter()
+                .map(|x| x.as_f64().unwrap())
+                .collect()
+        };
+
+        for name in ["rw", "trend", "ar", "air"] {
+            let block = &fixture["series"][name];
+            let alpha = block["alpha"].as_f64().unwrap();
+            let final_level = block["final_level"].as_f64().unwrap();
+            let b = block["b"].as_f64().unwrap();
+            let n = block["n"].as_u64().unwrap() as usize;
+            let sigma2 = block["sigma2"].as_f64().unwrap();
+            let seas_component: Option<Vec<f64>> = block["seas_component"]
+                .as_array()
+                .map(|a| as_f64_vec(&Value::Array(a.clone())));
+            let seasonal_period = seas_component.as_ref().map(|s| s.len()).unwrap_or(0);
+
+            let model = Theta {
+                theta: 2.0,
+                alpha: Some(alpha),
+                optimize: false,
+                seasonal_period,
+                decomposition_type: DecompositionType::Multiplicative,
+                decomposition_fallback: false,
+                b: Some(b),
+                level: Some(final_level),
+                seasonals: None,
+                seasonal_forecast: seas_component,
+                fitted: None,
+                residuals: None,
+                residual_variance: Some(sigma2),
+                n,
+                exog_ols: None,
+                skip_optimization: true,
+            };
+
+            let point = as_f64_vec(&block["point"]);
+            let horizon = point.len();
+
+            for (level_pct, lower_key, upper_key) in [
+                (0.80, "lower_80", "upper_80"),
+                (0.95, "lower_95", "upper_95"),
+            ] {
+                let lower_r = as_f64_vec(&block[lower_key]);
+                let upper_r = as_f64_vec(&block[upper_key]);
+
+                let fc = model.predict_with_intervals(horizon, level_pct).unwrap();
+                let point_crate = fc.primary();
+                let lower_crate = fc.lower_series(0).unwrap();
+                let upper_crate = fc.upper_series(0).unwrap();
+
+                for h in 0..horizon {
+                    let rel = |got: f64, want: f64| -> f64 {
+                        if want.abs() < 1e-10 {
+                            (got - want).abs()
+                        } else {
+                            (got - want).abs() / want.abs()
+                        }
+                    };
+                    assert!(
+                        rel(point_crate[h], point[h]) <= 1e-8,
+                        "{name} h={h} point: crate={} R={}",
+                        point_crate[h],
+                        point[h]
+                    );
+                    assert!(
+                        rel(lower_crate[h], lower_r[h]) <= 1e-8,
+                        "{name} h={h} lower@{level_pct}: crate={} R={}",
+                        lower_crate[h],
+                        lower_r[h]
+                    );
+                    assert!(
+                        rel(upper_crate[h], upper_r[h]) <= 1e-8,
+                        "{name} h={h} upper@{level_pct}: crate={} R={}",
+                        upper_crate[h],
+                        upper_r[h]
+                    );
+                }
+            }
+        }
     }
 }

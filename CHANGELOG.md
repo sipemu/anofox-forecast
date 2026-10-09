@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - Unreleased
+
+Note: this section may show entries from multiple independent Phase 11 fix
+branches once merged together (fix/adf-kpss-correctness, fix/theta-alpha-
+intervals, etc.) — a CHANGELOG conflict between sibling PRs during review is
+expected; resolve by keeping all blocks under this heading.
+
+### Fixed
+
+- **Theta Standard Model (STM) random-walk forecast bias.** `Theta::new()`
+  (and `with_theta()`/`seasonal()`/`seasonal_with_decomposition()`) now
+  estimate alpha AND the initial SES level by jointly minimising the SSE of
+  `y_t - l_{t-1}` over the training series (`optimize_alpha_level`), exactly
+  matching R `forecast::thetaf`'s `ets(y, "ANN", opt.crit = "mse")` — alpha
+  was previously fixed at 0.1 with optimisation off. On the fixture random
+  walk (200 points, seed 20261009) the crate's alpha moves from the old
+  fixed `0.1` to `0.9999` (R: `0.999899989605684`), and the h=1 forecast
+  moves from the old RW-biased formula to `-21.78656053` vs thetaf's
+  `-21.78656052` (relative diff ~7e-10; previously audited as -6.99 vs
+  thetaf's -5.53 on an earlier fixture/series).
+  AutoTheta's STM candidate (built from `Theta::new()`/
+  `seasonal_with_decomposition()`) inherits the fix; OTM (`OptimizedTheta`,
+  which already optimises both alpha and theta) stays a distinct candidate.
+- **Theta drift formula.** The forecast drift term now uses thetaf's exact
+  finite-sample factor `(1 - (1 - alpha)^n) / alpha` (n = training length)
+  instead of the old `1 / alpha` asymptotic approximation, matching R to
+  1e-8 relative at the fitted parameters (see `thetaf_formula_at_r_parameters`).
+  `Theta::with_theta_value` gains a required `n: usize` parameter (was
+  `(theta, alpha, level, b)`, now `(theta, alpha, level, b, n)`) so
+  warm-started forecasts reproduce this finite-sample term correctly.
+- **Theta prediction intervals.** `predict_with_intervals` /
+  `predict_with_exog_intervals` now use thetaf's interval factor
+  `se_h = sqrt(sigma2) * sqrt(1 + alpha^2 * (h - 1))` instead of an AR(1)-style
+  geometric-sum factor that was roughly 2x too wide at h >= 6 (per the
+  upstream validation audit); `sigma2` is now `SSE / (n - 2)` on the
+  deseasonalized series (thetaf's `ets$sigma2` convention), computed at the
+  SES optimum rather than from the reseasonalized post-hoc residuals.
+  Interval z-values in Theta now come from `statrs`' exact normal
+  inverse-CDF (`normal_quantile`) instead of the crate-wide Abramowitz-Stegun
+  approximation (`utils::stats::quantile_normal`, accurate to only ~1e-4),
+  since thetaf parity requires interval bounds accurate to 1e-8 relative.
+
 ## [0.15.10] - 2026-09-09
 
 Robustness fixes and a new ERM hierarchical-reconciliation method from the v1.1 Robustness Fixes &
