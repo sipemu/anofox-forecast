@@ -2,7 +2,7 @@
 
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
-use crate::models::arima::diff::suggest_differencing;
+use crate::models::arima::diff::ndiffs_kpss;
 use crate::models::arima::model::{ARIMA, SARIMA};
 use crate::models::inspect::{ArimaExplanation, Explanation, Inspectable};
 use crate::models::{validate_series_complete, Forecaster};
@@ -838,8 +838,10 @@ impl Forecaster for AutoARIMA {
         };
 
         // Determine differencing orders (fixed, matching Python/R convention).
-        // Python/R use statistical tests (KPSS) to determine d and D, then fix them.
-        let suggested_d = suggest_differencing(values).min(self.config.max_d);
+        // d is chosen by repeated KPSS testing (R `forecast::ndiffs`), matching
+        // auto.arima's own d-selection; D-then-d sequencing (seasonally
+        // differencing first) lands in plan 11-05.
+        let suggested_d = ndiffs_kpss(values, 0.05, self.config.max_d);
         let suggested_cap_d = if s > 1 {
             Self::suggest_seasonal_differencing(values, s).min(self.config.max_cap_d)
         } else {

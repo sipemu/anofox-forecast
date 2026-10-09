@@ -274,7 +274,11 @@ pub fn find_min_fractional_d(series: &[f64], significance: f64, threshold: f64) 
     (best_d, best_p)
 }
 
-/// Check if a series needs differencing using a simple variance ratio test.
+/// Suggest a non-seasonal differencing order using repeated KPSS testing.
+///
+/// Delegates to [`ndiffs_kpss`] with R `forecast::ndiffs`' defaults
+/// (`alpha = 0.05`, `max_d = 2`) — kept as a convenience alias for callers
+/// that do not need a custom alpha/max_d.
 ///
 /// # Arguments
 /// * `series` - The input series
@@ -282,40 +286,138 @@ pub fn find_min_fractional_d(series: &[f64], significance: f64, threshold: f64) 
 /// # Returns
 /// Suggested differencing order (0, 1, or 2).
 pub fn suggest_differencing(series: &[f64]) -> usize {
-    if series.len() < 3 {
-        return 0;
-    }
+    ndiffs_kpss(series, 0.05, 2)
+}
 
-    let var_0 = variance(series);
-    let diff_1 = difference(series, 1);
+/// Determine the number of non-seasonal differences required for
+/// stationarity, by repeated KPSS testing — reproducing R
+/// `forecast::ndiffs(x, alpha, test = "kpss", type = "level", max.d)`.
+///
+/// At each step: if the current series is constant, stop (return the
+/// current `d`); otherwise compute the KPSS "level" statistic with
+/// `use.lag = trunc(3*sqrt(n)/13)` (`forecast::ndiffs`' own default lag,
+/// independent of this crate's `validation::kpss_test`'s default lag),
+/// map it to a p-value by linear interpolation against the four-point
+/// `urca`/`tseries` critical-value table (clamped to `[0.01, 0.10]`), and
+/// difference once more while `p < alpha` and `d < max_d`.
+///
+/// # Arguments
+/// * `series` - The input series
+/// * `alpha` - Significance level, clamped to `[0.01, 0.10]` like R
+/// * `max_d` - Maximum differencing order to try
+///
+/// # Returns
+/// The selected differencing order `d`.
+pub fn ndiffs_kpss(series: &[f64], alpha: f64, max_d: usize) -> usize {
+    let alpha = alpha.clamp(0.01, 0.10);
+    let mut d = 0usize;
+    let mut cur = series.to_vec();
 
-    if !variance_decreased_significantly(var_0, &diff_1) {
-        return 0;
-    }
+    loop {
+        if is_constant_series(&cur) {
+            break;
+        }
+        let n = cur.len();
+        if n < 4 {
+            break;
+        }
+        let use_lag = ((3.0 * (n as f64).sqrt()) / 13.0).trunc() as usize;
+        let stat = kpss_level_statistic(&cur, use_lag);
+        let p = ndiffs_kpss_pvalue(stat);
 
-    // Check if second difference helps more
-    let var_1 = variance(&diff_1);
-    let diff_2 = difference(&diff_1, 1);
-    if diff_2.len() >= 2 {
-        let var_2 = variance(&diff_2);
-        if var_2 / var_1 < 0.9 && var_2 < var_0 {
-            return 2;
+        if p < alpha && d < max_d {
+            cur = difference(&cur, 1);
+            d += 1;
+        } else {
+            break;
         }
     }
 
-    1
+    d
 }
 
-/// Check if differencing significantly reduces variance.
-#[inline]
-fn variance_decreased_significantly(var_original: f64, differenced: &[f64]) -> bool {
-    if differenced.len() < 2 || var_original <= 0.0 {
-        return false;
+/// KPSS "level" (type = "mu") test statistic, matching
+/// `urca::ur.kpss(x, type = "mu", use.lag = lag)`'s `@teststat`.
+///
+/// Demeans the series, forms the partial-sum (cumulative) process of the
+/// residuals, and divides the normalized sum-of-squared partial sums by a
+/// Bartlett-kernel long-run-variance estimate with weights
+/// `1 - j/(lag+1)` for `j = 1..=lag` (`lag = 0` is allowed, in which case
+/// the long-run variance reduces to the plain residual variance).
+pub(crate) fn kpss_level_statistic(x: &[f64], lag: usize) -> f64 {
+    let n = x.len();
+    if n == 0 {
+        return f64::NAN;
     }
-    variance(differenced) / var_original < 0.9
+
+    let mean = x.iter().sum::<f64>() / n as f64;
+    let resid: Vec<f64> = x.iter().map(|&v| v - mean).collect();
+
+    let mut cumsum = 0.0;
+    let mut numerator = 0.0;
+    for &r in &resid {
+        cumsum += r;
+        numerator += cumsum * cumsum;
+    }
+    numerator /= (n * n) as f64;
+
+    let mut lrv = resid.iter().map(|r| r * r).sum::<f64>() / n as f64;
+    for j in 1..=lag {
+        let weight = 1.0 - j as f64 / (lag as f64 + 1.0);
+        let gamma: f64 = resid
+            .iter()
+            .skip(j)
+            .zip(resid.iter())
+            .map(|(&a, &b)| a * b)
+            .sum::<f64>()
+            / n as f64;
+        lrv += 2.0 * weight * gamma;
+    }
+
+    if lrv <= 0.0 {
+        return 0.0;
+    }
+
+    numerator / lrv
 }
 
-/// Calculate variance of a series.
+/// Map a KPSS "level" statistic to a p-value by linear interpolation
+/// against the four-point `tseries`/`urca` critical-value table, matching
+/// R `approx(cvals, pvals, xout = stat, rule = 2)` — flat extrapolation
+/// beyond the table, so the result is always in `[0.01, 0.10]`.
+fn ndiffs_kpss_pvalue(stat: f64) -> f64 {
+    const CVALS: [f64; 4] = [0.347, 0.463, 0.574, 0.739];
+    const PVALS: [f64; 4] = [0.10, 0.05, 0.025, 0.01];
+
+    if stat <= CVALS[0] {
+        return PVALS[0];
+    }
+    if stat >= CVALS[CVALS.len() - 1] {
+        return PVALS[PVALS.len() - 1];
+    }
+    for i in 0..CVALS.len() - 1 {
+        if stat >= CVALS[i] && stat <= CVALS[i + 1] {
+            let frac = (stat - CVALS[i]) / (CVALS[i + 1] - CVALS[i]);
+            return PVALS[i] + frac * (PVALS[i + 1] - PVALS[i]);
+        }
+    }
+    PVALS[PVALS.len() - 1]
+}
+
+/// R's `is.constant()`-equivalent check used by `ndiffs`: true when every
+/// value is (numerically) identical.
+fn is_constant_series(x: &[f64]) -> bool {
+    if x.len() < 2 {
+        return true;
+    }
+    let first = x[0];
+    x.iter()
+        .all(|&v| (v - first).abs() < 1e-9 * first.abs().max(1.0))
+}
+
+/// Calculate variance of a series (test-only helper; production code now
+/// delegates differencing-order selection to the KPSS-based `ndiffs_kpss`).
+#[cfg(test)]
 fn variance(series: &[f64]) -> f64 {
     if series.len() < 2 {
         return 0.0;
@@ -414,6 +516,51 @@ mod tests {
 
         // The integration should produce reasonable continuation
         assert!(integrated.len() == 2);
+    }
+
+    /// `kpss_level_statistic` must equal `urca::ur.kpss`'s `@teststat` to
+    /// `1e-8` absolute for every one of the 100 non-seasonal R-reference
+    /// fixture series (rw + ar1), using the fixture's own recorded
+    /// `use.lag = trunc(3*sqrt(n)/13)`.
+    #[test]
+    fn kpss_statistic_matches_urca() {
+        use serde_json::Value;
+
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("data")
+            .join("r_reference")
+            .join("auto_arima_r.json");
+        let raw = std::fs::read_to_string(&path)
+            .unwrap_or_else(|_| panic!("missing fixture: {}", path.display()));
+        let fixture: Value =
+            serde_json::from_str(&raw).unwrap_or_else(|e| panic!("malformed fixture: {}", e));
+
+        let as_f64_vec = |v: &Value| -> Vec<f64> {
+            v.as_array()
+                .unwrap()
+                .iter()
+                .map(|x| x.as_f64().unwrap())
+                .collect()
+        };
+
+        let mut checked = 0usize;
+        for family in ["rw", "ar1"] {
+            let entries = fixture[family].as_array().unwrap();
+            for (i, entry) in entries.iter().enumerate() {
+                let values = as_f64_vec(&entry["values"]);
+                let use_lag = entry["kpss_use_lag"].as_u64().unwrap() as usize;
+                let expected_stat = entry["kpss_stat"].as_f64().unwrap();
+
+                let stat = kpss_level_statistic(&values, use_lag);
+                assert!(
+                    (stat - expected_stat).abs() < 1e-8,
+                    "{family}[{i}]: kpss_level_statistic={stat} vs urca={expected_stat}"
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 100, "expected 100 non-seasonal fixture series");
     }
 
     #[test]
