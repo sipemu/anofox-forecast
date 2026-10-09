@@ -58,5 +58,7 @@ pub use residual_tests::{
 
 // Re-export from stationarity
 pub use stationarity::{
-    adf_test, kpss_test, test_stationarity, CriticalValues, StationarityResult,
+    adf_test, adf_test_with_options, kpss_p_value, kpss_test, mackinnon_critical_values,
+    mackinnon_p_value, test_stationarity, AdfLagSelection, AdfOptions, AdfRegression,
+    CriticalValues, StationarityResult,
 };
