@@ -44,50 +44,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `P`/`Q` are now searched even when `nsdiffs_seas` yields `D = 0` for the
   configured period.
 
+- **AutoARIMA now reproduces R `forecast::auto.arima`'s model selection.**
+  New `r_arima` module ports R's actual estimation path as driven by
+  `forecast:::myarima`: `optim(method = "BFGS")` (`vmmin`, numerical
+  gradient with `ndeps = 1e-3`, `parscale`, `reltol`, `maxit = 100`,
+  `optimhess`), the CSS stage (`ARIMA_CSS`, `init0` + `lm` start for the
+  mean/drift, `arCheck`), `transform.pars` (`partrans`/`invpartrans`,
+  `maInvert`), the ML stage via `ARIMA_Like` (diffuse-prior Kalman filter,
+  `kappa = 1e6`, on the undifferenced series) with `getQ0` (Gardner 1980),
+  `checkarima` (NaN standard errors or a singular Hessian score `Inf`), the
+  `minroot < 1.01` rule and `myarima`'s AICc/BIC for CSS-ML and CSS fits.
+  Every stepwise candidate is fitted this way. R's approximation rule
+  (`n > 150 || m > 12`: CSS search, then exact refits in CSS-ic order) and
+  R's `is.constant(dx)` branch are ported too.
+- **`AutoARIMAConfig::default()` now uses R's defaults**: Hyndman-Khandakar
+  stepwise search (`true_stepwise = true`), `max_cap_p = max_cap_q = 2`.
+  The stepwise search follows R's source: one explicit constant state with
+  an end-of-scan toggle, start model 4 does not flip the constant, and
+  `max.order` is not applied (R applies it only to the exhaustive search).
+- **The selected model is R's own CSS-ML fit** of the chosen
+  `(order, constant)`, passed into `ARIMA`/`SARIMA` as pre-fitted
+  coefficients (new crate-internal `SARIMA::with_coefficients`), so the
+  forecast uses the constant/drift decision the search made.
+- Fixed a sign error in the Schur-Cohn step-down recursion used for the
+  root rule (verified against `numpy.roots`); it rejected stationary AR
+  candidates.
+- Measured against R 4.6.1 / forecast 9.0.2 (fixtures in
+  `tests/data/r_reference/`): AirPassengers selects R's
+  `ARIMA(2,1,1)(0,1,0)[12]` and all 19 models in R's search trace score
+  the same (within 0.01 AICc, same 4 `Inf` verdicts); random-walk fixture
+  `(0,1,0)` share 0.86 vs R 0.86, with all 50 picks identical; M4-Daily
+  gate passes, with D4047 at 1.000x the statsforecast baseline.
+
 ### Added (fix/auto-arima-order-selection)
 
-- **`AutoARIMAConfig::max_order`** — R `auto.arima`'s `max.order` bound
-  (`p+q+P+Q`, default 5), enforced by `true_stepwise_search` on every start
-  model and neighbour move.
-- **`AutoARIMAConfig::with_grid_stepwise()`** — explicit opt-in for the
-  fixed-grid stepwise search (the crate's current default), for symmetry
-  with the existing `with_true_stepwise()`.
-
-### Known gap (not shipped, tracked for a follow-up PR)
-
-- Comparing every `(p,q)` candidate's CSS sum-of-squared-residuals over a
-  *common* leading-observation window (rather than each candidate's own
-  `max(p,q)`-sized window) was implemented and verified to raise this
-  branch's random-walk `(0,1,0)` selection share from ~0% to 56-98%
-  (fixture: `tests/data/r_reference/auto_arima_r.json`, R's own share on the
-  same seed is 86%) — but every variant tried also pushed AutoARIMA's
-  selected order on M4-Daily series D4047 far enough to breach the
-  project's existing 2x-of-statsforecast per-series accuracy gate
-  (`tests/m4_daily_accuracy_regression.rs`). Given the direct conflict
-  between improving synthetic random-walk selection and regressing a real
-  forecast-accuracy gate, this PR keeps the (bug-carrying but
-  M4-gate-safe) per-candidate scoring window; `tests/auto_arima_r_reference.rs`'s
-  `auto_arima_rw_share_near_r` and `auto_arima_selection_frequencies` are
-  `#[ignore]`d with an explanation rather than deleted or loosened, so the
-  gap stays tracked for the branch's follow-up PR.
-- **(11-05 follow-up, same root cause, re-verified with new evidence.)**
-  Flipping the crate's *default* search to R's own bounds (`max.P=2`,
-  `max.Q=2`, Hyndman-Khandakar stepwise) was attempted again this session
-  and re-exposes the same bug on a *second*, independent dataset
-  (AirPassengers), not only the synthetic RW/AR(0.7) fixtures: R's actual
-  pick `ARIMA(2,1,1)(0,1,0)[12]` scores ~1002 under the crate's own AICc
-  while an overfit `ARIMA(3,1,0)(2,1,0)[12]` scores ~829, because the two
-  candidates are compared over different effective sample sizes. A direct
-  `Rscript forecast::auto.arima` run on M4-Daily D4047 confirms R itself
-  selects `ARIMA(0,1,0)` with MAE 141.5 — exactly the statsforecast
-  baseline the gate compares against (ratio 1.0x) — so the M4 gate's 2x
-  tolerance is evidence-backed and is not loosened. The default search
-  stays at the pre-11-05 bounds (`max_cap_p=1`, `max_cap_q=1`, grid
-  stepwise); `auto_arima_airpassengers_matches_r` is added and `#[ignore]`d
-  alongside the two existing Monte-Carlo tests. Closing this requires
-  exact-ML (or CSS-ML) likelihood scoring that doesn't shrink the
-  comparison sample with model order, in both `ARIMA::score_order` and
-  `SARIMA::score_order` — deferred to a dedicated follow-up.
+- **`AutoARIMAConfig::max_order`**: R `auto.arima`'s `max.order` bound
+  (`p+q+P+Q`, default 5) for the grid/exhaustive searches.
+- **`AutoARIMAConfig::with_grid_stepwise()`**: opt-in for the crate's
+  legacy fixed-grid stepwise search, for symmetry with
+  `with_true_stepwise()`.
 
 ## [0.15.10] - 2026-09-09
 
