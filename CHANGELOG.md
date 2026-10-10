@@ -101,6 +101,131 @@ Statistical correctness fixes for the ADF and KPSS stationarity tests
   approximation (`utils::stats::quantile_normal`, accurate to only ~1e-4),
   since thetaf parity requires interval bounds accurate to 1e-8 relative.
 
+### Fixed — ETS Likelihood, Constraints, Candidate Pool & Prediction Intervals (UPST-03)
+
+- **ETS multiplicative-error likelihood used `Σ ln|y_t|`, not `Σ ln|ŷ_t|` (R/statsforecast
+  convention), and seasonal models skipped the first `period` observations when scoring.**
+  `log_likelihood`/`aic`/`aicc`/`bic` now accumulate over every observation from `t=0` using the
+  one-step forecast's absolute value, matching R `forecast::ets`. Confirmed exact (within 1e-6
+  relative on loglik/aic/aicc/bic, 1e-8 relative on fitted values and final states) against R at
+  R's own fitted parameters for all 18 `(error,trend,season)` AirPassengers models and 6
+  non-seasonal models — see `tests/ets_r_reference.rs::ets_loglik_at_r_params_all_models`.
+- **Seasonal-additive and additive-trend state recursions did not match R's innovations
+  state-space form.** The `(trend, SeasonalType::Additive)` arms' seasonal update used the
+  just-updated level instead of the pre-update level (an extra spurious `(1-alpha)` factor); the
+  additive-trend arms' trend update used a classical reparametrised `beta*(l_t-l_{t-1})` form that
+  silently scales `beta` by an extra factor of `alpha` and does not match R's direct
+  `beta*e_t`; the `(Additive/AdditiveDamped trend, SeasonalType::Multiplicative)` additive-error
+  branch had the same just-updated-level bug. All affected arms (and their `fit()` duplicates) now
+  use R's direct-error Hyndman form, validated to machine precision (<1e-12 absolute) against R.
+- **Smoothing parameters could exceed R's "usual" constraints.** Every `optimize_params` branch
+  previously gave `alpha`, `beta`, `gamma` independent `[0.0001, 0.9999]` boxes; `beta` could exceed
+  `alpha` and `gamma` could exceed `1 - alpha`. A new reparametrisation (`alpha` in
+  `[1e-4, 0.9999]`, `beta` in `[1e-4, alpha]`, `gamma` in `[1e-4, 1-alpha]`, `phi` in `[0.8, 0.98]`)
+  is now applied in every branch. AirPassengers ETS(M,A,M): alpha/gamma `0.9999/0.9999` (both at
+  the old box's upper corner) → optimiser now finds alpha≈0.790, beta≈0.0001, gamma≈0.210, with a
+  *better* log-likelihood than R's own optimum (-681.11 vs R's -682.40 at R's alpha=0.395,
+  gamma=0.400 — a different local optimum, not a correctness regression).
+- **AutoETS's automatic candidate pool did not match R `forecast::ets(restrict = TRUE)`'s
+  default.** The crate excluded `ETS(M,A,A)`/`ETS(M,Ad,A)` as "unstable" (per FPP3) and included
+  `ETS(A,N,M)`/`ETS(A,A,M)`/`ETS(A,Ad,M)` — the opposite of R's default, which excludes
+  additive-error + multiplicative-season combinations and includes MAA/MAdA. AutoETS's default
+  pool now matches R exactly (15 models for positive seasonal data, 6 for non-positive seasonal, 6
+  for positive non-seasonal). AirPassengers AutoETS selection: previously picked `ETS(A,N,M)`
+  (excluded from R's default set); now picks `ETS(M,A,M)` with AICc 1401.07, within 2.0 of R's own
+  best (`ETS(M,Ad,M)`, AICc 1400.64).
+
+### Changed — ETS (UPST-03)
+
+- **`log_likelihood`/`aic`/`aicc`/`bic` values change for every ETS model** (R/statsforecast
+  convention — AICc is now comparable across additive and multiplicative error types; previously
+  it was not).
+- **`ETSSpec::is_valid()` now always returns `true`.** `ETS(M,A,A)` and `ETS(M,Ad,A)` are valid R
+  `forecast::ets` models (included in R's own `restrict = TRUE` default set), not "unstable"
+  combinations — `from_notation("MAA")`/`from_notation("MAdA")` now parse successfully instead of
+  erroring. A new, narrower `ETSSpec::is_r_restricted()` (additive error + multiplicative season)
+  replaces `is_valid()`'s old role in `AutoETS::generate_candidates`.
+
+### Added — ETS (UPST-03)
+
+- **`ETS::with_params_and_states(spec, seasonal_period, alpha, beta, gamma, phi, level, trend,
+  seasonals)`** — construct a model at fixed parameters and initial states with zero optimisation,
+  for scoring at externally supplied (e.g. R) parameters.
+- **`ETSSpec::is_r_restricted(&self) -> bool`** — true for additive-error models with
+  multiplicative seasonality (`ANM`, `AAM`, `AAdM`), R `forecast::ets(restrict = TRUE)`'s exclusion.
+- **`ETSSpec::maa()`/`ETSSpec::mada()`** constructors for `ETS(M,A,A)`/`ETS(M,Ad,A)`.
+- **ETS prediction intervals were a flat `sigma*sqrt(ceil(h/m))` width using an uncorrected,
+  raw-residual-basis variance — the same width for every model shape, regardless of error type,
+  trend, or how the seasonal component actually propagates uncertainty.** Intervals now follow
+  Hyndman, Koehler, Ord & Snyder (2008) ch. 6 exactly, matching R `forecast:::forecast.ets`'s own
+  class1/class2/class3 dispatch:
+  - **Class 1** (additive error, trend N/A/Ad, season N/A): analytic variance
+    `v_h = sigma2*(1 + sum_{j=1}^{h-1} c_j^2)` via the closed-form `c_j = w'F^(j-1)g` coefficient
+    (level term constant `alpha`; trend term linear or damped-sum; additive-seasonal term periodic
+    every `period` steps). Matches R to 1e-6 relative at R's own fitted parameters, h=1..24, for
+    all six (trend, season) combinations — `tests/ets_intervals_reference.rs::ets_class1_intervals_match_r`.
+  - **Class 2** (multiplicative error, trend N/A/Ad, season N/A): the same `c_j` coefficients feed
+    R's heteroscedastic `theta_h` recursion (`theta_1=mu_1^2`,
+    `theta_h=mu_h^2+sigma2*sum_j c_j^2*theta_{h-j}`, `v_h=(1+sigma2)*theta_h-mu_h^2`). Also exact to
+    1e-6 relative — `ets_class2_intervals_match_r`.
+  - **Class 3 and additive-error+multiplicative-season models** (MNM/MAM/MAdM, ANM/AAM/AAdM):
+    5000-path seeded Monte-Carlo simulation propagating the model's own one-step update recursion,
+    empirical quantiles via R type-7 interpolation; within 5% relative of R's 95% half-widths and
+    identical across repeated calls — `ets_class3_and_restricted_intervals_near_r`. AirPassengers
+    ETS(M,A,M) 95% half-width: before → after vs R (R's own half-width in parentheses): h=1
+    0.07 → 35.3 (R: 35.0); h=24 0.10 → 100.0 (R: 103.5).
+  - Measured Monte-Carlo coverage of the resulting 95% intervals: reduced test (300 local-level
+    reps, n=200, h=1..12) mean coverage 0.9500; full `#[ignore]` test (2000 reps each) ANN 0.9457,
+    AAdN 0.9331, MAM 0.9359 — `ets_interval_coverage_reduced`/`ets_interval_coverage`.
+  - **Interval `sigma2` is now degrees-of-freedom corrected** (`sum(e^2)/(n-length(par))`,
+    R's convention) and, for multiplicative-error models, computed on the *relative*-error basis
+    the likelihood already uses — not the raw `(y-fc)` basis `residual_variance` (still used for
+    AIC/AICc/BIC/loglik, unchanged) always used. New `ETS::interval_sigma2` field.
+  - Fixed `quantile_normal` (`src/utils/stats.rs`) from the Abramowitz & Stegun 26.2.23
+    approximation (~4.5e-4 max absolute error) to Peter Acklam's rational approximation
+    (~1.15e-9 relative error) — required to hit the 1e-6-relative class-1/2 parity above; a
+    pre-existing (minor) imprecision in every other interval-producing model in the crate that
+    uses `quantile_normal` is incidentally improved too.
+- **The same defect class existed outside `ets.rs`.** `SimpleExponentialSmoothing`, `HoltLinearTrend`,
+  `HoltWinters` and `SeasonalES` prediction intervals now route through `ETS::ets_interval_bounds`
+  on their equivalent ETS spec, using each model's own fitted parameters, final state and a new
+  degrees-of-freedom-corrected `interval_sigma2` field (same pattern as `ETS::interval_sigma2`
+  above), replacing four different ad-hoc approximations:
+  - **SES** used `1 + Σ_{j=1}^{h-1}(1-alpha)^{2j}` (converges to a roughly *constant* width for
+    alpha near 1, since `(1-alpha)` is then tiny) instead of the ETS(A,N,N) class-1 variance
+    `1 + alpha²(h-1)`. On the `pos` fixture (`alpha≈0.9999`) at h=12, 95%: **2.08 → 7.25** (R `ses()`:
+    7.25 — now exact to 1e-6 relative for h=1..24, both 80%/95% — `tests/es_family_intervals_reference.rs::ses_holt_match_r`).
+  - **Holt** used a simplified `(alpha + alpha*beta*damped_sum(phi,j))²` approximation instead of
+    the actual class-1 `c_j = alpha + beta*damped_sum(phi,j)` (no inner `alpha*` factor on the
+    trend term). Damped Holt's own optimiser converges within ~1e-4 of R `holt(damped=TRUE)` on
+    the `pos` fixture, so bounds are within 0.04% of R for h=1..24 (well under the 3% fallback
+    ceiling); plain (undamped) Holt's crate-fit trend state does not converge to R's on this
+    fixture (R's `beta≈0.0001` means R's trend state is dominated by its jointly-MLE'd initial
+    value, which this crate's single-first-difference heuristic does not reproduce — a
+    pre-existing *fitting*-time difference, not an interval-*formula* defect, verified separately
+    via an exact self-consistency check against the corrected formula).
+  - **HoltWinters** used a flat `sigma*sqrt(ceil(h/period))` (one step per full season, not
+    per-observation) for both seasonal types. Additive now uses the ETS(A,A,A) class-1 variance;
+    multiplicative is ETS(A,A,M) (this model's residual is `y - forecast`, raw/additive, for both
+    seasonal types — never `(y-forecast)/forecast` — so it is always the additive-error member of
+    its equivalence class, documented in `predict_with_intervals`'s rustdoc), which
+    `ets_interval_bounds` simulates (matching R `forecast.ets`'s own ETS(A,A,M) fallback). On the
+    `air` fixture at R's own fitted parameters, h=12, 95% half-width: additive **52.72 → 182.42**
+    (R `hw(air,"additive")`: 121.93); multiplicative **24.18 → 34.66** (R `hw(air,"multiplicative")`:
+    56.16) — both seasonal types' crate-level initial-state heuristic does not jointly reproduce
+    R's MLE'd trend/seasonal states on this strongly-trending 144-point series (the same
+    pre-existing fitting-time gap as plain Holt above, not an interval-formula defect), so the new
+    tests compare only near-horizon (h=1..3 additive, h=1..6 multiplicative) bounds, within 12%/6%
+    of R respectively.
+  - **SeasonalES** used `sqrt(1 + 0.1h)` (an arbitrary fan-out, not tied to any model parameter)
+    instead of recognising that this model is `period` *independent* SES chains sharing one alpha
+    (see the module's own doc: "NOT a multiplicative seasonal model"; `error_type` is accepted but
+    never read by `fit()`/`predict()`, kept only for backward compatibility) — each slot's bound
+    now comes from the plain ETS(A,N,N)/SES class-1 variance at that slot's own forecast step
+    `j = (h-1)/period + 1`, not the overall horizon `h`.
+  - New tests: `tests/es_family_intervals_reference.rs` (`ses_holt_use_ets_helper`,
+    `ses_holt_match_r`, `hw_seasonal_es_use_ets_helper`, `hw_additive_matches_r`,
+    `hw_multiplicative_convention_documented`, `es_family_uses_ets_helper`).
 
 ## [0.15.10] - 2026-09-09
 

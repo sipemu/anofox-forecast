@@ -543,9 +543,9 @@ impl SeasonalESForecaster {
 ///
 /// Follows the ETS taxonomy from FPP3: <https://otexts.com/fpp3/taxonomy.html>
 ///
-/// Note: Some combinations are invalid/unstable per FPP3:
-/// - MAA (Multiplicative error + Additive trend + Additive seasonal)
-/// - MAdA (Multiplicative error + Damped trend + Additive seasonal)
+/// All 18 error/trend/seasonal combinations are accepted, including
+/// MAA and MAdA: R `forecast::ets()` fits both, and its default
+/// `restrict = TRUE` automatic model set includes them (forecast 9.0.2).
 #[wasm_bindgen]
 pub struct ETSForecaster {
     model: ETS,
@@ -558,7 +558,7 @@ impl ETSForecaster {
     /// @param trend - Trend type: "N" (none), "A" (additive), or "Ad" (additive damped)
     /// @param seasonal - Seasonal type: "N" (none), "A" (additive), or "M" (multiplicative)
     /// @param period - Seasonal period (ignored if seasonal is "N")
-    /// @throws Error if the combination is unstable (MAA or MAdA)
+    /// @throws Error if a component code is not recognised
     #[wasm_bindgen(constructor)]
     pub fn new(
         error: &str,
@@ -590,18 +590,9 @@ impl ETSForecaster {
             _ => return Err(JsError::new("Seasonal type must be 'N', 'A', or 'M'")),
         };
 
+        // Every combination is a valid R `forecast::ets` model (incl. MAA/MAdA),
+        // so no further validation is needed beyond parsing the component codes.
         let spec = ETSSpec::new(error_type, trend_type, seasonal_type);
-
-        // Validate the specification (MAA and MAdA are unstable)
-        if !spec.is_valid() {
-            return Err(JsError::new(&format!(
-                "ETS({},{},{}) is an unstable model combination per FPP3. \
-                 Multiplicative error with additive trend and additive seasonal is not supported.",
-                error.to_uppercase(),
-                trend.to_uppercase(),
-                seasonal.to_uppercase()
-            )));
-        }
 
         Ok(Self {
             model: ETS::new(spec, period),
@@ -625,7 +616,7 @@ impl ETSForecaster {
     /// - "MAM" - Multiplicative Holt-Winters
     /// - "AAdM" - Damped trend with multiplicative seasonal
     ///
-    /// @throws Error for invalid notation or unstable combinations (MAA, MAdA)
+    /// @throws Error for invalid notation (MAA and MAdA are accepted)
     #[wasm_bindgen(js_name = fromNotation)]
     pub fn from_notation(notation: &str, period: usize) -> Result<ETSForecaster, JsError> {
         use anofox_forecast::models::exponential::ETSSpec;
@@ -637,16 +628,16 @@ impl ETSForecaster {
         })
     }
 
-    /// Check if an ETS specification is valid/stable.
+    /// Check if an ETS specification is valid.
     ///
     /// @param error - Error type: "A" or "M"
     /// @param trend - Trend type: "N", "A", or "Ad"
     /// @param seasonal - Seasonal type: "N", "A", or "M"
-    /// @returns true if the combination is stable and usable
+    /// @returns true if all three component codes are recognised
     ///
-    /// Invalid combinations (return false):
-    /// - M,A,A - Multiplicative error with additive trend and additive seasonal
-    /// - M,Ad,A - Multiplicative error with damped trend and additive seasonal
+    /// Every recognised combination is valid, including M,A,A and M,Ad,A,
+    /// which R `forecast::ets()` fits and includes in its default
+    /// `restrict = TRUE` model set. Returns false only for unknown codes.
     #[wasm_bindgen(js_name = isValidSpec)]
     pub fn is_valid_spec(error: &str, trend: &str, seasonal: &str) -> bool {
         use anofox_forecast::models::exponential::{
@@ -2954,28 +2945,23 @@ mod tests {
         assert!(ETSForecaster::from_notation("A", 12).is_err());
     }
 
+    // MAA/MAdA are valid R `forecast::ets` models (in R's default
+    // `restrict = TRUE` set); the core crate's `ETSSpec::is_valid()` now
+    // accepts them, matching R parity (tests/ets_r_reference.rs).
     #[wasm_bindgen_test]
-    fn test_ets_from_notation_unstable_maa() {
-        // MAA is unstable and should fail
-        let result = ETSForecaster::from_notation("MAA", 12);
-        assert!(result.is_err());
+    fn test_ets_from_notation_maa_accepted() {
+        assert!(ETSForecaster::from_notation("MAA", 12).is_ok());
     }
 
     #[wasm_bindgen_test]
-    fn test_ets_from_notation_unstable_mada() {
-        // MAdA is unstable and should fail
-        let result = ETSForecaster::from_notation("MAdA", 12);
-        assert!(result.is_err());
+    fn test_ets_from_notation_mada_accepted() {
+        assert!(ETSForecaster::from_notation("MAdA", 12).is_ok());
     }
 
     #[wasm_bindgen_test]
-    fn test_ets_unstable_combination_new() {
-        // Creating unstable combination via new() should also fail
-        let result = ETSForecaster::new("M", "A", "A", 12);
-        assert!(result.is_err());
-
-        let result = ETSForecaster::new("M", "Ad", "A", 12);
-        assert!(result.is_err());
+    fn test_ets_maa_mada_new_accepted() {
+        assert!(ETSForecaster::new("M", "A", "A", 12).is_ok());
+        assert!(ETSForecaster::new("M", "Ad", "A", 12).is_ok());
     }
 
     #[wasm_bindgen_test]
@@ -2988,9 +2974,9 @@ mod tests {
         assert!(ETSForecaster::is_valid_spec("M", "N", "M"));
         assert!(ETSForecaster::is_valid_spec("A", "Ad", "M"));
 
-        // Invalid/unstable combinations
-        assert!(!ETSForecaster::is_valid_spec("M", "A", "A"));
-        assert!(!ETSForecaster::is_valid_spec("M", "Ad", "A"));
+        // MAA/MAdA are valid R forecast::ets models (restrict = TRUE set)
+        assert!(ETSForecaster::is_valid_spec("M", "A", "A"));
+        assert!(ETSForecaster::is_valid_spec("M", "Ad", "A"));
 
         // Invalid parameters
         assert!(!ETSForecaster::is_valid_spec("X", "A", "A"));
