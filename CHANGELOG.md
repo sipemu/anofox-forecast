@@ -227,6 +227,59 @@ Statistical correctness fixes for the ADF and KPSS stationarity tests
     `ses_holt_match_r`, `hw_seasonal_es_use_ets_helper`, `hw_additive_matches_r`,
     `hw_multiplicative_convention_documented`, `es_family_uses_ets_helper`).
 
+### Fixed
+
+- **GARCH prediction intervals centred on the simulated-innovation draw, not the
+  conditional mean (UPST-05).** `GARCH::predict_with_intervals` built its bounds around
+  `predict()`'s single fixed simulated-innovation path (a deterministic draw matching
+  statsforecast's own simulation convention) instead of the fitted conditional mean,
+  so the interval centre could sit several standard deviations away from the series'
+  actual distribution while the half-width stayed sized for that distribution. Measured
+  empirical 95% coverage against continuations simulated from a true GARCH(1,1) data-
+  generating process: **63.3% → 94.8–96.3%** across h=1..12 (1000 continuations, seeded).
+  `predict_with_intervals` now returns `mean ∓ z·sqrt(forecast_variance(h))`; `predict()`
+  and `forecast_variance()` are unchanged. The previously-reported "GARCH 0.13x interval
+  width" comparison against statsforecast was also found to be partly an artefact of
+  statsforecast's own GARCH interval formula, which multiplies the z-quantile by `sigma2`
+  (variance) instead of `sqrt(sigma2)` (std dev) — see the PR body for the full findings
+  table.
+
+- **TBATS prediction intervals used `sigma * sqrt(h + 1)`, a random-walk approximation
+  ignoring the model's own trend/damping/seasonal state (UPST-05).** `predict_with_intervals`
+  now computes the innovations state-space variance `v_h = sigma2 * (1 + sum_{j<h}
+  (w' F^(j-1) g)^2)` — the same construction R `forecast::tbats` and statsforecast's
+  `_compute_sigmah` use — on the Box-Cox transformed scale, then inverse-transforms the
+  point and both bounds independently. Proven against 20000 seeded Monte-Carlo paths
+  through the model's own state recursion: analytic vs. empirical variance agree to
+  **<3%** at every h=1..12. Empirical 95% coverage against a true local-level +
+  one-harmonic trigonometric-seasonal data-generating process: **97.6%** (200 seeded
+  series, h=1..12), within the nominal [92%, 98%] band. On 2 of 4 real-series fixtures
+  (`multiplicative_seasonal`, `trend_seasonal`), the 95% width now diverges from
+  statsforecast's own TBATS fit (up to ~5.9x) — diagnosed to a pre-existing gap in this
+  crate's Nelder-Mead optimizer, which (unlike statsforecast's `checkAdmissibility`) does
+  not reject parameter sets whose `F - g·w'` eigenvalues indicate an unstable/non-damped
+  fit (e.g. `alpha=0.999`); `forecast_variance`'s correctness is independent of this and
+  is proven by the simulation test above. See the PR body for the full findings.
+
+- **MSTL prediction intervals used `sqrt(1 + 0.1h)` on a residual variance that is ~0 for
+  an exact decomposition (UPST-05) — effectively no real intervals.** `predict_with_intervals`
+  now uses the trend forecaster's own bounds (AutoETS/SES: the wrapped model's own
+  `predict_with_intervals`; Linear: the OLS prediction interval, `sigma^2 = SSR/(n-2)`;
+  Naive: `sigma * sqrt(h)` with `sigma^2` the mean squared first difference, R `naive()`'s
+  convention) plus the same seasonal naive projection added to the point forecast, matching
+  statsforecast's MSTL construction. `MSTL(Naive)` 95% width now matches statsforecast's
+  `MSTL(trend_forecaster=Naive())` within **4%** on all four real-series fixtures (ratios
+  0.96–1.02). Empirical 95% coverage against a random-walk + fixed-seasonal data-generating
+  process: **90%** (100 seeded series) / **91%** (500 seeded series, h=1..12) — below the
+  [92%, 98%] target at the shortest horizons (h=1: ~82%, converging to ~93% by h=8-12),
+  traced to STL's boundary (loess) estimate of the trend's last point being a slightly
+  lagged/smoothed estimate of the true last value, a characteristic statsforecast's own
+  MSTL(Naive) shares equally (same ~1.0 width ratio above), not a crate-specific defect.
+  `MSTL(AutoETS/SES)` interval calibration additionally depends on the ETS prediction-
+  interval fix in `fix/ets-likelihood-intervals` (this PR's trend bounds are only as
+  calibrated as the AutoETS/SES model they delegate to). See the PR body for the full
+  findings.
+
 ## [0.15.10] - 2026-09-09
 
 Robustness fixes and a new ERM hierarchical-reconciliation method from the v1.1 Robustness Fixes &

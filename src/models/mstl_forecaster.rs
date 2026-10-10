@@ -92,7 +92,13 @@ pub struct MSTLForecaster {
     fitted: Option<Vec<f64>>,
     /// Residuals.
     residuals: Option<Vec<f64>>,
-    /// Residual variance for confidence intervals.
+    /// Residual variance of `training - fitted_values`. No longer used by
+    /// `predict_with_intervals` (which now delegates to the trend
+    /// forecaster's own bounds plus the seasonal projection, per
+    /// `TrendForecasterTrait::predict_with_intervals`) — this residual is
+    /// near-zero for an exact MSTL decomposition, which was the previous
+    /// bug. Retained only for `fitted_values_with_intervals`'s in-sample
+    /// band, a separate (and separately scoped) API.
     residual_variance: Option<f64>,
     /// OLS result from pre-regression (when fit with exogenous regressors).
     ols_result: Option<OLSResult>,
@@ -110,6 +116,21 @@ pub struct MSTLForecaster {
 /// Internal trait for trend forecasters (to allow different types).
 trait TrendForecasterTrait: std::fmt::Debug + Send + Sync {
     fn predict(&self, horizon: usize) -> Result<Vec<f64>>;
+
+    /// Point forecast plus (lower, upper) prediction-interval bounds on the
+    /// deseasonalised (trend + remainder) series, per `TrendForecastMethod`:
+    /// AutoETS/SES delegate to the wrapped model's own `predict_with_intervals`;
+    /// Linear uses the OLS prediction interval; Naive uses
+    /// `sigma * sqrt(h)` with `sigma^2` the mean squared first difference
+    /// (R `naive()`'s convention). `MSTLForecaster::predict_with_intervals`
+    /// adds the same seasonal naive projection to `lower`/`upper` that
+    /// `predict_base` adds to the point forecast.
+    fn predict_with_intervals(
+        &self,
+        horizon: usize,
+        level: f64,
+    ) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>)>;
+
     fn clone_box(&self) -> Box<dyn TrendForecasterTrait>;
 }
 
@@ -131,6 +152,18 @@ impl TrendForecasterTrait for AutoETSTrendForecaster {
         Ok(forecast.primary().to_vec())
     }
 
+    fn predict_with_intervals(
+        &self,
+        horizon: usize,
+        level: f64,
+    ) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>)> {
+        let forecast = self.model.predict_with_intervals(horizon, level)?;
+        let point = forecast.primary().to_vec();
+        let lower = forecast.lower_series(0)?.to_vec();
+        let upper = forecast.upper_series(0)?.to_vec();
+        Ok((point, lower, upper))
+    }
+
     fn clone_box(&self) -> Box<dyn TrendForecasterTrait> {
         Box::new(self.clone())
     }
@@ -148,6 +181,18 @@ impl TrendForecasterTrait for SESTrendForecaster {
         Ok(forecast.primary().to_vec())
     }
 
+    fn predict_with_intervals(
+        &self,
+        horizon: usize,
+        level: f64,
+    ) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>)> {
+        let forecast = self.model.predict_with_intervals(horizon, level)?;
+        let point = forecast.primary().to_vec();
+        let lower = forecast.lower_series(0)?.to_vec();
+        let upper = forecast.upper_series(0)?.to_vec();
+        Ok((point, lower, upper))
+    }
+
     fn clone_box(&self) -> Box<dyn TrendForecasterTrait> {
         Box::new(self.clone())
     }
@@ -159,6 +204,14 @@ struct LinearTrendForecaster {
     intercept: f64,
     slope: f64,
     n: usize,
+    /// Residual variance `SSR / (n - 2)` from the in-sample OLS fit, used for
+    /// the prediction-interval standard error.
+    sigma2: f64,
+    /// Mean of the in-sample time index `0..n-1` (`x_mean` in `fit_linear`).
+    x_mean: f64,
+    /// `Sum((x - x_mean)^2)` over the in-sample time index (`ss_xx` in
+    /// `fit_linear`).
+    ss_xx: f64,
 }
 
 impl TrendForecasterTrait for LinearTrendForecaster {
@@ -171,6 +224,32 @@ impl TrendForecasterTrait for LinearTrendForecaster {
         Ok(forecasts)
     }
 
+    fn predict_with_intervals(
+        &self,
+        horizon: usize,
+        level: f64,
+    ) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>)> {
+        let point = self.predict(horizon)?;
+        if self.sigma2 <= 0.0 || self.ss_xx <= 0.0 || self.n == 0 {
+            return Ok((point.clone(), point.clone(), point));
+        }
+
+        let z = crate::utils::quantile_normal(0.5 + level / 2.0);
+        let sigma = self.sigma2.sqrt();
+        let mut lower = Vec::with_capacity(horizon);
+        let mut upper = Vec::with_capacity(horizon);
+        for h in 1..=horizon {
+            let t0 = (self.n + h) as f64;
+            // OLS prediction interval standard error:
+            // sigma * sqrt(1 + 1/n + (t0 - x_mean)^2 / ss_xx).
+            let se = sigma
+                * (1.0 + 1.0 / self.n as f64 + (t0 - self.x_mean).powi(2) / self.ss_xx).sqrt();
+            lower.push(point[h - 1] - z * se);
+            upper.push(point[h - 1] + z * se);
+        }
+        Ok((point, lower, upper))
+    }
+
     fn clone_box(&self) -> Box<dyn TrendForecasterTrait> {
         Box::new(self.clone())
     }
@@ -180,11 +259,37 @@ impl TrendForecasterTrait for LinearTrendForecaster {
 #[derive(Debug, Clone)]
 struct NaiveTrendForecaster {
     last_value: f64,
+    /// Mean of squared first differences of the in-sample deseasonalised
+    /// series — R `naive()`'s convention for the one-step residual
+    /// variance (used here as `sigma^2` growing as `h` via `sigma * sqrt(h)`).
+    sigma2: f64,
 }
 
 impl TrendForecasterTrait for NaiveTrendForecaster {
     fn predict(&self, horizon: usize) -> Result<Vec<f64>> {
         Ok(vec![self.last_value; horizon])
+    }
+
+    fn predict_with_intervals(
+        &self,
+        horizon: usize,
+        level: f64,
+    ) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>)> {
+        let point = vec![self.last_value; horizon];
+        if self.sigma2 <= 0.0 {
+            return Ok((point.clone(), point.clone(), point));
+        }
+
+        let z = crate::utils::quantile_normal(0.5 + level / 2.0);
+        let sigma = self.sigma2.sqrt();
+        let mut lower = Vec::with_capacity(horizon);
+        let mut upper = Vec::with_capacity(horizon);
+        for h in 1..=horizon {
+            let se = sigma * (h as f64).sqrt();
+            lower.push(self.last_value - z * se);
+            upper.push(self.last_value + z * se);
+        }
+        Ok((point, lower, upper))
     }
 
     fn clone_box(&self) -> Box<dyn TrendForecasterTrait> {
@@ -318,11 +423,13 @@ impl MSTLForecaster {
         }
     }
 
-    /// Fit a linear trend model.
-    fn fit_linear(values: &[f64]) -> (f64, f64) {
+    /// Fit a linear trend model, also returning the OLS diagnostics
+    /// (`sigma2 = SSR / (n - 2)`, `x_mean`, `ss_xx`) needed for
+    /// `LinearTrendForecaster::predict_with_intervals`'s prediction interval.
+    fn fit_linear(values: &[f64]) -> (f64, f64, f64, f64, f64) {
         let n = values.len();
         if n == 0 {
-            return (0.0, 0.0);
+            return (0.0, 0.0, 0.0, 0.0, 0.0);
         }
 
         let x_mean = (n - 1) as f64 / 2.0;
@@ -339,7 +446,17 @@ impl MSTLForecaster {
         let slope = if ss_xx > 0.0 { ss_xy / ss_xx } else { 0.0 };
         let intercept = y_mean - slope * x_mean;
 
-        (intercept, slope)
+        let ssr: f64 = values
+            .iter()
+            .enumerate()
+            .map(|(i, &y)| {
+                let fitted = intercept + slope * i as f64;
+                (y - fitted).powi(2)
+            })
+            .sum();
+        let sigma2 = if n > 2 { ssr / (n - 2) as f64 } else { 0.0 };
+
+        (intercept, slope, sigma2, x_mean, ss_xx)
     }
 }
 
@@ -439,16 +556,27 @@ impl Forecaster for MSTLForecaster {
                 Box::new(SESTrendForecaster { model })
             }
             TrendForecastMethod::Linear => {
-                let (intercept, slope) = Self::fit_linear(&deseasonalized);
+                let (intercept, slope, sigma2, x_mean, ss_xx) = Self::fit_linear(&deseasonalized);
                 Box::new(LinearTrendForecaster {
                     intercept,
                     slope,
                     n: self.n,
+                    sigma2,
+                    x_mean,
+                    ss_xx,
                 })
             }
             TrendForecastMethod::Naive => {
                 let last_value = *deseasonalized.last().unwrap_or(&0.0);
-                Box::new(NaiveTrendForecaster { last_value })
+                // R naive()'s one-step residual variance: mean squared first
+                // difference of the deseasonalised series.
+                let sigma2 = if deseasonalized.len() > 1 {
+                    let diffs: Vec<f64> = deseasonalized.windows(2).map(|w| w[1] - w[0]).collect();
+                    crate::simd::sum_of_squares(&diffs) / diffs.len() as f64
+                } else {
+                    0.0
+                };
+                Box::new(NaiveTrendForecaster { last_value, sigma2 })
             }
         };
 
@@ -517,31 +645,44 @@ impl Forecaster for MSTLForecaster {
         self.predict_base(horizon)
     }
 
+    /// Prediction intervals = the trend forecaster's own bounds (per
+    /// `TrendForecastMethod`; see `TrendForecasterTrait::predict_with_intervals`)
+    /// on the deseasonalised series, plus the same seasonal naive projection
+    /// `predict_base` adds to the point forecast — matching statsforecast's
+    /// MSTL construction (`res = {key: val + seas for key, val in
+    /// res.items()}` applied to `mean`/`lo`/`hi` alike). Replaces the
+    /// previous `sqrt(1 + 0.1h)` band on a residual variance that is ~0 for
+    /// an exact MSTL decomposition.
     fn predict_with_intervals(&self, horizon: usize, confidence: f64) -> Result<Forecast> {
         let forecast = self.predict(horizon)?;
-        let variance = self.residual_variance.unwrap_or(0.0);
 
-        if horizon == 0 || variance <= 0.0 {
+        if horizon == 0 {
             return Ok(forecast);
         }
 
-        let z = crate::utils::stats::quantile_normal((1.0 + confidence) / 2.0);
-        let se = variance.sqrt();
+        let decomposition = self
+            .decomposition
+            .as_ref()
+            .ok_or(ForecastError::FitRequired { model: None })?;
+        let trend_forecaster = self
+            .trend_forecaster
+            .as_ref()
+            .ok_or(ForecastError::FitRequired { model: None })?;
 
-        let preds = forecast.primary();
-        let mut lower = Vec::with_capacity(horizon);
-        let mut upper = Vec::with_capacity(horizon);
+        let (_, mut lower, mut upper) =
+            trend_forecaster.predict_with_intervals(horizon, confidence)?;
 
-        // Simple constant variance intervals (could be improved with fan-out)
-        for h in 0..horizon {
-            // Variance increases with horizon (simple approximation)
-            let h_factor = (1.0 + 0.1 * h as f64).sqrt();
-            lower.push(preds[h] - z * se * h_factor);
-            upper.push(preds[h] + z * se * h_factor);
+        for (idx, seasonal) in decomposition.seasonal_components.iter().enumerate() {
+            let period = decomposition.seasonal_periods[idx];
+            let seasonal_forecast = self.project_seasonal(seasonal, period, horizon);
+            for (i, &s) in seasonal_forecast.iter().enumerate() {
+                lower[i] += s;
+                upper[i] += s;
+            }
         }
 
         Ok(Forecast::from_values_with_intervals(
-            preds.to_vec(),
+            forecast.primary().to_vec(),
             lower,
             upper,
         ))
