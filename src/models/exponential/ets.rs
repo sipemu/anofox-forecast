@@ -378,7 +378,7 @@ macro_rules! ets_likelihood_loop {
      update { $($upd:tt)* }
     ) => {{
         let mut _sum_sq = 0.0_f64;
-        let mut _sum_log = 0.0_f64;
+        let mut _sum_log_fc = 0.0_f64;
         let mut _cnt = 0_usize;
         for (_, &$y) in $values.iter().enumerate().skip($start_idx) {
             let _fc = { $($fc)* };
@@ -387,12 +387,14 @@ macro_rules! ets_likelihood_loop {
             let _se = if $is_mult_error && _fc.abs() > 1e-10 { _err / _fc } else { _err };
             _sum_sq += _se * _se;
             if !_sum_sq.is_finite() { return f64::MAX; }
-            if $is_mult_error { _sum_log += $y.abs().ln(); }
+            // R/statsforecast ets convention (D-07): the multiplicative-error
+            // likelihood accumulates ln|one-step forecast| (_fc), not ln|y|.
+            if $is_mult_error { _sum_log_fc += _fc.abs().ln(); }
             _cnt += 1;
             let $lp = $level;
             $($upd)*
         }
-        (_sum_sq, _sum_log, _cnt)
+        (_sum_sq, _sum_log_fc, _cnt)
     }};
     // Seasonal: reads/writes seasonal buffer by index
     (seasonal $values:expr, $start_idx:expr, $period:expr, $is_mult_error:expr,
@@ -402,7 +404,7 @@ macro_rules! ets_likelihood_loop {
      update { $($upd:tt)* }
     ) => {{
         let mut _sum_sq = 0.0_f64;
-        let mut _sum_log = 0.0_f64;
+        let mut _sum_log_fc = 0.0_f64;
         let mut _cnt = 0_usize;
         for (_t, &$y) in $values.iter().enumerate().skip($start_idx) {
             let $si = _t % $period;
@@ -413,12 +415,14 @@ macro_rules! ets_likelihood_loop {
             let _se = if $is_mult_error && _fc.abs() > 1e-10 { _err / _fc } else { _err };
             _sum_sq += _se * _se;
             if !_sum_sq.is_finite() { return f64::MAX; }
-            if $is_mult_error { _sum_log += $y.abs().ln(); }
+            // R/statsforecast ets convention (D-07): the multiplicative-error
+            // likelihood accumulates ln|one-step forecast| (_fc), not ln|y|.
+            if $is_mult_error { _sum_log_fc += _fc.abs().ln(); }
             _cnt += 1;
             let $lp = $level;
             $($upd)*
         }
-        (_sum_sq, _sum_log, _cnt)
+        (_sum_sq, _sum_log_fc, _cnt)
     }};
 }
 
@@ -564,6 +568,84 @@ impl ETS {
                 None
             } else {
                 Some(seasonal_values)
+            },
+            fitted: None,
+            residuals: None,
+            residual_variance: None,
+            log_likelihood: None,
+            aic: None,
+            aicc: None,
+            bic: None,
+            n: 0,
+            exog_ols: None,
+            skip_optimization: true,
+        }
+    }
+
+    /// Create an ETS model with fixed smoothing parameters AND fixed initial
+    /// states, with no optimisation performed at any point (unlike
+    /// [`with_initial_states`](Self::with_initial_states), which still lets
+    /// `fit()` run the forward recursion from the given states -- which this
+    /// method also does, but with the caller's exact `alpha`/`beta`/`gamma`/
+    /// `phi` instead of defaults). Values are used exactly as given (after a
+    /// finiteness check) -- primarily for scoring a model at externally
+    /// supplied (e.g. R `forecast::ets`) parameters/states for parity tests.
+    ///
+    /// `seasonals` uses the crate's `t % seasonal_period` buffer layout
+    /// (buffer\[0\] is the seasonal factor applied to the first observation).
+    pub fn with_params_and_states(
+        spec: ETSSpec,
+        seasonal_period: usize,
+        alpha: f64,
+        beta: Option<f64>,
+        gamma: Option<f64>,
+        phi: Option<f64>,
+        level: f64,
+        trend: f64,
+        seasonals: Vec<f64>,
+    ) -> Self {
+        debug_assert!(
+            alpha.is_finite(),
+            "with_params_and_states: alpha must be finite"
+        );
+        debug_assert!(
+            level.is_finite(),
+            "with_params_and_states: level must be finite"
+        );
+        debug_assert!(
+            trend.is_finite(),
+            "with_params_and_states: trend must be finite"
+        );
+        debug_assert!(
+            beta.is_none_or(f64::is_finite),
+            "with_params_and_states: beta must be finite"
+        );
+        debug_assert!(
+            gamma.is_none_or(f64::is_finite),
+            "with_params_and_states: gamma must be finite"
+        );
+        debug_assert!(
+            phi.is_none_or(f64::is_finite),
+            "with_params_and_states: phi must be finite"
+        );
+        debug_assert!(
+            seasonals.iter().all(|s| s.is_finite()),
+            "with_params_and_states: seasonals must be finite"
+        );
+        Self {
+            spec,
+            seasonal_period,
+            alpha: Some(alpha),
+            beta,
+            gamma,
+            phi,
+            optimize: false,
+            level: Some(level),
+            trend: Some(trend),
+            seasonals: if seasonals.is_empty() {
+                None
+            } else {
+                Some(seasonals)
             },
             fitted: None,
             residuals: None,
@@ -789,7 +871,10 @@ impl ETS {
     ) -> f64 {
         let n = values.len();
         let period = self.seasonal_period;
-        let start_idx = if self.spec.has_seasonal() { period } else { 0 };
+        // R/statsforecast ets convention (D-07): score every observation
+        // from t = 0 (the initial states are time-0 states, before y_1) --
+        // seasonal models no longer skip the first period.
+        let start_idx = 0;
 
         if n <= start_idx + 1 {
             return f64::MAX;
@@ -831,7 +916,7 @@ impl ETS {
 
         // Hoisted match: dispatch once, then run a branch-free inner loop.
         // Eliminates two match dispatches per observation (forecast + update).
-        let (sum_sq_errors, sum_log_y, count) = match (self.spec.trend, self.spec.seasonal) {
+        let (sum_sq_errors, sum_log_fc, count) = match (self.spec.trend, self.spec.seasonal) {
             (TrendType::None, SeasonalType::None) => {
                 ets_likelihood_loop!(nonseasonal values, start_idx, is_mult_error,
                     level, trend,
@@ -859,13 +944,26 @@ impl ETS {
                     y, s, season_idx, _level_prev,
                     forecast { level * s }
                     update {
-                        let y_des = if s.abs() > 1e-10 { y / s } else { y };
-                        level = alpha * y_des + (1.0 - alpha) * level;
-                        seasonal_buf[season_idx] = if level.abs() > 1e-10 {
-                            gamma * (y / level) + (1.0 - gamma) * s
+                        let fc = _level_prev * s;
+                        if is_mult_error {
+                            // R/statsforecast ets convention (D-07): the SSOE
+                            // form l_t=l_{t-1}(1+alpha*e_t), s_t=s_{t-m}(1+gamma*e_t)
+                            // with e_t=(y-fc)/fc, validated numerically against
+                            // R forecast::ets(MNM) at R's own fitted parameters.
+                            if fc.abs() > 1e-10 {
+                                let e = (y - fc) / fc;
+                                level = _level_prev * (1.0 + alpha * e);
+                                seasonal_buf[season_idx] = s * (1.0 + gamma * e);
+                            }
                         } else {
-                            s
-                        };
+                            let y_des = if s.abs() > 1e-10 { y / s } else { y };
+                            level = alpha * y_des + (1.0 - alpha) * level;
+                            seasonal_buf[season_idx] = if _level_prev.abs() > 1e-10 {
+                                gamma * (y / _level_prev) + (1.0 - gamma) * s
+                            } else {
+                                s
+                            };
+                        }
                     }
                 )
             }
@@ -898,14 +996,31 @@ impl ETS {
                     y, s, season_idx, level_prev,
                     forecast { (level + trend) * s }
                     update {
-                        let y_des = if s.abs() > 1e-10 { y / s } else { y };
-                        level = alpha * y_des + (1.0 - alpha) * (level_prev + trend);
-                        trend = beta * (level - level_prev) + (1.0 - beta) * trend;
-                        seasonal_buf[season_idx] = if level.abs() > 1e-10 {
-                            gamma * (y / level) + (1.0 - gamma) * s
+                        let l_plus_b = level_prev + trend;
+                        let fc = l_plus_b * s;
+                        if is_mult_error {
+                            // R/statsforecast ets convention (D-07): SSOE form
+                            // l_t=(l+b)(1+alpha*e), b_t=b+beta*(l+b)*e,
+                            // s_t=s_{t-m}(1+gamma*e), e=(y-fc)/fc -- validated
+                            // numerically against R forecast::ets(MAM) at R's
+                            // own fitted parameters (exact match to float
+                            // precision across the first 6 fitted values).
+                            if fc.abs() > 1e-10 {
+                                let e = (y - fc) / fc;
+                                level = l_plus_b * (1.0 + alpha * e);
+                                trend += beta * l_plus_b * e;
+                                seasonal_buf[season_idx] = s * (1.0 + gamma * e);
+                            }
                         } else {
-                            s
-                        };
+                            let y_des = if s.abs() > 1e-10 { y / s } else { y };
+                            level = alpha * y_des + (1.0 - alpha) * l_plus_b;
+                            trend = beta * (level - level_prev) + (1.0 - beta) * trend;
+                            seasonal_buf[season_idx] = if l_plus_b.abs() > 1e-10 {
+                                gamma * (y / l_plus_b) + (1.0 - gamma) * s
+                            } else {
+                                s
+                            };
+                        }
                     }
                 )
             }
@@ -938,29 +1053,48 @@ impl ETS {
                     y, s, season_idx, level_prev,
                     forecast { (level + phi * trend) * s }
                     update {
-                        let y_des = if s.abs() > 1e-10 { y / s } else { y };
-                        level = alpha * y_des + (1.0 - alpha) * (level_prev + phi * trend);
-                        trend = beta * (level - level_prev) + (1.0 - beta) * phi * trend;
-                        seasonal_buf[season_idx] = if level.abs() > 1e-10 {
-                            gamma * (y / level) + (1.0 - gamma) * s
+                        let l_plus_pb = level_prev + phi * trend;
+                        let fc = l_plus_pb * s;
+                        if is_mult_error {
+                            // Damped analogue of the (A,M) arm above: phi*trend
+                            // replaces trend wherever the undamped SSOE form
+                            // uses the raw trend baseline.
+                            if fc.abs() > 1e-10 {
+                                let e = (y - fc) / fc;
+                                level = l_plus_pb * (1.0 + alpha * e);
+                                trend = phi * trend + beta * l_plus_pb * e;
+                                seasonal_buf[season_idx] = s * (1.0 + gamma * e);
+                            }
                         } else {
-                            s
-                        };
+                            let y_des = if s.abs() > 1e-10 { y / s } else { y };
+                            level = alpha * y_des + (1.0 - alpha) * l_plus_pb;
+                            trend = beta * (level - level_prev) + (1.0 - beta) * phi * trend;
+                            seasonal_buf[season_idx] = if l_plus_pb.abs() > 1e-10 {
+                                gamma * (y / l_plus_pb) + (1.0 - gamma) * s
+                            } else {
+                                s
+                            };
+                        }
                     }
                 )
             }
         };
 
-        if count == 0 {
+        if count == 0 || !sum_sq_errors.is_finite() {
             return f64::MAX;
         }
+        // A perfect fit (sum_sq_errors == 0, e.g. a constant series) is the
+        // global optimum, not a degenerate one -- floor instead of rejecting,
+        // so ln() stays finite without distorting any non-degenerate fit.
+        let sum_sq_errors = sum_sq_errors.max(1e-300);
 
-        let sigma2 = sum_sq_errors / count as f64;
+        // R/statsforecast ets convention (D-07):
+        // loglik = -0.5*(n*ln(sum_sq) + 2*sum_log|fc)  [mult-error term only]
+        let n_f = count as f64;
         let ll = if is_mult_error {
-            -0.5 * count as f64 * (1.0 + sigma2.ln() + (2.0 * std::f64::consts::PI).ln())
-                - sum_log_y
+            -0.5 * (n_f * sum_sq_errors.ln() + 2.0 * sum_log_fc)
         } else {
-            -0.5 * count as f64 * (1.0 + sigma2.ln() + (2.0 * std::f64::consts::PI).ln())
+            -0.5 * (n_f * sum_sq_errors.ln())
         };
 
         -ll
@@ -1851,16 +1985,16 @@ impl Forecaster for ETS {
         // Use optimized or heuristic initial states
         let mut level = init_level;
         let mut trend = init_trend;
-        let start_idx = if self.spec.has_seasonal() { period } else { 0 };
+        // R/statsforecast ets convention (D-07): the initial states are
+        // time-0 states (before y_1) -- score and update from t = 0 for
+        // every model, seasonal included (no first-period skip).
+        let start_idx = 0;
+        let is_mult_error = self.spec.error == ErrorType::Multiplicative;
 
         let mut fitted = Vec::with_capacity(self.n);
         let mut residuals = Vec::with_capacity(self.n);
-
-        // Fill initial values
-        for &val in values.iter().take(start_idx) {
-            fitted.push(val);
-            residuals.push(0.0);
-        }
+        let mut sum_sq_errors = 0.0_f64;
+        let mut sum_log_fc = 0.0_f64;
 
         // Process remaining data
         for (t, &y) in values.iter().enumerate().skip(start_idx) {
@@ -1891,7 +2025,22 @@ impl Forecaster for ETS {
             };
 
             fitted.push(forecast);
-            residuals.push(y - forecast);
+            let err = y - forecast;
+            residuals.push(err);
+
+            // R/statsforecast ets convention (D-07): the likelihood/variance
+            // use the relative error (y-fc)/fc for multiplicative-error
+            // models and ln|fc| (not ln|y|); `residuals()` keeps returning
+            // the plain y-fc difference above for API stability.
+            let se = if is_mult_error && forecast.abs() > 1e-10 {
+                err / forecast
+            } else {
+                err
+            };
+            sum_sq_errors += se * se;
+            if is_mult_error {
+                sum_log_fc += forecast.abs().ln();
+            }
 
             // Update state
             let level_prev = level;
@@ -1905,13 +2054,22 @@ impl Forecaster for ETS {
                     seasonals[season_idx] = gamma * (y - level) + (1.0 - gamma) * s;
                 }
                 (TrendType::None, SeasonalType::Multiplicative) => {
-                    let y_des = if s.abs() > 1e-10 { y / s } else { y };
-                    level = alpha * y_des + (1.0 - alpha) * level;
-                    seasonals[season_idx] = if level.abs() > 1e-10 {
-                        gamma * (y / level) + (1.0 - gamma) * s
+                    let fc = level_prev * s;
+                    if is_mult_error {
+                        if fc.abs() > 1e-10 {
+                            let e = (y - fc) / fc;
+                            level = level_prev * (1.0 + alpha * e);
+                            seasonals[season_idx] = s * (1.0 + gamma * e);
+                        }
                     } else {
-                        s
-                    };
+                        let y_des = if s.abs() > 1e-10 { y / s } else { y };
+                        level = alpha * y_des + (1.0 - alpha) * level;
+                        seasonals[season_idx] = if level_prev.abs() > 1e-10 {
+                            gamma * (y / level_prev) + (1.0 - gamma) * s
+                        } else {
+                            s
+                        };
+                    }
                 }
                 (TrendType::Additive, SeasonalType::None) => {
                     level = alpha * y + (1.0 - alpha) * (level_prev + trend);
@@ -1923,14 +2081,25 @@ impl Forecaster for ETS {
                     seasonals[season_idx] = gamma * (y - level) + (1.0 - gamma) * s;
                 }
                 (TrendType::Additive, SeasonalType::Multiplicative) => {
-                    let y_des = if s.abs() > 1e-10 { y / s } else { y };
-                    level = alpha * y_des + (1.0 - alpha) * (level_prev + trend);
-                    trend = beta * (level - level_prev) + (1.0 - beta) * trend;
-                    seasonals[season_idx] = if level.abs() > 1e-10 {
-                        gamma * (y / level) + (1.0 - gamma) * s
+                    let l_plus_b = level_prev + trend;
+                    let fc = l_plus_b * s;
+                    if is_mult_error {
+                        if fc.abs() > 1e-10 {
+                            let e = (y - fc) / fc;
+                            level = l_plus_b * (1.0 + alpha * e);
+                            trend += beta * l_plus_b * e;
+                            seasonals[season_idx] = s * (1.0 + gamma * e);
+                        }
                     } else {
-                        s
-                    };
+                        let y_des = if s.abs() > 1e-10 { y / s } else { y };
+                        level = alpha * y_des + (1.0 - alpha) * l_plus_b;
+                        trend = beta * (level - level_prev) + (1.0 - beta) * trend;
+                        seasonals[season_idx] = if l_plus_b.abs() > 1e-10 {
+                            gamma * (y / l_plus_b) + (1.0 - gamma) * s
+                        } else {
+                            s
+                        };
+                    }
                 }
                 (TrendType::AdditiveDamped, SeasonalType::None) => {
                     level = alpha * y + (1.0 - alpha) * (level_prev + phi * trend);
@@ -1942,14 +2111,25 @@ impl Forecaster for ETS {
                     seasonals[season_idx] = gamma * (y - level) + (1.0 - gamma) * s;
                 }
                 (TrendType::AdditiveDamped, SeasonalType::Multiplicative) => {
-                    let y_des = if s.abs() > 1e-10 { y / s } else { y };
-                    level = alpha * y_des + (1.0 - alpha) * (level_prev + phi * trend);
-                    trend = beta * (level - level_prev) + (1.0 - beta) * phi * trend;
-                    seasonals[season_idx] = if level.abs() > 1e-10 {
-                        gamma * (y / level) + (1.0 - gamma) * s
+                    let l_plus_pb = level_prev + phi * trend;
+                    let fc = l_plus_pb * s;
+                    if is_mult_error {
+                        if fc.abs() > 1e-10 {
+                            let e = (y - fc) / fc;
+                            level = l_plus_pb * (1.0 + alpha * e);
+                            trend = phi * trend + beta * l_plus_pb * e;
+                            seasonals[season_idx] = s * (1.0 + gamma * e);
+                        }
                     } else {
-                        s
-                    };
+                        let y_des = if s.abs() > 1e-10 { y / s } else { y };
+                        level = alpha * y_des + (1.0 - alpha) * l_plus_pb;
+                        trend = beta * (level - level_prev) + (1.0 - beta) * phi * trend;
+                        seasonals[season_idx] = if l_plus_pb.abs() > 1e-10 {
+                            gamma * (y / l_plus_pb) + (1.0 - gamma) * s
+                        } else {
+                            s
+                        };
+                    }
                 }
             }
         }
@@ -1961,19 +2141,27 @@ impl Forecaster for ETS {
         }
         self.fitted = Some(fitted);
 
-        // Calculate residual variance and information criteria
-        // Use actual residual count for AIC calculation (statsforecast compatible)
+        // Calculate residual variance (additive-residual based; used for
+        // prediction intervals only -- see plan 11-07) and information
+        // criteria (R/statsforecast ets convention, D-07):
+        //   loglik = -0.5*(n*ln(sum_sq) + 2*sum_log|fc)  [mult-error term only]
+        // where sum_sq/sum_log_fc were accumulated above using relative
+        // errors + ln|forecast| for multiplicative-error models.
         let valid_slice = &residuals[start_idx..];
-        if !valid_slice.is_empty() {
+        if !valid_slice.is_empty() && sum_sq_errors.is_finite() {
             let variance = crate::simd::sum_of_squares(valid_slice) / valid_slice.len() as f64;
             self.residual_variance = Some(variance);
 
-            // Use actual number of residuals for log-likelihood, not full sample size.
-            // This ensures seasonal models (which skip the first period of residuals)
-            // are not systematically penalized relative to non-seasonal models.
+            // Floor as in calculate_likelihood_with_init_buf: a perfect fit
+            // (sum_sq_errors == 0) is the global optimum, not degenerate.
+            let sum_sq_errors = sum_sq_errors.max(1e-300);
             let n = valid_slice.len() as f64;
             let k = self.num_params() as f64;
-            let ll = -0.5 * n * (1.0 + variance.ln() + (2.0 * std::f64::consts::PI).ln());
+            let ll = if is_mult_error {
+                -0.5 * (n * sum_sq_errors.ln() + 2.0 * sum_log_fc)
+            } else {
+                -0.5 * (n * sum_sq_errors.ln())
+            };
 
             self.log_likelihood = Some(ll);
             self.aic = Some(-2.0 * ll + 2.0 * k);
