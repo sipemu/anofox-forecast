@@ -14,7 +14,7 @@ use std::collections::HashMap;
 /// Type of Theta model selected by AutoTheta.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThetaModelType {
-    /// Standard Theta Model (STM) - fixed alpha=0.1, theta=2.0
+    /// Standard Theta Model (STM) - alpha estimated by SES optimisation (thetaf), theta=2.0
     STM,
     /// Optimized Theta Model (OTM) - optimized alpha and theta
     OTM,
@@ -50,7 +50,7 @@ enum FittedModel {
 /// with the best in-sample performance (lowest MSE).
 ///
 /// # Model Variants Considered
-/// - **STM**: Standard Theta Model with fixed alpha=0.1, theta=2.0
+/// - **STM**: Standard Theta Model with alpha estimated by SES optimisation (thetaf), theta=2.0
 /// - **OTM**: Optimized Theta Model with optimized alpha and theta
 /// - **DSTM**: Dynamic Standard Theta Model with dynamic coefficients
 /// - **DOTM**: Dynamic Optimized Theta Model (M4 competition winner component)

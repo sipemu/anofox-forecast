@@ -193,6 +193,28 @@ impl ETSSpec {
         )
     }
 
+    /// ETS(M,A,A) - Multiplicative error with additive trend and additive seasonality.
+    ///
+    /// Included in R `forecast::ets`'s default (`restrict = TRUE`) model set.
+    pub fn maa() -> Self {
+        Self::new(
+            ErrorType::Multiplicative,
+            TrendType::Additive,
+            SeasonalType::Additive,
+        )
+    }
+
+    /// ETS(M,Ad,A) - Multiplicative error with damped trend and additive seasonality.
+    ///
+    /// Included in R `forecast::ets`'s default (`restrict = TRUE`) model set.
+    pub fn mada() -> Self {
+        Self::new(
+            ErrorType::Multiplicative,
+            TrendType::AdditiveDamped,
+            SeasonalType::Additive,
+        )
+    }
+
     /// Get a short name for this specification.
     pub fn short_name(&self) -> String {
         let e = match self.error {
@@ -227,20 +249,29 @@ impl ETSSpec {
         matches!(self.trend, TrendType::AdditiveDamped)
     }
 
-    /// Check if this ETS specification is valid/stable.
+    /// Check if this ETS specification is valid/constructible.
     ///
-    /// Per FPP3 taxonomy (<https://otexts.com/fpp3/taxonomy.html>), most ETS
-    /// combinations are valid, but two are numerically unstable:
-    /// - ETS(M,A,A) - Multiplicative error with additive trend and additive seasonal
-    /// - ETS(M,Ad,A) - Multiplicative error with damped trend and additive seasonal
-    ///
-    /// Returns `true` for valid/stable combinations, `false` for unstable ones.
+    /// Every `(error, trend, seasonal)` combination this type can represent
+    /// is a valid R `forecast::ets` model, including ETS(M,A,A) and
+    /// ETS(M,Ad,A) — R's own `restrict = TRUE` default set includes both.
+    /// Always returns `true`; retained (rather than removed) for API
+    /// stability and because [`AutoETS`](crate::models::exponential::AutoETS)'s
+    /// automatic candidate pool uses [`Self::is_r_restricted`], a distinct
+    /// and narrower exclusion, instead of this method.
     pub fn is_valid(&self) -> bool {
-        // M,A,A and M,Ad,A are unstable (multiplicative error
-        // with additive trend AND additive seasonal)
-        !(self.error == ErrorType::Multiplicative
-            && matches!(self.trend, TrendType::Additive | TrendType::AdditiveDamped)
-            && self.seasonal == SeasonalType::Additive)
+        true
+    }
+
+    /// Check if R `forecast::ets()`'s default (`restrict = TRUE`) automatic
+    /// search excludes this specification.
+    ///
+    /// R's default AutoETS search skips additive-error models with
+    /// multiplicative seasonality — ETS(A,N,M), ETS(A,A,M), ETS(A,Ad,M) —
+    /// because that combination is numerically unstable when searched
+    /// automatically (though still fittable explicitly). This matches
+    /// `deparse(forecast::ets)`'s `restrict` branch (forecast 9.0.2).
+    pub fn is_r_restricted(&self) -> bool {
+        self.error == ErrorType::Additive && self.seasonal == SeasonalType::Multiplicative
     }
 
     /// Parse ETS notation string like "ANN", "AAA", "MAM", "AAdM".
@@ -255,9 +286,12 @@ impl ETSSpec {
     ///
     /// # Errors
     ///
-    /// Returns an error if:
-    /// - The notation format is invalid
-    /// - The combination is unstable (MAA, MAdA)
+    /// Returns an error if the notation format itself is invalid (wrong
+    /// length, or an unrecognised error/trend/seasonal letter). Every
+    /// constructible `(error, trend, seasonal)` combination — including
+    /// "MAA" and "MAdA" — parses successfully; [`Self::is_r_restricted`]
+    /// is a separate, narrower exclusion applied only by AutoETS's
+    /// automatic candidate pool, not by parsing.
     ///
     /// # Examples
     ///
@@ -270,8 +304,9 @@ impl ETSSpec {
     /// let spec = ETSSpec::from_notation("MAdM").unwrap();
     /// assert!(spec.is_damped());
     ///
-    /// // Invalid combination returns error
-    /// assert!(ETSSpec::from_notation("MAA").is_err());
+    /// // MAA/MAdA are valid R models and parse successfully.
+    /// let spec = ETSSpec::from_notation("MAA").unwrap();
+    /// assert_eq!(spec, ETSSpec::maa());
     /// ```
     pub fn from_notation(notation: &str) -> crate::error::Result<Self> {
         use crate::error::ForecastError;
@@ -373,12 +408,12 @@ macro_rules! ets_likelihood_loop {
     // Non-seasonal: no seasonal buffer access needed
     (nonseasonal $values:expr, $start_idx:expr, $is_mult_error:expr,
      $level:ident, $trend:ident,
-     $y:ident, $lp:ident,
+     $y:ident, $lp:ident, $err:ident,
      forecast { $($fc:tt)* }
      update { $($upd:tt)* }
     ) => {{
         let mut _sum_sq = 0.0_f64;
-        let mut _sum_log = 0.0_f64;
+        let mut _sum_log_fc = 0.0_f64;
         let mut _cnt = 0_usize;
         for (_, &$y) in $values.iter().enumerate().skip($start_idx) {
             let _fc = { $($fc)* };
@@ -387,22 +422,30 @@ macro_rules! ets_likelihood_loop {
             let _se = if $is_mult_error && _fc.abs() > 1e-10 { _err / _fc } else { _err };
             _sum_sq += _se * _se;
             if !_sum_sq.is_finite() { return f64::MAX; }
-            if $is_mult_error { _sum_log += $y.abs().ln(); }
+            // R/statsforecast ets convention (D-07): the multiplicative-error
+            // likelihood accumulates ln|one-step forecast| (_fc), not ln|y|.
+            if $is_mult_error { _sum_log_fc += _fc.abs().ln(); }
             _cnt += 1;
             let $lp = $level;
+            // Caller-named alias for the additive one-step error (y - fc),
+            // used by the state recursions below (D-07, 11-06 Task 2) --
+            // exposed as a macro parameter (like $lp) because `_err` itself,
+            // defined inside this macro body, is hygienically invisible to
+            // the caller-provided `update` tokens.
+            let $err = _err;
             $($upd)*
         }
-        (_sum_sq, _sum_log, _cnt)
+        (_sum_sq, _sum_log_fc, _cnt)
     }};
     // Seasonal: reads/writes seasonal buffer by index
     (seasonal $values:expr, $start_idx:expr, $period:expr, $is_mult_error:expr,
      $level:ident, $trend:ident, $buf:ident,
-     $y:ident, $s:ident, $si:ident, $lp:ident,
+     $y:ident, $s:ident, $si:ident, $lp:ident, $err:ident,
      forecast { $($fc:tt)* }
      update { $($upd:tt)* }
     ) => {{
         let mut _sum_sq = 0.0_f64;
-        let mut _sum_log = 0.0_f64;
+        let mut _sum_log_fc = 0.0_f64;
         let mut _cnt = 0_usize;
         for (_t, &$y) in $values.iter().enumerate().skip($start_idx) {
             let $si = _t % $period;
@@ -413,12 +456,15 @@ macro_rules! ets_likelihood_loop {
             let _se = if $is_mult_error && _fc.abs() > 1e-10 { _err / _fc } else { _err };
             _sum_sq += _se * _se;
             if !_sum_sq.is_finite() { return f64::MAX; }
-            if $is_mult_error { _sum_log += $y.abs().ln(); }
+            // R/statsforecast ets convention (D-07): the multiplicative-error
+            // likelihood accumulates ln|one-step forecast| (_fc), not ln|y|.
+            if $is_mult_error { _sum_log_fc += _fc.abs().ln(); }
             _cnt += 1;
             let $lp = $level;
+            let $err = _err;
             $($upd)*
         }
-        (_sum_sq, _sum_log, _cnt)
+        (_sum_sq, _sum_log_fc, _cnt)
     }};
 }
 
@@ -454,6 +500,12 @@ pub struct ETS {
     residuals: Option<Vec<f64>>,
     /// Residual variance.
     residual_variance: Option<f64>,
+    /// Degrees-of-freedom-corrected residual variance used for prediction
+    /// intervals only: `sum(e^2) / (n - length(par))`, matching R's
+    /// `forecast.ets` convention (D-08, plan 11-07). `residual_variance`
+    /// above (the uncorrected `sum(e^2)/n`) is kept as-is since other code
+    /// (AIC/AICc/BIC/loglik) depends on it.
+    interval_sigma2: Option<f64>,
     /// Log-likelihood.
     log_likelihood: Option<f64>,
     /// AIC.
@@ -488,6 +540,7 @@ impl ETS {
             fitted: None,
             residuals: None,
             residual_variance: None,
+            interval_sigma2: None,
             log_likelihood: None,
             aic: None,
             aicc: None,
@@ -521,6 +574,7 @@ impl ETS {
             fitted: None,
             residuals: None,
             residual_variance: None,
+            interval_sigma2: None,
             log_likelihood: None,
             aic: None,
             aicc: None,
@@ -568,6 +622,86 @@ impl ETS {
             fitted: None,
             residuals: None,
             residual_variance: None,
+            interval_sigma2: None,
+            log_likelihood: None,
+            aic: None,
+            aicc: None,
+            bic: None,
+            n: 0,
+            exog_ols: None,
+            skip_optimization: true,
+        }
+    }
+
+    /// Create an ETS model with fixed smoothing parameters AND fixed initial
+    /// states, with no optimisation performed at any point (unlike
+    /// [`with_initial_states`](Self::with_initial_states), which still lets
+    /// `fit()` run the forward recursion from the given states -- which this
+    /// method also does, but with the caller's exact `alpha`/`beta`/`gamma`/
+    /// `phi` instead of defaults). Values are used exactly as given (after a
+    /// finiteness check) -- primarily for scoring a model at externally
+    /// supplied (e.g. R `forecast::ets`) parameters/states for parity tests.
+    ///
+    /// `seasonals` uses the crate's `t % seasonal_period` buffer layout
+    /// (buffer\[0\] is the seasonal factor applied to the first observation).
+    pub fn with_params_and_states(
+        spec: ETSSpec,
+        seasonal_period: usize,
+        alpha: f64,
+        beta: Option<f64>,
+        gamma: Option<f64>,
+        phi: Option<f64>,
+        level: f64,
+        trend: f64,
+        seasonals: Vec<f64>,
+    ) -> Self {
+        debug_assert!(
+            alpha.is_finite(),
+            "with_params_and_states: alpha must be finite"
+        );
+        debug_assert!(
+            level.is_finite(),
+            "with_params_and_states: level must be finite"
+        );
+        debug_assert!(
+            trend.is_finite(),
+            "with_params_and_states: trend must be finite"
+        );
+        debug_assert!(
+            beta.is_none_or(f64::is_finite),
+            "with_params_and_states: beta must be finite"
+        );
+        debug_assert!(
+            gamma.is_none_or(f64::is_finite),
+            "with_params_and_states: gamma must be finite"
+        );
+        debug_assert!(
+            phi.is_none_or(f64::is_finite),
+            "with_params_and_states: phi must be finite"
+        );
+        debug_assert!(
+            seasonals.iter().all(|s| s.is_finite()),
+            "with_params_and_states: seasonals must be finite"
+        );
+        Self {
+            spec,
+            seasonal_period,
+            alpha: Some(alpha),
+            beta,
+            gamma,
+            phi,
+            optimize: false,
+            level: Some(level),
+            trend: Some(trend),
+            seasonals: if seasonals.is_empty() {
+                None
+            } else {
+                Some(seasonals)
+            },
+            fitted: None,
+            residuals: None,
+            residual_variance: None,
+            interval_sigma2: None,
             log_likelihood: None,
             aic: None,
             aicc: None,
@@ -789,7 +923,10 @@ impl ETS {
     ) -> f64 {
         let n = values.len();
         let period = self.seasonal_period;
-        let start_idx = if self.spec.has_seasonal() { period } else { 0 };
+        // R/statsforecast ets convention (D-07): score every observation
+        // from t = 0 (the initial states are time-0 states, before y_1) --
+        // seasonal models no longer skip the first period.
+        let start_idx = 0;
 
         if n <= start_idx + 1 {
             return f64::MAX;
@@ -831,11 +968,11 @@ impl ETS {
 
         // Hoisted match: dispatch once, then run a branch-free inner loop.
         // Eliminates two match dispatches per observation (forecast + update).
-        let (sum_sq_errors, sum_log_y, count) = match (self.spec.trend, self.spec.seasonal) {
+        let (sum_sq_errors, sum_log_fc, count) = match (self.spec.trend, self.spec.seasonal) {
             (TrendType::None, SeasonalType::None) => {
                 ets_likelihood_loop!(nonseasonal values, start_idx, is_mult_error,
                     level, trend,
-                    y, _level_prev,
+                    y, _level_prev, _err,
                     forecast { level }
                     update {
                         level = alpha * y + (1.0 - alpha) * level;
@@ -845,122 +982,224 @@ impl ETS {
             (TrendType::None, SeasonalType::Additive) => {
                 ets_likelihood_loop!(seasonal values, start_idx, period, is_mult_error,
                     level, trend, seasonal_buf,
-                    y, s, season_idx, _level_prev,
+                    y, s, season_idx, level_prev, err,
                     forecast { level + s }
                     update {
-                        level = alpha * (y - s) + (1.0 - alpha) * level;
-                        seasonal_buf[season_idx] = gamma * (y - level) + (1.0 - gamma) * s;
+                        // Hyndman innovations state-space form (same for both
+                        // error types: mu*eps = y-mu reduces identically when
+                        // the measurement equation is additive): l_t=l_{t-1}
+                        // +alpha*e_t, s_t=s_{t-m}+gamma*e_t, e_t=err=y-mu.
+                        // (Previously used the just-updated `level`, not
+                        // `level_prev`, in the seasonal update -- an extra
+                        // (1-alpha) factor that doesn't match R.) Validated
+                        // to machine precision against R forecast::ets(ANA,
+                        // MNA) at R's own fitted parameters (D-07, 11-06
+                        // Task 2).
+                        level = level_prev + alpha * err;
+                        seasonal_buf[season_idx] = s + gamma * err;
                     }
                 )
             }
             (TrendType::None, SeasonalType::Multiplicative) => {
                 ets_likelihood_loop!(seasonal values, start_idx, period, is_mult_error,
                     level, trend, seasonal_buf,
-                    y, s, season_idx, _level_prev,
+                    y, s, season_idx, _level_prev, _err,
                     forecast { level * s }
                     update {
-                        let y_des = if s.abs() > 1e-10 { y / s } else { y };
-                        level = alpha * y_des + (1.0 - alpha) * level;
-                        seasonal_buf[season_idx] = if level.abs() > 1e-10 {
-                            gamma * (y / level) + (1.0 - gamma) * s
+                        let fc = _level_prev * s;
+                        if is_mult_error {
+                            // R/statsforecast ets convention (D-07): the SSOE
+                            // form l_t=l_{t-1}(1+alpha*e_t), s_t=s_{t-m}(1+gamma*e_t)
+                            // with e_t=(y-fc)/fc, validated numerically against
+                            // R forecast::ets(MNM) at R's own fitted parameters.
+                            if fc.abs() > 1e-10 {
+                                let e = (y - fc) / fc;
+                                level = _level_prev * (1.0 + alpha * e);
+                                seasonal_buf[season_idx] = s * (1.0 + gamma * e);
+                            }
                         } else {
-                            s
-                        };
+                            let y_des = if s.abs() > 1e-10 { y / s } else { y };
+                            level = alpha * y_des + (1.0 - alpha) * level;
+                            seasonal_buf[season_idx] = if _level_prev.abs() > 1e-10 {
+                                gamma * (y / _level_prev) + (1.0 - gamma) * s
+                            } else {
+                                s
+                            };
+                        }
                     }
                 )
             }
             (TrendType::Additive, SeasonalType::None) => {
                 ets_likelihood_loop!(nonseasonal values, start_idx, is_mult_error,
                     level, trend,
-                    y, level_prev,
+                    y, level_prev, err,
                     forecast { level + trend }
                     update {
-                        level = alpha * y + (1.0 - alpha) * (level_prev + trend);
-                        trend = beta * (level - level_prev) + (1.0 - beta) * trend;
+                        // Hyndman direct-error form: l_t=l_{t-1}+b_{t-1}+
+                        // alpha*e_t, b_t=b_{t-1}+beta*e_t -- NOT beta*(l_t-
+                        // l_{t-1}), the classical reparametrisation this
+                        // replaces, which silently scales beta by an extra
+                        // factor of alpha and does not match R. Validated
+                        // to machine precision against R forecast::ets(AAN,
+                        // MAN) at R's own fitted parameters (D-07, 11-06
+                        // Task 2).
+                        level = level_prev + trend + alpha * err;
+                        trend += beta * err;
                     }
                 )
             }
             (TrendType::Additive, SeasonalType::Additive) => {
                 ets_likelihood_loop!(seasonal values, start_idx, period, is_mult_error,
                     level, trend, seasonal_buf,
-                    y, s, season_idx, level_prev,
+                    y, s, season_idx, level_prev, err,
                     forecast { level + trend + s }
                     update {
-                        level = alpha * (y - s) + (1.0 - alpha) * (level_prev + trend);
-                        trend = beta * (level - level_prev) + (1.0 - beta) * trend;
-                        seasonal_buf[season_idx] = gamma * (y - level) + (1.0 - gamma) * s;
+                        // Hyndman direct-error form (D-07, 11-06 Task 2):
+                        // same derivation as the (Additive, None) and
+                        // (None, Additive) arms, combined. Validated to
+                        // machine precision against R forecast::ets(AAA,
+                        // MAA, AAdA, MAdA) at R's own fitted parameters.
+                        level = level_prev + trend + alpha * err;
+                        trend += beta * err;
+                        seasonal_buf[season_idx] = s + gamma * err;
                     }
                 )
             }
             (TrendType::Additive, SeasonalType::Multiplicative) => {
                 ets_likelihood_loop!(seasonal values, start_idx, period, is_mult_error,
                     level, trend, seasonal_buf,
-                    y, s, season_idx, level_prev,
+                    y, s, season_idx, level_prev, err,
                     forecast { (level + trend) * s }
                     update {
-                        let y_des = if s.abs() > 1e-10 { y / s } else { y };
-                        level = alpha * y_des + (1.0 - alpha) * (level_prev + trend);
-                        trend = beta * (level - level_prev) + (1.0 - beta) * trend;
-                        seasonal_buf[season_idx] = if level.abs() > 1e-10 {
-                            gamma * (y / level) + (1.0 - gamma) * s
+                        let l_plus_b = level_prev + trend;
+                        let fc = l_plus_b * s;
+                        if is_mult_error {
+                            // R/statsforecast ets convention (D-07): SSOE form
+                            // l_t=(l+b)(1+alpha*e), b_t=b+beta*(l+b)*e,
+                            // s_t=s_{t-m}(1+gamma*e), e=(y-fc)/fc -- validated
+                            // numerically against R forecast::ets(MAM) at R's
+                            // own fitted parameters (exact match to float
+                            // precision across the first 6 fitted values).
+                            if fc.abs() > 1e-10 {
+                                let e = (y - fc) / fc;
+                                level = l_plus_b * (1.0 + alpha * e);
+                                trend += beta * l_plus_b * e;
+                                seasonal_buf[season_idx] = s * (1.0 + gamma * e);
+                            }
                         } else {
-                            s
-                        };
+                            // Hyndman direct-error form for additive error +
+                            // multiplicative season (D-07, 11-06 Task 2):
+                            // l_t=(l+b)+alpha*e_t/s_{t-m}, b_t=b+beta*e_t/
+                            // s_{t-m}, s_t=s_{t-m}+gamma*e_t/(l+b), e_t=err.
+                            // (Previously used the just-updated `level`, not
+                            // `level_prev`/`trend`, in the trend/seasonal
+                            // update.) Validated to machine precision
+                            // against R forecast::ets(AAM) at R's own
+                            // fitted parameters.
+                            if s.abs() > 1e-10 {
+                                level = l_plus_b + alpha * err / s;
+                                trend += beta * err / s;
+                            } else {
+                                level = l_plus_b;
+                            }
+                            seasonal_buf[season_idx] = if l_plus_b.abs() > 1e-10 {
+                                s + gamma * err / l_plus_b
+                            } else {
+                                s
+                            };
+                        }
                     }
                 )
             }
             (TrendType::AdditiveDamped, SeasonalType::None) => {
                 ets_likelihood_loop!(nonseasonal values, start_idx, is_mult_error,
                     level, trend,
-                    y, level_prev,
+                    y, level_prev, err,
                     forecast { level + phi * trend }
                     update {
-                        level = alpha * y + (1.0 - alpha) * (level_prev + phi * trend);
-                        trend = beta * (level - level_prev) + (1.0 - beta) * phi * trend;
+                        // Hyndman direct-error form, damped analogue of the
+                        // (Additive, None) arm (D-07, 11-06 Task 2).
+                        // Validated to machine precision against R
+                        // forecast::ets(AAdN, MAdN).
+                        level = level_prev + phi * trend + alpha * err;
+                        trend = phi * trend + beta * err;
                     }
                 )
             }
             (TrendType::AdditiveDamped, SeasonalType::Additive) => {
                 ets_likelihood_loop!(seasonal values, start_idx, period, is_mult_error,
                     level, trend, seasonal_buf,
-                    y, s, season_idx, level_prev,
+                    y, s, season_idx, level_prev, err,
                     forecast { level + phi * trend + s }
                     update {
-                        level = alpha * (y - s) + (1.0 - alpha) * (level_prev + phi * trend);
-                        trend = beta * (level - level_prev) + (1.0 - beta) * phi * trend;
-                        seasonal_buf[season_idx] = gamma * (y - level) + (1.0 - gamma) * s;
+                        // Hyndman direct-error form, damped analogue of the
+                        // (Additive, Additive) arm (D-07, 11-06 Task 2).
+                        // Validated to machine precision against R
+                        // forecast::ets(AAdA, MAdA).
+                        level = level_prev + phi * trend + alpha * err;
+                        trend = phi * trend + beta * err;
+                        seasonal_buf[season_idx] = s + gamma * err;
                     }
                 )
             }
             (TrendType::AdditiveDamped, SeasonalType::Multiplicative) => {
                 ets_likelihood_loop!(seasonal values, start_idx, period, is_mult_error,
                     level, trend, seasonal_buf,
-                    y, s, season_idx, level_prev,
+                    y, s, season_idx, level_prev, err,
                     forecast { (level + phi * trend) * s }
                     update {
-                        let y_des = if s.abs() > 1e-10 { y / s } else { y };
-                        level = alpha * y_des + (1.0 - alpha) * (level_prev + phi * trend);
-                        trend = beta * (level - level_prev) + (1.0 - beta) * phi * trend;
-                        seasonal_buf[season_idx] = if level.abs() > 1e-10 {
-                            gamma * (y / level) + (1.0 - gamma) * s
+                        let l_plus_pb = level_prev + phi * trend;
+                        let fc = l_plus_pb * s;
+                        if is_mult_error {
+                            // Damped analogue of the (A,M) arm above: phi*trend
+                            // replaces trend wherever the undamped SSOE form
+                            // uses the raw trend baseline.
+                            if fc.abs() > 1e-10 {
+                                let e = (y - fc) / fc;
+                                level = l_plus_pb * (1.0 + alpha * e);
+                                trend = phi * trend + beta * l_plus_pb * e;
+                                seasonal_buf[season_idx] = s * (1.0 + gamma * e);
+                            }
                         } else {
-                            s
-                        };
+                            // Damped analogue of the (Additive, Multiplicative)
+                            // additive-error fix above: phi*trend replaces
+                            // trend wherever the undamped form uses the raw
+                            // trend baseline (D-07, 11-06 Task 2). Validated
+                            // to machine precision against R
+                            // forecast::ets(AAdM).
+                            if s.abs() > 1e-10 {
+                                level = l_plus_pb + alpha * err / s;
+                                trend = phi * trend + beta * err / s;
+                            } else {
+                                level = l_plus_pb;
+                                trend *= phi;
+                            }
+                            seasonal_buf[season_idx] = if l_plus_pb.abs() > 1e-10 {
+                                s + gamma * err / l_plus_pb
+                            } else {
+                                s
+                            };
+                        }
                     }
                 )
             }
         };
 
-        if count == 0 {
+        if count == 0 || !sum_sq_errors.is_finite() {
             return f64::MAX;
         }
+        // A perfect fit (sum_sq_errors == 0, e.g. a constant series) is the
+        // global optimum, not a degenerate one -- floor instead of rejecting,
+        // so ln() stays finite without distorting any non-degenerate fit.
+        let sum_sq_errors = sum_sq_errors.max(1e-300);
 
-        let sigma2 = sum_sq_errors / count as f64;
+        // R/statsforecast ets convention (D-07):
+        // loglik = -0.5*(n*ln(sum_sq) + 2*sum_log|fc)  [mult-error term only]
+        let n_f = count as f64;
         let ll = if is_mult_error {
-            -0.5 * count as f64 * (1.0 + sigma2.ln() + (2.0 * std::f64::consts::PI).ln())
-                - sum_log_y
+            -0.5 * (n_f * sum_sq_errors.ln() + 2.0 * sum_log_fc)
         } else {
-            -0.5 * count as f64 * (1.0 + sigma2.ln() + (2.0 * std::f64::consts::PI).ln())
+            -0.5 * (n_f * sum_sq_errors.ln())
         };
 
         -ll
@@ -1000,6 +1239,92 @@ impl ETS {
     /// For non-seasonal models, optimizes smoothing parameters and initial states.
     /// For seasonal models, jointly optimizes smoothing parameters, initial level,
     /// and initial seasonal indices for better seasonal model fits.
+    /// Map unconstrained optimiser coordinates (each confined to `[0, 1]` by
+    /// the caller's bounds) to ETS smoothing parameters under the "usual"
+    /// constraints R's `forecast::ets` enforces: `1e-4 <= alpha <= 0.9999`,
+    /// `1e-4 <= beta <= alpha`, `1e-4 <= gamma <= 1 - alpha`,
+    /// `0.8 <= phi <= 0.98`. `raw` holds, in order, exactly the coordinates
+    /// present for this spec: alpha always first, then beta (iff
+    /// `has_beta`), then gamma (iff `has_gamma`), then phi (iff `has_phi`).
+    /// Reparametrising beta/gamma relative to alpha — rather than giving
+    /// each smoothing parameter an independent `[1e-4, 0.9999]` box — is
+    /// what makes `beta < alpha` and `gamma < 1 - alpha` hold for every
+    /// point the optimiser can reach, not just the final clamp.
+    fn map_usual_params(
+        raw: &[f64],
+        has_beta: bool,
+        has_gamma: bool,
+        has_phi: bool,
+    ) -> (f64, Option<f64>, Option<f64>, Option<f64>) {
+        const LOWER: f64 = 1e-4;
+        const ALPHA_UPPER: f64 = 0.9999;
+        const PHI_LOWER: f64 = 0.8;
+        const PHI_UPPER: f64 = 0.98;
+
+        let mut idx = 0;
+        let u_alpha = raw[idx].clamp(0.0, 1.0);
+        idx += 1;
+        let alpha = LOWER + u_alpha * (ALPHA_UPPER - LOWER);
+
+        let beta = if has_beta {
+            let u_beta = raw[idx].clamp(0.0, 1.0);
+            idx += 1;
+            Some(LOWER + u_beta * (alpha - LOWER))
+        } else {
+            None
+        };
+
+        let gamma = if has_gamma {
+            let u_gamma = raw[idx].clamp(0.0, 1.0);
+            idx += 1;
+            Some(LOWER + u_gamma * (1.0 - alpha - LOWER))
+        } else {
+            None
+        };
+
+        let phi = if has_phi {
+            let u_phi = raw[idx].clamp(0.0, 1.0);
+            Some(PHI_LOWER + u_phi * (PHI_UPPER - PHI_LOWER))
+        } else {
+            None
+        };
+
+        (alpha, beta, gamma, phi)
+    }
+
+    /// Inverse of [`Self::map_usual_params`]: given target parameter values,
+    /// find unconstrained `[0, 1]` coordinates that map back to them, for
+    /// seeding the optimiser's starting point. Only the coordinates present
+    /// (alpha always, then beta/gamma/phi iff `Some`) are returned, in the
+    /// same order `map_usual_params` expects.
+    fn unmap_usual_params(
+        alpha: f64,
+        beta: Option<f64>,
+        gamma: Option<f64>,
+        phi: Option<f64>,
+    ) -> Vec<f64> {
+        const LOWER: f64 = 1e-4;
+        const ALPHA_UPPER: f64 = 0.9999;
+        const PHI_LOWER: f64 = 0.8;
+        const PHI_UPPER: f64 = 0.98;
+        const MIN_DENOM: f64 = 1e-9;
+
+        let mut out = Vec::with_capacity(4);
+        out.push(((alpha - LOWER) / (ALPHA_UPPER - LOWER)).clamp(0.0, 1.0));
+        if let Some(b) = beta {
+            let denom = (alpha - LOWER).max(MIN_DENOM);
+            out.push(((b - LOWER) / denom).clamp(0.0, 1.0));
+        }
+        if let Some(g) = gamma {
+            let denom = (1.0 - alpha - LOWER).max(MIN_DENOM);
+            out.push(((g - LOWER) / denom).clamp(0.0, 1.0));
+        }
+        if let Some(p) = phi {
+            out.push(((p - PHI_LOWER) / (PHI_UPPER - PHI_LOWER)).clamp(0.0, 1.0));
+        }
+        out
+    }
+
     fn optimize_params(
         &self,
         values: &[f64],
@@ -1063,12 +1388,18 @@ impl ETS {
                     }
                 }
 
+                let mut start = Self::unmap_usual_params(alpha_init, Some(0.01), None, None);
+                start.push(init_level);
+                start.push(init_trend);
+
                 let result = nelder_mead(
                     |p| {
+                        let (alpha, beta, _, _) =
+                            Self::map_usual_params(&p[0..2], true, false, false);
                         self.calculate_likelihood_with_init(
                             values,
-                            p[0],
-                            Some(p[1]),
+                            alpha,
+                            beta,
                             None,
                             None,
                             Some(p[2]),
@@ -1076,13 +1407,8 @@ impl ETS {
                             None,
                         )
                     },
-                    &[alpha_init, 0.01, init_level, init_trend],
-                    Some(&[
-                        (0.0001, 0.9999),
-                        (0.0001, 0.9999),
-                        level_bounds,
-                        trend_bounds,
-                    ]),
+                    &start,
+                    Some(&[(0.0, 1.0), (0.0, 1.0), level_bounds, trend_bounds]),
                     config,
                 );
 
@@ -1103,9 +1429,11 @@ impl ETS {
                     return (0.3, Some(0.1), None, None, init_level, init_trend, None);
                 }
             };
+            let (alpha, beta, _, _) =
+                Self::map_usual_params(&result.optimal_point[0..2], true, false, false);
             return (
-                result.optimal_point[0].clamp(0.0001, 0.9999),
-                Some(result.optimal_point[1].clamp(0.0001, 0.9999)),
+                alpha,
+                beta,
                 None,
                 None,
                 result.optimal_point[2],
@@ -1154,7 +1482,11 @@ impl ETS {
             // 6× cheap (2-4 dim) + 1× joint, yielding ~3-5× speedup.
 
             let quick_config = NelderMeadConfig {
-                max_iter: 500,
+                // Raised from 500 (D-07, 11-06 Task 2): the corrected
+                // recursion's likelihood surface needs more stage-1
+                // exploration per start to rank candidates reliably before
+                // stage 2's joint refinement commits to one of them.
+                max_iter: 1500,
                 tolerance: 1e-10,
                 ..Default::default()
             };
@@ -1163,7 +1495,7 @@ impl ETS {
             match (has_trend, is_damped) {
                 (false, _) => {
                     // Stage 1: optimize alpha, gamma only (2 params)
-                    let smoothing_bounds = [(0.0001, 0.9999), (0.0001, 0.9999)];
+                    let smoothing_bounds = [(0.0, 1.0), (0.0, 1.0)];
                     let mut best_stage1 = f64::MAX;
                     let mut best_alpha = 0.3_f64;
                     let mut best_gamma = 0.1_f64;
@@ -1188,14 +1520,18 @@ impl ETS {
                             }
                         }
 
+                        let start =
+                            Self::unmap_usual_params(alpha_init, None, Some(gamma_init), None);
                         let result = nelder_mead(
                             |p| {
+                                let (alpha, _, gamma, _) =
+                                    Self::map_usual_params(&p[0..2], false, true, false);
                                 let mut buf = seasonal_buf.borrow_mut();
                                 self.calculate_likelihood_with_init_buf(
                                     values,
-                                    p[0],
+                                    alpha,
                                     None,
-                                    Some(p[1]),
+                                    gamma,
                                     None,
                                     Some(init_level),
                                     None,
@@ -1203,40 +1539,47 @@ impl ETS {
                                     &mut buf,
                                 )
                             },
-                            &[alpha_init, gamma_init],
+                            &start,
                             Some(&smoothing_bounds),
                             quick_config,
                         );
 
                         if result.optimal_value < best_stage1 {
                             best_stage1 = result.optimal_value;
-                            best_alpha = result.optimal_point[0];
-                            best_gamma = result.optimal_point[1];
+                            let (alpha, _, gamma, _) = Self::map_usual_params(
+                                &result.optimal_point[0..2],
+                                false,
+                                true,
+                                false,
+                            );
+                            best_alpha = alpha;
+                            best_gamma = gamma.unwrap();
                         }
                     }
 
                     // Stage 2: joint refinement — alpha, gamma, l0, s0[0..period]
                     let n_params = 2 + 1 + period;
                     let mut joint_bounds = Vec::with_capacity(n_params);
-                    joint_bounds.push((0.0001, 0.9999));
-                    joint_bounds.push((0.0001, 0.9999));
+                    joint_bounds.push((0.0, 1.0));
+                    joint_bounds.push((0.0, 1.0));
                     joint_bounds.push(level_bounds);
                     joint_bounds.extend_from_slice(&seasonal_bounds);
 
-                    let mut start = Vec::with_capacity(n_params);
-                    start.push(best_alpha);
-                    start.push(best_gamma);
+                    let mut start =
+                        Self::unmap_usual_params(best_alpha, None, Some(best_gamma), None);
                     start.push(init_level);
                     start.extend_from_slice(&init_seasonals);
 
                     let result = nelder_mead(
                         |p| {
+                            let (alpha, _, gamma, _) =
+                                Self::map_usual_params(&p[0..2], false, true, false);
                             let mut buf = seasonal_buf.borrow_mut();
                             self.calculate_likelihood_with_init_buf(
                                 values,
-                                p[0],
+                                alpha,
                                 None,
-                                Some(p[1]),
+                                gamma,
                                 None,
                                 Some(p[2]),
                                 None,
@@ -1250,11 +1593,13 @@ impl ETS {
                     );
 
                     if result.optimal_value < f64::MAX {
+                        let (alpha, _, gamma, _) =
+                            Self::map_usual_params(&result.optimal_point[0..2], false, true, false);
                         let opt_seasonals = result.optimal_point[3..3 + period].to_vec();
                         (
-                            result.optimal_point[0].clamp(0.0001, 0.9999),
+                            alpha,
                             None,
-                            Some(result.optimal_point[1].clamp(0.0001, 0.9999)),
+                            gamma,
                             None,
                             result.optimal_point[2],
                             init_trend,
@@ -1274,7 +1619,7 @@ impl ETS {
                 }
                 (true, false) => {
                     // Stage 1: optimize alpha, beta, gamma (3 params)
-                    let smoothing_bounds = [(0.0001, 0.9999), (0.0001, 0.9999), (0.0001, 0.9999)];
+                    let smoothing_bounds = [(0.0, 1.0), (0.0, 1.0), (0.0, 1.0)];
                     let mut best_stage1 = f64::MAX;
                     let mut best_alpha = 0.3_f64;
                     let mut best_beta = 0.1_f64;
@@ -1300,14 +1645,18 @@ impl ETS {
                             }
                         }
 
+                        let start =
+                            Self::unmap_usual_params(alpha_init, Some(0.1), Some(gamma_init), None);
                         let result = nelder_mead(
                             |p| {
+                                let (alpha, beta, gamma, _) =
+                                    Self::map_usual_params(&p[0..3], true, true, false);
                                 let mut buf = seasonal_buf.borrow_mut();
                                 self.calculate_likelihood_with_init_buf(
                                     values,
-                                    p[0],
-                                    Some(p[1]),
-                                    Some(p[2]),
+                                    alpha,
+                                    beta,
+                                    gamma,
                                     None,
                                     Some(init_level),
                                     Some(init_trend),
@@ -1315,45 +1664,55 @@ impl ETS {
                                     &mut buf,
                                 )
                             },
-                            &[alpha_init, 0.1, gamma_init],
+                            &start,
                             Some(&smoothing_bounds),
                             quick_config,
                         );
 
                         if result.optimal_value < best_stage1 {
                             best_stage1 = result.optimal_value;
-                            best_alpha = result.optimal_point[0];
-                            best_beta = result.optimal_point[1];
-                            best_gamma = result.optimal_point[2];
+                            let (alpha, beta, gamma, _) = Self::map_usual_params(
+                                &result.optimal_point[0..3],
+                                true,
+                                true,
+                                false,
+                            );
+                            best_alpha = alpha;
+                            best_beta = beta.unwrap();
+                            best_gamma = gamma.unwrap();
                         }
                     }
 
                     // Stage 2: joint — alpha, beta, gamma, l0, b0, s0[0..period]
                     let n_params = 3 + 2 + period;
                     let mut joint_bounds = Vec::with_capacity(n_params);
-                    joint_bounds.push((0.0001, 0.9999));
-                    joint_bounds.push((0.0001, 0.9999));
-                    joint_bounds.push((0.0001, 0.9999));
+                    joint_bounds.push((0.0, 1.0));
+                    joint_bounds.push((0.0, 1.0));
+                    joint_bounds.push((0.0, 1.0));
                     joint_bounds.push(level_bounds);
                     joint_bounds.push(trend_bounds);
                     joint_bounds.extend_from_slice(&seasonal_bounds);
 
-                    let mut start = Vec::with_capacity(n_params);
-                    start.push(best_alpha);
-                    start.push(best_beta);
-                    start.push(best_gamma);
+                    let mut start = Self::unmap_usual_params(
+                        best_alpha,
+                        Some(best_beta),
+                        Some(best_gamma),
+                        None,
+                    );
                     start.push(init_level);
                     start.push(init_trend);
                     start.extend_from_slice(&init_seasonals);
 
                     let result = nelder_mead(
                         |p| {
+                            let (alpha, beta, gamma, _) =
+                                Self::map_usual_params(&p[0..3], true, true, false);
                             let mut buf = seasonal_buf.borrow_mut();
                             self.calculate_likelihood_with_init_buf(
                                 values,
-                                p[0],
-                                Some(p[1]),
-                                Some(p[2]),
+                                alpha,
+                                beta,
+                                gamma,
                                 None,
                                 Some(p[3]),
                                 Some(p[4]),
@@ -1367,11 +1726,13 @@ impl ETS {
                     );
 
                     if result.optimal_value < f64::MAX {
+                        let (alpha, beta, gamma, _) =
+                            Self::map_usual_params(&result.optimal_point[0..3], true, true, false);
                         let opt_seasonals = result.optimal_point[5..5 + period].to_vec();
                         (
-                            result.optimal_point[0].clamp(0.0001, 0.9999),
-                            Some(result.optimal_point[1].clamp(0.0001, 0.9999)),
-                            Some(result.optimal_point[2].clamp(0.0001, 0.9999)),
+                            alpha,
+                            beta,
+                            gamma,
                             None,
                             result.optimal_point[3],
                             result.optimal_point[4],
@@ -1391,17 +1752,15 @@ impl ETS {
                 }
                 (true, true) => {
                     // Stage 1: optimize alpha, beta, gamma, phi (4 params)
-                    let smoothing_bounds = [
-                        (0.0001, 0.9999),
-                        (0.0001, 0.9999),
-                        (0.0001, 0.9999),
-                        (0.8, 0.98),
-                    ];
+                    let smoothing_bounds = [(0.0, 1.0), (0.0, 1.0), (0.0, 1.0), (0.0, 1.0)];
                     let mut best_stage1 = f64::MAX;
-                    let mut best_alpha = 0.3_f64;
-                    let mut best_beta = 0.1_f64;
-                    let mut best_gamma = 0.1_f64;
-                    let mut best_phi = 0.98_f64;
+                    // Keep every stage-1 candidate (D-07, 11-06 Task 2):
+                    // stage 1's cheap ranking can misorder candidates once
+                    // the likelihood surface changed shape after the
+                    // recursion fix, so stage 2 refines from the top few,
+                    // not just the single apparent winner (fixes MAdM
+                    // converging to a worse optimum than R).
+                    let mut stage1_candidates: Vec<(f64, f64, f64, f64, f64)> = Vec::new();
 
                     for &(alpha_init, gamma_init) in &ag_starts {
                         if best_stage1 < f64::MAX {
@@ -1423,82 +1782,120 @@ impl ETS {
                             }
                         }
 
+                        let start = Self::unmap_usual_params(
+                            alpha_init,
+                            Some(0.1),
+                            Some(gamma_init),
+                            Some(0.98),
+                        );
                         let result = nelder_mead(
                             |p| {
+                                let (alpha, beta, gamma, phi) =
+                                    Self::map_usual_params(&p[0..4], true, true, true);
                                 let mut buf = seasonal_buf.borrow_mut();
                                 self.calculate_likelihood_with_init_buf(
                                     values,
-                                    p[0],
-                                    Some(p[1]),
-                                    Some(p[2]),
-                                    Some(p[3]),
+                                    alpha,
+                                    beta,
+                                    gamma,
+                                    phi,
                                     Some(init_level),
                                     Some(init_trend),
                                     Some(&init_seasonals),
                                     &mut buf,
                                 )
                             },
-                            &[alpha_init, 0.1, gamma_init, 0.98],
+                            &start,
                             Some(&smoothing_bounds),
                             quick_config,
                         );
 
+                        let (alpha, beta, gamma, phi) =
+                            Self::map_usual_params(&result.optimal_point[0..4], true, true, true);
+                        stage1_candidates.push((
+                            result.optimal_value,
+                            alpha,
+                            beta.unwrap(),
+                            gamma.unwrap(),
+                            phi.unwrap(),
+                        ));
                         if result.optimal_value < best_stage1 {
                             best_stage1 = result.optimal_value;
-                            best_alpha = result.optimal_point[0];
-                            best_beta = result.optimal_point[1];
-                            best_gamma = result.optimal_point[2];
-                            best_phi = result.optimal_point[3];
                         }
                     }
+
+                    if stage1_candidates.is_empty() {
+                        stage1_candidates.push((f64::MAX, 0.3, 0.1, 0.1, 0.98));
+                    }
+                    stage1_candidates
+                        .sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
                     // Stage 2: joint — alpha, beta, gamma, phi, l0, b0, s0[0..period]
                     let n_params = 4 + 2 + period;
                     let mut joint_bounds = Vec::with_capacity(n_params);
-                    joint_bounds.push((0.0001, 0.9999));
-                    joint_bounds.push((0.0001, 0.9999));
-                    joint_bounds.push((0.0001, 0.9999));
-                    joint_bounds.push((0.8, 0.98));
+                    joint_bounds.push((0.0, 1.0));
+                    joint_bounds.push((0.0, 1.0));
+                    joint_bounds.push((0.0, 1.0));
+                    joint_bounds.push((0.0, 1.0));
                     joint_bounds.push(level_bounds);
                     joint_bounds.push(trend_bounds);
                     joint_bounds.extend_from_slice(&seasonal_bounds);
 
-                    let mut start = Vec::with_capacity(n_params);
-                    start.push(best_alpha);
-                    start.push(best_beta);
-                    start.push(best_gamma);
-                    start.push(best_phi);
-                    start.push(init_level);
-                    start.push(init_trend);
-                    start.extend_from_slice(&init_seasonals);
+                    let mut best_stage2: Option<crate::utils::optimization::NelderMeadResult> =
+                        None;
+                    for &(_, cand_alpha, cand_beta, cand_gamma, cand_phi) in
+                        stage1_candidates.iter().take(3)
+                    {
+                        let mut start = Self::unmap_usual_params(
+                            cand_alpha,
+                            Some(cand_beta),
+                            Some(cand_gamma),
+                            Some(cand_phi),
+                        );
+                        start.push(init_level);
+                        start.push(init_trend);
+                        start.extend_from_slice(&init_seasonals);
 
-                    let result = nelder_mead(
-                        |p| {
-                            let mut buf = seasonal_buf.borrow_mut();
-                            self.calculate_likelihood_with_init_buf(
-                                values,
-                                p[0],
-                                Some(p[1]),
-                                Some(p[2]),
-                                Some(p[3]),
-                                Some(p[4]),
-                                Some(p[5]),
-                                Some(&p[6..6 + period]),
-                                &mut buf,
-                            )
-                        },
-                        &start,
-                        Some(&joint_bounds),
-                        seasonal_config,
-                    );
+                        let candidate_result = nelder_mead(
+                            |p| {
+                                let (alpha, beta, gamma, phi) =
+                                    Self::map_usual_params(&p[0..4], true, true, true);
+                                let mut buf = seasonal_buf.borrow_mut();
+                                self.calculate_likelihood_with_init_buf(
+                                    values,
+                                    alpha,
+                                    beta,
+                                    gamma,
+                                    phi,
+                                    Some(p[4]),
+                                    Some(p[5]),
+                                    Some(&p[6..6 + period]),
+                                    &mut buf,
+                                )
+                            },
+                            &start,
+                            Some(&joint_bounds),
+                            seasonal_config,
+                        );
+
+                        if best_stage2
+                            .as_ref()
+                            .is_none_or(|b| candidate_result.optimal_value < b.optimal_value)
+                        {
+                            best_stage2 = Some(candidate_result);
+                        }
+                    }
+                    let result = best_stage2.expect("stage1_candidates is non-empty");
 
                     if result.optimal_value < f64::MAX {
+                        let (alpha, beta, gamma, phi) =
+                            Self::map_usual_params(&result.optimal_point[0..4], true, true, true);
                         let opt_seasonals = result.optimal_point[6..6 + period].to_vec();
                         (
-                            result.optimal_point[0].clamp(0.0001, 0.9999),
-                            Some(result.optimal_point[1].clamp(0.0001, 0.9999)),
-                            Some(result.optimal_point[2].clamp(0.0001, 0.9999)),
-                            Some(result.optimal_point[3].clamp(0.8, 0.98)),
+                            alpha,
+                            beta,
+                            gamma,
+                            phi,
                             result.optimal_point[4],
                             result.optimal_point[5],
                             Some(opt_seasonals),
@@ -1523,11 +1920,14 @@ impl ETS {
                     // Just alpha (ETS(A,N,N) or ETS(M,N,N))
                     // Pass heuristic init states to avoid redundant initialize_state()
                     // calls inside each Nelder-Mead evaluation.
+                    let start = Self::unmap_usual_params(0.3, None, None, None);
                     let result = nelder_mead(
                         |p| {
+                            let (alpha, _, _, _) =
+                                Self::map_usual_params(&p[0..1], false, false, false);
                             self.calculate_likelihood_with_init(
                                 values,
-                                p[0],
+                                alpha,
                                 None,
                                 None,
                                 None,
@@ -1536,19 +1936,13 @@ impl ETS {
                                 None,
                             )
                         },
-                        &[0.3],
-                        Some(&[(0.0001, 0.9999)]),
+                        &start,
+                        Some(&[(0.0, 1.0)]),
                         config,
                     );
-                    (
-                        result.optimal_point[0].clamp(0.0001, 0.9999),
-                        None,
-                        None,
-                        None,
-                        init_level,
-                        init_trend,
-                        None,
-                    )
+                    let (alpha, _, _, _) =
+                        Self::map_usual_params(&result.optimal_point[0..1], false, false, false);
+                    (alpha, None, None, None, init_level, init_trend, None)
                 }
                 (true, false) => {
                     // alpha, beta (non-damped trend, no seasonal) — shouldn't reach here
@@ -1559,32 +1953,29 @@ impl ETS {
                     // alpha, beta, phi (damped trend, no seasonal)
                     // Pass heuristic init states to avoid redundant initialize_state()
                     // calls inside each Nelder-Mead evaluation.
+                    let start = Self::unmap_usual_params(0.3, Some(0.1), None, Some(0.98));
                     let result = nelder_mead(
                         |p| {
+                            let (alpha, beta, _, phi) =
+                                Self::map_usual_params(&p[0..3], true, false, true);
                             self.calculate_likelihood_with_init(
                                 values,
-                                p[0],
-                                Some(p[1]),
+                                alpha,
+                                beta,
                                 None,
-                                Some(p[2]),
+                                phi,
                                 Some(init_level),
                                 Some(init_trend),
                                 None,
                             )
                         },
-                        &[0.3, 0.1, 0.98],
-                        Some(&[(0.0001, 0.9999), (0.0001, 0.9999), (0.8, 0.98)]),
+                        &start,
+                        Some(&[(0.0, 1.0), (0.0, 1.0), (0.0, 1.0)]),
                         config,
                     );
-                    (
-                        result.optimal_point[0].clamp(0.0001, 0.9999),
-                        Some(result.optimal_point[1].clamp(0.0001, 0.9999)),
-                        None,
-                        Some(result.optimal_point[2].clamp(0.8, 0.98)),
-                        init_level,
-                        init_trend,
-                        None,
-                    )
+                    let (alpha, beta, _, phi) =
+                        Self::map_usual_params(&result.optimal_point[0..3], true, false, true);
+                    (alpha, beta, None, phi, init_level, init_trend, None)
                 }
             }
         }
@@ -1722,6 +2113,391 @@ impl ETS {
     }
 
     /// Internal prediction with intervals and optional exogenous regressors.
+    /// Hyndman, Koehler, Ord & Snyder (2008) ch. 6 forecast-error-variance
+    /// coefficient `c_j = w'F^(j-1)g`: the sensitivity of a forecast `j`
+    /// steps beyond its own innovation to that one innovation, for the
+    /// general state-space form shared by every (trend, season) combination
+    /// with trend in {N,A,Ad} and season in {N,A} (class 1/2; class 3 and
+    /// additive-error + multiplicative-season models are simulated instead
+    /// -- see [`Self::ets_interval_bounds`]). Table 6.1 in that reference
+    /// gives this closed form directly: the level contribution is constant
+    /// at `alpha`; the trend contribution accumulates linearly (undamped)
+    /// or via the same `phi*(1-phi^j)/(1-phi)` damping sum already used for
+    /// point forecasts ([`Self::damped_sum`]); the additive-seasonal
+    /// contribution reappears only every `period` steps, because the single
+    /// seasonal state slot a given innovation updates is next read exactly
+    /// one full cycle later.
+    fn ets_cj(
+        trend: TrendType,
+        seasonal: SeasonalType,
+        alpha: f64,
+        beta: Option<f64>,
+        gamma: Option<f64>,
+        phi: Option<f64>,
+        period: usize,
+        j: usize,
+    ) -> f64 {
+        let trend_term = match trend {
+            TrendType::None => 0.0,
+            TrendType::Additive => beta.unwrap_or(0.0) * j as f64,
+            TrendType::AdditiveDamped => {
+                beta.unwrap_or(0.0) * Self::damped_sum(phi.unwrap_or(1.0), j)
+            }
+        };
+        // R's forecast:::class1 builds G for the seasonal injection at a
+        // fixed matrix row (G[3,1] <- gamma) regardless of whether a trend
+        // row is present. When trend is absent that row is the *second*
+        // seasonal state (not the first), shifting the periodic bump back
+        // by one step: confirmed against `forecast:::class1` directly
+        // (trend present: gamma bump at j = m, 2m, ...; trend absent: at
+        // j = m-1, 2m-1, ...). Rather than replicate R's row layout
+        // (R-notation state ordering differs from this crate's `t % m`
+        // seasonal buffer anyway), this reproduces the same *numeric*
+        // period/phase R's forecast actually reports.
+        let seasonal_term = match seasonal {
+            SeasonalType::Additive if period > 0 => {
+                let has_trend = trend != TrendType::None;
+                let hit = if has_trend {
+                    j % period == 0
+                } else {
+                    (j + 1) % period == 0
+                };
+                if hit {
+                    gamma.unwrap_or(0.0)
+                } else {
+                    0.0
+                }
+            }
+            _ => 0.0,
+        };
+        alpha + trend_term + seasonal_term
+    }
+
+    /// Class-1 (additive error) analytic forecast-error variance for
+    /// h = 1..=horizon: `v_h = sigma2*(1 + sum_{j=1}^{h-1} c_j^2)`.
+    fn ets_forecast_variance(
+        spec: ETSSpec,
+        alpha: f64,
+        beta: Option<f64>,
+        gamma: Option<f64>,
+        phi: Option<f64>,
+        period: usize,
+        sigma2: f64,
+        horizon: usize,
+    ) -> Vec<f64> {
+        let mut variances = Vec::with_capacity(horizon);
+        let mut running_c2 = 0.0;
+        for h in 1..=horizon {
+            if h >= 2 {
+                let c = Self::ets_cj(
+                    spec.trend,
+                    spec.seasonal,
+                    alpha,
+                    beta,
+                    gamma,
+                    phi,
+                    period,
+                    h - 1,
+                );
+                running_c2 += c * c;
+            }
+            variances.push(sigma2 * (1.0 + running_c2));
+        }
+        variances
+    }
+
+    /// Single dispatch entry for ETS prediction-interval bounds, matching
+    /// R `forecast:::forecast.ets`'s class1/class2/class3 split exactly
+    /// (D-08, plan 11-07): class 1 (additive error, season N/A) uses
+    /// [`Self::ets_forecast_variance`] directly. Class 2 (multiplicative
+    /// error, season N/A) and class 3 / additive-error+multiplicative-season
+    /// models (simulation) are added in plan 11-07 Task 2 -- until then this
+    /// arm keeps the pre-11-07 flat `sigma*sqrt(k)` width so multiplicative-
+    /// error callers do not regress to an error.
+    ///
+    /// `point` must already include any exogenous-regressor contribution
+    /// (as produced by [`Self::predict_internal`]); bounds are returned as
+    /// `point ∓ z*sqrt(v_h)`, so the exogenous shift carries through to both
+    /// bounds identically to the point forecast.
+    /// Class-2 (multiplicative error, trend N/A/Ad, season N/A) analytic
+    /// heteroscedastic forecast-error variance, matching R
+    /// `forecast:::class2` exactly: `theta_1 = mu_1^2`,
+    /// `theta_h = mu_h^2 + sigma2*sum_{j=1}^{h-1} c_j^2*theta_{h-j}`,
+    /// `v_h = (1+sigma2)*theta_h - mu_h^2`, reusing the same `c_j`
+    /// coefficients as class 1 (R builds class 2 by calling `class1`
+    /// internally for `mu`/`cj` and layering the heteroscedastic recursion
+    /// on top).
+    fn ets_class2_variance(
+        spec: ETSSpec,
+        alpha: f64,
+        beta: Option<f64>,
+        gamma: Option<f64>,
+        phi: Option<f64>,
+        period: usize,
+        sigma2: f64,
+        point: &[f64],
+        horizon: usize,
+    ) -> Vec<f64> {
+        let mut cj = Vec::with_capacity(horizon.saturating_sub(1));
+        for j in 1..horizon {
+            cj.push(Self::ets_cj(
+                spec.trend,
+                spec.seasonal,
+                alpha,
+                beta,
+                gamma,
+                phi,
+                period,
+                j,
+            ));
+        }
+
+        let mut theta = vec![0.0; horizon];
+        theta[0] = point[0] * point[0];
+        for h in 1..horizon {
+            // h is 0-indexed step (h+1)-ahead; sum_{j=1}^{h} cj[j-1]^2 * theta[h-j]
+            let mut acc = 0.0;
+            for j in 1..=h {
+                acc += cj[j - 1] * cj[j - 1] * theta[h - j];
+            }
+            theta[h] = point[h] * point[h] + sigma2 * acc;
+        }
+
+        (0..horizon)
+            .map(|h| (1.0 + sigma2) * theta[h] - point[h] * point[h])
+            .collect()
+    }
+
+    /// Deterministic seed for the class-3 / A-error+M-season Monte-Carlo
+    /// simulation (D-08, plan 11-07 Task 2): fixed so two calls with the
+    /// same inputs return identical bounds (must_haves: "identical across
+    /// calls").
+    const ETS_SIMULATION_SEED: u64 = 0x4554535f31313037; // ASCII "ETS_1107"
+    /// Number of simulated sample paths, matching R `forecast.ets`'s
+    /// `npaths` default.
+    const ETS_SIMULATION_NPATHS: usize = 5000;
+
+    /// Simulation-based prediction-interval bounds for every
+    /// multiplicative-season model: class 3 (M error, M season, trend !=
+    /// M) and the additive-error+multiplicative-season models R also
+    /// simulates (D-08). Propagates `ETS_SIMULATION_NPATHS` sample paths
+    /// forward from the fitted final state using the model's own one-step
+    /// update recursion (mirroring `Forecaster::fit`'s per-arm update
+    /// equations for `SeasonalType::Multiplicative`) with innovations
+    /// drawn from `N(0, sigma2)` via a fixed-seed RNG, then takes R
+    /// type-7-interpolated empirical quantiles of the simulated
+    /// observations at each horizon step. Point forecasts are *not*
+    /// resampled (R does not resample them either): only the bounds come
+    /// from simulation.
+    #[allow(clippy::too_many_arguments)]
+    fn ets_simulated_bounds(
+        spec: ETSSpec,
+        alpha: f64,
+        beta: Option<f64>,
+        gamma: Option<f64>,
+        phi: Option<f64>,
+        period: usize,
+        sigma2: f64,
+        horizon: usize,
+        level: f64,
+        final_level: f64,
+        final_trend: f64,
+        final_seasonals: &[f64],
+        n_observed: usize,
+    ) -> (Vec<f64>, Vec<f64>) {
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
+
+        let period = period.max(1);
+        let beta_v = beta.unwrap_or(0.0);
+        let gamma_v = gamma.unwrap_or(0.0);
+        let phi_v = phi.unwrap_or(1.0);
+        let sigma = sigma2.max(0.0).sqrt();
+        let is_mult_error = spec.error == ErrorType::Multiplicative;
+
+        let mut samples: Vec<Vec<f64>> =
+            vec![Vec::with_capacity(Self::ETS_SIMULATION_NPATHS); horizon];
+        let mut rng = StdRng::seed_from_u64(Self::ETS_SIMULATION_SEED);
+
+        for _path in 0..Self::ETS_SIMULATION_NPATHS {
+            let mut lvl = final_level;
+            let mut trd = final_trend;
+            let mut seas = final_seasonals.to_vec();
+
+            for h in 1..=horizon {
+                let season_idx = (n_observed + h - 1) % period;
+                let s = if season_idx < seas.len() {
+                    seas[season_idx]
+                } else {
+                    1.0
+                };
+
+                // One-step-ahead forecast from the current simulated
+                // state (mirrors `Forecaster::fit`'s one-step forecast for
+                // `SeasonalType::Multiplicative`).
+                let l_plus_trend = match spec.trend {
+                    TrendType::None => lvl,
+                    TrendType::Additive => lvl + trd,
+                    TrendType::AdditiveDamped => lvl + phi_v * trd,
+                };
+                let fc = l_plus_trend * s;
+
+                // Box-Muller standard normal.
+                let u1: f64 = rng.gen::<f64>().max(1e-300);
+                let u2: f64 = rng.gen::<f64>();
+                let z = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
+                let lvl_prev = lvl;
+
+                let y_sim = if is_mult_error {
+                    let e = z * sigma;
+                    let y = fc * (1.0 + e);
+                    lvl = l_plus_trend * (1.0 + alpha * e);
+                    match spec.trend {
+                        TrendType::None => {}
+                        TrendType::Additive => trd += beta_v * l_plus_trend * e,
+                        TrendType::AdditiveDamped => trd = phi_v * trd + beta_v * l_plus_trend * e,
+                    }
+                    seas[season_idx] = s * (1.0 + gamma_v * e);
+                    y
+                } else {
+                    let err = z * sigma;
+                    let y = fc + err;
+                    if spec.trend == TrendType::None {
+                        // Hyndman direct form for the no-trend case mirrors
+                        // `Forecaster::fit`'s additive-error arm, which
+                        // deseasonalises y directly rather than dividing
+                        // the error by s.
+                        let y_des = if s.abs() > 1e-10 { y / s } else { y };
+                        lvl = alpha * y_des + (1.0 - alpha) * lvl_prev;
+                        seas[season_idx] = if lvl_prev.abs() > 1e-10 {
+                            gamma_v * (y / lvl_prev) + (1.0 - gamma_v) * s
+                        } else {
+                            s
+                        };
+                    } else {
+                        if s.abs() > 1e-10 {
+                            lvl = l_plus_trend + alpha * err / s;
+                            match spec.trend {
+                                TrendType::Additive => trd += beta_v * err / s,
+                                TrendType::AdditiveDamped => trd = phi_v * trd + beta_v * err / s,
+                                TrendType::None => unreachable!(),
+                            }
+                        } else {
+                            lvl = l_plus_trend;
+                            if spec.trend == TrendType::AdditiveDamped {
+                                trd *= phi_v;
+                            }
+                        }
+                        seas[season_idx] = if l_plus_trend.abs() > 1e-10 {
+                            s + gamma_v * err / l_plus_trend
+                        } else {
+                            s
+                        };
+                    }
+                    y
+                };
+
+                samples[h - 1].push(y_sim);
+            }
+        }
+
+        let lower_p = (1.0 - level) / 2.0;
+        let upper_p = (1.0 + level) / 2.0;
+
+        let mut lower = Vec::with_capacity(horizon);
+        let mut upper = Vec::with_capacity(horizon);
+        for sample_h in samples.iter_mut() {
+            sample_h.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            lower.push(Self::quantile_type7(sample_h, lower_p));
+            upper.push(Self::quantile_type7(sample_h, upper_p));
+        }
+        (lower, upper)
+    }
+
+    /// R type-7 (default) empirical quantile interpolation over an
+    /// already-sorted sample.
+    fn quantile_type7(sorted: &[f64], p: f64) -> f64 {
+        let n = sorted.len();
+        if n == 0 {
+            return f64::NAN;
+        }
+        if n == 1 {
+            return sorted[0];
+        }
+        let h = (n as f64 - 1.0) * p;
+        let lo = h.floor() as usize;
+        let hi = (lo + 1).min(n - 1);
+        let frac = h - lo as f64;
+        sorted[lo] + frac * (sorted[hi] - sorted[lo])
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn ets_interval_bounds(
+        spec: ETSSpec,
+        alpha: f64,
+        beta: Option<f64>,
+        gamma: Option<f64>,
+        phi: Option<f64>,
+        period: usize,
+        sigma2: f64,
+        point: &[f64],
+        horizon: usize,
+        level: f64,
+        final_level: f64,
+        final_trend: f64,
+        final_seasonals: &[f64],
+        n_observed: usize,
+    ) -> (Vec<f64>, Vec<f64>) {
+        let z = quantile_normal((1.0 + level) / 2.0);
+
+        if spec.seasonal == SeasonalType::Multiplicative {
+            return Self::ets_simulated_bounds(
+                spec,
+                alpha,
+                beta,
+                gamma,
+                phi,
+                period,
+                sigma2,
+                horizon,
+                level,
+                final_level,
+                final_trend,
+                final_seasonals,
+                n_observed,
+            );
+        }
+
+        match spec.error {
+            ErrorType::Additive => {
+                let variances = Self::ets_forecast_variance(
+                    spec, alpha, beta, gamma, phi, period, sigma2, horizon,
+                );
+                let mut lower = Vec::with_capacity(horizon);
+                let mut upper = Vec::with_capacity(horizon);
+                for h in 0..horizon {
+                    let se = variances[h].sqrt();
+                    lower.push(point[h] - z * se);
+                    upper.push(point[h] + z * se);
+                }
+                (lower, upper)
+            }
+            ErrorType::Multiplicative => {
+                let variances = Self::ets_class2_variance(
+                    spec, alpha, beta, gamma, phi, period, sigma2, point, horizon,
+                );
+                let mut lower = Vec::with_capacity(horizon);
+                let mut upper = Vec::with_capacity(horizon);
+                for h in 0..horizon {
+                    let se = variances[h].max(0.0).sqrt();
+                    lower.push(point[h] - z * se);
+                    upper.push(point[h] + z * se);
+                }
+                (lower, upper)
+            }
+        }
+    }
+
     fn predict_internal_with_intervals(
         &self,
         horizon: usize,
@@ -1729,30 +2505,34 @@ impl ETS {
         confidence: f64,
     ) -> Result<Forecast> {
         let forecast = self.predict_internal(horizon, future_regressors)?;
-        let variance = self.residual_variance.unwrap_or(0.0);
-        let period = self.seasonal_period;
 
         if horizon == 0 {
             return Ok(forecast);
         }
 
-        let z = quantile_normal((1.0 + confidence) / 2.0);
+        let sigma2 = self
+            .interval_sigma2
+            .or(self.residual_variance)
+            .unwrap_or(0.0);
         let preds = forecast.primary();
+        let empty_seasonals: Vec<f64> = Vec::new();
 
-        let mut lower = Vec::with_capacity(horizon);
-        let mut upper = Vec::with_capacity(horizon);
-
-        for h in 1..=horizon {
-            let k = if self.spec.has_seasonal() {
-                ((h - 1) / period) + 1
-            } else {
-                h
-            };
-            let se = (variance * k as f64).sqrt();
-
-            lower.push(preds[h - 1] - z * se);
-            upper.push(preds[h - 1] + z * se);
-        }
+        let (lower, upper) = Self::ets_interval_bounds(
+            self.spec,
+            self.alpha.unwrap_or(0.0),
+            self.beta,
+            self.gamma,
+            self.phi,
+            self.seasonal_period,
+            sigma2,
+            preds,
+            horizon,
+            confidence,
+            self.level.unwrap_or(0.0),
+            self.trend.unwrap_or(0.0),
+            self.seasonals.as_deref().unwrap_or(&empty_seasonals),
+            self.n,
+        );
 
         Ok(Forecast::from_values_with_intervals(
             preds.to_vec(),
@@ -1851,16 +2631,16 @@ impl Forecaster for ETS {
         // Use optimized or heuristic initial states
         let mut level = init_level;
         let mut trend = init_trend;
-        let start_idx = if self.spec.has_seasonal() { period } else { 0 };
+        // R/statsforecast ets convention (D-07): the initial states are
+        // time-0 states (before y_1) -- score and update from t = 0 for
+        // every model, seasonal included (no first-period skip).
+        let start_idx = 0;
+        let is_mult_error = self.spec.error == ErrorType::Multiplicative;
 
         let mut fitted = Vec::with_capacity(self.n);
         let mut residuals = Vec::with_capacity(self.n);
-
-        // Fill initial values
-        for &val in values.iter().take(start_idx) {
-            fitted.push(val);
-            residuals.push(0.0);
-        }
+        let mut sum_sq_errors = 0.0_f64;
+        let mut sum_log_fc = 0.0_f64;
 
         // Process remaining data
         for (t, &y) in values.iter().enumerate().skip(start_idx) {
@@ -1891,7 +2671,22 @@ impl Forecaster for ETS {
             };
 
             fitted.push(forecast);
-            residuals.push(y - forecast);
+            let err = y - forecast;
+            residuals.push(err);
+
+            // R/statsforecast ets convention (D-07): the likelihood/variance
+            // use the relative error (y-fc)/fc for multiplicative-error
+            // models and ln|fc| (not ln|y|); `residuals()` keeps returning
+            // the plain y-fc difference above for API stability.
+            let se = if is_mult_error && forecast.abs() > 1e-10 {
+                err / forecast
+            } else {
+                err
+            };
+            sum_sq_errors += se * se;
+            if is_mult_error {
+                sum_log_fc += forecast.abs().ln();
+            }
 
             // Update state
             let level_prev = level;
@@ -1901,55 +2696,95 @@ impl Forecaster for ETS {
                     level = alpha * y + (1.0 - alpha) * level;
                 }
                 (TrendType::None, SeasonalType::Additive) => {
-                    level = alpha * (y - s) + (1.0 - alpha) * level;
-                    seasonals[season_idx] = gamma * (y - level) + (1.0 - gamma) * s;
+                    // Hyndman direct-error form (D-07, 11-06 Task 2); see
+                    // the matching arm in calculate_likelihood_with_init_buf.
+                    level = level_prev + alpha * err;
+                    seasonals[season_idx] = s + gamma * err;
                 }
                 (TrendType::None, SeasonalType::Multiplicative) => {
-                    let y_des = if s.abs() > 1e-10 { y / s } else { y };
-                    level = alpha * y_des + (1.0 - alpha) * level;
-                    seasonals[season_idx] = if level.abs() > 1e-10 {
-                        gamma * (y / level) + (1.0 - gamma) * s
+                    let fc = level_prev * s;
+                    if is_mult_error {
+                        if fc.abs() > 1e-10 {
+                            let e = (y - fc) / fc;
+                            level = level_prev * (1.0 + alpha * e);
+                            seasonals[season_idx] = s * (1.0 + gamma * e);
+                        }
                     } else {
-                        s
-                    };
+                        let y_des = if s.abs() > 1e-10 { y / s } else { y };
+                        level = alpha * y_des + (1.0 - alpha) * level;
+                        seasonals[season_idx] = if level_prev.abs() > 1e-10 {
+                            gamma * (y / level_prev) + (1.0 - gamma) * s
+                        } else {
+                            s
+                        };
+                    }
                 }
                 (TrendType::Additive, SeasonalType::None) => {
-                    level = alpha * y + (1.0 - alpha) * (level_prev + trend);
-                    trend = beta * (level - level_prev) + (1.0 - beta) * trend;
+                    level = level_prev + trend + alpha * err;
+                    trend += beta * err;
                 }
                 (TrendType::Additive, SeasonalType::Additive) => {
-                    level = alpha * (y - s) + (1.0 - alpha) * (level_prev + trend);
-                    trend = beta * (level - level_prev) + (1.0 - beta) * trend;
-                    seasonals[season_idx] = gamma * (y - level) + (1.0 - gamma) * s;
+                    level = level_prev + trend + alpha * err;
+                    trend += beta * err;
+                    seasonals[season_idx] = s + gamma * err;
                 }
                 (TrendType::Additive, SeasonalType::Multiplicative) => {
-                    let y_des = if s.abs() > 1e-10 { y / s } else { y };
-                    level = alpha * y_des + (1.0 - alpha) * (level_prev + trend);
-                    trend = beta * (level - level_prev) + (1.0 - beta) * trend;
-                    seasonals[season_idx] = if level.abs() > 1e-10 {
-                        gamma * (y / level) + (1.0 - gamma) * s
+                    let l_plus_b = level_prev + trend;
+                    let fc = l_plus_b * s;
+                    if is_mult_error {
+                        if fc.abs() > 1e-10 {
+                            let e = (y - fc) / fc;
+                            level = l_plus_b * (1.0 + alpha * e);
+                            trend += beta * l_plus_b * e;
+                            seasonals[season_idx] = s * (1.0 + gamma * e);
+                        }
                     } else {
-                        s
-                    };
+                        if s.abs() > 1e-10 {
+                            level = l_plus_b + alpha * err / s;
+                            trend += beta * err / s;
+                        } else {
+                            level = l_plus_b;
+                        }
+                        seasonals[season_idx] = if l_plus_b.abs() > 1e-10 {
+                            s + gamma * err / l_plus_b
+                        } else {
+                            s
+                        };
+                    }
                 }
                 (TrendType::AdditiveDamped, SeasonalType::None) => {
-                    level = alpha * y + (1.0 - alpha) * (level_prev + phi * trend);
-                    trend = beta * (level - level_prev) + (1.0 - beta) * phi * trend;
+                    level = level_prev + phi * trend + alpha * err;
+                    trend = phi * trend + beta * err;
                 }
                 (TrendType::AdditiveDamped, SeasonalType::Additive) => {
-                    level = alpha * (y - s) + (1.0 - alpha) * (level_prev + phi * trend);
-                    trend = beta * (level - level_prev) + (1.0 - beta) * phi * trend;
-                    seasonals[season_idx] = gamma * (y - level) + (1.0 - gamma) * s;
+                    level = level_prev + phi * trend + alpha * err;
+                    trend = phi * trend + beta * err;
+                    seasonals[season_idx] = s + gamma * err;
                 }
                 (TrendType::AdditiveDamped, SeasonalType::Multiplicative) => {
-                    let y_des = if s.abs() > 1e-10 { y / s } else { y };
-                    level = alpha * y_des + (1.0 - alpha) * (level_prev + phi * trend);
-                    trend = beta * (level - level_prev) + (1.0 - beta) * phi * trend;
-                    seasonals[season_idx] = if level.abs() > 1e-10 {
-                        gamma * (y / level) + (1.0 - gamma) * s
+                    let l_plus_pb = level_prev + phi * trend;
+                    let fc = l_plus_pb * s;
+                    if is_mult_error {
+                        if fc.abs() > 1e-10 {
+                            let e = (y - fc) / fc;
+                            level = l_plus_pb * (1.0 + alpha * e);
+                            trend = phi * trend + beta * l_plus_pb * e;
+                            seasonals[season_idx] = s * (1.0 + gamma * e);
+                        }
                     } else {
-                        s
-                    };
+                        if s.abs() > 1e-10 {
+                            level = l_plus_pb + alpha * err / s;
+                            trend = phi * trend + beta * err / s;
+                        } else {
+                            level = l_plus_pb;
+                            trend *= phi;
+                        }
+                        seasonals[season_idx] = if l_plus_pb.abs() > 1e-10 {
+                            s + gamma * err / l_plus_pb
+                        } else {
+                            s
+                        };
+                    }
                 }
             }
         }
@@ -1961,19 +2796,39 @@ impl Forecaster for ETS {
         }
         self.fitted = Some(fitted);
 
-        // Calculate residual variance and information criteria
-        // Use actual residual count for AIC calculation (statsforecast compatible)
+        // Calculate residual variance (additive-residual based; used for
+        // prediction intervals only -- see plan 11-07) and information
+        // criteria (R/statsforecast ets convention, D-07):
+        //   loglik = -0.5*(n*ln(sum_sq) + 2*sum_log|fc)  [mult-error term only]
+        // where sum_sq/sum_log_fc were accumulated above using relative
+        // errors + ln|forecast| for multiplicative-error models.
         let valid_slice = &residuals[start_idx..];
-        if !valid_slice.is_empty() {
+        if !valid_slice.is_empty() && sum_sq_errors.is_finite() {
             let variance = crate::simd::sum_of_squares(valid_slice) / valid_slice.len() as f64;
             self.residual_variance = Some(variance);
 
-            // Use actual number of residuals for log-likelihood, not full sample size.
-            // This ensures seasonal models (which skip the first period of residuals)
-            // are not systematically penalized relative to non-seasonal models.
+            // Interval sigma2 (D-08, plan 11-07): R's `forecast.ets` divides
+            // by `n - length(par)` (length(par) = num_params() - 1, since
+            // num_params() also counts sigma^2 itself), not by `n`. Uses
+            // `sum_sq_errors` directly (relative-error basis for
+            // multiplicative-error models, matching the loglik/AIC below)
+            // rather than `variance` above, which is always raw-residual
+            // based regardless of error type.
+            let n_obs_f = valid_slice.len() as f64;
+            let length_par = (self.num_params() as f64 - 1.0).max(1.0);
+            let df = (n_obs_f - length_par).max(1.0);
+            self.interval_sigma2 = Some(sum_sq_errors / df);
+
+            // Floor as in calculate_likelihood_with_init_buf: a perfect fit
+            // (sum_sq_errors == 0) is the global optimum, not degenerate.
+            let sum_sq_errors = sum_sq_errors.max(1e-300);
             let n = valid_slice.len() as f64;
             let k = self.num_params() as f64;
-            let ll = -0.5 * n * (1.0 + variance.ln() + (2.0 * std::f64::consts::PI).ln());
+            let ll = if is_mult_error {
+                -0.5 * (n * sum_sq_errors.ln() + 2.0 * sum_log_fc)
+            } else {
+                -0.5 * (n * sum_sq_errors.ln())
+            };
 
             self.log_likelihood = Some(ll);
             self.aic = Some(-2.0 * ll + 2.0 * k);
@@ -1995,6 +2850,19 @@ impl Forecaster for ETS {
         self.predict_internal(horizon, None)
     }
 
+    /// Prediction intervals follow R `forecast:::forecast.ets`'s own
+    /// class1/class2/class3 dispatch (Hyndman, Koehler, Ord & Snyder 2008
+    /// ch. 6; D-08, plan 11-07):
+    /// - **Class 1** (additive error, trend N/A/Ad, season N/A): analytic
+    ///   `v_h = sigma2*(1 + sum_{j<h} c_j^2)`, exact to 1e-6 relative of R
+    ///   at R's own parameters.
+    /// - **Class 2** (multiplicative error, trend N/A/Ad, season N/A): the
+    ///   same `c_j` coefficients feed R's heteroscedastic `theta_h`
+    ///   recursion, also exact to 1e-6 relative.
+    /// - **Class 3 and additive-error + multiplicative-season models**
+    ///   (MNM/MAM/MAdM, ANM/AAM/AAdM): 5000-path seeded Monte-Carlo
+    ///   simulation with empirical (R type-7) quantiles, within 5%
+    ///   relative of R's half-widths and identical across repeated calls.
     fn predict_with_intervals(&self, horizon: usize, confidence: f64) -> Result<Forecast> {
         if self.exog_ols.is_some() {
             return Err(ForecastError::InvalidParameter(
@@ -2663,21 +3531,12 @@ mod tests {
     }
 
     #[test]
-    fn ets_spec_from_notation_invalid_unstable_combinations() {
-        // MAA and MAdA are unstable per FPP3 taxonomy
-        let result_maa = ETSSpec::from_notation("MAA");
-        assert!(result_maa.is_err());
-        assert!(result_maa
-            .unwrap_err()
-            .to_string()
-            .contains("unstable model combination"));
-
-        let result_mada = ETSSpec::from_notation("MAdA");
-        assert!(result_mada.is_err());
-        assert!(result_mada
-            .unwrap_err()
-            .to_string()
-            .contains("unstable model combination"));
+    fn ets_spec_from_notation_accepts_maa_and_mada() {
+        // Per D-07/Task 3 (phase 11-06): MAA and MAdA are valid R
+        // forecast::ets models (included in R's restrict = TRUE default
+        // set) — from_notation parses them successfully, not an error.
+        assert_eq!(ETSSpec::from_notation("MAA").unwrap(), ETSSpec::maa());
+        assert_eq!(ETSSpec::from_notation("MAdA").unwrap(), ETSSpec::mada());
     }
 
     #[test]
@@ -2718,25 +3577,24 @@ mod tests {
         assert!(ETSSpec::mam().is_valid());
         assert!(ETSSpec::mnm().is_valid());
         assert!(ETSSpec::madm().is_valid());
+        assert!(ETSSpec::maa().is_valid());
+        assert!(ETSSpec::mada().is_valid());
     }
 
     #[test]
-    fn ets_spec_is_valid_unstable_combinations() {
-        // MAA - Multiplicative error + Additive trend + Additive seasonal
-        let maa = ETSSpec::new(
-            ErrorType::Multiplicative,
-            TrendType::Additive,
-            SeasonalType::Additive,
-        );
-        assert!(!maa.is_valid());
+    fn ets_spec_is_r_restricted() {
+        // Per D-07/Task 3 (phase 11-06): R forecast::ets()'s restrict = TRUE
+        // default excludes additive-error models with multiplicative
+        // seasonality (ANM, AAM, AAdM) — everything else, including the
+        // formerly-"unstable" MAA/MAdA, is left in the default pool.
+        assert!(ETSSpec::anm().is_r_restricted());
+        assert!(ETSSpec::aam().is_r_restricted());
+        assert!(ETSSpec::aadm().is_r_restricted());
 
-        // MAdA - Multiplicative error + Damped trend + Additive seasonal
-        let mada = ETSSpec::new(
-            ErrorType::Multiplicative,
-            TrendType::AdditiveDamped,
-            SeasonalType::Additive,
-        );
-        assert!(!mada.is_valid());
+        assert!(!ETSSpec::maa().is_r_restricted());
+        assert!(!ETSSpec::mada().is_r_restricted());
+        assert!(!ETSSpec::mam().is_r_restricted());
+        assert!(!ETSSpec::ann().is_r_restricted());
     }
 
     #[test]
