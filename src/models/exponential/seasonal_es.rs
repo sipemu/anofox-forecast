@@ -10,6 +10,7 @@
 //! - Slot 1: apply SES to y[1], y[13], y[25], ...
 //! - etc.
 
+use super::ets::{ETSSpec, ETS};
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
 use crate::models::{validate_series_complete, Forecaster};
@@ -67,6 +68,19 @@ pub struct SeasonalES {
     residuals: Option<Vec<f64>>,
     /// Residual variance.
     residual_variance: Option<f64>,
+    /// Degrees-of-freedom-corrected sigma2 used by `predict_with_intervals`
+    /// (D-08, plan 11-08): `SSE/(n - (period+1))`. `SeasonalES` applies SES
+    /// independently to each of `period` seasonal slots (see module doc --
+    /// this is NOT a coupled level+seasonal ETS recursion; each slot's
+    /// history and forecast only ever depends on that slot's own values),
+    /// sharing a single `alpha` across all slots, so `p = period` (one
+    /// independent initial level per slot, mirroring plain SES's "initial
+    /// level is an estimated parameter" convention) `+ 1` (the one shared
+    /// alpha), regardless of whether `alpha` was fit-optimized or supplied
+    /// fixed (mirroring `SimpleExponentialSmoothing`'s default convention
+    /// outside its `with_alpha` warm-start exception, which has no
+    /// equivalent constructor here).
+    interval_sigma2: Option<f64>,
     /// Series length.
     n: usize,
     /// Training input values, retained for issue #106.
@@ -89,6 +103,7 @@ impl SeasonalES {
             fitted: None,
             residuals: None,
             residual_variance: None,
+            interval_sigma2: None,
             n: 0,
             training_values_store: None,
             training_regressors_store: None,
@@ -106,6 +121,7 @@ impl SeasonalES {
             fitted: None,
             residuals: None,
             residual_variance: None,
+            interval_sigma2: None,
             n: 0,
             training_values_store: None,
             training_regressors_store: None,
@@ -124,6 +140,7 @@ impl SeasonalES {
             fitted: None,
             residuals: None,
             residual_variance: None,
+            interval_sigma2: None,
             n: 0,
             training_values_store: None,
             training_regressors_store: None,
@@ -328,9 +345,16 @@ impl Forecaster for SeasonalES {
             .copied()
             .collect();
         if !valid_residuals.is_empty() {
-            let variance =
-                crate::simd::sum_of_squares(&valid_residuals) / valid_residuals.len() as f64;
+            let sse = crate::simd::sum_of_squares(&valid_residuals);
+            let variance = sse / valid_residuals.len() as f64;
             self.residual_variance = Some(variance);
+
+            // D-08 (plan 11-08): degrees-of-freedom-corrected sigma2, p =
+            // period (one independent initial level per slot) + 1 (the
+            // one shared alpha) -- see the `interval_sigma2` field doc.
+            let df_params = self.period as f64 + 1.0;
+            let denom = (n as f64 - df_params).max(1.0);
+            self.interval_sigma2 = Some(sse / denom);
         }
 
         self.seasonal_values = Some(seasonal_values);
@@ -370,27 +394,68 @@ impl Forecaster for SeasonalES {
         Ok(Forecast::from_values(predictions))
     }
 
+    /// SeasonalES prediction intervals (D-08, plan 11-08): each seasonal
+    /// slot is forecast via `ETS::ets_interval_bounds` on the equivalent
+    /// ETS(A,N,N) spec (plain SES, matching this model's own per-slot
+    /// `ses_forecast` recursion exactly -- see the `interval_sigma2` field
+    /// doc for why there is no cross-slot ETS(A,N,A)/(M,N,M) coupling to
+    /// route through instead), using this model's shared alpha, that
+    /// slot's own final level (`seasonal_values[slot]`) and the pooled
+    /// df-corrected `interval_sigma2`, at the slot-relative step
+    /// `j = (h-1)/period + 1` (the j-th time *this slot* is forecast, not
+    /// the j-th forecast overall). `error_type` does not change this:
+    /// `fit()` never reads it (kept field, "backward compatibility" per
+    /// its own doc comment) -- the per-slot recursion is always the
+    /// additive-error SES update regardless of its value, so the
+    /// equivalent ETS spec is always ETS(A,N,N), never ETS(M,N,N).
+    /// Replaces the previous `sqrt(1 + 0.1*h)` fan-out, which is neither
+    /// SES's actual variance growth nor slot-relative.
     fn predict_with_intervals(&self, horizon: usize, confidence: f64) -> Result<Forecast> {
         let forecast = self.predict(horizon)?;
-        let variance = self.residual_variance.unwrap_or(0.0);
+        let seasonal_values = self
+            .seasonal_values
+            .as_ref()
+            .ok_or(ForecastError::FitRequired { model: None })?;
+        let sigma2 = self
+            .interval_sigma2
+            .or(self.residual_variance)
+            .unwrap_or(0.0);
 
         if horizon == 0 {
             return Ok(forecast);
         }
 
-        let z = quantile_normal((1.0 + confidence) / 2.0);
         let preds = forecast.primary();
+        let empty_seasonals: Vec<f64> = Vec::new();
 
         let mut lower = Vec::with_capacity(horizon);
         let mut upper = Vec::with_capacity(horizon);
 
-        for h in 0..horizon {
-            // Simple fan-out for intervals
-            let factor = (1.0 + 0.1 * h as f64).sqrt();
-            let se = (variance * factor).sqrt();
+        for h in 1..=horizon {
+            let slot = (h - 1) % self.period;
+            let slot_level = seasonal_values[slot];
+            let j = (h - 1) / self.period + 1;
+            let point_j = vec![slot_level; j];
 
-            lower.push(preds[h] - z * se);
-            upper.push(preds[h] + z * se);
+            let (lower_j, upper_j) = ETS::ets_interval_bounds(
+                ETSSpec::ann(),
+                self.alpha,
+                None,
+                None,
+                None,
+                1,
+                sigma2,
+                &point_j,
+                j,
+                confidence,
+                slot_level,
+                0.0,
+                &empty_seasonals,
+                self.n,
+            );
+
+            lower.push(lower_j[j - 1]);
+            upper.push(upper_j[j - 1]);
         }
 
         Ok(Forecast::from_values_with_intervals(

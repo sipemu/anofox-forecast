@@ -3,6 +3,7 @@
 //! Also known as triple exponential smoothing, this model handles
 //! data with both trend and seasonality.
 
+use super::ets::{ETSSpec, ETS};
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
 use crate::models::{validate_series_complete, Forecaster};
@@ -62,6 +63,15 @@ pub struct HoltWinters {
     residuals: Option<Vec<f64>>,
     /// Residual variance.
     residual_variance: Option<f64>,
+    /// Degrees-of-freedom-corrected sigma2 used by `predict_with_intervals`'s
+    /// `ets_interval_bounds` call (D-08, plan 11-08): `SSE/(n - p)`. `p`
+    /// always counts the initial level, trend, and the seasonal_period-1
+    /// free seasonal states (seasonal indices are constrained -- sum-to-
+    /// zero for additive, mean-to-one for multiplicative -- so only
+    /// `period - 1` are free, matching R/`ETS::num_params()`'s
+    /// convention); when `fit()` optimized the smoothing parameters
+    /// (`optimize`), `p` also counts alpha, beta and gamma.
+    interval_sigma2: Option<f64>,
     /// Original series length.
     n: usize,
     /// Training input values, retained for issue #106.
@@ -92,6 +102,7 @@ impl HoltWinters {
             fitted: None,
             residuals: None,
             residual_variance: None,
+            interval_sigma2: None,
             n: 0,
             training_values_store: None,
             training_regressors_store: None,
@@ -129,6 +140,7 @@ impl HoltWinters {
             fitted: None,
             residuals: None,
             residual_variance: None,
+            interval_sigma2: None,
             n: 0,
             training_values_store: None,
             training_regressors_store: None,
@@ -436,9 +448,25 @@ impl Forecaster for HoltWinters {
         // Calculate residual variance
         let valid_residuals: Vec<f64> = residuals[period..].to_vec();
         if !valid_residuals.is_empty() {
-            let variance =
-                crate::simd::sum_of_squares(&valid_residuals) / valid_residuals.len() as f64;
+            let sse = crate::simd::sum_of_squares(&valid_residuals);
+            let variance = sse / valid_residuals.len() as f64;
             self.residual_variance = Some(variance);
+
+            // D-08 (plan 11-08): degrees-of-freedom-corrected sigma2 for
+            // `predict_with_intervals`'s ETS(A,A,A)/(A,A,M) interval. `p`
+            // always counts the initial level, trend, and the free
+            // (period-1) seasonal states; when `fit()` optimized the
+            // smoothing parameters, `p` also counts alpha, beta and
+            // gamma -- matching `ETS::num_params()`'s structural
+            // convention for the optimized case.
+            let base_params = 2.0 + (period as f64 - 1.0);
+            let df_params = if self.optimize {
+                base_params + 3.0
+            } else {
+                base_params
+            };
+            let denom = (self.n as f64 - df_params).max(1.0);
+            self.interval_sigma2 = Some(sse / denom);
         }
 
         self.residuals = Some(residuals);
@@ -487,6 +515,22 @@ impl Forecaster for HoltWinters {
         Ok(Forecast::from_values(predictions))
     }
 
+    /// HoltWinters prediction intervals (D-08, plan 11-08): routed through
+    /// `ETS::ets_interval_bounds` on the equivalent ETS(A,A,A) (additive
+    /// season) / ETS(A,A,M) (multiplicative season) spec, using this
+    /// model's own alpha/beta/gamma, final level/trend/seasonals and
+    /// df-corrected `interval_sigma2`. Both arms use `ErrorType::Additive`
+    /// -- `fit()`'s residual is `y - forecast` (raw/additive) for *both*
+    /// seasonal types (see the `error`/update equations above: the
+    /// multiplicative-season update deseasonalises `y` before computing
+    /// the level update, but the recorded residual itself is still the
+    /// raw forecast error, never `(y-forecast)/forecast`), so this crate's
+    /// HoltWinters is always the additive-error member of its ETS
+    /// equivalence class. `ets_interval_bounds` dispatches multiplicative-
+    /// season models (both arms here, when seasonal is `Multiplicative`)
+    /// to Monte-Carlo simulation, matching R `forecast.ets`'s own
+    /// ETS(A,A,M) simulation fallback. Replaces the previous
+    /// `sigma*sqrt(ceil(h/period))` approximation.
     fn predict_with_intervals(&self, horizon: usize, level: f64) -> Result<Forecast> {
         let l = self
             .level
@@ -498,36 +542,57 @@ impl Forecaster for HoltWinters {
             .seasonals
             .as_ref()
             .ok_or(ForecastError::FitRequired { model: None })?;
-        let variance = self.residual_variance.unwrap_or(0.0);
+        let sigma2 = self
+            .interval_sigma2
+            .or(self.residual_variance)
+            .unwrap_or(0.0);
+        let alpha = self
+            .alpha
+            .ok_or(ForecastError::FitRequired { model: None })?;
+        let beta = self
+            .beta
+            .ok_or(ForecastError::FitRequired { model: None })?;
+        let gamma = self
+            .gamma
+            .ok_or(ForecastError::FitRequired { model: None })?;
         let period = self.seasonal_period;
 
         if horizon == 0 {
             return Ok(Forecast::new());
         }
 
-        let z = quantile_normal((1.0 + level) / 2.0);
+        let predictions: Vec<f64> = (1..=horizon)
+            .map(|h| {
+                let season_idx = (self.n + h - 1) % period;
+                let s = seasonals[season_idx];
+                match self.seasonal_type {
+                    SeasonalType::Additive => l + (h as f64) * b + s,
+                    SeasonalType::Multiplicative => (l + (h as f64) * b) * s,
+                }
+            })
+            .collect();
 
-        let mut predictions = Vec::with_capacity(horizon);
-        let mut lower = Vec::with_capacity(horizon);
-        let mut upper = Vec::with_capacity(horizon);
+        let spec = match self.seasonal_type {
+            SeasonalType::Additive => ETSSpec::aaa(),
+            SeasonalType::Multiplicative => ETSSpec::aam(),
+        };
 
-        for h in 1..=horizon {
-            let season_idx = (self.n + h - 1) % period;
-            let s = seasonals[season_idx];
-
-            let pred = match self.seasonal_type {
-                SeasonalType::Additive => l + (h as f64) * b + s,
-                SeasonalType::Multiplicative => (l + (h as f64) * b) * s,
-            };
-            predictions.push(pred);
-
-            // Simplified standard error approximation
-            let k = ((h - 1) / period) + 1;
-            let se = (variance * k as f64).sqrt();
-
-            lower.push(pred - z * se);
-            upper.push(pred + z * se);
-        }
+        let (lower, upper) = ETS::ets_interval_bounds(
+            spec,
+            alpha,
+            Some(beta),
+            Some(gamma),
+            None,
+            period,
+            sigma2,
+            &predictions,
+            horizon,
+            level,
+            l,
+            b,
+            seasonals,
+            self.n,
+        );
 
         Ok(Forecast::from_values_with_intervals(
             predictions,

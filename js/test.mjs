@@ -199,15 +199,27 @@ test('ETSForecaster.isValidSpec', () => {
   assert.strictEqual(ETSForecaster.isValidSpec("A", "A", "A"), true);
   assert.strictEqual(ETSForecaster.isValidSpec("M", "A", "M"), true);
 
-  // Invalid combinations (unstable)
-  assert.strictEqual(ETSForecaster.isValidSpec("M", "A", "A"), false);
-  assert.strictEqual(ETSForecaster.isValidSpec("M", "Ad", "A"), false);
+  // MAA / MAdA are valid R forecast::ets() models and part of R's default
+  // restrict = TRUE automatic set (forecast 9.0.2). The core crate dropped
+  // the old FPP3 "unstable" rejection for R parity (ETSSpec::is_valid(),
+  // see CHANGELOG 0.16.0 and tests/ets_r_reference.rs, which fits MAA/MAdA
+  // at R's own parameters).
+  assert.strictEqual(ETSForecaster.isValidSpec("M", "A", "A"), true);
+  assert.strictEqual(ETSForecaster.isValidSpec("M", "Ad", "A"), true);
+
+  // Unknown component codes are still rejected
+  assert.strictEqual(ETSForecaster.isValidSpec("X", "A", "A"), false);
 });
 
-test('ETSForecaster rejects unstable MAA', () => {
-  assert.throws(() => {
-    new ETSForecaster("M", "A", "A", 12);
-  });
+test('ETSForecaster accepts MAA / MAdA (R parity)', () => {
+  const ts = createSeasonalSeries();
+  for (const trend of ["A", "Ad"]) {
+    const model = new ETSForecaster("M", trend, "A", 12);
+    model.fit(ts);
+    const forecast = model.predict(6);
+    assert.strictEqual(forecast.values.length, 6);
+    assert.ok(forecast.values.every(Number.isFinite));
+  }
 });
 
 test('AutoETSForecaster', () => {

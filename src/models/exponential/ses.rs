@@ -2,6 +2,7 @@
 //!
 //! SES is suitable for forecasting data with no clear trend or seasonality.
 
+use super::ets::{ETSSpec, ETS};
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
 use crate::models::{validate_series_complete, FittedParams, Forecaster};
@@ -51,6 +52,15 @@ pub struct SimpleExponentialSmoothing {
     residuals: Option<Vec<f64>>,
     /// Residual variance for prediction intervals.
     residual_variance: Option<f64>,
+    /// Degrees-of-freedom-corrected sigma2 used by `predict_with_intervals`'s
+    /// `ets_interval_bounds` call (D-08, plan 11-08): `SSE/(n - p)` where
+    /// `p` is 2 (alpha and the initial level are both estimated, as in R's
+    /// `ses()`) when alpha was fit by `fit()`, or 1 when alpha was supplied
+    /// directly and is not re-estimated (`with_alpha`'s warm-start,
+    /// `skip_optimization`). Kept separate from `residual_variance` (still
+    /// `SSE/(n-1)`, unchanged, still backing `fitted_values_with_intervals`)
+    /// for the same reason 11-07 introduced `ETS::interval_sigma2`.
+    interval_sigma2: Option<f64>,
     /// Original series length.
     n: usize,
     /// Whether to skip optimization when fit() is called (warm-start mode).
@@ -74,6 +84,7 @@ impl SimpleExponentialSmoothing {
             fitted: None,
             residuals: None,
             residual_variance: None,
+            interval_sigma2: None,
             n: 0,
             skip_optimization: false,
             training_values_store: None,
@@ -92,6 +103,7 @@ impl SimpleExponentialSmoothing {
             fitted: None,
             residuals: None,
             residual_variance: None,
+            interval_sigma2: None,
             n: 0,
             skip_optimization: false,
             training_values_store: None,
@@ -116,6 +128,7 @@ impl SimpleExponentialSmoothing {
             fitted: None,
             residuals: None,
             residual_variance: None,
+            interval_sigma2: None,
             n: 0,
             skip_optimization: true,
             training_values_store: None,
@@ -218,9 +231,20 @@ impl Forecaster for SimpleExponentialSmoothing {
         // Calculate residual variance (excluding first observation)
         let valid_residuals: Vec<f64> = residuals[1..].to_vec();
         if !valid_residuals.is_empty() {
-            let variance =
-                crate::simd::sum_of_squares(&valid_residuals) / valid_residuals.len() as f64;
+            let sse = crate::simd::sum_of_squares(&valid_residuals);
+            let variance = sse / valid_residuals.len() as f64;
             self.residual_variance = Some(variance);
+
+            // D-08 (plan 11-08): degrees-of-freedom-corrected sigma2 for
+            // `predict_with_intervals`'s ETS(A,N,N) interval, matching R
+            // `ses()`'s convention (`sigma2 = SSE/(n - p)`). `p = 2` when
+            // alpha was estimated by this `fit()` call (alpha and the
+            // initial level both count as estimated parameters, as in R);
+            // `p = 1` when alpha was supplied fixed via `with_alpha` and
+            // is not re-estimated here (only the level is "fresh").
+            let df_params = if self.skip_optimization { 1.0 } else { 2.0 };
+            let denom = (self.n as f64 - df_params).max(1.0);
+            self.interval_sigma2 = Some(sse / denom);
         }
 
         self.residuals = Some(residuals);
@@ -250,11 +274,23 @@ impl Forecaster for SimpleExponentialSmoothing {
         Ok(Forecast::from_values(predictions))
     }
 
+    /// SES prediction intervals (D-08, plan 11-08): routed through
+    /// `ETS::ets_interval_bounds` on the equivalent ETS(A,N,N) spec,
+    /// using this model's own alpha, final level and df-corrected
+    /// `interval_sigma2` (falling back to the uncorrected
+    /// `residual_variance` only if `fit()` produced no valid residuals,
+    /// e.g. a single-observation series). Replaces the previous
+    /// `1 + sum_{j=1}^{h-1} (1-alpha)^{2j}` factor, which does not match
+    /// SES's actual forecast-error variance (`1 + alpha^2*(h-1)`, the
+    /// ETS(A,N,N) class-1 special case where `c_j = alpha` for every `j`).
     fn predict_with_intervals(&self, horizon: usize, level: f64) -> Result<Forecast> {
         let current_level = self
             .level
             .ok_or(ForecastError::FitRequired { model: None })?;
-        let variance = self.residual_variance.unwrap_or(0.0);
+        let sigma2 = self
+            .interval_sigma2
+            .or(self.residual_variance)
+            .unwrap_or(0.0);
         let alpha = self
             .alpha
             .ok_or(ForecastError::FitRequired { model: None })?;
@@ -263,30 +299,25 @@ impl Forecaster for SimpleExponentialSmoothing {
             return Ok(Forecast::new());
         }
 
-        let z = quantile_normal((1.0 + level) / 2.0);
         let predictions = vec![current_level; horizon];
-        let mut lower = Vec::with_capacity(horizon);
-        let mut upper = Vec::with_capacity(horizon);
+        let empty_seasonals: Vec<f64> = Vec::new();
 
-        for h in 1..=horizon {
-            // Variance increases with forecast horizon
-            // Var(e_{n+h}) = sigma^2 * (1 + sum_{j=1}^{h-1} (1-alpha)^{2j})
-            // = sigma^2 * (1 + (1-alpha)^2 * (1 - (1-alpha)^{2(h-1)}) / (1 - (1-alpha)^2))
-            let factor = if h == 1 {
-                1.0
-            } else {
-                let beta = 1.0 - alpha;
-                let beta2 = beta * beta;
-                if (1.0 - beta2).abs() < 1e-10 {
-                    h as f64
-                } else {
-                    1.0 + beta2 * (1.0 - beta2.powi((h - 1) as i32)) / (1.0 - beta2)
-                }
-            };
-            let se = (variance * factor).sqrt();
-            lower.push(current_level - z * se);
-            upper.push(current_level + z * se);
-        }
+        let (lower, upper) = ETS::ets_interval_bounds(
+            ETSSpec::ann(),
+            alpha,
+            None,
+            None,
+            None,
+            1,
+            sigma2,
+            &predictions,
+            horizon,
+            level,
+            current_level,
+            0.0,
+            &empty_seasonals,
+            self.n,
+        );
 
         Ok(Forecast::from_values_with_intervals(
             predictions,
