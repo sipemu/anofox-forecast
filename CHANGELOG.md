@@ -7,17 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.16.0] - Unreleased
+## [0.16.0] - 2026-10-10
 
-Statistical correctness fixes for the ADF and KPSS stationarity tests
-(DIAG-01, DIAG-02). Backward-compatible: `adf_test`/`kpss_test`/
-`test_stationarity` keep their public signatures and `StationarityResult`/
-`CriticalValues` keep their field layout; new functionality is additive.
+Statistical correctness release: stationarity tests (ADF/KPSS), Theta,
+ETS likelihood/constraints/candidate pool/prediction intervals, and
+TBATS/MSTL/GARCH prediction intervals are now verified against R
+(`urca`/`tseries`/`forecast`) and statsforecast reference values.
+Public signatures are unchanged and new API is additive, but **numerical
+outputs change** (p-values, selected models, fitted parameters, interval
+widths) wherever the previous results were incorrect.
 
-> **Note:** this CHANGELOG section may show entries from sibling Phase 11
-> fix PRs that land first — that overlap is expected (all Phase 11 branches
-> share the same `0.16.0` section header) and is resolved by keeping every
-> block when merging, not by dropping one.
+AutoARIMA order-selection fixes (PR #223) are not part of this release.
 
 ### Fixed
 
