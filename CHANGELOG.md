@@ -62,6 +62,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`ETSSpec::is_r_restricted(&self) -> bool`** — true for additive-error models with
   multiplicative seasonality (`ANM`, `AAM`, `AAdM`), R `forecast::ets(restrict = TRUE)`'s exclusion.
 - **`ETSSpec::maa()`/`ETSSpec::mada()`** constructors for `ETS(M,A,A)`/`ETS(M,Ad,A)`.
+- **ETS prediction intervals were a flat `sigma*sqrt(ceil(h/m))` width using an uncorrected,
+  raw-residual-basis variance — the same width for every model shape, regardless of error type,
+  trend, or how the seasonal component actually propagates uncertainty.** Intervals now follow
+  Hyndman, Koehler, Ord & Snyder (2008) ch. 6 exactly, matching R `forecast:::forecast.ets`'s own
+  class1/class2/class3 dispatch:
+  - **Class 1** (additive error, trend N/A/Ad, season N/A): analytic variance
+    `v_h = sigma2*(1 + sum_{j=1}^{h-1} c_j^2)` via the closed-form `c_j = w'F^(j-1)g` coefficient
+    (level term constant `alpha`; trend term linear or damped-sum; additive-seasonal term periodic
+    every `period` steps). Matches R to 1e-6 relative at R's own fitted parameters, h=1..24, for
+    all six (trend, season) combinations — `tests/ets_intervals_reference.rs::ets_class1_intervals_match_r`.
+  - **Class 2** (multiplicative error, trend N/A/Ad, season N/A): the same `c_j` coefficients feed
+    R's heteroscedastic `theta_h` recursion (`theta_1=mu_1^2`,
+    `theta_h=mu_h^2+sigma2*sum_j c_j^2*theta_{h-j}`, `v_h=(1+sigma2)*theta_h-mu_h^2`). Also exact to
+    1e-6 relative — `ets_class2_intervals_match_r`.
+  - **Class 3 and additive-error+multiplicative-season models** (MNM/MAM/MAdM, ANM/AAM/AAdM):
+    5000-path seeded Monte-Carlo simulation propagating the model's own one-step update recursion,
+    empirical quantiles via R type-7 interpolation; within 5% relative of R's 95% half-widths and
+    identical across repeated calls — `ets_class3_and_restricted_intervals_near_r`. AirPassengers
+    ETS(M,A,M) 95% half-width: before → after vs R (R's own half-width in parentheses): h=1
+    0.07 → 35.3 (R: 35.0); h=24 0.10 → 100.0 (R: 103.5).
+  - Measured Monte-Carlo coverage of the resulting 95% intervals: reduced test (300 local-level
+    reps, n=200, h=1..12) mean coverage 0.9500; full `#[ignore]` test (2000 reps each) ANN 0.9457,
+    AAdN 0.9331, MAM 0.9359 — `ets_interval_coverage_reduced`/`ets_interval_coverage`.
+  - **Interval `sigma2` is now degrees-of-freedom corrected** (`sum(e^2)/(n-length(par))`,
+    R's convention) and, for multiplicative-error models, computed on the *relative*-error basis
+    the likelihood already uses — not the raw `(y-fc)` basis `residual_variance` (still used for
+    AIC/AICc/BIC/loglik, unchanged) always used. New `ETS::interval_sigma2` field.
+  - Fixed `quantile_normal` (`src/utils/stats.rs`) from the Abramowitz & Stegun 26.2.23
+    approximation (~4.5e-4 max absolute error) to Peter Acklam's rational approximation
+    (~1.15e-9 relative error) — required to hit the 1e-6-relative class-1/2 parity above; a
+    pre-existing (minor) imprecision in every other interval-producing model in the crate that
+    uses `quantile_normal` is incidentally improved too.
 
 ## [0.15.10] - 2026-09-09
 

@@ -2219,6 +2219,218 @@ impl ETS {
     /// (as produced by [`Self::predict_internal`]); bounds are returned as
     /// `point ∓ z*sqrt(v_h)`, so the exogenous shift carries through to both
     /// bounds identically to the point forecast.
+    /// Class-2 (multiplicative error, trend N/A/Ad, season N/A) analytic
+    /// heteroscedastic forecast-error variance, matching R
+    /// `forecast:::class2` exactly: `theta_1 = mu_1^2`,
+    /// `theta_h = mu_h^2 + sigma2*sum_{j=1}^{h-1} c_j^2*theta_{h-j}`,
+    /// `v_h = (1+sigma2)*theta_h - mu_h^2`, reusing the same `c_j`
+    /// coefficients as class 1 (R builds class 2 by calling `class1`
+    /// internally for `mu`/`cj` and layering the heteroscedastic recursion
+    /// on top).
+    fn ets_class2_variance(
+        spec: ETSSpec,
+        alpha: f64,
+        beta: Option<f64>,
+        gamma: Option<f64>,
+        phi: Option<f64>,
+        period: usize,
+        sigma2: f64,
+        point: &[f64],
+        horizon: usize,
+    ) -> Vec<f64> {
+        let mut cj = Vec::with_capacity(horizon.saturating_sub(1));
+        for j in 1..horizon {
+            cj.push(Self::ets_cj(
+                spec.trend,
+                spec.seasonal,
+                alpha,
+                beta,
+                gamma,
+                phi,
+                period,
+                j,
+            ));
+        }
+
+        let mut theta = vec![0.0; horizon];
+        theta[0] = point[0] * point[0];
+        for h in 1..horizon {
+            // h is 0-indexed step (h+1)-ahead; sum_{j=1}^{h} cj[j-1]^2 * theta[h-j]
+            let mut acc = 0.0;
+            for j in 1..=h {
+                acc += cj[j - 1] * cj[j - 1] * theta[h - j];
+            }
+            theta[h] = point[h] * point[h] + sigma2 * acc;
+        }
+
+        (0..horizon)
+            .map(|h| (1.0 + sigma2) * theta[h] - point[h] * point[h])
+            .collect()
+    }
+
+    /// Deterministic seed for the class-3 / A-error+M-season Monte-Carlo
+    /// simulation (D-08, plan 11-07 Task 2): fixed so two calls with the
+    /// same inputs return identical bounds (must_haves: "identical across
+    /// calls").
+    const ETS_SIMULATION_SEED: u64 = 0x4554535f31313037; // ASCII "ETS_1107"
+    /// Number of simulated sample paths, matching R `forecast.ets`'s
+    /// `npaths` default.
+    const ETS_SIMULATION_NPATHS: usize = 5000;
+
+    /// Simulation-based prediction-interval bounds for every
+    /// multiplicative-season model: class 3 (M error, M season, trend !=
+    /// M) and the additive-error+multiplicative-season models R also
+    /// simulates (D-08). Propagates `ETS_SIMULATION_NPATHS` sample paths
+    /// forward from the fitted final state using the model's own one-step
+    /// update recursion (mirroring `Forecaster::fit`'s per-arm update
+    /// equations for `SeasonalType::Multiplicative`) with innovations
+    /// drawn from `N(0, sigma2)` via a fixed-seed RNG, then takes R
+    /// type-7-interpolated empirical quantiles of the simulated
+    /// observations at each horizon step. Point forecasts are *not*
+    /// resampled (R does not resample them either): only the bounds come
+    /// from simulation.
+    #[allow(clippy::too_many_arguments)]
+    fn ets_simulated_bounds(
+        spec: ETSSpec,
+        alpha: f64,
+        beta: Option<f64>,
+        gamma: Option<f64>,
+        phi: Option<f64>,
+        period: usize,
+        sigma2: f64,
+        horizon: usize,
+        level: f64,
+        final_level: f64,
+        final_trend: f64,
+        final_seasonals: &[f64],
+        n_observed: usize,
+    ) -> (Vec<f64>, Vec<f64>) {
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
+
+        let period = period.max(1);
+        let beta_v = beta.unwrap_or(0.0);
+        let gamma_v = gamma.unwrap_or(0.0);
+        let phi_v = phi.unwrap_or(1.0);
+        let sigma = sigma2.max(0.0).sqrt();
+        let is_mult_error = spec.error == ErrorType::Multiplicative;
+
+        let mut samples: Vec<Vec<f64>> =
+            vec![Vec::with_capacity(Self::ETS_SIMULATION_NPATHS); horizon];
+        let mut rng = StdRng::seed_from_u64(Self::ETS_SIMULATION_SEED);
+
+        for _path in 0..Self::ETS_SIMULATION_NPATHS {
+            let mut lvl = final_level;
+            let mut trd = final_trend;
+            let mut seas = final_seasonals.to_vec();
+
+            for h in 1..=horizon {
+                let season_idx = (n_observed + h - 1) % period;
+                let s = if season_idx < seas.len() {
+                    seas[season_idx]
+                } else {
+                    1.0
+                };
+
+                // One-step-ahead forecast from the current simulated
+                // state (mirrors `Forecaster::fit`'s one-step forecast for
+                // `SeasonalType::Multiplicative`).
+                let l_plus_trend = match spec.trend {
+                    TrendType::None => lvl,
+                    TrendType::Additive => lvl + trd,
+                    TrendType::AdditiveDamped => lvl + phi_v * trd,
+                };
+                let fc = l_plus_trend * s;
+
+                // Box-Muller standard normal.
+                let u1: f64 = rng.gen::<f64>().max(1e-300);
+                let u2: f64 = rng.gen::<f64>();
+                let z = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
+                let lvl_prev = lvl;
+
+                let y_sim = if is_mult_error {
+                    let e = z * sigma;
+                    let y = fc * (1.0 + e);
+                    lvl = l_plus_trend * (1.0 + alpha * e);
+                    match spec.trend {
+                        TrendType::None => {}
+                        TrendType::Additive => trd += beta_v * l_plus_trend * e,
+                        TrendType::AdditiveDamped => trd = phi_v * trd + beta_v * l_plus_trend * e,
+                    }
+                    seas[season_idx] = s * (1.0 + gamma_v * e);
+                    y
+                } else {
+                    let err = z * sigma;
+                    let y = fc + err;
+                    if spec.trend == TrendType::None {
+                        // Hyndman direct form for the no-trend case mirrors
+                        // `Forecaster::fit`'s additive-error arm, which
+                        // deseasonalises y directly rather than dividing
+                        // the error by s.
+                        let y_des = if s.abs() > 1e-10 { y / s } else { y };
+                        lvl = alpha * y_des + (1.0 - alpha) * lvl_prev;
+                        seas[season_idx] = if lvl_prev.abs() > 1e-10 {
+                            gamma_v * (y / lvl_prev) + (1.0 - gamma_v) * s
+                        } else {
+                            s
+                        };
+                    } else {
+                        if s.abs() > 1e-10 {
+                            lvl = l_plus_trend + alpha * err / s;
+                            match spec.trend {
+                                TrendType::Additive => trd += beta_v * err / s,
+                                TrendType::AdditiveDamped => trd = phi_v * trd + beta_v * err / s,
+                                TrendType::None => unreachable!(),
+                            }
+                        } else {
+                            lvl = l_plus_trend;
+                            if spec.trend == TrendType::AdditiveDamped {
+                                trd *= phi_v;
+                            }
+                        }
+                        seas[season_idx] = if l_plus_trend.abs() > 1e-10 {
+                            s + gamma_v * err / l_plus_trend
+                        } else {
+                            s
+                        };
+                    }
+                    y
+                };
+
+                samples[h - 1].push(y_sim);
+            }
+        }
+
+        let lower_p = (1.0 - level) / 2.0;
+        let upper_p = (1.0 + level) / 2.0;
+
+        let mut lower = Vec::with_capacity(horizon);
+        let mut upper = Vec::with_capacity(horizon);
+        for sample_h in samples.iter_mut() {
+            sample_h.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            lower.push(Self::quantile_type7(sample_h, lower_p));
+            upper.push(Self::quantile_type7(sample_h, upper_p));
+        }
+        (lower, upper)
+    }
+
+    /// R type-7 (default) empirical quantile interpolation over an
+    /// already-sorted sample.
+    fn quantile_type7(sorted: &[f64], p: f64) -> f64 {
+        let n = sorted.len();
+        if n == 0 {
+            return f64::NAN;
+        }
+        if n == 1 {
+            return sorted[0];
+        }
+        let h = (n as f64 - 1.0) * p;
+        let lo = h.floor() as usize;
+        let hi = (lo + 1).min(n - 1);
+        let frac = h - lo as f64;
+        sorted[lo] + frac * (sorted[hi] - sorted[lo])
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn ets_interval_bounds(
         spec: ETSSpec,
@@ -2231,11 +2443,33 @@ impl ETS {
         point: &[f64],
         horizon: usize,
         level: f64,
+        final_level: f64,
+        final_trend: f64,
+        final_seasonals: &[f64],
+        n_observed: usize,
     ) -> (Vec<f64>, Vec<f64>) {
         let z = quantile_normal((1.0 + level) / 2.0);
 
+        if spec.seasonal == SeasonalType::Multiplicative {
+            return Self::ets_simulated_bounds(
+                spec,
+                alpha,
+                beta,
+                gamma,
+                phi,
+                period,
+                sigma2,
+                horizon,
+                level,
+                final_level,
+                final_trend,
+                final_seasonals,
+                n_observed,
+            );
+        }
+
         match spec.error {
-            ErrorType::Additive if spec.seasonal != SeasonalType::Multiplicative => {
+            ErrorType::Additive => {
                 let variances = Self::ets_forecast_variance(
                     spec, alpha, beta, gamma, phi, period, sigma2, horizon,
                 );
@@ -2248,23 +2482,16 @@ impl ETS {
                 }
                 (lower, upper)
             }
-            _ => {
-                // TODO(plan 11-07 Task 2): class 2 analytic theta_h
-                // recursion, and simulation-based bounds for every
-                // multiplicative-season model (class 3, plus
-                // additive-error + multiplicative-season).
-                let k_period = period.max(1);
+            ErrorType::Multiplicative => {
+                let variances = Self::ets_class2_variance(
+                    spec, alpha, beta, gamma, phi, period, sigma2, point, horizon,
+                );
                 let mut lower = Vec::with_capacity(horizon);
                 let mut upper = Vec::with_capacity(horizon);
-                for h in 1..=horizon {
-                    let k = if spec.has_seasonal() {
-                        ((h - 1) / k_period) + 1
-                    } else {
-                        h
-                    };
-                    let se = (sigma2 * k as f64).sqrt();
-                    lower.push(point[h - 1] - z * se);
-                    upper.push(point[h - 1] + z * se);
+                for h in 0..horizon {
+                    let se = variances[h].max(0.0).sqrt();
+                    lower.push(point[h] - z * se);
+                    upper.push(point[h] + z * se);
                 }
                 (lower, upper)
             }
@@ -2288,6 +2515,7 @@ impl ETS {
             .or(self.residual_variance)
             .unwrap_or(0.0);
         let preds = forecast.primary();
+        let empty_seasonals: Vec<f64> = Vec::new();
 
         let (lower, upper) = Self::ets_interval_bounds(
             self.spec,
@@ -2300,6 +2528,10 @@ impl ETS {
             preds,
             horizon,
             confidence,
+            self.level.unwrap_or(0.0),
+            self.trend.unwrap_or(0.0),
+            self.seasonals.as_deref().unwrap_or(&empty_seasonals),
+            self.n,
         );
 
         Ok(Forecast::from_values_with_intervals(
@@ -2577,11 +2809,15 @@ impl Forecaster for ETS {
 
             // Interval sigma2 (D-08, plan 11-07): R's `forecast.ets` divides
             // by `n - length(par)` (length(par) = num_params() - 1, since
-            // num_params() also counts sigma^2 itself), not by `n`.
+            // num_params() also counts sigma^2 itself), not by `n`. Uses
+            // `sum_sq_errors` directly (relative-error basis for
+            // multiplicative-error models, matching the loglik/AIC below)
+            // rather than `variance` above, which is always raw-residual
+            // based regardless of error type.
             let n_obs_f = valid_slice.len() as f64;
             let length_par = (self.num_params() as f64 - 1.0).max(1.0);
             let df = (n_obs_f - length_par).max(1.0);
-            self.interval_sigma2 = Some(variance * n_obs_f / df);
+            self.interval_sigma2 = Some(sum_sq_errors / df);
 
             // Floor as in calculate_likelihood_with_init_buf: a perfect fit
             // (sum_sq_errors == 0) is the global optimum, not degenerate.
@@ -2614,6 +2850,19 @@ impl Forecaster for ETS {
         self.predict_internal(horizon, None)
     }
 
+    /// Prediction intervals follow R `forecast:::forecast.ets`'s own
+    /// class1/class2/class3 dispatch (Hyndman, Koehler, Ord & Snyder 2008
+    /// ch. 6; D-08, plan 11-07):
+    /// - **Class 1** (additive error, trend N/A/Ad, season N/A): analytic
+    ///   `v_h = sigma2*(1 + sum_{j<h} c_j^2)`, exact to 1e-6 relative of R
+    ///   at R's own parameters.
+    /// - **Class 2** (multiplicative error, trend N/A/Ad, season N/A): the
+    ///   same `c_j` coefficients feed R's heteroscedastic `theta_h`
+    ///   recursion, also exact to 1e-6 relative.
+    /// - **Class 3 and additive-error + multiplicative-season models**
+    ///   (MNM/MAM/MAdM, ANM/AAM/AAdM): 5000-path seeded Monte-Carlo
+    ///   simulation with empirical (R type-7) quantiles, within 5%
+    ///   relative of R's half-widths and identical across repeated calls.
     fn predict_with_intervals(&self, horizon: usize, confidence: f64) -> Result<Forecast> {
         if self.exog_ols.is_some() {
             return Err(ForecastError::InvalidParameter(

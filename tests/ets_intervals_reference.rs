@@ -15,7 +15,7 @@
 //! module.
 
 use anofox_forecast::core::TimeSeries;
-use anofox_forecast::models::exponential::{ETSSpec, ETS};
+use anofox_forecast::models::exponential::{ETSSeasonalType, ETSSpec, ErrorType, TrendType, ETS};
 use anofox_forecast::models::Forecaster;
 use chrono::{Duration, TimeZone, Utc};
 use serde_json::Value;
@@ -198,4 +198,455 @@ fn ets_class1_intervals_match_r() {
     for case in &cases {
         check_class1_or_2_model(case, 1e-6);
     }
+}
+
+fn check_simulated_model(fit: &FixtureFit, half_width_tol: f64) {
+    let fixture = load_fixture();
+    let series = as_f64_vec(&fixture[fit.series]);
+    let entry = &fixture[format!("{}_fits", fit.series)][fit.model];
+
+    let par = &entry["par"];
+    let alpha = as_f64(&par["alpha"]);
+    let beta = par.get("beta").map(as_f64);
+    let gamma = par.get("gamma").map(as_f64);
+    let phi = par.get("phi").map(as_f64);
+
+    let names = state_names(entry);
+    let initial_state = as_f64_vec(&entry["initial_state"]);
+    let (level0, trend0, seasonals0) = r_state_to_crate(&names, &initial_state);
+
+    let ts = TimeSeries::univariate(make_timestamps(series.len()), series.clone()).unwrap();
+
+    let mut model = ETS::with_params_and_states(
+        fit.spec, fit.period, alpha, beta, gamma, phi, level0, trend0, seasonals0,
+    );
+    model.fit(&ts).unwrap();
+
+    let expected = &entry["forecast"];
+    let expected_mean = as_f64_vec(&expected["mean"]);
+    let horizon = expected_mean.len();
+
+    // Determinism: two consecutive calls must return identical bounds.
+    let fc1 = model.predict_with_intervals(horizon, 0.95).unwrap();
+    let fc2 = model.predict_with_intervals(horizon, 0.95).unwrap();
+    assert_eq!(
+        fc1.lower_series(0).unwrap(),
+        fc2.lower_series(0).unwrap(),
+        "{}: simulated bounds not deterministic across calls (lower)",
+        fit.model
+    );
+    assert_eq!(
+        fc1.upper_series(0).unwrap(),
+        fc2.upper_series(0).unwrap(),
+        "{}: simulated bounds not deterministic across calls (upper)",
+        fit.model
+    );
+
+    let lower = fc1.lower_series(0).unwrap();
+    let upper = fc1.upper_series(0).unwrap();
+    let expected_lower = as_f64_vec(&expected["lower_95"]);
+    let expected_upper = as_f64_vec(&expected["upper_95"]);
+
+    for h in 0..horizon {
+        let half_width = (upper[h] - lower[h]) / 2.0;
+        let expected_half_width = (expected_upper[h] - expected_lower[h]) / 2.0;
+        assert_rel_close(
+            half_width,
+            expected_half_width,
+            half_width_tol,
+            &format!("{} 95% half-width h={}", fit.model, h + 1),
+        );
+    }
+}
+
+/// Class 3 (MNM, MAM, MAdM) and additive-error + multiplicative-season
+/// models (ANM, AAM, AAdM) R also simulates: at R's own fitted parameters,
+/// the crate's simulated 95% half-widths (5000 seeded sample paths) must be
+/// within 5% relative of R's own `forecast.ets` half-widths for h = 1..24,
+/// and two consecutive calls must return identical bounds.
+#[test]
+fn ets_class3_and_restricted_intervals_near_r() {
+    let cases = [
+        FixtureFit {
+            series: "air",
+            model: "MNM",
+            spec: ETSSpec::mnm(),
+            period: 12,
+        },
+        FixtureFit {
+            series: "air",
+            model: "MAM",
+            spec: ETSSpec::mam(),
+            period: 12,
+        },
+        FixtureFit {
+            series: "air",
+            model: "MAdM",
+            spec: ETSSpec::madm(),
+            period: 12,
+        },
+        FixtureFit {
+            series: "air",
+            model: "ANM",
+            spec: ETSSpec::anm(),
+            period: 12,
+        },
+        FixtureFit {
+            series: "air",
+            model: "AAM",
+            spec: ETSSpec::aam(),
+            period: 12,
+        },
+        FixtureFit {
+            series: "air",
+            model: "AAdM",
+            spec: ETSSpec::aadm(),
+            period: 12,
+        },
+    ];
+
+    for case in &cases {
+        check_simulated_model(case, 0.05);
+    }
+}
+
+/// Class 2 (multiplicative error, trend N/A/Ad, season N/A): MNN/MAN/MAdN
+/// on `pos`, MNA/MAA/MAdA on `air` -- the `theta_h` heteroscedastic
+/// recursion's 80%/95% bounds at R's own fitted parameters must equal R's
+/// own `forecast.ets` bounds to 1e-6 relative, for h = 1..24.
+#[test]
+fn ets_class2_intervals_match_r() {
+    let cases = [
+        FixtureFit {
+            series: "pos",
+            model: "MNN",
+            spec: ETSSpec::mnn(),
+            period: 1,
+        },
+        FixtureFit {
+            series: "pos",
+            model: "MAN",
+            spec: ETSSpec::man(),
+            period: 1,
+        },
+        FixtureFit {
+            series: "pos",
+            model: "MAdN",
+            spec: ETSSpec::madn(),
+            period: 1,
+        },
+        FixtureFit {
+            series: "air",
+            model: "MNA",
+            spec: ETSSpec::new(
+                ErrorType::Multiplicative,
+                TrendType::None,
+                ETSSeasonalType::Additive,
+            ),
+            period: 12,
+        },
+        FixtureFit {
+            series: "air",
+            model: "MAA",
+            spec: ETSSpec::maa(),
+            period: 12,
+        },
+        FixtureFit {
+            series: "air",
+            model: "MAdA",
+            spec: ETSSpec::mada(),
+            period: 12,
+        },
+    ];
+
+    for case in &cases {
+        check_class1_or_2_model(case, 1e-6);
+    }
+}
+
+// ---------------------------------------------------------------------
+// Monte-Carlo coverage of 95% ETS intervals (D-08, must_haves).
+// ---------------------------------------------------------------------
+
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
+
+fn std_normal(rng: &mut StdRng) -> f64 {
+    let u1: f64 = rng.gen::<f64>().max(1e-300);
+    let u2: f64 = rng.gen::<f64>();
+    (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
+}
+
+/// Local-level DGP: `y_t = l_{t-1} + e_t`, `l_t = l_{t-1} + alpha*e_t`
+/// (i.e. the data-generating process ETS(A,N,N) describes exactly).
+fn simulate_ann(rng: &mut StdRng, n: usize, alpha: f64, l0: f64, sigma: f64) -> Vec<f64> {
+    let mut l = l0;
+    (0..n)
+        .map(|_| {
+            let e = std_normal(rng) * sigma;
+            let y = l + e;
+            l += alpha * e;
+            y
+        })
+        .collect()
+}
+
+/// Damped-trend DGP: `y_t = l_{t-1}+phi*b_{t-1}+e_t`,
+/// `l_t=l_{t-1}+phi*b_{t-1}+alpha*e_t`, `b_t=phi*b_{t-1}+beta*e_t` -- the
+/// data-generating process ETS(A,Ad,N) describes exactly.
+#[allow(clippy::too_many_arguments)]
+fn simulate_aadn(
+    rng: &mut StdRng,
+    n: usize,
+    alpha: f64,
+    beta: f64,
+    phi: f64,
+    l0: f64,
+    b0: f64,
+    sigma: f64,
+) -> Vec<f64> {
+    let mut l = l0;
+    let mut b = b0;
+    (0..n)
+        .map(|_| {
+            let e = std_normal(rng) * sigma;
+            let l_plus_pb = l + phi * b;
+            let y = l_plus_pb + e;
+            l = l_plus_pb + alpha * e;
+            b = phi * b + beta * e;
+            y
+        })
+        .collect()
+}
+
+/// Multiplicative-error, additive-trend, multiplicative-season DGP
+/// (ETS(M,A,M)-shaped): `y_t = (l_{t-1}+b_{t-1})*s_{t-m}*(1+e_t)`,
+/// matching `Forecaster::fit`'s own mult-error update for
+/// `(TrendType::Additive, SeasonalType::Multiplicative)`.
+#[allow(clippy::too_many_arguments)]
+fn simulate_mam(
+    rng: &mut StdRng,
+    n: usize,
+    alpha: f64,
+    beta: f64,
+    gamma: f64,
+    period: usize,
+    l0: f64,
+    b0: f64,
+    seasonals0: &[f64],
+    sigma: f64,
+) -> Vec<f64> {
+    let mut l = l0;
+    let mut b = b0;
+    let mut seas = seasonals0.to_vec();
+    (0..n)
+        .map(|t| {
+            let season_idx = t % period;
+            let s = seas[season_idx];
+            let l_plus_b = l + b;
+            let fc = l_plus_b * s;
+            let e = std_normal(rng) * sigma;
+            let y = fc * (1.0 + e);
+            l = l_plus_b * (1.0 + alpha * e);
+            b += beta * l_plus_b * e;
+            seas[season_idx] = s * (1.0 + gamma * e);
+            y
+        })
+        .collect()
+}
+
+struct CoverageResult {
+    mean_coverage: f64,
+    trials: usize,
+}
+
+fn run_ann_coverage(reps: usize, n: usize, horizon: usize, base_seed: u64) -> CoverageResult {
+    let alpha_dgp = 0.3;
+    let l0 = 10.0;
+    let sigma = 1.0;
+    let mut covered = 0usize;
+    let mut trials = 0usize;
+
+    for rep in 0..reps {
+        let mut rng = StdRng::seed_from_u64(base_seed + rep as u64);
+        let series = simulate_ann(&mut rng, n + horizon, alpha_dgp, l0, sigma);
+        let fit_part = &series[..n];
+        let holdout = &series[n..n + horizon];
+
+        let ts = TimeSeries::univariate(make_timestamps(n), fit_part.to_vec()).unwrap();
+        let mut model = ETS::new(ETSSpec::ann(), 1);
+        model.fit(&ts).unwrap();
+        let forecast = model.predict_with_intervals(horizon, 0.95).unwrap();
+        let lower = forecast.lower_series(0).unwrap();
+        let upper = forecast.upper_series(0).unwrap();
+
+        for h in 0..horizon {
+            trials += 1;
+            if holdout[h] >= lower[h] && holdout[h] <= upper[h] {
+                covered += 1;
+            }
+        }
+    }
+
+    CoverageResult {
+        mean_coverage: covered as f64 / trials as f64,
+        trials,
+    }
+}
+
+fn run_aadn_coverage(reps: usize, n: usize, horizon: usize, base_seed: u64) -> CoverageResult {
+    let alpha_dgp = 0.5;
+    let beta_dgp = 0.1;
+    let phi_dgp = 0.9;
+    let l0 = 10.0;
+    let b0 = 0.5;
+    let sigma = 1.0;
+    let mut covered = 0usize;
+    let mut trials = 0usize;
+
+    for rep in 0..reps {
+        let mut rng = StdRng::seed_from_u64(base_seed + rep as u64);
+        let series = simulate_aadn(
+            &mut rng,
+            n + horizon,
+            alpha_dgp,
+            beta_dgp,
+            phi_dgp,
+            l0,
+            b0,
+            sigma,
+        );
+        let fit_part = &series[..n];
+        let holdout = &series[n..n + horizon];
+
+        let ts = TimeSeries::univariate(make_timestamps(n), fit_part.to_vec()).unwrap();
+        let mut model = ETS::new(ETSSpec::aadn(), 1);
+        model.fit(&ts).unwrap();
+        let forecast = model.predict_with_intervals(horizon, 0.95).unwrap();
+        let lower = forecast.lower_series(0).unwrap();
+        let upper = forecast.upper_series(0).unwrap();
+
+        for h in 0..horizon {
+            trials += 1;
+            if holdout[h] >= lower[h] && holdout[h] <= upper[h] {
+                covered += 1;
+            }
+        }
+    }
+
+    CoverageResult {
+        mean_coverage: covered as f64 / trials as f64,
+        trials,
+    }
+}
+
+fn run_mam_coverage(reps: usize, n: usize, horizon: usize, base_seed: u64) -> CoverageResult {
+    let fixture = load_fixture();
+    let entry = &fixture["air_fits"]["MAM"];
+    let alpha_dgp = as_f64(&entry["par"]["alpha"]);
+    let beta_dgp = as_f64(&entry["par"]["beta"]);
+    let gamma_dgp = as_f64(&entry["par"]["gamma"]);
+    let sigma_dgp = as_f64(&entry["sigma2"]).sqrt();
+    let period = 12;
+
+    let names = state_names(entry);
+    let initial_state = as_f64_vec(&entry["initial_state"]);
+    let (l0, b0, seasonals0) = r_state_to_crate(&names, &initial_state);
+
+    let mut covered = 0usize;
+    let mut trials = 0usize;
+
+    for rep in 0..reps {
+        let mut rng = StdRng::seed_from_u64(base_seed + rep as u64);
+        let series = simulate_mam(
+            &mut rng,
+            n + horizon,
+            alpha_dgp,
+            beta_dgp,
+            gamma_dgp,
+            period,
+            l0,
+            b0,
+            &seasonals0,
+            sigma_dgp,
+        );
+        let fit_part = &series[..n];
+        let holdout = &series[n..n + horizon];
+
+        let ts = TimeSeries::univariate(make_timestamps(n), fit_part.to_vec()).unwrap();
+        let mut model = ETS::new(ETSSpec::mam(), period);
+        model.fit(&ts).unwrap();
+        let forecast = model.predict_with_intervals(horizon, 0.95).unwrap();
+        let lower = forecast.lower_series(0).unwrap();
+        let upper = forecast.upper_series(0).unwrap();
+
+        for h in 0..horizon {
+            trials += 1;
+            if holdout[h] >= lower[h] && holdout[h] <= upper[h] {
+                covered += 1;
+            }
+        }
+    }
+
+    CoverageResult {
+        mean_coverage: covered as f64 / trials as f64,
+        trials,
+    }
+}
+
+/// Reduced (non-ignored) Monte-Carlo coverage check: 300 seeded local-level
+/// (ETS(A,N,N)) series, n=200, h=1..12 -- mean 95% coverage must land in
+/// [0.92, 0.975].
+#[test]
+fn ets_interval_coverage_reduced() {
+    let result = run_ann_coverage(300, 200, 12, 0xE75_0000);
+    eprintln!(
+        "ets_interval_coverage_reduced: mean coverage = {:.4} over {} trials",
+        result.mean_coverage, result.trials
+    );
+    assert!(
+        (0.92..=0.975).contains(&result.mean_coverage),
+        "ANN reduced coverage {:.4} outside [0.92, 0.975]",
+        result.mean_coverage
+    );
+}
+
+/// Full Monte-Carlo coverage check (2000 reps each of ANN, AAdN, MAM
+/// DGPs): mean 95% coverage must land in [0.93, 0.97] for each. Run with:
+/// `cargo test --test ets_intervals_reference -- --ignored ets_interval_coverage --nocapture`
+#[test]
+#[ignore = "monte-carlo: cargo test --test ets_intervals_reference -- --ignored ets_interval_coverage --nocapture"]
+fn ets_interval_coverage() {
+    let ann = run_ann_coverage(2000, 200, 12, 0xA000_0000);
+    eprintln!(
+        "ANN coverage = {:.4} over {} trials",
+        ann.mean_coverage, ann.trials
+    );
+    assert!(
+        (0.93..=0.97).contains(&ann.mean_coverage),
+        "ANN coverage {:.4} outside [0.93, 0.97]",
+        ann.mean_coverage
+    );
+
+    let aadn = run_aadn_coverage(2000, 200, 12, 0xB000_0000);
+    eprintln!(
+        "AAdN coverage = {:.4} over {} trials",
+        aadn.mean_coverage, aadn.trials
+    );
+    assert!(
+        (0.93..=0.97).contains(&aadn.mean_coverage),
+        "AAdN coverage {:.4} outside [0.93, 0.97]",
+        aadn.mean_coverage
+    );
+
+    let mam = run_mam_coverage(2000, 200, 12, 0xC000_0000);
+    eprintln!(
+        "MAM coverage = {:.4} over {} trials",
+        mam.mean_coverage, mam.trials
+    );
+    assert!(
+        (0.93..=0.97).contains(&mam.mean_coverage),
+        "MAM coverage {:.4} outside [0.93, 0.97]",
+        mam.mean_coverage
+    );
 }
