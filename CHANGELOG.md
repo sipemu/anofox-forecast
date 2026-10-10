@@ -39,6 +39,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no correction at all, while the non-seasonal scorer already had it —
   seasonal and non-seasonal candidates are now compared on a like-for-like
   AICc basis.
+- The pre-11-05 non-seasonal fallback in `AutoARIMA::fit` is removed: R
+  `auto.arima` only drops seasonal AR/MA terms when `period < 2`; seasonal
+  `P`/`Q` are now searched even when `nsdiffs_seas` yields `D = 0` for the
+  configured period.
+
+### Added (fix/auto-arima-order-selection)
+
+- **`AutoARIMAConfig::max_order`** — R `auto.arima`'s `max.order` bound
+  (`p+q+P+Q`, default 5), enforced by `true_stepwise_search` on every start
+  model and neighbour move.
+- **`AutoARIMAConfig::with_grid_stepwise()`** — explicit opt-in for the
+  fixed-grid stepwise search (the crate's current default), for symmetry
+  with the existing `with_true_stepwise()`.
 
 ### Known gap (not shipped, tracked for a follow-up PR)
 
@@ -57,6 +70,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `auto_arima_rw_share_near_r` and `auto_arima_selection_frequencies` are
   `#[ignore]`d with an explanation rather than deleted or loosened, so the
   gap stays tracked for the branch's follow-up PR.
+- **(11-05 follow-up, same root cause, re-verified with new evidence.)**
+  Flipping the crate's *default* search to R's own bounds (`max.P=2`,
+  `max.Q=2`, Hyndman-Khandakar stepwise) was attempted again this session
+  and re-exposes the same bug on a *second*, independent dataset
+  (AirPassengers), not only the synthetic RW/AR(0.7) fixtures: R's actual
+  pick `ARIMA(2,1,1)(0,1,0)[12]` scores ~1002 under the crate's own AICc
+  while an overfit `ARIMA(3,1,0)(2,1,0)[12]` scores ~829, because the two
+  candidates are compared over different effective sample sizes. A direct
+  `Rscript forecast::auto.arima` run on M4-Daily D4047 confirms R itself
+  selects `ARIMA(0,1,0)` with MAE 141.5 — exactly the statsforecast
+  baseline the gate compares against (ratio 1.0x) — so the M4 gate's 2x
+  tolerance is evidence-backed and is not loosened. The default search
+  stays at the pre-11-05 bounds (`max_cap_p=1`, `max_cap_q=1`, grid
+  stepwise); `auto_arima_airpassengers_matches_r` is added and `#[ignore]`d
+  alongside the two existing Monte-Carlo tests. Closing this requires
+  exact-ML (or CSS-ML) likelihood scoring that doesn't shrink the
+  comparison sample with model order, in both `ARIMA::score_order` and
+  `SARIMA::score_order` — deferred to a dedicated follow-up.
 
 ## [0.15.10] - 2026-09-09
 
