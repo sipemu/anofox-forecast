@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - Unreleased
+
+### Fixed
+
+- **ETS multiplicative-error likelihood used `Σ ln|y_t|`, not `Σ ln|ŷ_t|` (R/statsforecast
+  convention), and seasonal models skipped the first `period` observations when scoring.**
+  `log_likelihood`/`aic`/`aicc`/`bic` now accumulate over every observation from `t=0` using the
+  one-step forecast's absolute value, matching R `forecast::ets`. Confirmed exact (within 1e-6
+  relative on loglik/aic/aicc/bic, 1e-8 relative on fitted values and final states) against R at
+  R's own fitted parameters for all 18 `(error,trend,season)` AirPassengers models and 6
+  non-seasonal models — see `tests/ets_r_reference.rs::ets_loglik_at_r_params_all_models`.
+- **Seasonal-additive and additive-trend state recursions did not match R's innovations
+  state-space form.** The `(trend, SeasonalType::Additive)` arms' seasonal update used the
+  just-updated level instead of the pre-update level (an extra spurious `(1-alpha)` factor); the
+  additive-trend arms' trend update used a classical reparametrised `beta*(l_t-l_{t-1})` form that
+  silently scales `beta` by an extra factor of `alpha` and does not match R's direct
+  `beta*e_t`; the `(Additive/AdditiveDamped trend, SeasonalType::Multiplicative)` additive-error
+  branch had the same just-updated-level bug. All affected arms (and their `fit()` duplicates) now
+  use R's direct-error Hyndman form, validated to machine precision (<1e-12 absolute) against R.
+- **Smoothing parameters could exceed R's "usual" constraints.** Every `optimize_params` branch
+  previously gave `alpha`, `beta`, `gamma` independent `[0.0001, 0.9999]` boxes; `beta` could exceed
+  `alpha` and `gamma` could exceed `1 - alpha`. A new reparametrisation (`alpha` in
+  `[1e-4, 0.9999]`, `beta` in `[1e-4, alpha]`, `gamma` in `[1e-4, 1-alpha]`, `phi` in `[0.8, 0.98]`)
+  is now applied in every branch. AirPassengers ETS(M,A,M): alpha/gamma `0.9999/0.9999` (both at
+  the old box's upper corner) → optimiser now finds alpha≈0.790, beta≈0.0001, gamma≈0.210, with a
+  *better* log-likelihood than R's own optimum (-681.11 vs R's -682.40 at R's alpha=0.395,
+  gamma=0.400 — a different local optimum, not a correctness regression).
+- **AutoETS's automatic candidate pool did not match R `forecast::ets(restrict = TRUE)`'s
+  default.** The crate excluded `ETS(M,A,A)`/`ETS(M,Ad,A)` as "unstable" (per FPP3) and included
+  `ETS(A,N,M)`/`ETS(A,A,M)`/`ETS(A,Ad,M)` — the opposite of R's default, which excludes
+  additive-error + multiplicative-season combinations and includes MAA/MAdA. AutoETS's default
+  pool now matches R exactly (15 models for positive seasonal data, 6 for non-positive seasonal, 6
+  for positive non-seasonal). AirPassengers AutoETS selection: previously picked `ETS(A,N,M)`
+  (excluded from R's default set); now picks `ETS(M,A,M)` with AICc 1401.07, within 2.0 of R's own
+  best (`ETS(M,Ad,M)`, AICc 1400.64).
+
+### Changed
+
+- **`log_likelihood`/`aic`/`aicc`/`bic` values change for every ETS model** (R/statsforecast
+  convention — AICc is now comparable across additive and multiplicative error types; previously
+  it was not).
+- **`ETSSpec::is_valid()` now always returns `true`.** `ETS(M,A,A)` and `ETS(M,Ad,A)` are valid R
+  `forecast::ets` models (included in R's own `restrict = TRUE` default set), not "unstable"
+  combinations — `from_notation("MAA")`/`from_notation("MAdA")` now parse successfully instead of
+  erroring. A new, narrower `ETSSpec::is_r_restricted()` (additive error + multiplicative season)
+  replaces `is_valid()`'s old role in `AutoETS::generate_candidates`.
+
+### Added
+
+- **`ETS::with_params_and_states(spec, seasonal_period, alpha, beta, gamma, phi, level, trend,
+  seasonals)`** — construct a model at fixed parameters and initial states with zero optimisation,
+  for scoring at externally supplied (e.g. R) parameters.
+- **`ETSSpec::is_r_restricted(&self) -> bool`** — true for additive-error models with
+  multiplicative seasonality (`ANM`, `AAM`, `AAdM`), R `forecast::ets(restrict = TRUE)`'s exclusion.
+- **`ETSSpec::maa()`/`ETSSpec::mada()`** constructors for `ETS(M,A,A)`/`ETS(M,Ad,A)`.
+
 ## [0.15.10] - 2026-09-09
 
 Robustness fixes and a new ERM hierarchical-reconciliation method from the v1.1 Robustness Fixes &
