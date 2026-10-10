@@ -59,3 +59,81 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
+
+---
+
+## MacKinnon ADF response-surface tables (`src/validation/stationarity.rs`)
+
+`mackinnon_p_value` and `mackinnon_critical_values` (used internally by
+`adf_test` / `adf_test_with_options`) port the `N = 1` (single series
+believed `I(1)`) rows of the MacKinnon response-surface coefficient tables
+as shipped in [`statsmodels`](https://github.com/statsmodels/statsmodels)'
+`statsmodels.tsa.adfvalues` module (`tau_max_*`, `tau_min_*`, `tau_star_*`,
+`tau_*_smallp`, `tau_*_largep` for the MacKinnon (1994) p-value surfaces,
+and `tau_2010s` for the MacKinnon (2010) finite-sample critical-value
+surfaces). The coefficient values themselves are dumped programmatically
+from the installed `statsmodels` package into
+`tests/data/r_reference/adf_statsmodels.json` by
+`validation/reference/python/adf_statsmodels.py` and proven equal to the
+Rust constants by `tests/adf_kpss_reference.rs::mackinnon_tables_match_statsmodels`
+— they are not hand-transcribed from the paper.
+
+References:
+
+- MacKinnon, J.G. 1994. "Approximate Asymptotic Distribution Functions for
+  Unit-Root and Cointegration Tests." *Journal of Business & Economic
+  Statistics*, 12.2, 167–76.
+- MacKinnon, J.G. 2010. "Critical Values for Cointegration Tests." Queen's
+  University, Dept. of Economics Working Paper 1227.
+
+`statsmodels` issue [#10271](https://github.com/statsmodels/statsmodels/issues/10271)
+documents a handful of transcription discrepancies between `statsmodels`'
+shipped `tau_2010["c"]` values and the original MacKinnon (2010) paper. This
+crate reproduces `statsmodels`' shipped values exactly (not the paper),
+since `statsmodels`' own `adfuller`/`mackinnonp`/`mackinnoncrit` is the
+oracle this crate's tests are proven against.
+
+Upstream project links:
+
+- Repository: https://github.com/statsmodels/statsmodels
+- License: BSD-3-Clause (reproduced below, from `statsmodels` 0.14.6's
+  `LICENSE.txt`)
+
+### statsmodels — BSD-3-Clause license
+
+```
+Copyright (C) 2006, Jonathan E. Taylor
+All rights reserved.
+
+Copyright (c) 2006-2008 Scipy Developers.
+All rights reserved.
+
+Copyright (c) 2009-2018 statsmodels Developers.
+All rights reserved.
+
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+  a. Redistributions of source code must retain the above copyright notice,
+     this list of conditions and the following disclaimer.
+  b. Redistributions in binary form must reproduce the above copyright
+     notice, this list of conditions and the following disclaimer in the
+     documentation and/or other materials provided with the distribution.
+  c. Neither the name of statsmodels nor the names of its contributors
+     may be used to endorse or promote products derived from this software
+     without specific prior written permission.
+
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ARE DISCLAIMED. IN NO EVENT SHALL STATSMODELS OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
+DAMAGE.
+```

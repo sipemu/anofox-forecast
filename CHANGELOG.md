@@ -9,7 +9,99 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.16.0] - Unreleased
 
+Statistical correctness fixes for the ADF and KPSS stationarity tests
+(DIAG-01, DIAG-02). Backward-compatible: `adf_test`/`kpss_test`/
+`test_stationarity` keep their public signatures and `StationarityResult`/
+`CriticalValues` keep their field layout; new functionality is additive.
+
+> **Note:** this CHANGELOG section may show entries from sibling Phase 11
+> fix PRs that land first — that overlap is expected (all Phase 11 branches
+> share the same `0.16.0` section header) and is resolved by keeping every
+> block when merging, not by dropping one.
+
 ### Fixed
+
+- **ADF test is now genuinely augmented.** `adf_test`/`adf_test_with_options`
+  regress `Δy_t` on the deterministic term, `y_{t-1}` **and** the lagged
+  differences `Δy_{t-1}..Δy_{t-lag}` — previously the "selected" lag only
+  trimmed the sample, so the lagged differences never entered the
+  regression at all. Measured on a 2000-rep Monte-Carlo: IMA(1,1)
+  (θ = −0.5) unit-root rejection at the 5% level dropped from **63.5%** to
+  **8.70%** (174/2000); random-walk size at 5% is **6.95%** (139/2000),
+  within the nominal [3.5%, 7.5%] band.
+- **ADF p-values and critical values now come from MacKinnon's response
+  surfaces** (as shipped in `statsmodels.tsa.adfvalues`: MacKinnon 1994 for
+  p-values, MacKinnon 2010 for finite-sample critical values) instead of a
+  9-step lookup table and three hard-coded constants (`-3.43`/`-2.86`/
+  `-2.57`, which were only ever correct for the constant-only regression).
+  Statistic, used lag, p-value and critical values now match
+  `statsmodels.tsa.stattools.adfuller` and `urca::ur.df` to `1e-8`/`1e-10`
+  on every fixture series, for every regression type (`none`/`drift`/
+  `trend`) and lag-selection method (AIC/BIC/t-stat/fixed).
+- **KPSS p-value bounded to `[0.01, 0.10]`**, matching
+  `tseries::kpss.test(null = "Level", lshort = TRUE)` exactly via linear
+  interpolation within its four-point table — previously the p-value
+  extrapolated linearly outside the table (toward 0 for large statistics,
+  toward 1 for very small ones) and skipped the table's 2.5% point
+  entirely.
+
+### Added
+
+- `AdfRegression` (`NoConstant`/`Constant`/`ConstantTrend`),
+  `AdfLagSelection` (`Aic`/`Bic`/`TStat`/`Fixed`) and `AdfOptions`
+  (`with_regression`/`with_max_lags`/`with_lag_selection`) for explicit
+  control over the ADF regression and lag selection.
+- `adf_test_with_options(series, &AdfOptions) -> StationarityResult` — the
+  options-taking ADF entry point; `adf_test` is now a thin delegation to it
+  with `Constant` regression and `Aic` lag selection (unchanged defaults).
+- `mackinnon_p_value(statistic, regression) -> f64` and
+  `mackinnon_critical_values(regression, nobs) -> CriticalValues` — public
+  ports of `statsmodels.tsa.adfvalues.mackinnonp`/`mackinnoncrit` (`N = 1`).
+- `kpss_p_value(statistic) -> f64` — public, bounded KPSS p-value function
+  (previously private), for parity with the ADF side.
+
+### Changed
+
+- `StationarityResult.lags` may now be `0` for the ADF test when AIC/BIC/
+  t-stat selection picks no augmentation at all (previously always `>= 1`
+  by construction of the old, non-augmented regression).
+
+### Fixed — Theta (UPST-04)
+
+- **Theta Standard Model (STM) random-walk forecast bias.** `Theta::new()`
+  (and `with_theta()`/`seasonal()`/`seasonal_with_decomposition()`) now
+  estimate alpha AND the initial SES level by jointly minimising the SSE of
+  `y_t - l_{t-1}` over the training series (`optimize_alpha_level`), exactly
+  matching R `forecast::thetaf`'s `ets(y, "ANN", opt.crit = "mse")` — alpha
+  was previously fixed at 0.1 with optimisation off. On the fixture random
+  walk (200 points, seed 20261009) the crate's alpha moves from the old
+  fixed `0.1` to `0.9999` (R: `0.999899989605684`), and the h=1 forecast
+  moves from the old RW-biased formula to `-21.78656053` vs thetaf's
+  `-21.78656052` (relative diff ~7e-10; previously audited as -6.99 vs
+  thetaf's -5.53 on an earlier fixture/series).
+  AutoTheta's STM candidate (built from `Theta::new()`/
+  `seasonal_with_decomposition()`) inherits the fix; OTM (`OptimizedTheta`,
+  which already optimises both alpha and theta) stays a distinct candidate.
+- **Theta drift formula.** The forecast drift term now uses thetaf's exact
+  finite-sample factor `(1 - (1 - alpha)^n) / alpha` (n = training length)
+  instead of the old `1 / alpha` asymptotic approximation, matching R to
+  1e-8 relative at the fitted parameters (see `thetaf_formula_at_r_parameters`).
+  `Theta::with_theta_value` gains a required `n: usize` parameter (was
+  `(theta, alpha, level, b)`, now `(theta, alpha, level, b, n)`) so
+  warm-started forecasts reproduce this finite-sample term correctly.
+- **Theta prediction intervals.** `predict_with_intervals` /
+  `predict_with_exog_intervals` now use thetaf's interval factor
+  `se_h = sqrt(sigma2) * sqrt(1 + alpha^2 * (h - 1))` instead of an AR(1)-style
+  geometric-sum factor that was roughly 2x too wide at h >= 6 (per the
+  upstream validation audit); `sigma2` is now `SSE / (n - 2)` on the
+  deseasonalized series (thetaf's `ets$sigma2` convention), computed at the
+  SES optimum rather than from the reseasonalized post-hoc residuals.
+  Interval z-values in Theta now come from `statrs`' exact normal
+  inverse-CDF (`normal_quantile`) instead of the crate-wide Abramowitz-Stegun
+  approximation (`utils::stats::quantile_normal`, accurate to only ~1e-4),
+  since thetaf parity requires interval bounds accurate to 1e-8 relative.
+
+### Fixed — ETS Likelihood, Constraints, Candidate Pool & Prediction Intervals (UPST-03)
 
 - **ETS multiplicative-error likelihood used `Σ ln|y_t|`, not `Σ ln|ŷ_t|` (R/statsforecast
   convention), and seasonal models skipped the first `period` observations when scoring.**
@@ -43,7 +135,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (excluded from R's default set); now picks `ETS(M,A,M)` with AICc 1401.07, within 2.0 of R's own
   best (`ETS(M,Ad,M)`, AICc 1400.64).
 
-### Changed
+### Changed — ETS (UPST-03)
 
 - **`log_likelihood`/`aic`/`aicc`/`bic` values change for every ETS model** (R/statsforecast
   convention — AICc is now comparable across additive and multiplicative error types; previously
@@ -54,7 +146,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   erroring. A new, narrower `ETSSpec::is_r_restricted()` (additive error + multiplicative season)
   replaces `is_valid()`'s old role in `AutoETS::generate_candidates`.
 
-### Added
+### Added — ETS (UPST-03)
 
 - **`ETS::with_params_and_states(spec, seasonal_period, alpha, beta, gamma, phi, level, trend,
   seasonals)`** — construct a model at fixed parameters and initial states with zero optimisation,
