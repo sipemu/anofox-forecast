@@ -280,11 +280,13 @@ impl AutoETS {
         for &error in &error_types {
             for &trend in &trend_types {
                 for &seasonal in &seasonal_types {
-                    // Skip invalid combinations (M,A,A and M,Ad,A are unstable)
-                    if error == ErrorType::Multiplicative
-                        && (trend == TrendType::Additive || trend == TrendType::AdditiveDamped)
-                        && seasonal == SeasonalType::Additive
-                    {
+                    let spec = ETSSpec::new(error, trend, seasonal);
+
+                    // R forecast::ets()'s restrict = TRUE default excludes
+                    // additive-error models with multiplicative seasonality
+                    // (ANM, AAM, AAdM); MAA/MAdA are in R's default set and
+                    // are no longer excluded here (D-07, phase 11-06 Task 3).
+                    if spec.is_r_restricted() {
                         continue;
                     }
 
@@ -336,7 +338,7 @@ impl AutoETS {
                         }
                     }
 
-                    candidates.push(ETSSpec::new(error, trend, seasonal));
+                    candidates.push(spec);
                 }
             }
         }
@@ -812,6 +814,55 @@ mod tests {
     fn make_timestamps(n: usize) -> Vec<chrono::DateTime<Utc>> {
         let base = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
         (0..n).map(|i| base + Duration::hours(i as i64)).collect()
+    }
+
+    fn spec_set(specs: &[ETSSpec]) -> std::collections::BTreeSet<String> {
+        specs.iter().map(|s| s.short_name()).collect()
+    }
+
+    fn notation_set(names: &[&str]) -> std::collections::BTreeSet<String> {
+        names
+            .iter()
+            .map(|n| ETSSpec::from_notation(n).unwrap().short_name())
+            .collect()
+    }
+
+    /// AutoETS's default candidate pool matches R `forecast::ets()`'s
+    /// `restrict = TRUE` set (D-07, phase 11-06 Task 3): additive-error
+    /// models with multiplicative seasonality (ANM, AAM, AAdM) are
+    /// excluded; MAA/MAdA are included; multiplicative error/seasonal are
+    /// excluded entirely for non-positive data.
+    #[test]
+    fn auto_ets_candidate_set_matches_r() {
+        let auto = AutoETS::new();
+
+        let positive_seasonal = auto.generate_candidates(true, false);
+        let expected_positive_seasonal = notation_set(&[
+            "ANN", "AAN", "AAdN", "ANA", "AAA", "AAdA", "MNN", "MAN", "MAdN", "MNA", "MAA", "MAdA",
+            "MNM", "MAM", "MAdM",
+        ]);
+        assert_eq!(spec_set(&positive_seasonal), expected_positive_seasonal);
+
+        let nonpositive_seasonal = auto.generate_candidates(true, true);
+        let expected_nonpositive_seasonal =
+            notation_set(&["ANN", "AAN", "AAdN", "ANA", "AAA", "AAdA"]);
+        assert_eq!(
+            spec_set(&nonpositive_seasonal),
+            expected_nonpositive_seasonal
+        );
+
+        let positive_nonseasonal = auto.generate_candidates(false, false);
+        let expected_positive_nonseasonal =
+            notation_set(&["ANN", "AAN", "AAdN", "MNN", "MAN", "MAdN"]);
+        assert_eq!(
+            spec_set(&positive_nonseasonal),
+            expected_positive_nonseasonal
+        );
+    }
+
+    #[test]
+    fn auto_ets_default_criterion_is_aicc() {
+        assert_eq!(AutoETSConfig::default().criterion, SelectionCriterion::AICc);
     }
 
     #[test]
