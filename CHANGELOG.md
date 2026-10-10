@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] - Unreleased
+
+### Fixed
+
+- **GARCH prediction intervals centred on the simulated-innovation draw, not the
+  conditional mean (UPST-05).** `GARCH::predict_with_intervals` built its bounds around
+  `predict()`'s single fixed simulated-innovation path (a deterministic draw matching
+  statsforecast's own simulation convention) instead of the fitted conditional mean,
+  so the interval centre could sit several standard deviations away from the series'
+  actual distribution while the half-width stayed sized for that distribution. Measured
+  empirical 95% coverage against continuations simulated from a true GARCH(1,1) data-
+  generating process: **63.3% → 94.8–96.3%** across h=1..12 (1000 continuations, seeded).
+  `predict_with_intervals` now returns `mean ∓ z·sqrt(forecast_variance(h))`; `predict()`
+  and `forecast_variance()` are unchanged. The previously-reported "GARCH 0.13x interval
+  width" comparison against statsforecast was also found to be partly an artefact of
+  statsforecast's own GARCH interval formula, which multiplies the z-quantile by `sigma2`
+  (variance) instead of `sqrt(sigma2)` (std dev) — see the PR body for the full findings
+  table.
+
 ## [0.15.10] - 2026-09-09
 
 Robustness fixes and a new ERM hierarchical-reconciliation method from the v1.1 Robustness Fixes &

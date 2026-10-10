@@ -248,14 +248,16 @@ fn garch_interval_coverage_on_true_dgp() {
             lower[h],
             upper[h]
         );
-        // Harness-sanity only in this task (Task 1 spike): confirm coverage is a valid
-        // fraction and print it for the findings table. The [0.92, 0.98] shipped-outcome
-        // assertion is added in Task 2 once the predict_with_intervals fix lands.
+        // Shipped-outcome assertion (D-10, FIX): predict_with_intervals now centres bounds
+        // on the fitted conditional mean (garch.rs, finding H1) instead of predict()'s
+        // simulated-innovation draw, restoring coverage to nominal.
         assert!(
-            (0.0..=1.0).contains(&coverage),
-            "h={}: coverage {} is not a valid fraction",
+            (0.92..=0.98).contains(&coverage),
+            "h={}: empirical 95% coverage {} outside [0.92, 0.98] (lower={}, upper={})",
             h + 1,
-            coverage
+            coverage,
+            lower[h],
+            upper[h]
         );
     }
 }
