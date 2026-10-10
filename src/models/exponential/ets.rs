@@ -500,6 +500,12 @@ pub struct ETS {
     residuals: Option<Vec<f64>>,
     /// Residual variance.
     residual_variance: Option<f64>,
+    /// Degrees-of-freedom-corrected residual variance used for prediction
+    /// intervals only: `sum(e^2) / (n - length(par))`, matching R's
+    /// `forecast.ets` convention (D-08, plan 11-07). `residual_variance`
+    /// above (the uncorrected `sum(e^2)/n`) is kept as-is since other code
+    /// (AIC/AICc/BIC/loglik) depends on it.
+    interval_sigma2: Option<f64>,
     /// Log-likelihood.
     log_likelihood: Option<f64>,
     /// AIC.
@@ -534,6 +540,7 @@ impl ETS {
             fitted: None,
             residuals: None,
             residual_variance: None,
+            interval_sigma2: None,
             log_likelihood: None,
             aic: None,
             aicc: None,
@@ -567,6 +574,7 @@ impl ETS {
             fitted: None,
             residuals: None,
             residual_variance: None,
+            interval_sigma2: None,
             log_likelihood: None,
             aic: None,
             aicc: None,
@@ -614,6 +622,7 @@ impl ETS {
             fitted: None,
             residuals: None,
             residual_variance: None,
+            interval_sigma2: None,
             log_likelihood: None,
             aic: None,
             aicc: None,
@@ -692,6 +701,7 @@ impl ETS {
             fitted: None,
             residuals: None,
             residual_variance: None,
+            interval_sigma2: None,
             log_likelihood: None,
             aic: None,
             aicc: None,
@@ -2103,6 +2113,164 @@ impl ETS {
     }
 
     /// Internal prediction with intervals and optional exogenous regressors.
+    /// Hyndman, Koehler, Ord & Snyder (2008) ch. 6 forecast-error-variance
+    /// coefficient `c_j = w'F^(j-1)g`: the sensitivity of a forecast `j`
+    /// steps beyond its own innovation to that one innovation, for the
+    /// general state-space form shared by every (trend, season) combination
+    /// with trend in {N,A,Ad} and season in {N,A} (class 1/2; class 3 and
+    /// additive-error + multiplicative-season models are simulated instead
+    /// -- see [`Self::ets_interval_bounds`]). Table 6.1 in that reference
+    /// gives this closed form directly: the level contribution is constant
+    /// at `alpha`; the trend contribution accumulates linearly (undamped)
+    /// or via the same `phi*(1-phi^j)/(1-phi)` damping sum already used for
+    /// point forecasts ([`Self::damped_sum`]); the additive-seasonal
+    /// contribution reappears only every `period` steps, because the single
+    /// seasonal state slot a given innovation updates is next read exactly
+    /// one full cycle later.
+    fn ets_cj(
+        trend: TrendType,
+        seasonal: SeasonalType,
+        alpha: f64,
+        beta: Option<f64>,
+        gamma: Option<f64>,
+        phi: Option<f64>,
+        period: usize,
+        j: usize,
+    ) -> f64 {
+        let trend_term = match trend {
+            TrendType::None => 0.0,
+            TrendType::Additive => beta.unwrap_or(0.0) * j as f64,
+            TrendType::AdditiveDamped => {
+                beta.unwrap_or(0.0) * Self::damped_sum(phi.unwrap_or(1.0), j)
+            }
+        };
+        // R's forecast:::class1 builds G for the seasonal injection at a
+        // fixed matrix row (G[3,1] <- gamma) regardless of whether a trend
+        // row is present. When trend is absent that row is the *second*
+        // seasonal state (not the first), shifting the periodic bump back
+        // by one step: confirmed against `forecast:::class1` directly
+        // (trend present: gamma bump at j = m, 2m, ...; trend absent: at
+        // j = m-1, 2m-1, ...). Rather than replicate R's row layout
+        // (R-notation state ordering differs from this crate's `t % m`
+        // seasonal buffer anyway), this reproduces the same *numeric*
+        // period/phase R's forecast actually reports.
+        let seasonal_term = match seasonal {
+            SeasonalType::Additive if period > 0 => {
+                let has_trend = trend != TrendType::None;
+                let hit = if has_trend {
+                    j % period == 0
+                } else {
+                    (j + 1) % period == 0
+                };
+                if hit {
+                    gamma.unwrap_or(0.0)
+                } else {
+                    0.0
+                }
+            }
+            _ => 0.0,
+        };
+        alpha + trend_term + seasonal_term
+    }
+
+    /// Class-1 (additive error) analytic forecast-error variance for
+    /// h = 1..=horizon: `v_h = sigma2*(1 + sum_{j=1}^{h-1} c_j^2)`.
+    fn ets_forecast_variance(
+        spec: ETSSpec,
+        alpha: f64,
+        beta: Option<f64>,
+        gamma: Option<f64>,
+        phi: Option<f64>,
+        period: usize,
+        sigma2: f64,
+        horizon: usize,
+    ) -> Vec<f64> {
+        let mut variances = Vec::with_capacity(horizon);
+        let mut running_c2 = 0.0;
+        for h in 1..=horizon {
+            if h >= 2 {
+                let c = Self::ets_cj(
+                    spec.trend,
+                    spec.seasonal,
+                    alpha,
+                    beta,
+                    gamma,
+                    phi,
+                    period,
+                    h - 1,
+                );
+                running_c2 += c * c;
+            }
+            variances.push(sigma2 * (1.0 + running_c2));
+        }
+        variances
+    }
+
+    /// Single dispatch entry for ETS prediction-interval bounds, matching
+    /// R `forecast:::forecast.ets`'s class1/class2/class3 split exactly
+    /// (D-08, plan 11-07): class 1 (additive error, season N/A) uses
+    /// [`Self::ets_forecast_variance`] directly. Class 2 (multiplicative
+    /// error, season N/A) and class 3 / additive-error+multiplicative-season
+    /// models (simulation) are added in plan 11-07 Task 2 -- until then this
+    /// arm keeps the pre-11-07 flat `sigma*sqrt(k)` width so multiplicative-
+    /// error callers do not regress to an error.
+    ///
+    /// `point` must already include any exogenous-regressor contribution
+    /// (as produced by [`Self::predict_internal`]); bounds are returned as
+    /// `point ∓ z*sqrt(v_h)`, so the exogenous shift carries through to both
+    /// bounds identically to the point forecast.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn ets_interval_bounds(
+        spec: ETSSpec,
+        alpha: f64,
+        beta: Option<f64>,
+        gamma: Option<f64>,
+        phi: Option<f64>,
+        period: usize,
+        sigma2: f64,
+        point: &[f64],
+        horizon: usize,
+        level: f64,
+    ) -> (Vec<f64>, Vec<f64>) {
+        let z = quantile_normal((1.0 + level) / 2.0);
+
+        match spec.error {
+            ErrorType::Additive if spec.seasonal != SeasonalType::Multiplicative => {
+                let variances = Self::ets_forecast_variance(
+                    spec, alpha, beta, gamma, phi, period, sigma2, horizon,
+                );
+                let mut lower = Vec::with_capacity(horizon);
+                let mut upper = Vec::with_capacity(horizon);
+                for h in 0..horizon {
+                    let se = variances[h].sqrt();
+                    lower.push(point[h] - z * se);
+                    upper.push(point[h] + z * se);
+                }
+                (lower, upper)
+            }
+            _ => {
+                // TODO(plan 11-07 Task 2): class 2 analytic theta_h
+                // recursion, and simulation-based bounds for every
+                // multiplicative-season model (class 3, plus
+                // additive-error + multiplicative-season).
+                let k_period = period.max(1);
+                let mut lower = Vec::with_capacity(horizon);
+                let mut upper = Vec::with_capacity(horizon);
+                for h in 1..=horizon {
+                    let k = if spec.has_seasonal() {
+                        ((h - 1) / k_period) + 1
+                    } else {
+                        h
+                    };
+                    let se = (sigma2 * k as f64).sqrt();
+                    lower.push(point[h - 1] - z * se);
+                    upper.push(point[h - 1] + z * se);
+                }
+                (lower, upper)
+            }
+        }
+    }
+
     fn predict_internal_with_intervals(
         &self,
         horizon: usize,
@@ -2110,30 +2278,29 @@ impl ETS {
         confidence: f64,
     ) -> Result<Forecast> {
         let forecast = self.predict_internal(horizon, future_regressors)?;
-        let variance = self.residual_variance.unwrap_or(0.0);
-        let period = self.seasonal_period;
 
         if horizon == 0 {
             return Ok(forecast);
         }
 
-        let z = quantile_normal((1.0 + confidence) / 2.0);
+        let sigma2 = self
+            .interval_sigma2
+            .or(self.residual_variance)
+            .unwrap_or(0.0);
         let preds = forecast.primary();
 
-        let mut lower = Vec::with_capacity(horizon);
-        let mut upper = Vec::with_capacity(horizon);
-
-        for h in 1..=horizon {
-            let k = if self.spec.has_seasonal() {
-                ((h - 1) / period) + 1
-            } else {
-                h
-            };
-            let se = (variance * k as f64).sqrt();
-
-            lower.push(preds[h - 1] - z * se);
-            upper.push(preds[h - 1] + z * se);
-        }
+        let (lower, upper) = Self::ets_interval_bounds(
+            self.spec,
+            self.alpha.unwrap_or(0.0),
+            self.beta,
+            self.gamma,
+            self.phi,
+            self.seasonal_period,
+            sigma2,
+            preds,
+            horizon,
+            confidence,
+        );
 
         Ok(Forecast::from_values_with_intervals(
             preds.to_vec(),
@@ -2407,6 +2574,14 @@ impl Forecaster for ETS {
         if !valid_slice.is_empty() && sum_sq_errors.is_finite() {
             let variance = crate::simd::sum_of_squares(valid_slice) / valid_slice.len() as f64;
             self.residual_variance = Some(variance);
+
+            // Interval sigma2 (D-08, plan 11-07): R's `forecast.ets` divides
+            // by `n - length(par)` (length(par) = num_params() - 1, since
+            // num_params() also counts sigma^2 itself), not by `n`.
+            let n_obs_f = valid_slice.len() as f64;
+            let length_par = (self.num_params() as f64 - 1.0).max(1.0);
+            let df = (n_obs_f - length_par).max(1.0);
+            self.interval_sigma2 = Some(variance * n_obs_f / df);
 
             // Floor as in calculate_likelihood_with_init_buf: a perfect fit
             // (sum_sq_errors == 0) is the global optimum, not degenerate.
