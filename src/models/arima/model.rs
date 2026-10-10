@@ -317,192 +317,39 @@ impl ARIMA {
         self.bic
     }
 
-    /// Score-only evaluation: compute AIC or BIC from a pre-computed differenced series
-    /// without storing any model state. Used by AutoARIMA to avoid full model construction
-    /// during candidate search.
+    /// Score-only evaluation: compute AICc or BIC from a pre-computed
+    /// differenced series, via the exact Gaussian likelihood (R
+    /// `stats::arima` CSS-ML convention, D-06) -- no full model
+    /// construction, no steady-state shortcut. Delegates to
+    /// `exact_likelihood::fit_exact_ml` on the FULL differenced series
+    /// (`common_start`/tail-window plumbing removed).
     ///
-    /// Returns `Some(score)` on success, `None` if fitting fails.
+    /// Returns `Some(score)` on success, `None` if fitting fails or
+    /// the candidate fails R's root rule (`ic = Inf` equivalent).
     pub(crate) fn score_order(
         p: usize,
         q: usize,
         diff_series: &[f64],
         use_aic: bool,
         allow_constant: bool,
-        common_start: usize,
+        _common_start: usize,
     ) -> Option<f64> {
-        let n = diff_series.len();
-        let start = p.max(q);
-        if n <= start + 2 {
-            return None;
-        }
-        // NOTE (D-06 scope decision): a per-candidate-common scoring
-        // window (dropping `max(common_start, start)` leading
-        // observations for every candidate, not just this one's own
-        // `start`) was implemented and verified to fix the random-walk
-        // d/D-vs-scoring inconsistency Pattern 5 describes -- but it also
-        // changed AutoARIMA's selected order on M4-Daily series D4047
-        // enough to push its MAE to 3.88x the statsforecast baseline
-        // (gate: 2x), an explicitly protected regression per this
-        // branch's interfaces contract ("M4 gate thresholds are not
-        // loosened"). Given the tension between the two explicit
-        // requirements, this branch keeps the original per-candidate
-        // `start` (not `common_start`) to preserve the M4 gate; the
-        // common-basis window fix is deferred, documented in SUMMARY as
-        // a known gap for 11-05. `common_start` is accepted for call-site
-        // symmetry with `SARIMA::score_order` but intentionally unused
-        // here.
-        let _ = common_start;
-        let nstar = n as f64; // effective sample size (after differencing)
-
-        if p == 0 && q == 0 {
-            // Try both with-mean (drift) and without-mean variants, return best.
-            // D-06: a constant is only tried when `allow_constant` (d+D<=1);
-            // this is the one behavior change from the pre-D-06 code, which
-            // tried both unconditionally regardless of d+D.
-            let mean = diff_series.iter().sum::<f64>() / nstar;
-
-            // Use the same Gaussian loglik formula as non-(0,0) case for consistency.
-            let score_variant = |sigma2: f64, k: f64| -> Option<f64> {
-                if sigma2 < 0.0 || !sigma2.is_finite() {
-                    return None;
-                }
-                let log_s2 = if sigma2 < 1e-15 {
-                    1e-15_f64.ln()
-                } else {
-                    sigma2.ln()
-                };
-                let ll = -0.5 * nstar * (1.0 + log_s2 + (2.0 * std::f64::consts::PI).ln());
-                let score = if use_aic {
-                    let aic = -2.0 * ll + 2.0 * k;
-                    if nstar > k + 1.0 {
-                        aic + 2.0 * k * (k + 1.0) / (nstar - k - 1.0)
-                    } else {
-                        f64::MAX
-                    }
-                } else {
-                    -2.0 * ll + k * nstar.ln()
-                };
-                if score.is_finite() {
-                    Some(score)
-                } else {
-                    None
-                }
-            };
-
-            // Without drift: variance around zero, k = 1 (sigma2 only)
-            let var_without = diff_series.iter().map(|v| v * v).sum::<f64>() / nstar;
-            let score_without = score_variant(var_without, 1.0);
-
-            let score_with = if allow_constant {
-                // With drift: variance around mean, k = 2 (drift + sigma2)
-                let var_with = diff_series.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / nstar;
-                score_variant(var_with, 2.0)
-            } else {
-                None
-            };
-
-            return match (score_with, score_without) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (Some(a), None) => Some(a),
-                (None, Some(b)) => Some(b),
-                (None, None) => None,
-            };
-        }
-
-        // ARMA(p,q) scoring: CSS optimization with AICc.
-        // For long series (n > 500), use approximate scoring on the tail
-        // (matching R's auto.arima approximation=TRUE).
-        let score_series = if n > 500 {
-            &diff_series[n - 500..]
-        } else {
-            diff_series
-        };
-        let score_n = score_series.len();
-        let score_start = p.max(q);
-
-        // HR initialization on the scoring subseries
-        let hr_init = if p + q >= 2 {
-            let hr = Self::hannan_rissanen_init(score_series, p, q);
-            let raw: Vec<f64> = hr[1..].to_vec(); // skip intercept
-            raw.iter()
-                .map(|&v| v.clamp(-0.98, 0.98))
-                .collect::<Vec<_>>()
-        } else {
-            let mut init = Vec::with_capacity(p + q);
-            for i in 0..p {
-                init.push(0.3 / (i + 1) as f64);
-            }
-            for i in 0..q {
-                init.push(0.3 / (i + 1) as f64);
-            }
-            init
-        };
-
-        let mut bounds = Vec::with_capacity(p + q);
-        for _ in 0..(p + q) {
-            bounds.push((-0.99, 0.99));
-        }
-
-        let residuals_buf = std::cell::RefCell::new(vec![0.0; score_n]);
-        let css_result = nelder_mead(
-            |params| {
-                let mut buf = residuals_buf.borrow_mut();
-                Self::calculate_css(
-                    score_series,
-                    p,
-                    q,
-                    &params[..p],
-                    &params[p..],
-                    0.0,
-                    &mut buf,
-                )
-            },
-            &hr_init,
-            Some(&bounds),
-            NelderMeadConfig {
-                max_iter: 100,
-                tolerance: 1e-6,
-                ..Default::default()
-            },
-        );
-
-        let css = css_result.optimal_value;
-        if !css.is_finite() || css >= f64::MAX {
-            return None;
-        }
-
-        // AICc from CSS variance (using scoring subseries length)
-        let n_eff = (score_n - score_start) as f64;
-        if n_eff <= 0.0 {
-            return None;
-        }
-        let sigma2 = css / n_eff;
-        if sigma2 < 0.0 || !sigma2.is_finite() {
-            return None;
-        }
-        let log_s2 = if sigma2 < 1e-15 {
-            1e-15_f64.ln()
-        } else {
-            sigma2.ln()
-        };
-        let ll = -0.5 * n_eff * (1.0 + log_s2 + (2.0 * std::f64::consts::PI).ln());
-        let k = (p + q + 1) as f64; // AR + MA + intercept/sigma2
-        let score = if use_aic {
-            let aic = -2.0 * ll + 2.0 * k;
-            // AICc correction
-            if n_eff > k + 1.0 {
-                aic + 2.0 * k * (k + 1.0) / (n_eff - k - 1.0)
-            } else {
-                f64::MAX
-            }
-        } else {
-            -2.0 * ll + k * n_eff.ln()
-        };
-
-        if score.is_finite() {
-            Some(score)
+        let score =
+            |fit: &super::exact_likelihood::ScoredFit| if use_aic { fit.aicc } else { fit.bic };
+        let fit_without = super::exact_likelihood::fit_exact_ml(diff_series, p, q, 0, 0, 1, false);
+        let fit_with = if allow_constant {
+            super::exact_likelihood::fit_exact_ml(diff_series, p, q, 0, 0, 1, true)
         } else {
             None
+        };
+        match (
+            fit_with.as_ref().map(score),
+            fit_without.as_ref().map(score),
+        ) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
         }
     }
 
@@ -558,7 +405,7 @@ impl ARIMA {
     ///
     /// `ar_poly` = [1, -phi1, -phi2, ...], `ma_poly` = [1, theta1, theta2, ...]
     /// Returns gamma(0..nobs-1) with sigma2=1.
-    fn arma_acovf(ar_poly: &[f64], ma_poly: &[f64], nobs: usize) -> Vec<f64> {
+    pub(super) fn arma_acovf(ar_poly: &[f64], ma_poly: &[f64], nobs: usize) -> Vec<f64> {
         let p = ar_poly.len() - 1; // AR order
         let q = ma_poly.len() - 1; // MA order
         let m = p.max(q) + 1;
@@ -698,7 +545,7 @@ impl ARIMA {
     /// For AR(1): |phi1| < 1
     /// For AR(2): phi2 + phi1 < 1, phi2 - phi1 < 1, |phi2| < 1
     /// For higher orders: use the companion matrix eigenvalue check.
-    fn check_stationarity(ar: &[f64]) -> bool {
+    pub(super) fn check_stationarity(ar: &[f64]) -> bool {
         let p = ar.len();
         if p == 0 {
             return true;
@@ -841,7 +688,7 @@ impl ARIMA {
     ///
     /// Ported from statsmodels `_arma_innovations.pyx::darma_transformed_acovf_fast`.
     /// Returns (acovf_matrix [n x n flat row-major], acovf2 [1-D], n) where n = min(2*m, nobs).
-    fn arma_transformed_acovf_fast(
+    pub(super) fn arma_transformed_acovf_fast(
         ar_poly: &[f64],
         ma_poly: &[f64],
         arma_acovf: &[f64],
@@ -910,7 +757,7 @@ impl ARIMA {
     ///
     /// Ported from statsmodels `_arma_innovations.pyx::darma_innovations_algo_fast`.
     /// Returns (theta [nobs x (m+1) flat row-major], v [nobs]).
-    fn arma_innovations_algo_fast(
+    pub(super) fn arma_innovations_algo_fast(
         nobs: usize,
         ar_params: &[f64],
         ma_params: &[f64],
@@ -1003,7 +850,7 @@ impl ARIMA {
     /// Innovations filter: compute one-step-ahead prediction errors.
     ///
     /// Ported from statsmodels `_arma_innovations.pyx::darma_innovations_filter`.
-    fn arma_innovations_filter(
+    pub(super) fn arma_innovations_filter(
         endog: &[f64],
         ar_params: &[f64],
         ma_params: &[f64],
@@ -2252,9 +2099,12 @@ impl SARIMA {
         self.bic
     }
 
-    /// Score-only evaluation: compute AIC or BIC from a pre-computed differenced series
-    /// without storing any model state. Used by AutoARIMA to avoid full model construction
-    /// during candidate search.
+    /// Score-only evaluation: compute AICc or BIC from a pre-computed
+    /// differenced series, via the exact Gaussian likelihood (R
+    /// `stats::arima` CSS-ML convention, D-06) -- no full model
+    /// construction, no steady-state shortcut, no approximation-tail
+    /// window. Delegates to `exact_likelihood::fit_exact_ml` on the
+    /// FULL differenced series.
     pub(crate) fn score_order(
         p: usize,
         q: usize,
@@ -2266,160 +2116,20 @@ impl SARIMA {
         allow_constant: bool,
         _common_start: usize,
     ) -> Option<f64> {
-        let max_ar_lag = if cap_p > 0 && s > 1 {
-            p + cap_p * s
-        } else {
-            p.max(cap_p * s)
-        };
-        let max_ma_lag = if cap_q > 0 && s > 1 {
-            q + cap_q * s
-        } else {
-            q.max(cap_q * s)
-        };
-        let start = max_ar_lag.max(max_ma_lag);
-
-        if diff_series.len() <= start + 2 {
-            return None;
-        }
-
-        // For long series, use approximate scoring on the tail (matches R's approximation=TRUE).
-        let n_full = diff_series.len();
-        let min_approx_len = start + 200;
-        let score_series = if n_full > min_approx_len && n_full > 500 {
-            &diff_series[n_full - 500.max(min_approx_len)..]
-        } else {
-            diff_series
-        };
-        let score_n = score_series.len();
-
-        // D-06: a constant is tried only when `allow_constant` (d+D<=1).
-        // `n_params`/`initial`/`bounds` are built per with_constant variant
-        // below (pre-D-06 code always included the constant).
-        let base_params = p + q + cap_p + cap_q;
-
-        if p == 0 && q == 0 && cap_p == 0 && cap_q == 0 {
-            // Just intercept (or pure-zero-mean) model.
-            let n_eff = (score_n - start) as f64;
-            if n_eff <= 0.0 {
-                return None;
-            }
-            let variance_without = score_series[start..].iter().map(|v| v * v).sum::<f64>() / n_eff;
-            let score_without = Self::sarima_ic(variance_without, n_eff, 1.0, use_aic);
-
-            let score_with = if allow_constant {
-                let mean = score_series.iter().sum::<f64>() / score_n as f64;
-                let variance_with = score_series[start..]
-                    .iter()
-                    .map(|v| (v - mean).powi(2))
-                    .sum::<f64>()
-                    / n_eff;
-                Self::sarima_ic(variance_with, n_eff, 2.0, use_aic)
-            } else {
-                None
-            };
-
-            return match (score_with, score_without) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (Some(a), None) => Some(a),
-                (None, Some(b)) => Some(b),
-                (None, None) => None,
-            };
-        }
-
-        // Run CSS optimization either with a free intercept (constant) or
-        // with intercept fixed at 0.0; npar differs by whether the
-        // constant is included (+1).
-        let run_variant = |with_constant: bool| -> Option<f64> {
-            let n_params = base_params + if with_constant { 1 } else { 0 };
-            let mean = score_series.iter().sum::<f64>() / score_n as f64;
-            let mut initial = vec![0.0; n_params];
-            let mut bounds = Vec::with_capacity(n_params);
-            let mut idx = 0;
-            if with_constant {
-                initial[0] = mean;
-                bounds.push((f64::NEG_INFINITY, f64::INFINITY));
-                idx = 1;
-            }
-            for i in 0..p {
-                initial[idx + i] = 0.1 / (i + 1) as f64;
-                bounds.push((-0.99, 0.99));
-            }
-            idx += p;
-            for i in 0..q {
-                initial[idx + i] = 0.1 / (i + 1) as f64;
-                bounds.push((-0.99, 0.99));
-            }
-            idx += q;
-            for i in 0..cap_p {
-                initial[idx + i] = 0.1 / (i + 1) as f64;
-                bounds.push((-0.99, 0.99));
-            }
-            idx += cap_p;
-            for i in 0..cap_q {
-                initial[idx + i] = 0.1 / (i + 1) as f64;
-                bounds.push((-0.99, 0.99));
-            }
-
-            let lbfgs_config = LbfgsConfig {
-                max_iter: 50,
-                tolerance: 1e-6,
-                ..Default::default()
-            };
-
-            let residuals_buf = std::cell::RefCell::new(vec![0.0; score_n]);
-            let const_off = if with_constant { 1 } else { 0 };
-
-            let result = lbfgs_optimize(
-                |params| {
-                    let ar_end = const_off + p;
-                    let ma_end = ar_end + q;
-                    let sar_end = ma_end + cap_p;
-                    let sma_end = sar_end + cap_q;
-                    let intercept = if with_constant { params[0] } else { 0.0 };
-
-                    let mut buf = residuals_buf.borrow_mut();
-                    Self::calculate_css(
-                        score_series,
-                        p,
-                        q,
-                        cap_p,
-                        cap_q,
-                        s,
-                        &params[const_off..ar_end],
-                        &params[ar_end..ma_end],
-                        &params[ma_end..sar_end],
-                        &params[sar_end..sma_end],
-                        intercept,
-                        &mut buf,
-                    )
-                },
-                &initial,
-                Some(&bounds),
-                lbfgs_config,
-            );
-
-            // Compute AIC/BIC directly from CSS
-            let css = result.optimal_value;
-            if !css.is_finite() || css <= 0.0 {
-                return None;
-            }
-
-            let n_eff = (score_n - start) as f64;
-            let variance = css / n_eff;
-            let k = (n_params + 1) as f64; // + sigma2 -- Pattern 5 fix #2: AICc
-                                           // correction below, which the pre-D-06 code omitted entirely
-                                           // (it only ever computed plain AIC/BIC for this branch).
-            Self::sarima_ic(variance, n_eff, k, use_aic)
-        };
-
-        let score_without = run_variant(false);
-        let score_with = if allow_constant {
-            run_variant(true)
+        let m = if s > 1 { s } else { 1 };
+        let score =
+            |fit: &super::exact_likelihood::ScoredFit| if use_aic { fit.aicc } else { fit.bic };
+        let fit_without =
+            super::exact_likelihood::fit_exact_ml(diff_series, p, q, cap_p, cap_q, m, false);
+        let fit_with = if allow_constant {
+            super::exact_likelihood::fit_exact_ml(diff_series, p, q, cap_p, cap_q, m, true)
         } else {
             None
         };
-
-        match (score_with, score_without) {
+        match (
+            fit_with.as_ref().map(score),
+            fit_without.as_ref().map(score),
+        ) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (Some(a), None) => Some(a),
             (None, Some(b)) => Some(b),
@@ -2513,7 +2223,7 @@ impl SARIMA {
     /// are multiplied, creating interaction terms at lag (i+1) + (j+1)*s.
     /// Uses a pre-allocated residuals buffer to avoid allocation per call.
     /// The buffer must be at least `diff_series.len()` elements.
-    fn calculate_css(
+    pub(super) fn calculate_css(
         diff_series: &[f64],
         p: usize,
         q: usize,
@@ -3312,6 +3022,23 @@ impl Forecaster for SARIMA {
             "ARIMA"
         }
     }
+}
+
+/// Test-only hook into `exact_likelihood::fit_exact_ml`, exposed so
+/// integration tests (a separate crate) can probe the exact-ML scorer
+/// directly without constructing a full `AutoARIMA` search (11-11,
+/// mirrors `calculate_mle_pub`'s existing pattern). Returns the fitted
+/// AICc.
+#[doc(hidden)]
+pub fn fit_exact_ml_for_tests(
+    w: &[f64],
+    p: usize,
+    q: usize,
+    cap_p: usize,
+    cap_q: usize,
+    m: usize,
+) -> Option<f64> {
+    super::exact_likelihood::fit_exact_ml(w, p, q, cap_p, cap_q, m, false).map(|fit| fit.aicc)
 }
 
 #[cfg(test)]

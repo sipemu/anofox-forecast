@@ -7,6 +7,7 @@
 
 mod auto_arima;
 mod diff;
+mod exact_likelihood;
 mod model;
 
 pub use auto_arima::{AutoARIMA, AutoARIMAConfig, ModelOrder};
@@ -14,4 +15,4 @@ pub use diff::{
     difference, find_min_fractional_d, fractional_difference, fractional_weights, integrate,
     ndiffs_kpss, nsdiffs_seas, seasonal_difference, seasonal_integrate, suggest_differencing,
 };
-pub use model::{ARIMASpec, SARIMASpec, ARIMA, SARIMA};
+pub use model::{fit_exact_ml_for_tests, ARIMASpec, SARIMASpec, ARIMA, SARIMA};
