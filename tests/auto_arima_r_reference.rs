@@ -342,3 +342,91 @@ fn auto_arima_selection_frequencies() {
         "d>=1 share {ar_share} outside [0.08, 0.32]"
     );
 }
+
+/// `AutoARIMA::seasonal(12)` on AirPassengers: `d` and `D` must equal R's
+/// (`d=1`, `D=1` -- passes), and R's own selected order
+/// (`ARIMA(2,1,1)(0,1,0)[12]` per the fixture) must rank among the
+/// crate's three lowest-scored candidates.
+///
+/// KNOWN GAP (documented, not silently loosened -- see 11-05-SUMMARY.md
+/// and 11-04-SUMMARY.md's "Known Gap"): this directly re-exercises the
+/// pre-existing per-candidate AICc scoring-window bug on a *second*,
+/// independent dataset (previously only verified failing on the
+/// synthetic RW/AR(0.7) Monte-Carlo fixtures). Measured in this session:
+/// the crate's own `SARIMA::score_order`/`.fit().aic()` ranks an overfit
+/// `ARIMA(3,1,0)(2,1,0)[12]` far ahead of R's own pick (~829 vs ~1002,
+/// a ~170-unit AICc gap) because the two candidates are scored over
+/// different effective sample sizes (`n - max(p,q+P*s,...)`, dropping
+/// more leading observations for the higher-order candidate, which
+/// mechanically shrinks its residual variance and thus its AICc,
+/// independent of genuine predictive power). This is the exact
+/// mechanism research Pattern 5 and 11-04's Known Gap describe. 11-04
+/// already implemented and reverted a "common-basis" fix (and an
+/// exact-likelihood variant) for this; both raised the RW-share Monte
+/// Carlo target but regressed `tests/m4_daily_accuracy_regression.rs`
+/// (D4047 3.88x / 2.35x vs the 2x gate). This session re-verified the
+/// gap persists under R's own default seasonal bounds (`max.P=2`), found
+/// it also breaks on a previously-untested dataset (AirPassengers,
+/// 170-point AICc gap, not just the synthetic fixtures), and confirmed
+/// with a direct `Rscript` run that R's own pick on M4 D4047 is
+/// `ARIMA(0,1,0)` with MAE exactly matching the statsforecast gate
+/// baseline (141.5, ratio 1.0x) -- i.e. R is NOT in the ">2x" regime on
+/// that series, so the M4 gate's 2x tolerance is evidence-backed and
+/// must not be loosened (2026-10-10 user decision, point 3). Closing
+/// this gap requires replacing CSS-based candidate scoring with exact
+/// (or CSS-ML) likelihood comparisons on a per-candidate basis that
+/// doesn't shrink with model order, for both `ARIMA::score_order` and
+/// `SARIMA::score_order` -- out of this session's remaining budget; see
+/// 11-05-SUMMARY.md for the full trail and recommended next steps.
+#[test]
+#[ignore = "known gap: per-candidate AICc scoring window favours high-order models by shrinking the comparison sample; confirmed on AirPassengers too, not just the RW/AR fixtures. Deferred, see 11-05-SUMMARY.md and 11-04-SUMMARY.md Known Gap."]
+fn auto_arima_airpassengers_matches_r() {
+    let fixture = load_fixture();
+    let entries = fixture["seasonal"].as_array().unwrap();
+    let air = entries
+        .iter()
+        .find(|e| e["name"].as_str() == Some("air_passengers"))
+        .unwrap();
+    let values = as_f64_vec(&air["values"]);
+    let r_order = (
+        air["p"].as_u64().unwrap() as usize,
+        air["d"].as_u64().unwrap() as usize,
+        air["q"].as_u64().unwrap() as usize,
+        air["cap_p"].as_u64().unwrap() as usize,
+        air["cap_d"].as_u64().unwrap() as usize,
+        air["cap_q"].as_u64().unwrap() as usize,
+    );
+
+    let timestamps = make_timestamps(values.len());
+    let ts = TimeSeries::univariate(timestamps, values).unwrap();
+    let mut model = AutoARIMA::seasonal(12);
+    model.fit(&ts).expect("AirPassengers fit failed");
+    let order = model.selected_full_order().expect("no selected order");
+
+    println!(
+        "crate selected order = ({}, {}, {}, {}, {}, {}) R order = {r_order:?}",
+        order.p, order.d, order.q, order.cap_p, order.cap_d, order.cap_q
+    );
+
+    assert_eq!(order.d, 1, "AirPassengers: crate d={} vs R d=1", order.d);
+    assert_eq!(
+        order.cap_d, 1,
+        "AirPassengers: crate D={} vs R D=1",
+        order.cap_d
+    );
+
+    let mut scores = model.model_scores().to_vec();
+    scores.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    let top3: Vec<_> = scores
+        .iter()
+        .take(3)
+        .map(|(o, score)| ((o.p, o.d, o.q, o.cap_p, o.cap_d, o.cap_q), *score))
+        .collect();
+    println!("top 3 scored candidates = {top3:?}");
+
+    let r_in_top3 = top3.iter().any(|(order, _)| *order == r_order);
+    assert!(
+        r_in_top3,
+        "R's order {r_order:?} not among crate's top 3 scored candidates: {top3:?}"
+    );
+}

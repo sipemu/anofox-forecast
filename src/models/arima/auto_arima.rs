@@ -31,8 +31,19 @@ pub struct AutoARIMAConfig {
     /// Use stepwise search (faster) vs exhaustive.
     pub stepwise: bool,
     /// Use true stepwise (neighbor-based hill climbing) vs grid stepwise.
-    /// Only applies when stepwise=true. More efficient but may miss global optimum.
+    /// Only applies when stepwise=true. This is R `forecast::auto.arima`'s
+    /// own search strategy (Hyndman-Khandakar stepwise, D-06); enable it
+    /// via `with_true_stepwise()`. NOT the crate's default as of 11-05
+    /// (evidence-gated, deferred -- see `AutoARIMAConfig::default()` and
+    /// 11-05-SUMMARY.md): it is enforced by `max_order` here, but the
+    /// scoring formula it calls into still has the per-candidate AICc
+    /// window bug documented in 11-04-SUMMARY.md's Known Gap, so this is
+    /// not yet safe as the default.
     pub true_stepwise: bool,
+    /// Maximum value of `p+q+P+Q` allowed for any candidate (R
+    /// `auto.arima`'s `max.order`, default 5, D-06). Enforced by
+    /// `true_stepwise_search` on every start model and neighbour move.
+    pub max_order: usize,
     /// Selection criterion (use AIC for selection).
     pub use_aic: bool,
 }
@@ -43,12 +54,29 @@ impl Default for AutoARIMAConfig {
             max_p: 5,
             max_q: 5,
             max_d: 2,
+            // 11-05 (D-06, evidence-gated per 2026-10-10 user decision): R
+            // `auto.arima`'s real defaults are max.P = 2, max.Q = 2 with
+            // Hyndman-Khandakar stepwise search as the default strategy.
+            // That combination was implemented and tested in this session
+            // and found to re-expose the pre-existing per-candidate AICc
+            // scoring-window bug documented as a Known Gap in
+            // 11-04-SUMMARY.md -- not only on the RW/AR Monte-Carlo
+            // fixtures (already known), but also on AirPassengers (R's
+            // ARIMA(2,1,1)(0,1,0)[12] scores ~1002 under the crate's own
+            // AICc while an overfit ARIMA(3,1,0)(2,1,0)[12] scores ~829,
+            // a ~170-unit gap from comparing candidates over different
+            // effective sample sizes). Flipping these defaults without
+            // fixing that root cause would ship a regression, which the
+            // user's decision explicitly says not to do ("stop and report
+            // precisely... rather than shipping a regression"). Kept at
+            // the pre-11-05 values; see 11-05-SUMMARY.md.
             max_cap_p: 1,
             max_cap_q: 1,
             max_cap_d: 1,
             seasonal_period: 0,
             stepwise: true,
-            true_stepwise: false, // Grid stepwise for reliable model selection
+            true_stepwise: false, // Grid stepwise for reliable model selection (see note above)
+            max_order: 5,
             use_aic: true,
         }
     }
@@ -83,11 +111,24 @@ impl AutoARIMAConfig {
         self
     }
 
-    /// Use true stepwise search (neighbor-based hill climbing).
-    /// More efficient than grid stepwise but may miss global optimum.
+    /// Use true stepwise search (neighbor-based hill climbing), matching
+    /// R `forecast::auto.arima`'s own default search strategy
+    /// (Hyndman-Khandakar). More efficient than grid stepwise but may
+    /// miss the global optimum under the crate's current scoring formula
+    /// (see `AutoARIMAConfig::default()`'s doc comment) -- opt in
+    /// explicitly, not yet the crate's default as of 11-05.
     pub fn with_true_stepwise(mut self) -> Self {
         self.stepwise = true;
         self.true_stepwise = true;
+        self
+    }
+
+    /// Use the fixed-grid stepwise search (the crate's default as of
+    /// 11-05). Named for symmetry with `with_true_stepwise()` and to give
+    /// a stable, explicit opt-in once the default flips to HK stepwise.
+    pub fn with_grid_stepwise(mut self) -> Self {
+        self.stepwise = true;
+        self.true_stepwise = false;
         self
     }
 }
@@ -191,24 +232,14 @@ impl AutoARIMA {
         &self.model_scores
     }
 
-    /// Test whether the series has a detectable seasonal pattern at the given period.
-    /// Uses STL decomposition + seasonal strength heuristic, matching statsforecast's
-    /// `seas_heuristic()` / `nsdiffs()` exactly:
-    ///   strength = 1 - Var(remainder) / Var(seasonal + remainder)
-    ///   seasonal if strength > 0.64
-    ///
-    /// Delegates to the same `diff::seasonal_strength` helper `nsdiffs_seas`
-    /// uses, so there is one seasonal-strength computation in the crate
-    /// (D-06 / research Pattern 4), not two divergent heuristics.
-    fn has_seasonal_pattern(values: &[f64], period: usize) -> bool {
-        use crate::models::arima::diff::seasonal_strength;
-        seasonal_strength(values, period).is_some_and(|s| s > 0.64)
-    }
-
     /// Suggest seasonal differencing order using R `forecast::nsdiffs`'
-    /// seasonal-strength test (D-06): delegates to `nsdiffs_seas`, the
-    /// same test `has_seasonal_pattern` uses, instead of a second,
-    /// divergent variance-ratio heuristic.
+    /// seasonal-strength test (D-06): delegates to `nsdiffs_seas`.
+    ///
+    /// 11-05: `AutoARIMA::fit` no longer falls back to a non-seasonal
+    /// search when this test's underlying strength heuristic is weak --
+    /// R's `auto.arima` only drops seasonal AR/MA terms when `period < 2`
+    /// (D-06); when `period > 1` but `nsdiffs_seas` returns `D = 0`, the
+    /// seasonal `P`/`Q` terms are still searched at `D = 0`.
     fn suggest_seasonal_differencing(values: &[f64], period: usize) -> usize {
         nsdiffs_seas(values, period, 1)
     }
@@ -568,10 +599,27 @@ impl AutoARIMA {
         neighbors
     }
 
-    /// True stepwise search matching Python statsforecast / R's auto.arima.
+    /// True stepwise search matching R `forecast::auto.arima`'s
+    /// Hyndman-Khandakar stepwise search (D-06).
     /// Greedy first-improvement: takes the first neighbor that improves the IC,
     /// then restarts the neighbor scan from the beginning.
     /// Uses score-only evaluation with pre-computed differenced series.
+    ///
+    /// Every start model and neighbour move is bounded by
+    /// `self.config.max_order` (R's `max.order`, p+q+P+Q, default 5):
+    /// candidates exceeding it are skipped via `order_within_max` below,
+    /// matching R's own bound on the search space.
+    ///
+    /// Note on the constant/mean term (R's fifth start model, "(0,d,0)
+    /// without constant"): `score_order_static`'s `allow_constant` already
+    /// evaluates a candidate with AND without a mean/drift term whenever
+    /// `d+D<=1` and keeps the better of the two (D-06, 11-04). A separate
+    /// "null model without constant" start candidate would therefore score
+    /// identically to the null-model-with-constant start below (same
+    /// `(p,q,P,Q)` key, same auto-selected best score) and is a redundant
+    /// R implementation detail in this crate's scoring design, not a
+    /// missing search state -- so it is intentionally not added as a
+    /// sixth distinct start candidate here (11-05).
     fn true_stepwise_search(
         &mut self,
         diff_series: &[f64],
@@ -581,10 +629,12 @@ impl AutoARIMA {
         let s = self.config.seasonal_period;
         let use_aic = self.config.use_aic;
         let common_start = Self::common_start_for_config(&self.config);
-        let max_models = 94; // matching Python's nmodels limit
+        let max_models = 94; // matching R's nmodels limit
+        let max_order = self.config.max_order;
+        let order_within_max = |o: &ModelOrder| o.p + o.q + o.cap_p + o.cap_q <= max_order;
 
         // Initial models matching Python statsforecast starting points
-        let initial_orders = vec![
+        let initial_orders: Vec<ModelOrder> = vec![
             // Model 0: (start_p, d, start_q) with seasonal
             ModelOrder {
                 p: 2,
@@ -642,6 +692,9 @@ impl AutoARIMA {
 
         let mut visited = std::collections::HashSet::new();
         for order in initial_orders {
+            if !order_within_max(&order) {
+                continue;
+            }
             let key = (order.p, order.q, order.cap_p, order.cap_q);
             if visited.contains(&key) {
                 continue;
@@ -675,6 +728,9 @@ impl AutoARIMA {
             let mut improved = false;
 
             for neighbor in neighbors {
+                if !order_within_max(&neighbor) {
+                    continue;
+                }
                 let key = (neighbor.p, neighbor.q, neighbor.cap_p, neighbor.cap_q);
                 if visited.contains(&key) {
                     continue;
@@ -842,14 +898,14 @@ impl Forecaster for AutoARIMA {
             });
         }
 
-        // Seasonal strength test: check if the data actually has a seasonal pattern
-        // at the configured period. If not, fall back to non-seasonal search.
-        // This matches statsforecast/R's behavior where nsdiffs() returns 0.
-        let s = if s > 1 && !Self::has_seasonal_pattern(values, s) {
-            0 // Fall back to non-seasonal
-        } else {
-            s
-        };
+        // 11-05 (D-06): no non-seasonal fallback here. R `auto.arima` only
+        // drops seasonal AR/MA terms when `period < 2`; when `period > 1`
+        // the seasonal P/Q terms are searched even if the seasonal-strength
+        // test below yields `D = 0` (a pre-11-05 fallback used to zero `s`
+        // itself when the strength test was weak, which also force a
+        // non-seasonal search -- removed, since `nsdiffs_seas` already
+        // correctly yields `D = 0` in that case without needing to drop
+        // seasonal P/Q from the search space too).
 
         // Determine differencing orders in auto.arima's own D-then-d order
         // (D-06): D by the seasonal-strength test on the raw series, then
@@ -1188,6 +1244,39 @@ mod tests {
     fn make_timestamps(n: usize) -> Vec<chrono::DateTime<Utc>> {
         let base = Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap();
         (0..n).map(|i| base + Duration::hours(i as i64)).collect()
+    }
+
+    /// `max_order` (R `auto.arima`'s `max.order`, D-06) defaults to 5 and
+    /// is enforced by `true_stepwise_search`.
+    ///
+    /// NOT asserted here (11-05, evidence-gated per 2026-10-10 user
+    /// decision): `max_cap_p`/`max_cap_q` = 2 and `true_stepwise` = true
+    /// as the *default*. Both are R's real defaults and are exercised via
+    /// `AutoARIMAConfig::default().with_true_stepwise().with_seasonal_orders(5, 1, 5)`
+    /// or equivalent explicit opt-in -- flipping them as the *default*
+    /// re-exposes the pre-existing per-candidate AICc scoring-window bug
+    /// (11-04-SUMMARY.md Known Gap) on AirPassengers too, not just the
+    /// RW/AR Monte-Carlo fixtures. See 11-05-SUMMARY.md.
+    #[test]
+    fn default_config_has_max_order_and_grid_stepwise() {
+        let config = AutoARIMAConfig::default();
+        assert_eq!(config.max_p, 5);
+        assert_eq!(config.max_q, 5);
+        assert_eq!(config.max_order, 5);
+        assert_eq!(config.max_d, 2);
+        assert_eq!(config.max_cap_d, 1);
+        assert!(config.stepwise);
+        assert!(!config.true_stepwise);
+    }
+
+    /// `with_grid_stepwise()` is a no-op on top of `default()` (both
+    /// currently mean grid stepwise) but documents the explicit opt-in
+    /// path for callers once the default flips to HK stepwise.
+    #[test]
+    fn with_grid_stepwise_sets_grid_search() {
+        let config = AutoARIMAConfig::default().with_grid_stepwise();
+        assert!(config.stepwise);
+        assert!(!config.true_stepwise);
     }
 
     #[test]
