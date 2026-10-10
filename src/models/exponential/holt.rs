@@ -384,7 +384,7 @@ impl Forecaster for HoltLinearTrend {
     }
 
     /// Holt prediction intervals (D-08, plan 11-08): routed through
-    /// [`ETS::ets_interval_bounds`] on the equivalent ETS(A,A,N) (or
+    /// `ETS::ets_interval_bounds` on the equivalent ETS(A,A,N) (or
     /// ETS(A,Ad,N) when `phi` is set) spec, using this model's own
     /// alpha/beta/phi, final level/trend and df-corrected
     /// `interval_sigma2`. Replaces the previous simplified

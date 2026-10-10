@@ -94,6 +94,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     (~1.15e-9 relative error) — required to hit the 1e-6-relative class-1/2 parity above; a
     pre-existing (minor) imprecision in every other interval-producing model in the crate that
     uses `quantile_normal` is incidentally improved too.
+- **The same defect class existed outside `ets.rs`.** `SimpleExponentialSmoothing`, `HoltLinearTrend`,
+  `HoltWinters` and `SeasonalES` prediction intervals now route through `ETS::ets_interval_bounds`
+  on their equivalent ETS spec, using each model's own fitted parameters, final state and a new
+  degrees-of-freedom-corrected `interval_sigma2` field (same pattern as `ETS::interval_sigma2`
+  above), replacing four different ad-hoc approximations:
+  - **SES** used `1 + Σ_{j=1}^{h-1}(1-alpha)^{2j}` (converges to a roughly *constant* width for
+    alpha near 1, since `(1-alpha)` is then tiny) instead of the ETS(A,N,N) class-1 variance
+    `1 + alpha²(h-1)`. On the `pos` fixture (`alpha≈0.9999`) at h=12, 95%: **2.08 → 7.25** (R `ses()`:
+    7.25 — now exact to 1e-6 relative for h=1..24, both 80%/95% — `tests/es_family_intervals_reference.rs::ses_holt_match_r`).
+  - **Holt** used a simplified `(alpha + alpha*beta*damped_sum(phi,j))²` approximation instead of
+    the actual class-1 `c_j = alpha + beta*damped_sum(phi,j)` (no inner `alpha*` factor on the
+    trend term). Damped Holt's own optimiser converges within ~1e-4 of R `holt(damped=TRUE)` on
+    the `pos` fixture, so bounds are within 0.04% of R for h=1..24 (well under the 3% fallback
+    ceiling); plain (undamped) Holt's crate-fit trend state does not converge to R's on this
+    fixture (R's `beta≈0.0001` means R's trend state is dominated by its jointly-MLE'd initial
+    value, which this crate's single-first-difference heuristic does not reproduce — a
+    pre-existing *fitting*-time difference, not an interval-*formula* defect, verified separately
+    via an exact self-consistency check against the corrected formula).
+  - **HoltWinters** used a flat `sigma*sqrt(ceil(h/period))` (one step per full season, not
+    per-observation) for both seasonal types. Additive now uses the ETS(A,A,A) class-1 variance;
+    multiplicative is ETS(A,A,M) (this model's residual is `y - forecast`, raw/additive, for both
+    seasonal types — never `(y-forecast)/forecast` — so it is always the additive-error member of
+    its equivalence class, documented in `predict_with_intervals`'s rustdoc), which
+    `ets_interval_bounds` simulates (matching R `forecast.ets`'s own ETS(A,A,M) fallback). On the
+    `air` fixture at R's own fitted parameters, h=12, 95% half-width: additive **52.72 → 182.42**
+    (R `hw(air,"additive")`: 121.93); multiplicative **24.18 → 34.66** (R `hw(air,"multiplicative")`:
+    56.16) — both seasonal types' crate-level initial-state heuristic does not jointly reproduce
+    R's MLE'd trend/seasonal states on this strongly-trending 144-point series (the same
+    pre-existing fitting-time gap as plain Holt above, not an interval-formula defect), so the new
+    tests compare only near-horizon (h=1..3 additive, h=1..6 multiplicative) bounds, within 12%/6%
+    of R respectively.
+  - **SeasonalES** used `sqrt(1 + 0.1h)` (an arbitrary fan-out, not tied to any model parameter)
+    instead of recognising that this model is `period` *independent* SES chains sharing one alpha
+    (see the module's own doc: "NOT a multiplicative seasonal model"; `error_type` is accepted but
+    never read by `fit()`/`predict()`, kept only for backward compatibility) — each slot's bound
+    now comes from the plain ETS(A,N,N)/SES class-1 variance at that slot's own forecast step
+    `j = (h-1)/period + 1`, not the overall horizon `h`.
+  - New tests: `tests/es_family_intervals_reference.rs` (`ses_holt_use_ets_helper`,
+    `ses_holt_match_r`, `hw_seasonal_es_use_ets_helper`, `hw_additive_matches_r`,
+    `hw_multiplicative_convention_documented`, `es_family_uses_ets_helper`).
 
 ## [0.15.10] - 2026-09-09
 

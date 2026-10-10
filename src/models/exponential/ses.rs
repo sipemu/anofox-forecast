@@ -275,7 +275,7 @@ impl Forecaster for SimpleExponentialSmoothing {
     }
 
     /// SES prediction intervals (D-08, plan 11-08): routed through
-    /// [`ETS::ets_interval_bounds`] on the equivalent ETS(A,N,N) spec,
+    /// `ETS::ets_interval_bounds` on the equivalent ETS(A,N,N) spec,
     /// using this model's own alpha, final level and df-corrected
     /// `interval_sigma2` (falling back to the uncorrected
     /// `residual_variance` only if `fit()` produced no valid residuals,
