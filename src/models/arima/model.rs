@@ -332,8 +332,34 @@ impl ARIMA {
         diff_series: &[f64],
         use_aic: bool,
         allow_constant: bool,
-        _common_start: usize,
+        approximation: bool,
     ) -> Option<f64> {
+        if approximation {
+            // R's `approximation = TRUE` path (n > 150 || m > 12): CSS
+            // criterion during the search; the winner alone is refit by
+            // exact ML (AutoARIMA::fit, after the search).
+            let without = super::exact_likelihood::css_r_criterion(
+                diff_series,
+                p,
+                q,
+                0,
+                0,
+                1,
+                false,
+                use_aic,
+            );
+            let with = if allow_constant {
+                super::exact_likelihood::css_r_criterion(diff_series, p, q, 0, 0, 1, true, use_aic)
+            } else {
+                None
+            };
+            return match (with, without) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
+            };
+        }
         let score =
             |fit: &super::exact_likelihood::ScoredFit| if use_aic { fit.aicc } else { fit.bic };
         let fit_without = super::exact_likelihood::fit_exact_ml(diff_series, p, q, 0, 0, 1, false);
@@ -2008,7 +2034,15 @@ pub struct SARIMA {
     /// OLS result for exogenous regressors (if any).
     #[cfg_attr(feature = "serde", serde(skip))]
     exog_ols: Option<OLSResult>,
+    /// Pre-fitted `(ar, ma, sar, sma, intercept)` consumed by the next
+    /// `fit()` instead of re-estimating (AutoARIMA's R-faithful final
+    /// fit, D-06).
+    #[cfg_attr(feature = "serde", serde(skip))]
+    warm_start: Option<Box<SarimaCoefficients>>,
 }
+
+/// `(ar, ma, sar, sma, intercept)` for a warm-started SARIMA.
+type SarimaCoefficients = (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, f64);
 
 impl SARIMA {
     /// Create a new SARIMA model.
@@ -2049,7 +2083,27 @@ impl SARIMA {
             bic: None,
             n: 0,
             exog_ols: None,
+            warm_start: None,
         }
+    }
+
+    /// Create a SARIMA model with pre-fitted coefficients: the next
+    /// `fit()` uses them directly (differencing/integration state and
+    /// fitted values are still computed from the data) instead of
+    /// re-estimating. `intercept` uses this type's constant-form
+    /// convention (`w_t = c + sum ... `).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn with_coefficients(
+        spec: SARIMASpec,
+        ar: Vec<f64>,
+        ma: Vec<f64>,
+        sar: Vec<f64>,
+        sma: Vec<f64>,
+        intercept: f64,
+    ) -> Self {
+        let mut model = Self::from_spec(spec);
+        model.warm_start = Some(Box::new((ar, ma, sar, sma, intercept)));
+        model
     }
 
     /// Create a SARIMA model from specification.
@@ -2114,9 +2168,41 @@ impl SARIMA {
         diff_series: &[f64],
         use_aic: bool,
         allow_constant: bool,
-        _common_start: usize,
+        approximation: bool,
     ) -> Option<f64> {
         let m = if s > 1 { s } else { 1 };
+        if approximation {
+            let without = super::exact_likelihood::css_r_criterion(
+                diff_series,
+                p,
+                q,
+                cap_p,
+                cap_q,
+                m,
+                false,
+                use_aic,
+            );
+            let with = if allow_constant {
+                super::exact_likelihood::css_r_criterion(
+                    diff_series,
+                    p,
+                    q,
+                    cap_p,
+                    cap_q,
+                    m,
+                    true,
+                    use_aic,
+                )
+            } else {
+                None
+            };
+            return match (with, without) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
+            };
+        }
         let score =
             |fit: &super::exact_likelihood::ScoredFit| if use_aic { fit.aicc } else { fit.bic };
         let fit_without =
@@ -2134,33 +2220,6 @@ impl SARIMA {
             (Some(a), None) => Some(a),
             (None, Some(b)) => Some(b),
             (None, None) => None,
-        }
-    }
-
-    /// Shared AIC/AICc/BIC-from-variance helper for `SARIMA::score_order`'s
-    /// two branches (Pattern 5 fix #2: the pre-D-06 code computed plain
-    /// `-2ll+2k` for the general branch with no AICc finite-sample
-    /// correction at all, while its own (0,0,0,0) branch used an
-    /// independent, slightly different formula -- this unifies both).
-    fn sarima_ic(variance: f64, n_eff: f64, k: f64, use_aic: bool) -> Option<f64> {
-        if variance <= 0.0 || !variance.is_finite() {
-            return None;
-        }
-        let ll = -0.5 * n_eff * (1.0 + variance.ln() + (2.0 * std::f64::consts::PI).ln());
-        let score = if use_aic {
-            let aic = -2.0 * ll + 2.0 * k;
-            if n_eff > k + 1.0 {
-                aic + 2.0 * k * (k + 1.0) / (n_eff - k - 1.0)
-            } else {
-                f64::MAX
-            }
-        } else {
-            -2.0 * ll + k * n_eff.ln()
-        };
-        if score.is_finite() {
-            Some(score)
-        } else {
-            None
         }
     }
 
@@ -2875,7 +2934,14 @@ impl Forecaster for SARIMA {
         // with the better AICc, restore its state.
         let try_drift_compare = (self.spec.d + self.spec.cap_d == 1)
             && (self.spec.p + self.spec.q + self.spec.cap_p + self.spec.cap_q >= 1);
-        if try_drift_compare {
+        if let Some((ar, ma, sar, sma, intercept)) = self.warm_start.take().map(|b| *b) {
+            self.ar_coefficients = ar;
+            self.ma_coefficients = ma;
+            self.seasonal_ar_coefficients = sar;
+            self.seasonal_ma_coefficients = sma;
+            self.intercept = intercept;
+            self.calculate_fitted(&diff_series);
+        } else if try_drift_compare {
             // Variant A — no drift.
             self.estimate_parameters_with_override(&diff_series, Some(false));
             self.calculate_fitted(&diff_series);
@@ -3039,6 +3105,39 @@ pub fn fit_exact_ml_for_tests(
     m: usize,
 ) -> Option<f64> {
     super::exact_likelihood::fit_exact_ml(w, p, q, cap_p, cap_q, m, false).map(|fit| fit.aicc)
+}
+
+/// Test-only hook into `r_arima::r_arima_fit` (R `myarima` port):
+/// returns the candidate's AICc, or `None` for R's `ic = Inf`.
+/// `x` is the undifferenced series; `css = true` emulates
+/// `method = "CSS"`.
+#[doc(hidden)]
+pub fn r_arima_aicc_for_tests(
+    x: &[f64],
+    order: (usize, usize, usize),
+    seasonal: (usize, usize, usize),
+    m: usize,
+    with_constant: bool,
+    css: bool,
+) -> Option<f64> {
+    let method = if css {
+        super::r_arima::RMethod::Css
+    } else {
+        super::r_arima::RMethod::CssMl
+    };
+    super::r_arima::r_arima_fit(
+        x,
+        order.1,
+        seasonal.1,
+        order.0,
+        order.2,
+        seasonal.0,
+        seasonal.2,
+        m,
+        with_constant,
+        method,
+    )
+    .map(|fit| fit.aicc)
 }
 
 #[cfg(test)]

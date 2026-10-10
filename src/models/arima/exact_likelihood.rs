@@ -112,11 +112,22 @@ pub(crate) fn seasonal_roots_outside(
 /// polynomial is a valid stationary-AR polynomial (all roots outside
 /// the unit circle) iff every partial-correlation produced by the
 /// reverse Levinson-Durbin step-down recursion has magnitude < 1 (the
-/// Schur-Cohn / Jury stability criterion). Trailing near-zero
-/// coefficients are trimmed first, matching R `myarima`'s `minroot`.
-/// Numerically reliable only for small (non-seasonal) orders --
-/// `seasonal_roots_outside` is the entry point used on any polynomial
-/// that may carry a seasonal factor.
+/// Schur-Cohn / Jury stability criterion): for an order-`m` coefficient
+/// vector `phi` (the crate's `y_t = sum phi_i y_{t-i}` convention),
+/// `phi'_j = (phi_j + phi_m * phi_{m-1-j}) / (1 - phi_m^2)` for
+/// `j = 0..m-2` steps down to the order-`(m-1)` vector; `phi_m` itself
+/// is the order-`m` reflection coefficient. (Verified against
+/// `numpy.roots` on worked examples -- the naively-plausible `-`
+/// variant of this recursion, matching the sign used by this module's
+/// sibling `jones_inverse` in `model.rs`, was tried first and
+/// empirically found to misclassify a genuinely-stationary AR(2) as
+/// non-stationary; `jones_inverse` is itself `#[allow(dead_code)]` and
+/// not exercised by any passing test, so its sign convention was not a
+/// safe reference here.) Trailing near-zero coefficients are trimmed
+/// first, matching R `myarima`'s `minroot`. Numerically reliable only
+/// for small (non-seasonal) orders -- `seasonal_roots_outside` is the
+/// entry point used on any polynomial that may carry a seasonal
+/// factor.
 pub(crate) fn roots_outside(coeffs: &[f64], radius: f64) -> bool {
     let mut c: Vec<f64> = coeffs.to_vec();
     while matches!(c.last(), Some(&last) if last.abs() < 1e-8) {
@@ -146,7 +157,7 @@ pub(crate) fn roots_outside(coeffs: &[f64], radius: f64) -> bool {
         }
         let mut next = vec![0.0; m - 1];
         for j in 0..m - 1 {
-            next[j] = (phi[j] - last * phi[m - 2 - j]) / denom;
+            next[j] = (phi[j] + last * phi[m - 2 - j]) / denom;
         }
         phi = next;
     }
@@ -228,6 +239,7 @@ pub(crate) fn exact_concentrated_loglik(w: &[f64], ar: &[f64], ma: &[f64]) -> Op
 /// Result of an exact-ML (CSS-ML) fit, scored on R's AICc/BIC
 /// convention (`nstar = w.len()`, `npar = p+q+P+Q+constant+1`).
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // full fit record; only aicc/bic feed the grid-path scorer
 pub(crate) struct ScoredFit {
     pub loglik: f64,
     pub sigma2: f64,
@@ -288,20 +300,50 @@ pub(crate) fn fit_exact_ml(
     let n = w.len();
     let m = m.max(1);
     let n_params = p + q + cap_p + cap_q;
+    let n_total = n_params + usize::from(include_constant);
+    let const_idx = n_params; // last slot when include_constant
     let start = max_lag_reach(p, cap_p, m).max(max_lag_reach(q, cap_q, m));
     if n <= start + n_params + 3 {
         return None;
     }
 
-    let constant = if include_constant {
-        w.iter().sum::<f64>() / n as f64
-    } else {
-        0.0
+    let sample_mean = w.iter().sum::<f64>() / n as f64;
+
+    // Loglik at a given parameter vector: constant (if any) is the LAST
+    // slot, jointly optimized with the ARMA parameters -- matching R
+    // `stats::arima`'s treatment of the mean/drift term as just another
+    // regression parameter in the same likelihood, not a pre-subtracted
+    // sample mean (which would be a different, biased estimator).
+    let loglik_at = |params: &[f64]| -> Option<(f64, f64)> {
+        let constant = if include_constant {
+            params[const_idx]
+        } else {
+            0.0
+        };
+        let centered: Vec<f64> = w.iter().map(|&x| x - constant).collect();
+        let ar = &params[0..p];
+        let ma = &params[p..p + q];
+        let sar = &params[p + q..p + q + cap_p];
+        let sma = &params[p + q + cap_p..p + q + cap_p + cap_q];
+        if n_params > 0 && !seasonal_roots_outside(ar, sar, m, 1.0) {
+            return None;
+        }
+        let ar_full = expand_seasonal_ar(ar, sar, m);
+        let ma_full = expand_seasonal_ma(ma, sma, m);
+        exact_concentrated_loglik(&centered, &ar_full, &ma_full)
     };
-    let centered: Vec<f64> = w.iter().map(|&x| x - constant).collect();
 
     if n_params == 0 {
-        let (loglik, sigma2) = exact_concentrated_loglik(&centered, &[], &[])?;
+        // Pure (0,0) model: the exact-likelihood-optimal mean is the
+        // sample mean in closed form (no ARMA parameters to jointly
+        // optimize against).
+        let params0 = if include_constant {
+            vec![sample_mean]
+        } else {
+            vec![]
+        };
+        let (loglik, sigma2) = loglik_at(&params0)?;
+        let constant = if include_constant { sample_mean } else { 0.0 };
         let npar = usize::from(include_constant) + 1;
         let (aicc, bic) = aicc_bic(loglik, npar, n)?;
         return Some(ScoredFit {
@@ -319,18 +361,31 @@ pub(crate) fn fit_exact_ml(
         });
     }
 
-    // --- CSS start (R's `method = "CSS"` stage) ---
-    let mut css_init = vec![0.0; n_params];
-    for (i, v) in css_init.iter_mut().enumerate() {
-        *v = 0.3 / (i + 1) as f64;
+    // --- CSS start (R's `method = "CSS"` stage): constant (if any)
+    // starts at the sample mean, jointly refined below. ---
+    let mut css_init = vec![0.0; n_total];
+    for i in 0..n_params {
+        css_init[i] = 0.3 / (i + 1) as f64;
     }
-    let mut css_bounds = Vec::with_capacity(n_params);
+    if include_constant {
+        css_init[const_idx] = sample_mean;
+    }
+    let mut css_bounds = Vec::with_capacity(n_total);
     for _ in 0..n_params {
         css_bounds.push((-0.99, 0.99));
+    }
+    if include_constant {
+        css_bounds.push((f64::NEG_INFINITY, f64::INFINITY));
     }
     let residuals_buf = std::cell::RefCell::new(vec![0.0; n]);
     let css_result = nelder_mead(
         |params| {
+            let constant = if include_constant {
+                params[const_idx]
+            } else {
+                0.0
+            };
+            let centered: Vec<f64> = w.iter().map(|&x| x - constant).collect();
             let ar = &params[0..p];
             let ma = &params[p..p + q];
             let sar = &params[p + q..p + q + cap_p];
@@ -361,27 +416,21 @@ pub(crate) fn fit_exact_ml(
 
     // --- Exact-likelihood refinement (R's `method = "CSS-ML"` stage) ---
     let objective = |params: &[f64]| -> f64 {
-        let ar = &params[0..p];
-        let ma = &params[p..p + q];
-        let sar = &params[p + q..p + q + cap_p];
-        let sma = &params[p + q + cap_p..p + q + cap_p + cap_q];
-        if !seasonal_roots_outside(ar, sar, m, 1.0) {
-            return f64::MAX;
-        }
-        let ma_full = expand_seasonal_ma(ma, sma, m);
-        let ar_full = expand_seasonal_ar(ar, sar, m);
-        match exact_concentrated_loglik(&centered, &ar_full, &ma_full) {
+        match loglik_at(params) {
             Some((ll, _)) if ll.is_finite() => -ll,
             _ => f64::MAX,
         }
     };
 
-    let mut bounds = Vec::with_capacity(n_params);
+    let mut bounds = Vec::with_capacity(n_total);
     for _ in 0..n_params {
         bounds.push((-0.995, 0.995));
     }
+    if include_constant {
+        bounds.push((f64::NEG_INFINITY, f64::INFINITY));
+    }
     let lbfgs_result = lbfgs_optimize(
-        &objective,
+        objective,
         &css_params,
         Some(&bounds),
         LbfgsConfig {
@@ -395,7 +444,7 @@ pub(crate) fn fit_exact_ml(
         css_params.clone()
     };
     let nm_result = nelder_mead(
-        &objective,
+        objective,
         &polish_start,
         Some(&bounds),
         NelderMeadConfig {
@@ -425,6 +474,11 @@ pub(crate) fn fit_exact_ml(
     let ma: Vec<f64> = final_params[p..p + q].to_vec();
     let sar: Vec<f64> = final_params[p + q..p + q + cap_p].to_vec();
     let sma: Vec<f64> = final_params[p + q + cap_p..p + q + cap_p + cap_q].to_vec();
+    let constant = if include_constant {
+        final_params[const_idx]
+    } else {
+        0.0
+    };
 
     // R's root rule (myarima's `minroot < 1.01`), checked on the
     // unexpanded (phi, Phi) / (theta, Theta) factors per
@@ -438,9 +492,7 @@ pub(crate) fn fit_exact_ml(
         return None;
     }
 
-    let ar_full = expand_seasonal_ar(&ar, &sar, m);
-    let ma_full = expand_seasonal_ma(&ma, &sma, m);
-    let (loglik, sigma2) = exact_concentrated_loglik(&centered, &ar_full, &ma_full)?;
+    let (loglik, sigma2) = loglik_at(&final_params)?;
     let npar = n_params + usize::from(include_constant) + 1;
     let (aicc, bic) = aicc_bic(loglik, npar, n)?;
 
@@ -487,28 +539,46 @@ pub(crate) fn css_r_criterion(
         return None;
     }
 
-    let constant = if include_constant {
-        w.iter().sum::<f64>() / n as f64
-    } else {
-        0.0
-    };
-    let centered: Vec<f64> = w.iter().map(|&x| x - constant).collect();
+    let sample_mean = w.iter().sum::<f64>() / n as f64;
+    let n_total = n_params + usize::from(include_constant);
+    let const_idx = n_params;
     let npar = n_params + usize::from(include_constant) + 1;
 
-    let css_value = if n_params == 0 {
-        centered[start..].iter().map(|v| v * v).sum::<f64>()
+    let (css_value, constant) = if n_params == 0 {
+        let constant = if include_constant { sample_mean } else { 0.0 };
+        let centered: Vec<f64> = w.iter().map(|&x| x - constant).collect();
+        (
+            centered[start..].iter().map(|v| v * v).sum::<f64>(),
+            constant,
+        )
     } else {
-        let mut init = vec![0.0; n_params];
-        for (i, v) in init.iter_mut().enumerate() {
-            *v = 0.3 / (i + 1) as f64;
+        // Constant (if any) is the LAST slot, jointly optimized with the
+        // ARMA parameters -- same rationale as `fit_exact_ml`'s
+        // `loglik_at`: R's CSS stage also estimates the mean/drift
+        // jointly, not via a pre-subtracted sample mean.
+        let mut init = vec![0.0; n_total];
+        for i in 0..n_params {
+            init[i] = 0.3 / (i + 1) as f64;
         }
-        let mut bounds = Vec::with_capacity(n_params);
+        if include_constant {
+            init[const_idx] = sample_mean;
+        }
+        let mut bounds = Vec::with_capacity(n_total);
         for _ in 0..n_params {
             bounds.push((-0.99, 0.99));
+        }
+        if include_constant {
+            bounds.push((f64::NEG_INFINITY, f64::INFINITY));
         }
         let residuals_buf = std::cell::RefCell::new(vec![0.0; n]);
         let result = nelder_mead(
             |params| {
+                let constant = if include_constant {
+                    params[const_idx]
+                } else {
+                    0.0
+                };
+                let centered: Vec<f64> = w.iter().map(|&x| x - constant).collect();
                 let ar = &params[0..p];
                 let ma = &params[p..p + q];
                 let sar = &params[p + q..p + q + cap_p];
@@ -542,8 +612,14 @@ pub(crate) fn css_r_criterion(
         if !seasonal_roots_outside(&ma_neg, &sma_neg, m, 1.01) {
             return None;
         }
-        result.optimal_value
+        let constant = if include_constant {
+            params[const_idx]
+        } else {
+            0.0
+        };
+        (result.optimal_value, constant)
     };
+    let _ = constant;
 
     let sigma2 = css_value / nstar as f64;
     if sigma2 <= 0.0 || !sigma2.is_finite() {

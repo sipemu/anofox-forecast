@@ -190,7 +190,6 @@ fn nsdiffs_matches_r() {
 /// owns finishing the search) rather than silently regressing to 0%
 /// again on a future refactor.
 #[test]
-#[ignore = "known gap: common-basis AICc window raises RW share but breaks the M4 gate (D4047); deferred to 11-05, see 11-04-SUMMARY.md"]
 fn auto_arima_rw_share_near_r() {
     let fixture = load_fixture();
     let expected_share = fixture["rw_010_share"].as_f64().unwrap();
@@ -379,7 +378,6 @@ fn auto_arima_selection_frequencies() {
 /// `SARIMA::score_order` -- out of this session's remaining budget; see
 /// 11-05-SUMMARY.md for the full trail and recommended next steps.
 #[test]
-#[ignore = "known gap: per-candidate AICc scoring window favours high-order models by shrinking the comparison sample; confirmed on AirPassengers too, not just the RW/AR fixtures. Deferred, see 11-05-SUMMARY.md and 11-04-SUMMARY.md Known Gap."]
 fn auto_arima_airpassengers_matches_r() {
     let fixture = load_fixture();
     let entries = fixture["seasonal"].as_array().unwrap();
@@ -528,12 +526,18 @@ fn airpassengers_scores_match_r_trace() {
     );
 }
 
-/// Diagnostic only (no assertion -- feeds Task 2): print the crate's
-/// exact-ML AICc for every D4047 candidate in the fixture next to R's
-/// own CSS-ML AICc, so Task 2's approximation-rule work has a measured
-/// starting point.
+/// 11-12: every D4047 candidate `forecast::Arima(method = "CSS-ML")`
+/// fitted in the fixture (with and without drift, seasonal and not) is
+/// reproduced by the crate's port of R's `stats::arima` estimation path
+/// (`r_arima`) to within 0.01 AICc. `Arima()` itself does not apply
+/// `myarima`'s `Inf` rules, so 6 of the 17 finite `Arima()` fits are
+/// `Inf` inside `auto.arima` -- (1,1,1)+drift, (2,1,2)+/-drift,
+/// (1,1,1)(1,0,1)[7], (2,1,2)(1,0,1)[7]+/-drift, all via
+/// `forecast:::checkarima` (NaN standard errors; verified with
+/// `forecast:::myarima(..., ic = "aicc")`, forecast 9.0.2). The port
+/// must return `None` for exactly those and match the other 11.
 #[test]
-fn d4047_exact_ml_diagnostic() {
+fn d4047_candidates_match_r_css_ml() {
     let fixture = load_candidates_fixture();
     let d4047 = &fixture["d4047"];
     let values: Vec<f64> = d4047["values"]
@@ -543,42 +547,103 @@ fn d4047_exact_ml_diagnostic() {
         .map(|v| v.as_f64().unwrap())
         .collect();
 
-    println!(
-        "D4047 (n={}, approximation={}):",
-        values.len(),
-        d4047["approximation"]
-    );
+    let mut matched = 0usize;
+    let mut max_diff = 0.0_f64;
     for cand in d4047["candidates"].as_array().unwrap() {
-        if cand["drift"].as_bool().unwrap_or(false) {
+        let Some(r_aicc) = cand["css_ml"]["aicc"].as_f64() else {
             continue;
-        }
-        let cml = &cand["css_ml"];
-        if cml.is_null() {
-            continue;
-        }
+        };
         let order = &cand["order"];
         let seasonal = &cand["seasonal"];
-        let p = order["p"].as_u64().unwrap() as usize;
-        let d = order["d"].as_u64().unwrap() as usize;
-        let q = order["q"].as_u64().unwrap() as usize;
-        let cap_p = seasonal["P"].as_u64().unwrap() as usize;
-        let cap_q = seasonal["Q"].as_u64().unwrap() as usize;
-        let period = seasonal["period"].as_u64().unwrap() as usize;
-        let r_aicc = cml["aicc"].as_f64().unwrap();
-
-        // Difference by d (D4047 candidates are all D=0 in this fixture).
-        let mut w = values.clone();
-        for _ in 0..d {
-            w = w[1..].iter().zip(w.iter()).map(|(a, b)| a - b).collect();
-        }
-        let m = period.max(1);
-        let fit = anofox_forecast::models::arima::fit_exact_ml_for_tests(&w, p, q, cap_p, 0, m);
-        match fit {
-            Some(aicc) => println!(
-                "  ARIMA({p},{d},{q})({cap_p},0,0)[{period}] : crate_aicc={aicc:.3} r_aicc={r_aicc:.3} diff={:.3}",
-                (aicc - r_aicc).abs()
+        let g = |v: &Value, k: &str| v[k].as_u64().unwrap() as usize;
+        let drift = cand["drift"].as_bool().unwrap_or(false);
+        let ours = anofox_forecast::models::arima::r_arima_aicc_for_tests(
+            &values,
+            (g(order, "p"), g(order, "d"), g(order, "q")),
+            (g(seasonal, "P"), g(seasonal, "D"), g(seasonal, "Q")),
+            g(seasonal, "period"),
+            drift,
+            false,
+        );
+        println!(
+            "  ARIMA({},{},{})({},{},{})[{}] drift={drift}: crate={ours:?} r={r_aicc:.4}",
+            g(order, "p"),
+            g(order, "d"),
+            g(order, "q"),
+            g(seasonal, "P"),
+            g(seasonal, "D"),
+            g(seasonal, "Q"),
+            g(seasonal, "period")
+        );
+        let r_inf_in_myarima = matches!(
+            (
+                g(order, "p"),
+                g(order, "q"),
+                g(seasonal, "P"),
+                g(seasonal, "Q"),
+                drift
             ),
-            None => println!("  ARIMA({p},{d},{q})({cap_p},0,0)[{period}] : crate=None r_aicc={r_aicc:.3}"),
+            (1, 1, 0, 0, true) | (2, 2, 0, 0, _) | (1, 1, 1, 1, false) | (2, 2, 1, 1, _)
+        );
+        match ours {
+            Some(aicc) => {
+                assert!(!r_inf_in_myarima, "crate finite where R's myarima is Inf");
+                let diff = (aicc - r_aicc).abs();
+                max_diff = max_diff.max(diff);
+                matched += 1;
+                assert!(diff <= 0.01, "AICc diff {diff} > 0.01");
+            }
+            None => assert!(r_inf_in_myarima, "crate Inf where R's myarima is finite"),
+        }
+    }
+    println!("matched = {matched}, max diff = {max_diff:.5}");
+    assert_eq!(
+        matched, 11,
+        "expected all 11 myarima-finite candidates matched"
+    );
+}
+
+/// 11-12: every model in R's own `auto.arima(AirPassengers, trace =
+/// TRUE)` search -- including the four R scores `Inf` -- is scored
+/// identically by the crate's `myarima` port: same finite/`Inf`
+/// verdict, finite AICc within 0.01 (R prints 3 decimals).
+#[test]
+fn airpassengers_full_trace_matches_r() {
+    let fixture = load_candidates_fixture();
+    let air = &fixture["air_passengers"];
+    let values: Vec<f64> = air["values"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
+    let trace = air["trace"].as_array().unwrap();
+    assert!(trace.len() >= 19);
+    for t in trace {
+        let g = |k: &str| t[k].as_u64().unwrap() as usize;
+        let ours = anofox_forecast::models::arima::r_arima_aicc_for_tests(
+            &values,
+            (g("p"), g("d"), g("q")),
+            (g("cap_p"), g("cap_d"), g("cap_q")),
+            12,
+            false,
+            false,
+        );
+        let label = format!(
+            "ARIMA({},{},{})({},{},{})[12]",
+            g("p"),
+            g("d"),
+            g("q"),
+            g("cap_p"),
+            g("cap_d"),
+            g("cap_q")
+        );
+        match (t["ic"].as_f64(), ours) {
+            (Some(r), Some(c)) => {
+                assert!((r - c).abs() <= 0.01, "{label}: crate {c} vs R {r}");
+            }
+            (None, None) => {}
+            (r, c) => panic!("{label}: finite/Inf mismatch, crate {c:?} vs R {r:?}"),
         }
     }
 }

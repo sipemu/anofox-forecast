@@ -32,17 +32,15 @@ pub struct AutoARIMAConfig {
     pub stepwise: bool,
     /// Use true stepwise (neighbor-based hill climbing) vs grid stepwise.
     /// Only applies when stepwise=true. This is R `forecast::auto.arima`'s
-    /// own search strategy (Hyndman-Khandakar stepwise, D-06); enable it
-    /// via `with_true_stepwise()`. NOT the crate's default as of 11-05
-    /// (evidence-gated, deferred -- see `AutoARIMAConfig::default()` and
-    /// 11-05-SUMMARY.md): it is enforced by `max_order` here, but the
-    /// scoring formula it calls into still has the per-candidate AICc
-    /// window bug documented in 11-04-SUMMARY.md's Known Gap, so this is
-    /// not yet safe as the default.
+    /// own search strategy (Hyndman-Khandakar stepwise, D-06) and the
+    /// crate's default: every candidate is fitted by a port of R's
+    /// `stats::arima` estimation path (`r_arima`, CSS then CSS-ML with
+    /// `optim` BFGS, or CSS alone under R's approximation rule) and scored
+    /// with `myarima`'s criteria, so the search reproduces R's own trace.
     pub true_stepwise: bool,
-    /// Maximum value of `p+q+P+Q` allowed for any candidate (R
-    /// `auto.arima`'s `max.order`, default 5, D-06). Enforced by
-    /// `true_stepwise_search` on every start model and neighbour move.
+    /// Maximum value of `p+q+P+Q` (R `auto.arima`'s `max.order`, default
+    /// 5). Like R, it bounds the exhaustive/grid searches only; R's
+    /// stepwise search (`true_stepwise`) never applies it.
     pub max_order: usize,
     /// Selection criterion (use AIC for selection).
     pub use_aic: bool,
@@ -54,28 +52,17 @@ impl Default for AutoARIMAConfig {
             max_p: 5,
             max_q: 5,
             max_d: 2,
-            // 11-05 (D-06, evidence-gated per 2026-10-10 user decision): R
-            // `auto.arima`'s real defaults are max.P = 2, max.Q = 2 with
-            // Hyndman-Khandakar stepwise search as the default strategy.
-            // That combination was implemented and tested in this session
-            // and found to re-expose the pre-existing per-candidate AICc
-            // scoring-window bug documented as a Known Gap in
-            // 11-04-SUMMARY.md -- not only on the RW/AR Monte-Carlo
-            // fixtures (already known), but also on AirPassengers (R's
-            // ARIMA(2,1,1)(0,1,0)[12] scores ~1002 under the crate's own
-            // AICc while an overfit ARIMA(3,1,0)(2,1,0)[12] scores ~829,
-            // a ~170-unit gap from comparing candidates over different
-            // effective sample sizes). Flipping these defaults without
-            // fixing that root cause would ship a regression, which the
-            // user's decision explicitly says not to do ("stop and report
-            // precisely... rather than shipping a regression"). Kept at
-            // the pre-11-05 values; see 11-05-SUMMARY.md.
-            max_cap_p: 1,
-            max_cap_q: 1,
+            // R `auto.arima`'s real defaults (D-06): max.P = 2, max.Q = 2,
+            // Hyndman-Khandakar stepwise search. Safe since 11-12: every
+            // candidate is fitted by the `r_arima` port of R's estimation
+            // path (11-11 had the right likelihood but a different
+            // optimiser, which changed which candidates converged where).
+            max_cap_p: 2,
+            max_cap_q: 2,
             max_cap_d: 1,
             seasonal_period: 0,
             stepwise: true,
-            true_stepwise: false, // Grid stepwise for reliable model selection (see note above)
+            true_stepwise: true, // R's Hyndman-Khandakar stepwise search (D-06, 11-11)
             max_order: 5,
             use_aic: true,
         }
@@ -113,19 +100,16 @@ impl AutoARIMAConfig {
 
     /// Use true stepwise search (neighbor-based hill climbing), matching
     /// R `forecast::auto.arima`'s own default search strategy
-    /// (Hyndman-Khandakar). More efficient than grid stepwise but may
-    /// miss the global optimum under the crate's current scoring formula
-    /// (see `AutoARIMAConfig::default()`'s doc comment) -- opt in
-    /// explicitly, not yet the crate's default as of 11-05.
+    /// (Hyndman-Khandakar). This is the default; the builder exists for
+    /// symmetry with `with_grid_stepwise()`.
     pub fn with_true_stepwise(mut self) -> Self {
         self.stepwise = true;
         self.true_stepwise = true;
         self
     }
 
-    /// Use the fixed-grid stepwise search (the crate's default as of
-    /// 11-05). Named for symmetry with `with_true_stepwise()` and to give
-    /// a stable, explicit opt-in once the default flips to HK stepwise.
+    /// Use the crate's legacy fixed-grid stepwise search instead of R's
+    /// Hyndman-Khandakar stepwise search (opt-in; not R's algorithm).
     pub fn with_grid_stepwise(mut self) -> Self {
         self.stepwise = true;
         self.true_stepwise = false;
@@ -421,18 +405,22 @@ impl AutoARIMA {
         None
     }
 
-    /// Score-only evaluation: compute AIC/BIC from pre-computed differenced series
-    /// without constructing the full model. Skips validation, storage, and calculate_fitted.
+    /// Score-only evaluation: compute AICc/BIC from pre-computed differenced
+    /// series without constructing the full model. Skips validation,
+    /// storage, and calculate_fitted.
     ///
-    /// `common_start` is the maximum lag reach across the *entire* candidate
-    /// grid being searched (see `Self::common_start_for_config`) -- every
-    /// candidate at a fixed (d, D) must be scored over the identical
-    /// leading-observation window for AICc comparisons to be valid (D-06).
+    /// `approximation` is R's default rule (`n > 150 || m > 12`, computed
+    /// once per `fit()` call on the undifferenced training length -- see
+    /// `Self::approximation_for_series`): when true, every candidate is
+    /// scored with R's CSS criterion (`exact_likelihood::css_r_criterion`);
+    /// otherwise every candidate is scored by the exact Gaussian
+    /// likelihood (`exact_likelihood::fit_exact_ml`). Either way this is a
+    /// common likelihood basis across the whole candidate grid (D-06).
     fn score_order_static(
         order: ModelOrder,
         diff_series: &[f64],
         use_aic: bool,
-        common_start: usize,
+        approximation: bool,
     ) -> Option<f64> {
         // Hyndman-Khandakar constant-allowance rule: a mean (d+D=0) or
         // drift (d+D=1) term is scored with and without and the better
@@ -448,7 +436,7 @@ impl AutoARIMA {
                 diff_series,
                 use_aic,
                 allow_constant,
-                common_start,
+                approximation,
             )
         } else {
             ARIMA::score_order(
@@ -457,23 +445,129 @@ impl AutoARIMA {
                 diff_series,
                 use_aic,
                 allow_constant,
-                common_start,
+                approximation,
             )
         }
     }
 
-    /// Maximum lag reach across the whole candidate grid this config can
-    /// generate -- the common CSS scoring window every candidate at a
-    /// fixed (d, D) is compared over (D-06, see `score_order_static`).
-    fn common_start_for_config(config: &AutoARIMAConfig) -> usize {
-        let s = config.seasonal_period;
-        if s > 1 {
-            let max_ar_lag = config.max_p + config.max_cap_p * s;
-            let max_ma_lag = config.max_q + config.max_cap_q * s;
-            max_ar_lag.max(max_ma_lag)
+    /// R `forecast::auto.arima`'s default `approximation` rule: a series
+    /// with more than 150 observations or a seasonal period greater than
+    /// 12 is searched with the (much cheaper) CSS criterion, and only the
+    /// winner is refit by exact ML (D-06).
+    fn approximation_for_series(n: usize, s: usize) -> bool {
+        n > 150 || s > 12
+    }
+
+    /// Score a single order at an EXPLICIT constant choice (no
+    /// with/without auto-min) -- used by `true_stepwise_search` to
+    /// match R's `search.arima`/`auto.arima` source, which threads one
+    /// explicit `constant` state through every candidate in its
+    /// stepwise loop rather than re-deciding per candidate (D-06,
+    /// 11-11).
+    fn score_order_explicit(
+        order: ModelOrder,
+        values: &[f64],
+        use_aic: bool,
+        approximation: bool,
+        with_constant: bool,
+    ) -> Option<f64> {
+        let method = if approximation {
+            super::r_arima::RMethod::Css
         } else {
-            config.max_p.max(config.max_q)
+            super::r_arima::RMethod::CssMl
+        };
+        Self::fit_r_candidate(order, values, with_constant, method).map(|fit| {
+            if use_aic {
+                fit.aicc
+            } else {
+                fit.bic
+            }
+        })
+    }
+
+    /// Fit one candidate the way R's `myarima` does (see
+    /// `r_arima::r_arima_fit`). The constant is a mean when `d + D = 0`
+    /// and a drift when `d + D = 1`; R regresses on the time index
+    /// `1..n`. `values` is the UNdifferenced training series (R's
+    /// likelihood runs a diffuse-prior Kalman filter on it).
+    /// `forecast:::is.constant`: `all.equal(x, rep(x[1], n))` with the
+    /// default relative tolerance `1.5e-8`.
+    fn r_is_constant(x: &[f64]) -> bool {
+        let Some(&first) = x.first() else {
+            return false;
+        };
+        let n = x.len() as f64;
+        let mut xy = x.iter().map(|v| (v - first).abs()).sum::<f64>() / n;
+        let xn = x.iter().map(|v| v.abs()).sum::<f64>() / n;
+        let tol = 1.5e-8;
+        if xn.is_finite() && xn > tol {
+            xy /= xn;
         }
+        xy <= tol
+    }
+
+    fn r_final_model(
+        series: &TimeSeries,
+        order: ModelOrder,
+        with_constant: bool,
+    ) -> Option<SelectedModel> {
+        let values = series.primary_values();
+        let fit =
+            Self::fit_r_candidate(order, values, with_constant, super::r_arima::RMethod::CssMl)?;
+        let m = if order.s > 1 { order.s } else { 1 };
+        // R's constant is a regression on 1 (mean) or the time index
+        // (drift); on the differenced scale it is the mean `mu` of `w`.
+        let mu = if with_constant && order.d + order.cap_d <= 1 {
+            if order.d == 0 && order.cap_d == 1 {
+                fit.constant * m as f64
+            } else {
+                fit.constant
+            }
+        } else {
+            0.0
+        };
+        if order.is_seasonal() {
+            // SARIMA uses the constant form `c = mu * phi(1) * Phi(1)`.
+            let c = mu * (1.0 - fit.ar.iter().sum::<f64>()) * (1.0 - fit.sar.iter().sum::<f64>());
+            let spec = super::SARIMASpec::new(
+                order.p,
+                order.d,
+                order.q,
+                order.cap_p,
+                order.cap_d,
+                order.cap_q,
+                order.s,
+            );
+            let mut model = SARIMA::with_coefficients(spec, fit.ar, fit.ma, fit.sar, fit.sma, c);
+            model.fit(series).ok()?;
+            Some(SelectedModel::SARIMA(model))
+        } else {
+            // ARIMA uses the mean form `w_t - mu = ...` (same as R).
+            let mut model = ARIMA::with_coefficients(order.p, order.d, order.q, fit.ar, fit.ma, mu);
+            model.fit(series).ok()?;
+            Some(SelectedModel::ARIMA(model))
+        }
+    }
+
+    fn fit_r_candidate(
+        order: ModelOrder,
+        values: &[f64],
+        with_constant: bool,
+        method: super::r_arima::RMethod,
+    ) -> Option<super::r_arima::RArimaFit> {
+        let m = if order.s > 1 { order.s } else { 1 };
+        super::r_arima::r_arima_fit(
+            values,
+            order.d,
+            order.cap_d,
+            order.p,
+            order.q,
+            order.cap_p,
+            order.cap_q,
+            m,
+            with_constant,
+            method,
+        )
     }
 
     /// Generate neighbors of a given order (for true stepwise search).
@@ -599,169 +693,331 @@ impl AutoARIMA {
         neighbors
     }
 
-    /// True stepwise search matching R `forecast::auto.arima`'s
-    /// Hyndman-Khandakar stepwise search (D-06).
-    /// Greedy first-improvement: takes the first neighbor that improves the IC,
-    /// then restarts the neighbor scan from the beginning.
-    /// Uses score-only evaluation with pre-computed differenced series.
+    /// R `forecast::auto.arima`'s own stepwise algorithm (D-06, 11-11
+    /// rewrite): the structural moves (seasonal P/Q then non-seasonal
+    /// p/q, each `-1`/`+1`/diagonals, first-improvement, restart scan)
+    /// are scored at a FIXED `current_constant` -- matching R's
+    /// `search.arima`/`auto.arima` source exactly, which threads one
+    /// explicit `constant` variable through every `myarima()` call in
+    /// the loop and only ever flips it via the dedicated toggle move at
+    /// the end of each scan (`if (allowdrift || allowmean) { ... }`,
+    /// no `next` after it, so the toggle's effect is picked up on the
+    /// next scan). The crate's own `score_order_static`/`fit_exact_ml`
+    /// previously auto-selected whichever of with/without-constant
+    /// scored better on EVERY structural move -- effectively exploring
+    /// twice as many models per step as R does and never tracking a
+    /// stable `constant` state, which let the greedy walk diverge onto
+    /// a different local optimum than R's (measured: AirPassengers
+    /// settling ~1.3 AICc units off R's pick, RW share 0.60 vs R's
+    /// 0.86). This rewrite restores R's exact state machine.
     ///
-    /// Every start model and neighbour move is bounded by
-    /// `self.config.max_order` (R's `max.order`, p+q+P+Q, default 5):
-    /// candidates exceeding it are skipped via `order_within_max` below,
-    /// matching R's own bound on the search space.
-    ///
-    /// Note on the constant/mean term (R's fifth start model, "(0,d,0)
-    /// without constant"): `score_order_static`'s `allow_constant` already
-    /// evaluates a candidate with AND without a mean/drift term whenever
-    /// `d+D<=1` and keeps the better of the two (D-06, 11-04). A separate
-    /// "null model without constant" start candidate would therefore score
-    /// identically to the null-model-with-constant start below (same
-    /// `(p,q,P,Q)` key, same auto-selected best score) and is a redundant
-    /// R implementation detail in this crate's scoring design, not a
-    /// missing search state -- so it is intentionally not added as a
-    /// sixth distinct start candidate here (11-05).
+    /// 11-12 details that also follow R's source: start model 4 (null
+    /// model without constant) updates the best fit but NOT the constant
+    /// state; `max.order` is not applied; `values` is the undifferenced
+    /// series (candidates are fitted by `r_arima`); under the
+    /// approximation rule the visited models are refit by exact CSS-ML in
+    /// increasing CSS-ic order and the first finite one wins. Returns the
+    /// selected order, its score and whether it carries the constant.
     fn true_stepwise_search(
         &mut self,
-        diff_series: &[f64],
+        values: &[f64],
         d: usize,
         cap_d: usize,
-    ) -> Option<(ModelOrder, f64)> {
+        approximation: bool,
+    ) -> Option<(ModelOrder, f64, bool)> {
         let s = self.config.seasonal_period;
         let use_aic = self.config.use_aic;
-        let common_start = Self::common_start_for_config(&self.config);
         let max_models = 94; // matching R's nmodels limit
-        let max_order = self.config.max_order;
-        let order_within_max = |o: &ModelOrder| o.p + o.q + o.cap_p + o.cap_q <= max_order;
+                             // R: `allowdrift <- allowdrift && (d+D)==1; allowmean <- allowmean && (d+D)==0;
+                             // constant <- allowdrift || allowmean` -- i.e. TRUE whenever d+D<=1.
+        let allow_constant = d + cap_d <= 1;
 
-        // Initial models matching Python statsforecast starting points
-        let initial_orders: Vec<ModelOrder> = vec![
-            // Model 0: (start_p, d, start_q) with seasonal
-            ModelOrder {
-                p: 2,
-                d,
-                q: 2,
-                cap_p: if s > 1 { 1 } else { 0 },
-                cap_d,
-                cap_q: if s > 1 { 1 } else { 0 },
-                s,
-            },
-            // Model 1: null model with constant
-            ModelOrder {
-                p: 0,
-                d,
-                q: 0,
-                cap_p: 0,
-                cap_d,
-                cap_q: 0,
-                s,
-            },
-            // Model 2: pure AR
-            ModelOrder {
-                p: if self.config.max_p > 0 { 1 } else { 0 },
-                d,
-                q: 0,
-                cap_p: if s > 1 && self.config.max_cap_p > 0 {
-                    1
-                } else {
-                    0
-                },
-                cap_d,
-                cap_q: 0,
-                s,
-            },
-            // Model 3: pure MA
-            ModelOrder {
-                p: 0,
-                d,
-                q: if self.config.max_q > 0 { 1 } else { 0 },
-                cap_p: 0,
-                cap_d,
-                cap_q: if s > 1 && self.config.max_cap_q > 0 {
-                    1
-                } else {
-                    0
-                },
-                s,
-            },
-        ];
+        let max_p = self.config.max_p;
+        let max_q = self.config.max_q;
+        let max_cap_p = self.config.max_cap_p;
+        let max_cap_q = self.config.max_cap_q;
 
-        // Find best starting point
-        let mut best_order: Option<ModelOrder> = None;
-        let mut best_score = f64::INFINITY;
+        // visited keys include the constant bit (R's `newmodel` dedups
+        // against the full (p,P,q,Q,constant) results row).
+        let mut visited: std::collections::HashSet<(usize, usize, usize, usize, bool)> =
+            std::collections::HashSet::new();
         let mut n_models = 0usize;
+        let mut current_constant = allow_constant;
+        // Every visited candidate in visiting order (R's `results`
+        // matrix), including `Inf` scores -- needed for R's
+        // approximation refit below.
+        let mut trail: Vec<(ModelOrder, bool, f64)> = Vec::new();
 
-        let mut visited = std::collections::HashSet::new();
-        for order in initial_orders {
-            if !order_within_max(&order) {
-                continue;
-            }
-            let key = (order.p, order.q, order.cap_p, order.cap_q);
+        // R's start.p/start.q/start.P/start.Q = 2/2/1/1, clipped to the
+        // configured maxima.
+        let start_p = 2.min(max_p);
+        let start_q = 2.min(max_q);
+        let start_cap_p = if s > 1 { 1.min(max_cap_p) } else { 0 };
+        let start_cap_q = if s > 1 { 1.min(max_cap_q) } else { 0 };
+
+        let mut current_order = ModelOrder {
+            p: start_p,
+            d,
+            q: start_q,
+            cap_p: start_cap_p,
+            cap_d,
+            cap_q: start_cap_q,
+            s,
+        };
+        let mut current_score = f64::INFINITY;
+        // Constant of the model that produced `current_score` (R's
+        // `bestfit`); can differ from `current_constant` after start
+        // model 4, see below.
+        let mut best_constant = current_constant;
+        // `record_candidate` is a plain function (not a closure) so it
+        // borrows `self.model_scores` only for the duration of each
+        // call -- a closure capturing `self` here would hold a
+        // conflicting borrow across the later `self.get_neighbors(...)`
+        // calls in the main loop below.
+        #[allow(clippy::too_many_arguments)]
+        fn record_candidate(
+            order: ModelOrder,
+            with_constant: bool,
+            visited: &mut std::collections::HashSet<(usize, usize, usize, usize, bool)>,
+            n_models: &mut usize,
+            model_scores: &mut Vec<(ModelOrder, f64)>,
+            trail: &mut Vec<(ModelOrder, bool, f64)>,
+            values: &[f64],
+            use_aic: bool,
+            approximation: bool,
+        ) -> Option<f64> {
+            let key = (order.p, order.q, order.cap_p, order.cap_q, with_constant);
             if visited.contains(&key) {
-                continue;
+                return None;
             }
             visited.insert(key);
-            n_models += 1;
+            *n_models += 1;
+            let score = AutoARIMA::score_order_explicit(
+                order,
+                values,
+                use_aic,
+                approximation,
+                with_constant,
+            );
+            trail.push((order, with_constant, score.unwrap_or(f64::INFINITY)));
+            let score = score?;
+            model_scores.push((order, score));
+            Some(score)
+        }
 
-            if let Some(score) = Self::score_order_static(order, diff_series, use_aic, common_start)
-            {
-                self.model_scores.push((order, score));
-                if score < best_score {
-                    best_score = score;
-                    best_order = Some(order);
+        // Start model 0: (start.p, d, start.q)(start.P, D, start.Q).
+        if let Some(score) = record_candidate(
+            current_order,
+            current_constant,
+            &mut visited,
+            &mut n_models,
+            &mut self.model_scores,
+            &mut trail,
+            values,
+            use_aic,
+            approximation,
+        ) {
+            current_score = score;
+            best_constant = current_constant;
+        }
+
+        // Start model 1: null model, same constant.
+        let null_order = ModelOrder {
+            p: 0,
+            d,
+            q: 0,
+            cap_p: 0,
+            cap_d,
+            cap_q: 0,
+            s,
+        };
+        if let Some(score) = record_candidate(
+            null_order,
+            current_constant,
+            &mut visited,
+            &mut n_models,
+            &mut self.model_scores,
+            &mut trail,
+            values,
+            use_aic,
+            approximation,
+        ) {
+            if score < current_score {
+                current_score = score;
+                current_order = null_order;
+                best_constant = current_constant;
+            }
+        }
+
+        // Start model 2: pure AR, same constant.
+        if max_p > 0 || max_cap_p > 0 {
+            let ar_order = ModelOrder {
+                p: usize::from(max_p > 0),
+                d,
+                q: 0,
+                cap_p: usize::from(s > 1 && max_cap_p > 0),
+                cap_d,
+                cap_q: 0,
+                s,
+            };
+            if let Some(score) = record_candidate(
+                ar_order,
+                current_constant,
+                &mut visited,
+                &mut n_models,
+                &mut self.model_scores,
+                &mut trail,
+                values,
+                use_aic,
+                approximation,
+            ) {
+                if score < current_score {
+                    current_score = score;
+                    current_order = ar_order;
+                    best_constant = current_constant;
                 }
             }
         }
 
-        let mut current_order = best_order?;
-        let mut current_score = best_score;
-
-        // Greedy first-improvement hill climbing (matching Python statsforecast).
-        // On each iteration, generate ALL neighbors in a fixed order.
-        // Take the FIRST one that improves the IC and restart from the top.
-        // Stop when no neighbor improves or max_models reached.
-        loop {
-            if n_models >= max_models {
-                break;
+        // Start model 3: pure MA, same constant.
+        if max_q > 0 || max_cap_q > 0 {
+            let ma_order = ModelOrder {
+                p: 0,
+                d,
+                q: usize::from(max_q > 0),
+                cap_p: 0,
+                cap_d,
+                cap_q: usize::from(s > 1 && max_cap_q > 0),
+                s,
+            };
+            if let Some(score) = record_candidate(
+                ma_order,
+                current_constant,
+                &mut visited,
+                &mut n_models,
+                &mut self.model_scores,
+                &mut trail,
+                values,
+                use_aic,
+                approximation,
+            ) {
+                if score < current_score {
+                    current_score = score;
+                    current_order = ma_order;
+                    best_constant = current_constant;
+                }
             }
+        }
 
+        // Start model 4: null model WITHOUT constant (only tried when
+        // the current constant is TRUE, matching R's `if (constant)`).
+        if current_constant {
+            if let Some(score) = record_candidate(
+                null_order,
+                false,
+                &mut visited,
+                &mut n_models,
+                &mut self.model_scores,
+                &mut trail,
+                values,
+                use_aic,
+                approximation,
+            ) {
+                // R (`auto.arima`): `bestfit <- fit; p <- q <- P <- Q <- 0`
+                // -- deliberately WITHOUT `constant <- FALSE`: the
+                // structural moves that follow are still scored with the
+                // constant, and only the end-of-scan toggle can flip it.
+                if score < current_score {
+                    current_score = score;
+                    current_order = null_order;
+                    best_constant = false;
+                }
+            }
+        }
+
+        // Greedy first-improvement hill climbing at a FIXED constant
+        // (R's structural moves), with a dedicated constant-toggle move
+        // at the end of each scan (R's `allowdrift || allowmean` block).
+        let mut start_k = 0usize;
+        while start_k < n_models && n_models < max_models {
+            start_k = n_models;
             let neighbors = self.get_neighbors(current_order);
             let mut improved = false;
 
             for neighbor in neighbors {
-                if !order_within_max(&neighbor) {
-                    continue;
+                if n_models >= max_models {
+                    break;
                 }
-                let key = (neighbor.p, neighbor.q, neighbor.cap_p, neighbor.cap_q);
-                if visited.contains(&key) {
-                    continue;
-                }
-                visited.insert(key);
-                n_models += 1;
-
-                if let Some(score) =
-                    Self::score_order_static(neighbor, diff_series, use_aic, common_start)
-                {
-                    self.model_scores.push((neighbor, score));
-
+                if let Some(score) = record_candidate(
+                    neighbor,
+                    current_constant,
+                    &mut visited,
+                    &mut n_models,
+                    &mut self.model_scores,
+                    &mut trail,
+                    values,
+                    use_aic,
+                    approximation,
+                ) {
                     if score < current_score {
                         current_score = score;
                         current_order = neighbor;
+                        best_constant = current_constant;
                         improved = true;
                         break; // greedy: take first improvement, restart scan
                     }
                 }
-
-                if n_models >= max_models {
-                    break;
-                }
             }
 
-            if !improved {
-                break;
+            if improved {
+                continue;
+            }
+
+            // Dedicated constant-toggle move (R: no `next` after this,
+            // so it is tried once per scan, after every structural move
+            // has failed to improve).
+            if allow_constant && n_models < max_models {
+                if let Some(score) = record_candidate(
+                    current_order,
+                    !current_constant,
+                    &mut visited,
+                    &mut n_models,
+                    &mut self.model_scores,
+                    &mut trail,
+                    values,
+                    use_aic,
+                    approximation,
+                ) {
+                    if score < current_score {
+                        current_score = score;
+                        current_constant = !current_constant;
+                        best_constant = current_constant;
+                    }
+                }
             }
         }
 
-        Some((current_order, current_score))
+        if !current_score.is_finite() {
+            return None;
+        }
+        if approximation {
+            // R: "Now re-fitting the best model(s) without
+            // approximations": walk the visited models in increasing
+            // CSS-ic order (`order()` is stable; `Inf` sorts last but is
+            // still tried) and keep the first whose exact CSS-ML fit has
+            // a finite ic; if none does, keep the CSS winner.
+            let mut idx: Vec<usize> = (0..trail.len()).collect();
+            idx.sort_by(|&a, &b| trail[a].2.total_cmp(&trail[b].2));
+            for i in idx {
+                let (order, with_constant, _) = trail[i];
+                if let Some(score) =
+                    Self::score_order_explicit(order, values, use_aic, false, with_constant)
+                {
+                    return Some((order, score, with_constant));
+                }
+            }
+        }
+        Some((current_order, current_score, best_constant))
     }
 
     /// Evaluate candidates - uses parallel processing when 'parallel' feature is enabled.
@@ -779,7 +1035,7 @@ impl AutoARIMA {
         Option<(SelectedModel, ModelOrder, f64)>,
     ) {
         let use_aic = self.config.use_aic;
-        let common_start = Self::common_start_for_config(&self.config);
+        let approximation = Self::approximation_for_series(n_values, self.config.seasonal_period);
 
         // Filter candidates by data requirements
         let valid_candidates: Vec<_> = candidates
@@ -814,7 +1070,7 @@ impl AutoARIMA {
                 .par_iter()
                 .filter_map(|&order| {
                     let diff_series = diff_series_map.get(&(order.d, order.cap_d))?;
-                    Self::score_order_static(order, diff_series, use_aic, common_start)
+                    Self::score_order_static(order, diff_series, use_aic, approximation)
                         .map(|score| (order, score))
                 })
                 .collect();
@@ -842,7 +1098,7 @@ impl AutoARIMA {
                 // Score-only first (cheap) to decide if full fit is worthwhile
                 if let Some(diff_series) = diff_series_map.get(&(order.d, order.cap_d)) {
                     if let Some(quick_score) =
-                        Self::score_order_static(order, diff_series, use_aic, common_start)
+                        Self::score_order_static(order, diff_series, use_aic, approximation)
                     {
                         scores.push((order, quick_score));
 
@@ -948,20 +1204,73 @@ impl Forecaster for AutoARIMA {
         }
 
         self.model_scores.clear();
+
+        // R `auto.arima`'s `is.constant(dx)` branch: an exactly constant
+        // differenced series (e.g. a perfect linear trend) is not
+        // searched at all -- R fits ARIMA(0,d,0)(0,D,0) with the
+        // constant FIXED at `mean(dx)` (drift / mean; d < 2 or D = 1 with
+        // d = 0) or with no constant (d = 2, or d > 0 with D > 0).
+        if self.config.stepwise && self.config.true_stepwise && !series.has_regressors() {
+            let d = suggested_d;
+            let cap_d = if s > 1 { suggested_cap_d } else { 0 };
+            if let Some(dx) = diff_series_map.get(&(d, cap_d)) {
+                if Self::r_is_constant(dx) {
+                    let order = ModelOrder {
+                        p: 0,
+                        d,
+                        q: 0,
+                        cap_p: 0,
+                        cap_d,
+                        cap_q: 0,
+                        s,
+                    };
+                    let with_constant = (cap_d > 0 && d == 0) || (cap_d == 0 && d < 2);
+                    let mu = if with_constant {
+                        dx.iter().sum::<f64>() / dx.len() as f64
+                    } else {
+                        0.0
+                    };
+                    let model = if order.is_seasonal() {
+                        let spec = super::SARIMASpec::new(0, d, 0, 0, cap_d, 0, s);
+                        let mut m =
+                            SARIMA::with_coefficients(spec, vec![], vec![], vec![], vec![], mu);
+                        m.fit(series)?;
+                        SelectedModel::SARIMA(m)
+                    } else {
+                        let mut m = ARIMA::with_coefficients(0, d, 0, vec![], vec![], mu);
+                        m.fit(series)?;
+                        SelectedModel::ARIMA(m)
+                    };
+                    self.selected_model = Some(model);
+                    self.selected_order = Some(order);
+                    self.training_values_store = Some(values.to_vec());
+                    self.training_regressors_store = None;
+                    return Ok(());
+                }
+            }
+        }
+
         let mut best_order: Option<ModelOrder> = None;
         let mut best_score = f64::INFINITY;
+        let mut best_constant = false;
+        // R's default `approximation` rule (D-06): computed once per
+        // `fit()` call from the undifferenced training length and the
+        // configured seasonal period.
+        let approximation = Self::approximation_for_series(values.len(), s);
 
         // Phase 1: Score-only evaluation to find the best order
         if self.config.stepwise && self.config.true_stepwise {
             for &d in &d_range {
                 for &cap_d in &cap_d_range {
                     if let Some(diff_series) = diff_series_map.get(&(d, cap_d)) {
-                        if let Some((order, score)) =
-                            self.true_stepwise_search(diff_series, d, cap_d)
+                        let _ = diff_series;
+                        if let Some((order, score, with_constant)) =
+                            self.true_stepwise_search(values, d, cap_d, approximation)
                         {
                             if score < best_score {
                                 best_score = score;
                                 best_order = Some(order);
+                                best_constant = with_constant;
                             }
                         }
                     }
@@ -1005,7 +1314,20 @@ impl Forecaster for AutoARIMA {
         self.model_scores
             .sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        // For true_stepwise path, do final full fit
+        // True-stepwise path: the final model is R's own CSS-ML fit of
+        // the selected (order, constant) -- exactly `auto.arima`'s
+        // `bestfit` -- carried into the forecasting model as pre-fitted
+        // coefficients, so the forecast uses the same constant/drift
+        // decision and estimates the search made (D-06).
+        if self.selected_model.is_none() && self.config.stepwise && self.config.true_stepwise {
+            if let Some(order) = best_order {
+                if !series.has_regressors() {
+                    self.selected_model = Self::r_final_model(series, order, best_constant);
+                }
+            }
+        }
+
+        // Fallback / grid path: crate's own full fit of the chosen order.
         if self.selected_model.is_none() {
             if let Some(order) = best_order {
                 if let Some((model, _)) =
@@ -1246,17 +1568,14 @@ mod tests {
         (0..n).map(|i| base + Duration::hours(i as i64)).collect()
     }
 
-    /// `max_order` (R `auto.arima`'s `max.order`, D-06) defaults to 5 and
-    /// is enforced by `true_stepwise_search`.
-    ///
-    /// NOT asserted here (11-05, evidence-gated per 2026-10-10 user
-    /// decision): `max_cap_p`/`max_cap_q` = 2 and `true_stepwise` = true
-    /// as the *default*. Both are R's real defaults and are exercised via
-    /// `AutoARIMAConfig::default().with_true_stepwise().with_seasonal_orders(5, 1, 5)`
-    /// or equivalent explicit opt-in -- flipping them as the *default*
-    /// re-exposes the pre-existing per-candidate AICc scoring-window bug
-    /// (11-04-SUMMARY.md Known Gap) on AirPassengers too, not just the
-    /// RW/AR Monte-Carlo fixtures. See 11-05-SUMMARY.md.
+    /// `AutoARIMAConfig::default()` matches R `auto.arima`'s own defaults
+    /// (D-06, 11-11): `max_order` (R's `max.order`) is 5, enforced by
+    /// `true_stepwise_search`; `max_cap_p`/`max_cap_q` are 2 (R's
+    /// `max.P`/`max.Q`); the default search is R's Hyndman-Khandakar
+    /// stepwise (`true_stepwise = true`). This flip was deferred by
+    /// 11-04/11-05 (see 11-05-SUMMARY.md) until the exact-likelihood
+    /// scorer (11-11, `exact_likelihood::fit_exact_ml`/`css_r_criterion`)
+    /// replaced the CSS-window scorer that made the flip unsafe.
     #[test]
     fn default_config_has_max_order_and_grid_stepwise() {
         let config = AutoARIMAConfig::default();
@@ -1265,13 +1584,14 @@ mod tests {
         assert_eq!(config.max_order, 5);
         assert_eq!(config.max_d, 2);
         assert_eq!(config.max_cap_d, 1);
+        assert_eq!(config.max_cap_p, 2);
+        assert_eq!(config.max_cap_q, 2);
         assert!(config.stepwise);
-        assert!(!config.true_stepwise);
+        assert!(config.true_stepwise);
     }
 
-    /// `with_grid_stepwise()` is a no-op on top of `default()` (both
-    /// currently mean grid stepwise) but documents the explicit opt-in
-    /// path for callers once the default flips to HK stepwise.
+    /// `with_grid_stepwise()` is the explicit opt-in to the old fixed-grid
+    /// search now that the default is R's HK stepwise (11-11).
     #[test]
     fn with_grid_stepwise_sets_grid_search() {
         let config = AutoARIMAConfig::default().with_grid_stepwise();
