@@ -3,6 +3,7 @@
 //! Also known as double exponential smoothing, this model is suitable for
 //! data with a linear trend but no seasonality.
 
+use super::ets::{ETSSpec, ETS};
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
 use crate::models::{validate_series_complete, Forecaster};
@@ -42,6 +43,16 @@ pub struct HoltLinearTrend {
     residuals: Option<Vec<f64>>,
     /// Residual variance.
     residual_variance: Option<f64>,
+    /// Degrees-of-freedom-corrected sigma2 used by `predict_with_intervals`'s
+    /// `ets_interval_bounds` call (D-08, plan 11-08): `SSE/(n - p)`. `p`
+    /// always counts the initial level and trend (2, R's convention);
+    /// when `fit()` optimized the smoothing parameters (`optimize`), `p`
+    /// also counts alpha, beta, and (if damped) phi, matching R `holt()`'s
+    /// "alpha/beta/phi and the initial states are the estimated
+    /// parameters" convention. Kept separate from `residual_variance`
+    /// (still `SSE/(n-1)`, unchanged) for the same reason 11-07 introduced
+    /// `ETS::interval_sigma2`.
+    interval_sigma2: Option<f64>,
     /// Original series length.
     n: usize,
     /// Training input values, retained for issue #106.
@@ -67,6 +78,7 @@ impl HoltLinearTrend {
             fitted: None,
             residuals: None,
             residual_variance: None,
+            interval_sigma2: None,
             n: 0,
             training_values_store: None,
             training_regressors_store: None,
@@ -90,6 +102,7 @@ impl HoltLinearTrend {
             fitted: None,
             residuals: None,
             residual_variance: None,
+            interval_sigma2: None,
             n: 0,
             training_values_store: None,
             training_regressors_store: None,
@@ -108,6 +121,7 @@ impl HoltLinearTrend {
             fitted: None,
             residuals: None,
             residual_variance: None,
+            interval_sigma2: None,
             n: 0,
             training_values_store: None,
             training_regressors_store: None,
@@ -126,6 +140,7 @@ impl HoltLinearTrend {
             fitted: None,
             residuals: None,
             residual_variance: None,
+            interval_sigma2: None,
             n: 0,
             training_values_store: None,
             training_regressors_store: None,
@@ -311,9 +326,28 @@ impl Forecaster for HoltLinearTrend {
         // Calculate residual variance
         let valid_residuals: Vec<f64> = residuals[1..].to_vec();
         if !valid_residuals.is_empty() {
-            let variance =
-                crate::simd::sum_of_squares(&valid_residuals) / valid_residuals.len() as f64;
+            let sse = crate::simd::sum_of_squares(&valid_residuals);
+            let variance = sse / valid_residuals.len() as f64;
             self.residual_variance = Some(variance);
+
+            // D-08 (plan 11-08): degrees-of-freedom-corrected sigma2 for
+            // `predict_with_intervals`'s ETS(A,A,N)/(A,Ad,N) interval. `p`
+            // always counts the initial level and trend (2); when `fit()`
+            // optimized the smoothing parameters, `p` also counts alpha,
+            // beta, and (if damped) phi -- matching R `holt()`'s
+            // convention that the smoothing parameters and the initial
+            // states are jointly the estimated parameters.
+            let df_params = if self.optimize {
+                if self.phi.is_some() {
+                    5.0
+                } else {
+                    4.0
+                }
+            } else {
+                2.0
+            };
+            let denom = (self.n as f64 - df_params).max(1.0);
+            self.interval_sigma2 = Some(sse / denom);
         }
 
         self.residuals = Some(residuals);
@@ -349,6 +383,15 @@ impl Forecaster for HoltLinearTrend {
         Ok(Forecast::from_values(predictions))
     }
 
+    /// Holt prediction intervals (D-08, plan 11-08): routed through
+    /// [`ETS::ets_interval_bounds`] on the equivalent ETS(A,A,N) (or
+    /// ETS(A,Ad,N) when `phi` is set) spec, using this model's own
+    /// alpha/beta/phi, final level/trend and df-corrected
+    /// `interval_sigma2`. Replaces the previous simplified
+    /// `(alpha + alpha*beta*damped_sum)^2` approximation, which is not
+    /// R `forecast.ets`'s class-1 `c_j` coefficient for a trended model
+    /// (`c_j = alpha + beta*damped_sum(phi, j)`, no inner `alpha*` factor
+    /// on the trend term).
     fn predict_with_intervals(&self, horizon: usize, level: f64) -> Result<Forecast> {
         let l = self
             .level
@@ -357,7 +400,10 @@ impl Forecaster for HoltLinearTrend {
             .trend
             .ok_or(ForecastError::FitRequired { model: None })?;
         let phi = self.phi.unwrap_or(1.0);
-        let variance = self.residual_variance.unwrap_or(0.0);
+        let sigma2 = self
+            .interval_sigma2
+            .or(self.residual_variance)
+            .unwrap_or(0.0);
         let alpha = self
             .alpha
             .ok_or(ForecastError::FitRequired { model: None })?;
@@ -369,33 +415,33 @@ impl Forecaster for HoltLinearTrend {
             return Ok(Forecast::new());
         }
 
-        let z = quantile_normal((1.0 + level) / 2.0);
+        let predictions: Vec<f64> = (1..=horizon)
+            .map(|h| l + Self::damped_sum(phi, h) * b)
+            .collect();
 
-        let mut predictions = Vec::with_capacity(horizon);
-        let mut lower = Vec::with_capacity(horizon);
-        let mut upper = Vec::with_capacity(horizon);
+        let spec = if self.phi.is_some() {
+            ETSSpec::aadn()
+        } else {
+            ETSSpec::aan()
+        };
+        let empty_seasonals: Vec<f64> = Vec::new();
 
-        for h in 1..=horizon {
-            let pred = l + Self::damped_sum(phi, h) * b;
-            predictions.push(pred);
-
-            // Approximate standard error for Holt's method
-            // This is a simplified approximation
-            let c = if h == 1 {
-                1.0
-            } else {
-                let mut sum = 1.0;
-                for j in 1..h {
-                    let phi_sum = Self::damped_sum(phi, j);
-                    sum += (alpha + alpha * beta * phi_sum).powi(2);
-                }
-                sum
-            };
-            let se = (variance * c).sqrt();
-
-            lower.push(pred - z * se);
-            upper.push(pred + z * se);
-        }
+        let (lower, upper) = ETS::ets_interval_bounds(
+            spec,
+            alpha,
+            Some(beta),
+            None,
+            self.phi,
+            1,
+            sigma2,
+            &predictions,
+            horizon,
+            level,
+            l,
+            b,
+            &empty_seasonals,
+            self.n,
+        );
 
         Ok(Forecast::from_values_with_intervals(
             predictions,
