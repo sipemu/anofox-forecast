@@ -1630,27 +1630,49 @@ mod tests {
         assert!(model.selected_order().is_some());
     }
 
+    /// Seeded AR(1) series (phi = 0.7) with Gaussian innovations from a small
+    /// deterministic LCG + Box-Muller generator, so the data is identical on
+    /// every platform. The previous noise-free `sin`-driven series fitted
+    /// ARIMA(2,1,2) almost perfectly, which made R's `checkarima` Hessian test
+    /// flip on last-ulp `sin` differences between libm versions.
+    fn seeded_ar1(n: usize, phi: f64, seed: u64) -> Vec<f64> {
+        let mut state = seed;
+        let mut uniform = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((state >> 11) as f64 + 0.5) / (1u64 << 53) as f64
+        };
+        let mut values = Vec::with_capacity(n);
+        let mut prev = 0.0;
+        for _ in 0..n {
+            let (u1, u2) = (uniform(), uniform());
+            let z = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
+            prev = phi * prev + z;
+            values.push(10.0 + prev);
+        }
+        values
+    }
+
     #[test]
     fn auto_arima_ar_process() {
         let timestamps = make_timestamps(100);
-        // AR(1) process
-        let mut values = vec![10.0];
-        for i in 1..100 {
-            values.push(0.8 * values[i - 1] + (i as f64 * 0.05).sin());
-        }
+        let values = seeded_ar1(100, 0.5, 42);
         let ts = TimeSeries::univariate(timestamps, values).unwrap();
 
         let mut model = AutoARIMA::new();
         model.fit(&ts).unwrap();
 
-        let (p, _, _) = model.selected_order().unwrap();
-        // Should select AR component (R auto.arima picks ARIMA(2,1,2) here)
-        assert!(
-            p >= 1,
-            "selected order {:?}, model scores {:?}",
-            model.selected_order(),
-            model.model_scores()
-        );
+        let order = model.selected_order().unwrap();
+        // R 4.6.1 / forecast 9.0.2 on these exact 100 values:
+        // auto.arima(v) -> ARIMA(1,0,0) with mean, AICc 308.7783.
+        assert_eq!(order, (1, 0, 0), "model scores {:?}", model.model_scores());
+        let best = model
+            .model_scores()
+            .iter()
+            .map(|(_, score)| *score)
+            .fold(f64::INFINITY, f64::min);
+        assert!((best - 308.7783).abs() < 0.01, "AICc {best} vs R 308.7783");
     }
 
     #[test]
