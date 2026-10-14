@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-10-14
+
 AutoARIMA now reproduces R `forecast::auto.arima` model selection (PR #223).
 Backward-compatible: no public signature changes, additive config only, but
 **selected models and forecasts change** wherever the previous search differed
