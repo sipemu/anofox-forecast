@@ -1644,8 +1644,13 @@ mod tests {
         model.fit(&ts).unwrap();
 
         let (p, _, _) = model.selected_order().unwrap();
-        // Should select AR component
-        assert!(p >= 1);
+        // Should select AR component (R auto.arima picks ARIMA(2,1,2) here)
+        assert!(
+            p >= 1,
+            "selected order {:?}, model scores {:?}",
+            model.selected_order(),
+            model.model_scores()
+        );
     }
 
     #[test]
