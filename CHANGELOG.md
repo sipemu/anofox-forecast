@@ -7,17 +7,93 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.16.0] - Unreleased
+AutoARIMA now reproduces R `forecast::auto.arima` model selection (PR #223).
+Backward-compatible: no public signature changes, additive config only, but
+**selected models and forecasts change** wherever the previous search differed
+from R.
 
-Statistical correctness fixes for the ADF and KPSS stationarity tests
-(DIAG-01, DIAG-02). Backward-compatible: `adf_test`/`kpss_test`/
-`test_stationarity` keep their public signatures and `StationarityResult`/
-`CriticalValues` keep their field layout; new functionality is additive.
+### Fixed — AutoARIMA (UPST-01)
 
-> **Note:** this CHANGELOG section may show entries from sibling Phase 11
-> fix PRs that land first — that overlap is expected (all Phase 11 branches
-> share the same `0.16.0` section header) and is resolved by keeping every
-> block when merging, not by dropping one.
+- **AutoARIMA's `d` is now chosen by repeated KPSS testing** (`ndiffs_kpss`,
+  reproducing R `forecast::ndiffs(test="kpss")`: `urca`-style "mu" statistic
+  with `use.lag = trunc(3*sqrt(n)/13)`, a four-point critical-value p-value
+  interpolation, differencing while `p < alpha`), replacing the previous ad
+  hoc variance-ratio heuristic (`suggest_differencing`). Verified against a
+  checked-in R fixture (R `forecast` 9.0.2 + `urca` 1.3.4): matches R's
+  `ndiffs` exactly on all 100 non-seasonal reference series (50 random
+  walks, 50 AR(0.7)).
+- **Seasonal differencing order `D` now uses one seasonal-strength test**
+  (`nsdiffs_seas`, R `forecast::nsdiffs(test="seas")` semantics), reused by
+  both the seasonal-pattern fallback and the actual `D` selection, replacing
+  two independently-maintained and disagreeing heuristics. `D` is now chosen
+  *before* `d` (seasonally differencing first, then KPSS-testing the result
+  for `d`), matching `auto.arima`'s own ordering.
+- **A constant (mean/drift) is only tried when `d + D <= 1`** in both
+  `ARIMA::score_order` and `SARIMA::score_order` (previously: the
+  non-seasonal scorer always tried both regardless of `d+D`, and the
+  seasonal scorer always included an intercept unconditionally).
+- **`SARIMA::score_order` now applies the AICc finite-sample correction**
+  (`+ 2k(k+1)/(n-k-1)`); previously this branch computed plain AIC/BIC with
+  no correction at all, while the non-seasonal scorer already had it —
+  seasonal and non-seasonal candidates are now compared on a like-for-like
+  AICc basis.
+- The pre-11-05 non-seasonal fallback in `AutoARIMA::fit` is removed: R
+  `auto.arima` only drops seasonal AR/MA terms when `period < 2`; seasonal
+  `P`/`Q` are now searched even when `nsdiffs_seas` yields `D = 0` for the
+  configured period.
+
+- **AutoARIMA now reproduces R `forecast::auto.arima`'s model selection.**
+  New `r_arima` module ports R's actual estimation path as driven by
+  `forecast:::myarima`: `optim(method = "BFGS")` (`vmmin`, numerical
+  gradient with `ndeps = 1e-3`, `parscale`, `reltol`, `maxit = 100`,
+  `optimhess`), the CSS stage (`ARIMA_CSS`, `init0` + `lm` start for the
+  mean/drift, `arCheck`), `transform.pars` (`partrans`/`invpartrans`,
+  `maInvert`), the ML stage via `ARIMA_Like` (diffuse-prior Kalman filter,
+  `kappa = 1e6`, on the undifferenced series) with `getQ0` (Gardner 1980),
+  `checkarima` (NaN standard errors or a singular Hessian score `Inf`), the
+  `minroot < 1.01` rule and `myarima`'s AICc/BIC for CSS-ML and CSS fits.
+  Every stepwise candidate is fitted this way. R's approximation rule
+  (`n > 150 || m > 12`: CSS search, then exact refits in CSS-ic order) and
+  R's `is.constant(dx)` branch are ported too.
+- **`AutoARIMAConfig::default()` now uses R's defaults**: Hyndman-Khandakar
+  stepwise search (`true_stepwise = true`), `max_cap_p = max_cap_q = 2`.
+  The stepwise search follows R's source: one explicit constant state with
+  an end-of-scan toggle, start model 4 does not flip the constant, and
+  `max.order` is not applied (R applies it only to the exhaustive search).
+- **The selected model is R's own CSS-ML fit** of the chosen
+  `(order, constant)`, passed into `ARIMA`/`SARIMA` as pre-fitted
+  coefficients (new crate-internal `SARIMA::with_coefficients`), so the
+  forecast uses the constant/drift decision the search made.
+- Fixed a sign error in the Schur-Cohn step-down recursion used for the
+  root rule (verified against `numpy.roots`); it rejected stationary AR
+  candidates.
+- Measured against R 4.6.1 / forecast 9.0.2 (fixtures in
+  `tests/data/r_reference/`): AirPassengers selects R's
+  `ARIMA(2,1,1)(0,1,0)[12]` and all 19 models in R's search trace score
+  the same (within 0.01 AICc, same 4 `Inf` verdicts); random-walk fixture
+  `(0,1,0)` share 0.86 vs R 0.86, with all 50 picks identical; M4-Daily
+  gate passes, with D4047 at 1.000x the statsforecast baseline.
+
+### Added — AutoARIMA (UPST-01)
+
+- **`AutoARIMAConfig::max_order`**: R `auto.arima`'s `max.order` bound
+  (`p+q+P+Q`, default 5) for the grid/exhaustive searches.
+- **`AutoARIMAConfig::with_grid_stepwise()`**: opt-in for the crate's
+  legacy fixed-grid stepwise search, for symmetry with
+  `with_true_stepwise()`.
+
+
+## [0.16.0] - 2026-10-10
+
+Statistical correctness release: stationarity tests (ADF/KPSS), Theta,
+ETS likelihood/constraints/candidate pool/prediction intervals, and
+TBATS/MSTL/GARCH prediction intervals are now verified against R
+(`urca`/`tseries`/`forecast`) and statsforecast reference values.
+Public signatures are unchanged and new API is additive, but **numerical
+outputs change** (p-values, selected models, fitted parameters, interval
+widths) wherever the previous results were incorrect.
+
+AutoARIMA order-selection fixes (PR #223) are not part of this release.
 
 ### Fixed
 
@@ -279,81 +355,6 @@ Statistical correctness fixes for the ADF and KPSS stationarity tests
   interval fix in `fix/ets-likelihood-intervals` (this PR's trend bounds are only as
   calibrated as the AutoETS/SES model they delegate to). See the PR body for the full
   findings.
-
-> Several Phase 11 fix branches land independent changes under this same
-> heading (fix/adf-kpss-correctness, fix/auto-arima-order-selection,
-> fix/theta-alpha-intervals, ...). A merge conflict here across those PRs is
-> expected and resolved by keeping all blocks.
-
-### Fixed (fix/auto-arima-order-selection)
-
-- **AutoARIMA's `d` is now chosen by repeated KPSS testing** (`ndiffs_kpss`,
-  reproducing R `forecast::ndiffs(test="kpss")`: `urca`-style "mu" statistic
-  with `use.lag = trunc(3*sqrt(n)/13)`, a four-point critical-value p-value
-  interpolation, differencing while `p < alpha`), replacing the previous ad
-  hoc variance-ratio heuristic (`suggest_differencing`). Verified against a
-  checked-in R fixture (R `forecast` 9.0.2 + `urca` 1.3.4): matches R's
-  `ndiffs` exactly on all 100 non-seasonal reference series (50 random
-  walks, 50 AR(0.7)).
-- **Seasonal differencing order `D` now uses one seasonal-strength test**
-  (`nsdiffs_seas`, R `forecast::nsdiffs(test="seas")` semantics), reused by
-  both the seasonal-pattern fallback and the actual `D` selection, replacing
-  two independently-maintained and disagreeing heuristics. `D` is now chosen
-  *before* `d` (seasonally differencing first, then KPSS-testing the result
-  for `d`), matching `auto.arima`'s own ordering.
-- **A constant (mean/drift) is only tried when `d + D <= 1`** in both
-  `ARIMA::score_order` and `SARIMA::score_order` (previously: the
-  non-seasonal scorer always tried both regardless of `d+D`, and the
-  seasonal scorer always included an intercept unconditionally).
-- **`SARIMA::score_order` now applies the AICc finite-sample correction**
-  (`+ 2k(k+1)/(n-k-1)`); previously this branch computed plain AIC/BIC with
-  no correction at all, while the non-seasonal scorer already had it —
-  seasonal and non-seasonal candidates are now compared on a like-for-like
-  AICc basis.
-- The pre-11-05 non-seasonal fallback in `AutoARIMA::fit` is removed: R
-  `auto.arima` only drops seasonal AR/MA terms when `period < 2`; seasonal
-  `P`/`Q` are now searched even when `nsdiffs_seas` yields `D = 0` for the
-  configured period.
-
-- **AutoARIMA now reproduces R `forecast::auto.arima`'s model selection.**
-  New `r_arima` module ports R's actual estimation path as driven by
-  `forecast:::myarima`: `optim(method = "BFGS")` (`vmmin`, numerical
-  gradient with `ndeps = 1e-3`, `parscale`, `reltol`, `maxit = 100`,
-  `optimhess`), the CSS stage (`ARIMA_CSS`, `init0` + `lm` start for the
-  mean/drift, `arCheck`), `transform.pars` (`partrans`/`invpartrans`,
-  `maInvert`), the ML stage via `ARIMA_Like` (diffuse-prior Kalman filter,
-  `kappa = 1e6`, on the undifferenced series) with `getQ0` (Gardner 1980),
-  `checkarima` (NaN standard errors or a singular Hessian score `Inf`), the
-  `minroot < 1.01` rule and `myarima`'s AICc/BIC for CSS-ML and CSS fits.
-  Every stepwise candidate is fitted this way. R's approximation rule
-  (`n > 150 || m > 12`: CSS search, then exact refits in CSS-ic order) and
-  R's `is.constant(dx)` branch are ported too.
-- **`AutoARIMAConfig::default()` now uses R's defaults**: Hyndman-Khandakar
-  stepwise search (`true_stepwise = true`), `max_cap_p = max_cap_q = 2`.
-  The stepwise search follows R's source: one explicit constant state with
-  an end-of-scan toggle, start model 4 does not flip the constant, and
-  `max.order` is not applied (R applies it only to the exhaustive search).
-- **The selected model is R's own CSS-ML fit** of the chosen
-  `(order, constant)`, passed into `ARIMA`/`SARIMA` as pre-fitted
-  coefficients (new crate-internal `SARIMA::with_coefficients`), so the
-  forecast uses the constant/drift decision the search made.
-- Fixed a sign error in the Schur-Cohn step-down recursion used for the
-  root rule (verified against `numpy.roots`); it rejected stationary AR
-  candidates.
-- Measured against R 4.6.1 / forecast 9.0.2 (fixtures in
-  `tests/data/r_reference/`): AirPassengers selects R's
-  `ARIMA(2,1,1)(0,1,0)[12]` and all 19 models in R's search trace score
-  the same (within 0.01 AICc, same 4 `Inf` verdicts); random-walk fixture
-  `(0,1,0)` share 0.86 vs R 0.86, with all 50 picks identical; M4-Daily
-  gate passes, with D4047 at 1.000x the statsforecast baseline.
-
-### Added (fix/auto-arima-order-selection)
-
-- **`AutoARIMAConfig::max_order`**: R `auto.arima`'s `max.order` bound
-  (`p+q+P+Q`, default 5) for the grid/exhaustive searches.
-- **`AutoARIMAConfig::with_grid_stepwise()`**: opt-in for the crate's
-  legacy fixed-grid stepwise search, for symmetry with
-  `with_true_stepwise()`.
 
 ## [0.15.10] - 2026-09-09
 

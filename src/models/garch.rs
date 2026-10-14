@@ -24,7 +24,10 @@ use crate::utils::optimization::{nelder_mead, NelderMeadConfig};
 /// - β (beta) coefficients capture persistence of past variance
 ///
 /// Note: `predict()` returns simulated innovations (ε*σ), matching statsforecast behavior.
-/// Use `forecast_variance()` for analytical variance forecasts.
+/// Use `forecast_variance()` for analytical variance forecasts. `predict_with_intervals()`
+/// returns the fitted conditional mean (not the simulated path) with bounds
+/// `mean ∓ z·sqrt(forecast_variance(h))`, so its empirical coverage matches the confidence
+/// level on the true GARCH(1,1) data-generating process (Phase 11, UPST-05, finding H1).
 ///
 /// # Example
 /// ```
@@ -701,33 +704,45 @@ impl Forecaster for GARCH {
     }
 
     fn predict_with_intervals(&self, horizon: usize, confidence: f64) -> Result<Forecast> {
-        let forecast = self.predict(horizon)?;
-
         if horizon == 0 {
-            return Ok(forecast);
+            return Ok(Forecast::new());
+        }
+
+        // Check model is fitted (mirrors predict()'s guard; forecast_variance() also
+        // guards, but we need the guard before touching self.mean below too).
+        if self.y_vals.is_empty() || self.sigma2_vals.is_empty() {
+            return Err(ForecastError::FitRequired { model: None });
         }
 
         // Get variance forecasts for confidence intervals
         let var_forecasts = self.forecast_variance(horizon)?;
 
         let z = crate::utils::stats::quantile_normal((1.0 + confidence) / 2.0);
-        let preds = forecast.primary();
 
+        // Bounds (and the returned point forecast) are centred on the fitted conditional
+        // mean of y_{n+h} (= self.mean for this constant-mean model), NOT on predict()'s
+        // simulated-innovation path. Centring on a single fixed random draw instead of the
+        // conditional mean was confirmed (Phase 11, UPST-05, finding H1) to produce
+        // empirical 95% coverage as low as ~63% against the true GARCH(1,1) DGP, because
+        // the draw can sit several standard deviations away from the distribution's actual
+        // centre while the half-width stays sized for that centre. predict()'s simulated
+        // path itself is left unchanged (still documented statsforecast-compatible); only
+        // predict_with_intervals's centring changes.
+        let mean = self.mean.unwrap_or(0.0);
+
+        let mut point = Vec::with_capacity(horizon);
         let mut lower = Vec::with_capacity(horizon);
         let mut upper = Vec::with_capacity(horizon);
 
-        // CI based on quantiles * sqrt(sigma²) around point forecast
-        for (i, &pred) in preds.iter().enumerate() {
-            let se = var_forecasts[i].sqrt();
-            lower.push(pred - z * se);
-            upper.push(pred + z * se);
+        // CI based on quantiles * sqrt(sigma²) around the conditional mean.
+        for &var in var_forecasts.iter() {
+            let se = var.sqrt();
+            point.push(mean);
+            lower.push(mean - z * se);
+            upper.push(mean + z * se);
         }
 
-        Ok(Forecast::from_values_with_intervals(
-            preds.to_vec(),
-            lower,
-            upper,
-        ))
+        Ok(Forecast::from_values_with_intervals(point, lower, upper))
     }
 
     fn fitted_values(&self) -> Option<&[f64]> {
@@ -874,6 +889,35 @@ mod tests {
             assert!(lower[i] < preds[i]);
             assert!(upper[i] > preds[i]);
         }
+    }
+
+    /// Phase 11, UPST-05, finding H1: `predict_with_intervals` must centre its point/bounds
+    /// on the fitted conditional mean, not on `predict()`'s simulated-innovation draw — the
+    /// latter caused empirical coverage as low as ~63% against the true GARCH(1,1) DGP (see
+    /// `tests/garch_reference.rs::garch_interval_coverage_on_true_dgp`).
+    #[test]
+    fn garch_predict_with_intervals_centred_on_conditional_mean() {
+        let ts = make_volatility_series(100);
+        let mut model = GARCH::garch_1_1();
+        model.fit(&ts).unwrap();
+
+        let forecast = model.predict_with_intervals(10, 0.95).unwrap();
+        let preds = forecast.primary();
+        let point_forecast = model.predict(10).unwrap();
+        let simulated_path = point_forecast.primary();
+
+        for i in 0..10 {
+            assert!(
+                (preds[i] - model.mean.unwrap()).abs() < 1e-12,
+                "predict_with_intervals point[{i}]={} should equal the fitted mean {}",
+                preds[i],
+                model.mean.unwrap()
+            );
+        }
+        // The point values must not merely echo predict()'s random draw (unless the
+        // simulated path happens to coincide with the mean, which is astronomically
+        // unlikely for this series).
+        assert_ne!(preds[0], simulated_path[0]);
     }
 
     #[test]

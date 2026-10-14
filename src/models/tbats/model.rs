@@ -16,6 +16,16 @@ use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
 use crate::models::{validate_series_complete, Forecaster};
 use crate::utils::optimization::{nelder_mead, NelderMeadConfig};
+use rand::{Rng, SeedableRng};
+
+/// Box-Muller standard normal sample, avoiding a `rand_distr` dependency for
+/// this test-only Monte-Carlo helper (same approach as
+/// `src/monitor/sequential.rs`'s inline `normal_sample`).
+fn sample_standard_normal<R: Rng>(rng: &mut R) -> f64 {
+    let u1: f64 = rng.gen::<f64>().max(f64::MIN_POSITIVE);
+    let u2: f64 = rng.gen();
+    (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
+}
 
 /// TBATS forecasting model.
 ///
@@ -462,6 +472,194 @@ impl TBATS {
         table
     }
 
+    /// Observation vector `w` such that `w' @ state` equals the model's point
+    /// prediction (level + phi * trend + sum of cosine seasonal states), the
+    /// same linear combination computed inline in `run_filter`/`predict`.
+    /// Matches statsforecast's `makeTBATSWMatrix` (ARMA terms excluded: this
+    /// implementation reserves but does not fit ARMA errors).
+    fn w_vector(&self) -> Vec<f64> {
+        let base = if self.use_trend { 2 } else { 1 };
+        let mut w = vec![0.0; self.state_dim()];
+        w[0] = 1.0;
+        if self.use_trend {
+            w[1] = self.phi;
+        }
+        let mut pos = base;
+        for &k in &self.fourier_k {
+            for j in 0..k {
+                w[pos + 2 * j] = 1.0; // cosine component only, sine stays 0
+            }
+            pos += 2 * k;
+        }
+        w
+    }
+
+    /// Error-loading vector `g` (alpha, beta, gamma_one/gamma_two per
+    /// harmonic) such that the state update is `state' = F @ state + g * e`.
+    /// Matches statsforecast's `makeTBATSGMatrix` (ARMA terms excluded).
+    fn g_vector(&self) -> Vec<f64> {
+        let base = if self.use_trend { 2 } else { 1 };
+        let mut g = vec![0.0; self.state_dim()];
+        g[0] = self.alpha;
+        if self.use_trend {
+            g[1] = self.beta;
+        }
+        let mut pos = base;
+        for (period_idx, &k) in self.fourier_k.iter().enumerate() {
+            let g1 = self.gamma_one.get(period_idx).copied().unwrap_or(0.0);
+            let g2 = self.gamma_two.get(period_idx).copied().unwrap_or(0.0);
+            for j in 0..k {
+                g[pos + 2 * j] = g1;
+                g[pos + 2 * j + 1] = g2;
+            }
+            pos += 2 * k;
+        }
+        g
+    }
+
+    /// Apply the deterministic (homogeneous, no-error) state transition `F`
+    /// to an arbitrary state-shaped vector: level/trend propagate through
+    /// `phi`, each (cos, sin) harmonic pair rotates by its own frequency.
+    /// This is the same transition `run_filter`/`predict` apply to the
+    /// filtered/forecast state; factored out so it can also be applied to
+    /// the error-loading vector `g` when computing `forecast_variance`.
+    fn apply_transition(&self, v: &[f64], trig: &[(f64, f64)]) -> Vec<f64> {
+        let base = if self.use_trend { 2 } else { 1 };
+        let phi = if self.use_trend { self.phi } else { 0.0 };
+        let mut out = v.to_vec();
+
+        let level = v[0];
+        let trend = if self.use_trend { v[1] } else { 0.0 };
+        out[0] = level + phi * trend;
+        if self.use_trend {
+            out[1] = phi * trend;
+        }
+
+        let mut pos = base;
+        let mut trig_idx = 0;
+        for &k in &self.fourier_k {
+            for j in 0..k {
+                let (cos_freq, sin_freq) = trig[trig_idx];
+                trig_idx += 1;
+
+                let idx_cos = pos + 2 * j;
+                let idx_sin = pos + 2 * j + 1;
+                let old_cos = v[idx_cos];
+                let old_sin = v[idx_sin];
+
+                out[idx_cos] = cos_freq * old_cos + sin_freq * old_sin;
+                out[idx_sin] = -sin_freq * old_cos + cos_freq * old_sin;
+            }
+            pos += 2 * k;
+        }
+        out
+    }
+
+    /// State-space forecast error variance `v_h = sigma2 * (1 + sum_{j=1}^{h-1} c_j^2)`
+    /// with `c_j = w' F^(j-1) g`, on the model's own (Box-Cox transformed, if
+    /// `lambda` is set) scale. Matches statsforecast's `tbats.py::_compute_sigmah`
+    /// (squared, i.e. the variance rather than the std-dev it returns) exactly:
+    /// `var_mult[0] = 1`, `var_mult[j] = var_mult[j-1] + c_j^2` for `j = 1..h-1`,
+    /// `sigma2h = sigma2 * var_mult`. Returned vector has length `horizon`,
+    /// index `h` (0-based) holding the variance for forecast step `h + 1`.
+    pub fn forecast_variance(&self, horizon: usize) -> Result<Vec<f64>> {
+        if self.fitted.is_none() {
+            return Err(ForecastError::FitRequired { model: None });
+        }
+        if horizon == 0 {
+            return Ok(Vec::new());
+        }
+
+        let w = self.w_vector();
+        let g = self.g_vector();
+        let trig = self.precompute_trig();
+
+        let mut var_mult = vec![0.0_f64; horizon];
+        var_mult[0] = 1.0;
+
+        // `current` holds F^(j-1) g; starts at j=1 where F^0 g = g.
+        let mut current = g;
+        for j in 1..horizon {
+            let cj: f64 = w.iter().zip(current.iter()).map(|(a, b)| a * b).sum();
+            var_mult[j] = var_mult[j - 1] + cj * cj;
+            current = self.apply_transition(&current, &trig);
+        }
+
+        Ok(var_mult.into_iter().map(|m| self.sigma2 * m).collect())
+    }
+
+    /// Simulate `n_paths` future continuations of `horizon` steps through
+    /// the model's own state recursion (`run_filter`'s update rule, using a
+    /// fresh `N(0, sigma2)` innovation at each step instead of a fitted
+    /// residual), on the transformed (Box-Cox, if `lambda` is set) scale.
+    /// Test-only Monte-Carlo helper: `tbats_variance_matches_simulation`
+    /// checks the empirical variance of these paths against
+    /// `forecast_variance`'s closed-form `w' F^(j-1) g` recursion.
+    #[doc(hidden)]
+    pub fn simulate_paths(
+        &self,
+        horizon: usize,
+        n_paths: usize,
+        seed: u64,
+    ) -> Result<Vec<Vec<f64>>> {
+        if self.fitted.is_none() {
+            return Err(ForecastError::FitRequired { model: None });
+        }
+        if horizon == 0 {
+            return Ok(vec![Vec::new(); n_paths]);
+        }
+
+        let w = self.w_vector();
+        let g = self.g_vector();
+        let trig = self.precompute_trig();
+        let sigma = self.sigma2.sqrt();
+
+        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+        let mut paths = Vec::with_capacity(n_paths);
+
+        for _ in 0..n_paths {
+            let mut state = self.state.clone();
+            let mut path = Vec::with_capacity(horizon);
+            for _ in 0..horizon {
+                let obs: f64 = w.iter().zip(state.iter()).map(|(a, b)| a * b).sum();
+                let e = sample_standard_normal(&mut rng) * sigma;
+                path.push(obs + e);
+
+                // x_t = F @ x_{t-1} + g * e, matching run_filter's update.
+                state = self.apply_transition(&state, &trig);
+                for (s, &gi) in state.iter_mut().zip(g.iter()) {
+                    *s += gi * e;
+                }
+            }
+            paths.push(path);
+        }
+
+        Ok(paths)
+    }
+
+    /// Point forecasts on the model's own (Box-Cox transformed, if `lambda`
+    /// is set) scale, i.e. `w' @ (F^h @ x_n)` for `h = 0..horizon-1`, before
+    /// any inverse Box-Cox transform. Shared by `predict` and
+    /// `predict_with_intervals` so both apply identical state transitions.
+    fn predict_transformed(&self, horizon: usize) -> Vec<f64> {
+        if horizon == 0 {
+            return Vec::new();
+        }
+
+        let w = self.w_vector();
+        let trig = self.precompute_trig();
+        let mut state = self.state.clone();
+        let mut predictions = Vec::with_capacity(horizon);
+
+        for _ in 0..horizon {
+            let pred: f64 = w.iter().zip(state.iter()).map(|(a, b)| a * b).sum();
+            predictions.push(pred);
+            state = self.apply_transition(&state, &trig);
+        }
+
+        predictions
+    }
+
     fn run_filter(
         &self,
         values: &[f64],
@@ -833,95 +1031,59 @@ impl Forecaster for TBATS {
         }
 
         let lambda = self.lambda.unwrap_or(1.0);
-        let mut predictions = Vec::with_capacity(horizon);
-        let trig = self.precompute_trig();
-
-        // Clone current state for forecasting
-        let mut state = self.state.clone();
-        let base = if self.use_trend { 2 } else { 1 };
-        let phi = if self.use_trend { self.phi } else { 0.0 };
-
-        for _h in 0..horizon {
-            // Observation: y = level + phi * trend + sum(cos_coef)
-            let level = state[0];
-            let trend = if self.use_trend { state[1] } else { 0.0 };
-
-            let mut seasonal = 0.0;
-            let mut pos = base;
-            for &k in &self.fourier_k {
-                for j in 0..k {
-                    seasonal += state[pos + 2 * j]; // Only cosine component
-                }
-                pos += 2 * k;
-            }
-
-            let pred_transformed = level + phi * trend + seasonal;
-            let pred = Self::inverse_box_cox(pred_transformed, lambda);
-            predictions.push(pred);
-
-            // State transition (F @ x, without error correction)
-            // Level: level_{t+1} = level_t + phi * trend_t
-            state[0] = level + phi * trend;
-
-            // Trend: trend_{t+1} = phi * trend_t
-            if self.use_trend {
-                state[1] = phi * trend;
-            }
-
-            // Rotate seasonal states using precomputed trig
-            let mut pos = base;
-            let mut trig_idx = 0;
-            for &k in &self.fourier_k {
-                for j in 0..k {
-                    let (cos_freq, sin_freq) = trig[trig_idx];
-                    trig_idx += 1;
-
-                    let idx_cos = pos + 2 * j;
-                    let idx_sin = pos + 2 * j + 1;
-
-                    let old_cos = state[idx_cos];
-                    let old_sin = state[idx_sin];
-
-                    state[idx_cos] = cos_freq * old_cos + sin_freq * old_sin;
-                    state[idx_sin] = -sin_freq * old_cos + cos_freq * old_sin;
-                }
-                pos += 2 * k;
-            }
-        }
+        let predictions: Vec<f64> = self
+            .predict_transformed(horizon)
+            .into_iter()
+            .map(|pred_transformed| Self::inverse_box_cox(pred_transformed, lambda))
+            .collect();
 
         Ok(Forecast::from_values(predictions))
     }
 
+    /// Prediction intervals from the model's own innovations state-space
+    /// variance: `v_h = sigma2 * (1 + sum_{j<h} (w' F^(j-1) g)^2)`
+    /// (see `forecast_variance`), computed on the Box-Cox transformed scale
+    /// and then inverse-transformed independently for the point and both
+    /// bounds — matching statsforecast's `TBATS.predict`/`.forecast`, which
+    /// compute `mean`/`lo`/`hi` on the transformed scale before applying
+    /// `inv_boxcox` to each. Replaces the previous `sigma * sqrt(h + 1)`
+    /// random-walk approximation, which ignored the model's own seasonal
+    /// states entirely.
     fn predict_with_intervals(&self, horizon: usize, level: f64) -> Result<Forecast> {
-        let point_forecast = self.predict(horizon)?;
-
-        if horizon == 0 {
-            return Ok(point_forecast);
+        if self.fitted.is_none() {
+            return Err(ForecastError::FitRequired { model: None });
         }
 
+        if horizon == 0 {
+            return Ok(Forecast::from_values(Vec::new()));
+        }
+
+        let lambda = self.lambda.unwrap_or(1.0);
         let z = crate::utils::quantile_normal(0.5 + level / 2.0);
-        let std_dev = self.sigma2.sqrt();
+        let variance = self.forecast_variance(horizon)?;
+        let transformed_points = self.predict_transformed(horizon);
 
-        // Approximate variance growth with horizon
-        let lower: Vec<f64> = point_forecast
-            .primary()
-            .iter()
-            .enumerate()
-            .map(|(h, &f)| f - z * std_dev * ((h + 1) as f64).sqrt())
-            .collect();
+        let mut points = Vec::with_capacity(horizon);
+        let mut lower = Vec::with_capacity(horizon);
+        let mut upper = Vec::with_capacity(horizon);
 
-        let upper: Vec<f64> = point_forecast
-            .primary()
-            .iter()
-            .enumerate()
-            .map(|(h, &f)| f + z * std_dev * ((h + 1) as f64).sqrt())
-            .collect();
+        for h in 0..horizon {
+            let sd = variance[h].max(0.0).sqrt();
+            let point_t = transformed_points[h];
+            let lo_t = point_t - z * sd;
+            let hi_t = point_t + z * sd;
 
-        Ok(Forecast::from_values_with_intervals(
-            point_forecast.primary().to_vec(),
-            lower,
-            upper,
-        ))
+            points.push(Self::inverse_box_cox(point_t, lambda));
+            let mut lo = Self::inverse_box_cox(lo_t, lambda);
+            let mut hi = Self::inverse_box_cox(hi_t, lambda);
+            if lo > hi {
+                std::mem::swap(&mut lo, &mut hi);
+            }
+            lower.push(lo);
+            upper.push(hi);
+        }
+
+        Ok(Forecast::from_values_with_intervals(points, lower, upper))
     }
 
     fn fitted_values(&self) -> Option<&[f64]> {
