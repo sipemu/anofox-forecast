@@ -66,7 +66,8 @@ fn setup_batch_100() -> Vec<Vec<f64>> {
 #[bench::n200(setup_ts_n200_ets())]
 fn bench_auto_ets_fit(ts: TimeSeries) {
     let mut model = AutoETS::with_period(12);
-    black_box(model.fit(black_box(&ts)).unwrap());
+    model.fit(black_box(&ts)).unwrap();
+    black_box(());
 }
 
 // AutoARIMA fit on a 200-observation series (auto order selection).
@@ -74,7 +75,8 @@ fn bench_auto_ets_fit(ts: TimeSeries) {
 #[bench::n200(setup_ts_n200_arima())]
 fn bench_auto_arima_fit(ts: TimeSeries) {
     let mut model = AutoARIMA::new();
-    black_box(model.fit(black_box(&ts)).unwrap());
+    model.fit(black_box(&ts)).unwrap();
+    black_box(());
 }
 
 // Batch AutoETS: 100 series x length 100, period 12, horizon 12.

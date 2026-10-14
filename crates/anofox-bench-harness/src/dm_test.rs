@@ -27,7 +27,7 @@
 /// * `e1` — Forecast errors from model 1 (actual − predicted₁); length T.
 /// * `e2` — Forecast errors from model 2 (actual − predicted₂); length T.
 /// * `h`  — Forecast horizon (controls the HAC lag window 0..h-1 and the HLN
-///           correction factor `sqrt[(T+1-2h+h(h-1)/T)/T]`).
+///   correction factor `sqrt[(T+1-2h+h(h-1)/T)/T]`).
 ///
 /// # Returns
 /// `(p_value, reject_h0)` — two-sided p-value under the normal approximation,
@@ -66,7 +66,7 @@ pub fn diebold_mariano_hln(e1: &[f64], e2: &[f64], h: usize) -> (f64, bool) {
     let hac = if h <= 1 {
         gamma(0)
     } else {
-        gamma(0) + 2.0 * (1..h).map(|k| gamma(k)).sum::<f64>()
+        gamma(0) + 2.0 * (1..h).map(gamma).sum::<f64>()
     };
 
     // V_hat = HAC / T  (variance of d̄)
