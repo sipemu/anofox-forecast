@@ -212,6 +212,77 @@ pub struct ARIMA {
     skip_optimization: bool,
 }
 
+/// The deterministic mean/drift path R's `stats::arima` subtracts from
+/// the undifferenced series before its likelihood pass, given the
+/// constant `mu` of the `(d, D)`-differenced series. With `d + D = 0` it
+/// is the mean; with `d + D = 1` it is R's drift regression on the time
+/// index `1..n` (slope `mu`, or `mu / m` for a seasonal difference).
+/// Higher differencing orders (where R allows no constant) integrate
+/// `mu` back through the differencing operators.
+fn r_constant_path(n: usize, mu: f64, d: usize, cap_d: usize, m: usize) -> Vec<f64> {
+    if mu == 0.0 {
+        return vec![0.0; n];
+    }
+    match (d, cap_d) {
+        (0, 0) => vec![mu; n],
+        (1, 0) => (1..=n).map(|t| mu * t as f64).collect(),
+        (0, 1) => (1..=n).map(|t| mu / m as f64 * t as f64).collect(),
+        _ => {
+            let mut g = vec![mu; n];
+            for _ in 0..cap_d {
+                for t in m..n {
+                    g[t] += g[t - m];
+                }
+            }
+            for _ in 0..d {
+                for t in 1..n {
+                    g[t] += g[t - 1];
+                }
+            }
+            g
+        }
+    }
+}
+
+/// R-faithful ARIMA prediction variances (see
+/// [`super::r_arima::r_prediction_variances`]) for a fitted model on the
+/// (regressor-adjusted) training series `original`.
+#[allow(clippy::too_many_arguments)]
+fn r_model_variances(
+    original: &[f64],
+    phi: &[f64],
+    theta: &[f64],
+    phi_theta_ncoef: usize,
+    mu: f64,
+    d: usize,
+    cap_d: usize,
+    m: usize,
+    n_exog: usize,
+    horizon: usize,
+) -> Option<(f64, Vec<f64>)> {
+    // Estimated coefficients (R's `npar - 1`): ARMA terms, the constant
+    // when present, and any exogenous regressors.
+    let ncoef = phi_theta_ncoef + usize::from(mu != 0.0) + n_exog;
+    let path = r_constant_path(original.len(), mu, d, cap_d, m);
+    let x: Vec<f64> = original.iter().zip(&path).map(|(v, g)| v - g).collect();
+    let delta = super::r_arima::delta_poly(d, cap_d, m);
+    super::r_arima::r_prediction_variances(&x, phi, theta, &delta, ncoef, horizon)
+}
+
+/// Symmetric normal intervals `preds +- z * sqrt(var_h)`.
+fn intervals_from_variances(preds: &[f64], variances: &[f64], level: f64) -> Forecast {
+    let z = quantile_normal((1.0 + level) / 2.0);
+    let (lower, upper) = preds
+        .iter()
+        .zip(variances)
+        .map(|(&p, &v)| {
+            let se = v.max(0.0).sqrt();
+            (p - z * se, p + z * se)
+        })
+        .unzip();
+    Forecast::from_values_with_intervals(preds.to_vec(), lower, upper)
+}
+
 impl ARIMA {
     /// Create a new ARIMA model.
     pub fn new(p: usize, d: usize, q: usize) -> Self {
@@ -285,6 +356,50 @@ impl ARIMA {
     /// Create an MA(q) model (ARIMA with p=0, d=0).
     pub fn ma(q: usize) -> Self {
         Self::new(0, 0, q)
+    }
+
+    /// Innovations variance `sigma2` as R's `forecast::Arima` reports it:
+    /// `sum(residuals^2) / (n.used - ncoef)` over the standardized
+    /// residuals of the exact-likelihood Kalman filter at the fitted
+    /// coefficients. This is the variance the prediction intervals are
+    /// scaled by. `None` before `fit()`.
+    pub fn sigma2(&self) -> Option<f64> {
+        self.forecast_variances(1).map(|(s2, _)| s2)
+    }
+
+    /// `(sigma2, squared standard errors h = 1..=horizon)` following R's
+    /// `predict.Arima` (`KalmanForecast` on the state-space form).
+    fn forecast_variances(&self, horizon: usize) -> Option<(f64, Vec<f64>)> {
+        let original = self.original.as_ref()?;
+        r_model_variances(
+            original,
+            &self.ar_coefficients,
+            &self.ma_coefficients,
+            self.spec.p + self.spec.q,
+            self.intercept,
+            self.spec.d,
+            0,
+            1,
+            self.exog_ols
+                .as_ref()
+                .map_or(0, |o| o.regressor_names.len()),
+            horizon,
+        )
+    }
+
+    /// Prediction intervals around `preds`; falls back to the
+    /// random-walk approximation `sigma2 * h` only when the state-space
+    /// recursion is unavailable (degenerate fit).
+    fn intervals_for(&self, preds: &[f64], level: f64) -> Forecast {
+        let horizon = preds.len();
+        let variances = match self.forecast_variances(horizon) {
+            Some((_, v)) => v,
+            None => {
+                let s2 = self.residual_variance.unwrap_or(0.0);
+                (1..=horizon).map(|h| s2 * h as f64).collect()
+            }
+        };
+        intervals_from_variances(preds, &variances, level)
     }
 
     /// Get the model specification.
@@ -1845,63 +1960,18 @@ impl Forecaster for ARIMA {
         level: f64,
     ) -> Result<Forecast> {
         let forecast = self.predict_with_exog(horizon, future_regressors)?;
-        let variance = self.residual_variance.unwrap_or(0.0);
-
         if horizon == 0 {
             return Ok(forecast);
         }
-
-        let z = quantile_normal((1.0 + level) / 2.0);
-        let preds = forecast.primary();
-
-        let mut lower = Vec::with_capacity(horizon);
-        let mut upper = Vec::with_capacity(horizon);
-
-        for h in 1..=horizon {
-            let cumulative_var = variance * h as f64;
-            let se = cumulative_var.sqrt();
-
-            lower.push(preds[h - 1] - z * se);
-            upper.push(preds[h - 1] + z * se);
-        }
-
-        Ok(Forecast::from_values_with_intervals(
-            preds.to_vec(),
-            lower,
-            upper,
-        ))
+        Ok(self.intervals_for(forecast.primary(), level))
     }
 
     fn predict_with_intervals(&self, horizon: usize, level: f64) -> Result<Forecast> {
         let forecast = self.predict(horizon)?;
-        let variance = self.residual_variance.unwrap_or(0.0);
-
         if horizon == 0 {
             return Ok(forecast);
         }
-
-        let z = quantile_normal((1.0 + level) / 2.0);
-        let preds = forecast.primary();
-
-        let mut lower = Vec::with_capacity(horizon);
-        let mut upper = Vec::with_capacity(horizon);
-
-        // Calculate cumulative variance for each horizon
-        for h in 1..=horizon {
-            // Simplified variance calculation
-            // For ARIMA, the variance grows with horizon
-            let cumulative_var = variance * h as f64;
-            let se = cumulative_var.sqrt();
-
-            lower.push(preds[h - 1] - z * se);
-            upper.push(preds[h - 1] + z * se);
-        }
-
-        Ok(Forecast::from_values_with_intervals(
-            preds.to_vec(),
-            lower,
-            upper,
-        ))
+        Ok(self.intervals_for(forecast.primary(), level))
     }
 
     fn fitted_values(&self) -> Option<&[f64]> {
@@ -2093,7 +2163,7 @@ impl SARIMA {
     /// re-estimating. `intercept` uses this type's constant-form
     /// convention (`w_t = c + sum ... `).
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn with_coefficients(
+    pub fn with_coefficients(
         spec: SARIMASpec,
         ar: Vec<f64>,
         ma: Vec<f64>,
@@ -2111,6 +2181,74 @@ impl SARIMA {
         Self::new(
             spec.p, spec.d, spec.q, spec.cap_p, spec.cap_d, spec.cap_q, spec.s,
         )
+    }
+
+    /// Innovations variance `sigma2` as R's `forecast::Arima` reports it:
+    /// `sum(residuals^2) / (n.used - ncoef)` over the standardized
+    /// residuals of the exact-likelihood Kalman filter at the fitted
+    /// coefficients. This is the variance the prediction intervals are
+    /// scaled by. `None` before `fit()`.
+    pub fn sigma2(&self) -> Option<f64> {
+        self.forecast_variances(1).map(|(s2, _)| s2)
+    }
+
+    /// `(sigma2, squared standard errors h = 1..=horizon)` following R's
+    /// `predict.Arima`: `KalmanForecast` on the `makeARIMA` state-space
+    /// form, whose transition folds in the full differencing polynomial
+    /// `(1-B)^d (1-B^s)^D`.
+    fn forecast_variances(&self, horizon: usize) -> Option<(f64, Vec<f64>)> {
+        let original = self.original.as_ref()?;
+        let s = self.spec.s.max(1);
+        let cap_d = if s > 1 { self.spec.cap_d } else { 0 };
+        let phi = super::exact_likelihood::expand_seasonal_ar(
+            &self.ar_coefficients,
+            &self.seasonal_ar_coefficients,
+            s,
+        );
+        let theta = super::exact_likelihood::expand_seasonal_ma(
+            &self.ma_coefficients,
+            &self.seasonal_ma_coefficients,
+            s,
+        );
+        // This type stores the constant form `c = mu * phi(1) * Phi(1)`.
+        let ar1 = 1.0 - self.ar_coefficients.iter().sum::<f64>();
+        let sar1 = 1.0 - self.seasonal_ar_coefficients.iter().sum::<f64>();
+        let den = ar1 * sar1;
+        let mu = if den.abs() > 1e-12 {
+            self.intercept / den
+        } else {
+            0.0
+        };
+        let narma = self.spec.p + self.spec.q + self.spec.cap_p + self.spec.cap_q;
+        let n_exog = self
+            .exog_ols
+            .as_ref()
+            .map_or(0, |o| o.regressor_names.len());
+        r_model_variances(
+            original,
+            &phi,
+            &theta,
+            narma,
+            mu,
+            self.spec.d,
+            cap_d,
+            s,
+            n_exog,
+            horizon,
+        )
+    }
+
+    /// Prediction intervals around `preds` (see [`Self::forecast_variances`]).
+    fn intervals_for(&self, preds: &[f64], level: f64) -> Forecast {
+        let horizon = preds.len();
+        let variances = match self.forecast_variances(horizon) {
+            Some((_, v)) => v,
+            None => {
+                let s2 = self.residual_variance.unwrap_or(0.0);
+                (1..=horizon).map(|h| s2 * h as f64).collect()
+            }
+        };
+        intervals_from_variances(preds, &variances, level)
     }
 
     /// Get the model specification.
@@ -3017,60 +3155,18 @@ impl Forecaster for SARIMA {
         level: f64,
     ) -> Result<Forecast> {
         let forecast = self.predict_with_exog(horizon, future_regressors)?;
-        let variance = self.residual_variance.unwrap_or(0.0);
-
         if horizon == 0 {
             return Ok(forecast);
         }
-
-        let z = quantile_normal((1.0 + level) / 2.0);
-        let preds = forecast.primary();
-
-        let mut lower = Vec::with_capacity(horizon);
-        let mut upper = Vec::with_capacity(horizon);
-
-        for h in 1..=horizon {
-            let cumulative_var = variance * (1.0 + 0.1 * h as f64);
-            let se = cumulative_var.sqrt();
-
-            lower.push(preds[h - 1] - z * se);
-            upper.push(preds[h - 1] + z * se);
-        }
-
-        Ok(Forecast::from_values_with_intervals(
-            preds.to_vec(),
-            lower,
-            upper,
-        ))
+        Ok(self.intervals_for(forecast.primary(), level))
     }
 
     fn predict_with_intervals(&self, horizon: usize, level: f64) -> Result<Forecast> {
         let forecast = self.predict(horizon)?;
-        let variance = self.residual_variance.unwrap_or(0.0);
-
         if horizon == 0 {
             return Ok(forecast);
         }
-
-        let z = quantile_normal((1.0 + level) / 2.0);
-        let preds = forecast.primary();
-
-        let mut lower = Vec::with_capacity(horizon);
-        let mut upper = Vec::with_capacity(horizon);
-
-        for h in 1..=horizon {
-            let cumulative_var = variance * (1.0 + 0.1 * h as f64);
-            let se = cumulative_var.sqrt();
-
-            lower.push(preds[h - 1] - z * se);
-            upper.push(preds[h - 1] + z * se);
-        }
-
-        Ok(Forecast::from_values_with_intervals(
-            preds.to_vec(),
-            lower,
-            upper,
-        ))
+        Ok(self.intervals_for(forecast.primary(), level))
     }
 
     fn fitted_values(&self) -> Option<&[f64]> {
