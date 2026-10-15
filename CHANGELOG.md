@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — ARIMA prediction intervals
+
+- **ARIMA / SARIMA / AutoARIMA prediction intervals now follow R
+  `stats::arima` + `forecast::forecast.Arima`.** The interval width was a
+  placeholder: `sigma2 * h` for `ARIMA` (exact only for a random walk) and
+  `sigma2 * (1 + 0.1 h)` for `SARIMA`, ignoring the AR/MA polynomials and
+  the seasonal-difference operator entirely, and `sigma2` was the
+  conditional-sum-of-squares residual variance divided by the residual
+  count. The variances are now R's `KalmanForecast` recursion on the
+  `makeARIMA` state-space form (AR/MA expanded multiplicatively, the full
+  `(1-B)^d (1-B^s)^D` differencing polynomial folded into the transition),
+  started from the filtered state covariance of an `ARIMA_Like` pass over
+  the training series, and scaled by the `forecast` package's `sigma2 =
+  sum(residuals^2) / (nstar - npar + 1)`. New `ARIMA::sigma2()` /
+  `SARIMA::sigma2()` expose it; `SARIMA::with_coefficients` is now public.
+  Point forecasts and model selection are unchanged.
+- 95% half-width vs R, h = 1..24 (crate/R ratio; checked-in fixture
+  `tests/data/r_reference/arima_intervals_r.json`, R 4.6.1 / forecast 9.0.2):
+
+  | Model (R's coefficients) | before: h=1 / h=6 / h=12 / h=24, max dev | after: max dev |
+  |---|---|---|
+  | AirPassengers ARIMA(2,1,1)(0,1,0)[12] (also AutoARIMA's pick) | 1.041 / 0.819 / 0.879 / 0.671, 34.9% | 8.1e-10 |
+  | log(AirPassengers) airline ARIMA(0,1,1)(0,1,1)[12] | 1.098 / 0.793 / 0.699 / 0.512, 48.8% | 8.1e-10 |
+  | log(AirPassengers) ARIMA(1,1,0)(1,1,0)[12] | 1.034 / 0.662 / 0.564 / 0.388, 61.2% | 8.1e-10 |
+  | WWWusage ARIMA(1,1,1) | 0.992 / 0.324 / 0.268 / 0.245, 75.5% | 8.1e-10 |
+  | WWWusage ARIMA(1,1,1) with drift | 0.984 / 0.329 / 0.274 / 0.253, 74.8% | 8.1e-10 |
+
+  `sigma2` now matches R to <= 4e-14 relative; the remaining 8.1e-10 is
+  the crate's `quantile_normal` approximation of `qnorm(0.975)`.
+
 ## [0.16.1] - 2026-10-14
 
 AutoARIMA now reproduces R `forecast::auto.arima` model selection (PR #223).
