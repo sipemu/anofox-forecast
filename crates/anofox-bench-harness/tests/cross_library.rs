@@ -23,6 +23,7 @@
 //!   - Exercises the gate logic (< 5% gap + p ≥ 0.05 → claim suppressed).
 //!   - Uses synthetic aligned error vectors that represent the monthly (h=18) case.
 //!   - Does NOT depend on `ANOFOX_DATASET_DIR`.
+//!
 //! This limitation is documented so Plan 04's narrative accurately states the
 //! DM gate's actual data scope.
 //!

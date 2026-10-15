@@ -32,6 +32,7 @@
 //! `.planning/baselines/accuracy.json` ONLY when both:
 //!   - `ANOFOX_WRITE_ACCURACY_BASELINE=1` is set, AND
 //!   - the ACCUR-08 anchor assertion has passed (monthly MASE within tolerance).
+//!
 //! Running plain `cargo test` without the write flag never overwrites the baseline.
 //!
 //! ## MSIS convention note (A4 / Pitfall 4)
