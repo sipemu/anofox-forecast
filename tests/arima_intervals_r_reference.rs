@@ -20,6 +20,9 @@ use serde_json::Value;
 /// the same diffuse-prior (`kappa = 1e6`) Kalman recursion, so the only
 /// differences are floating-point summation order.
 const REL_TOL: f64 = 1e-6;
+/// AutoARIMA case: bounded by estimated-vs-R coefficient agreement (see
+/// `auto_arima_air_passengers_intervals_match_r`).
+const AUTO_REL_TOL: f64 = 1e-4;
 const Z95: f64 = 1.959_963_984_540_054;
 
 fn load_fixture() -> Value {
@@ -65,7 +68,7 @@ fn rel(a: f64, b: f64) -> f64 {
 
 /// Max relative deviation of the crate's 95% half-widths from R's
 /// `qnorm(0.975) * se`, asserting it is within `REL_TOL`.
-fn assert_half_widths(name: &str, lower: &[f64], upper: &[f64], r_se: &[f64]) -> f64 {
+fn assert_half_widths(name: &str, lower: &[f64], upper: &[f64], r_se: &[f64], tol: f64) -> f64 {
     assert_eq!(lower.len(), r_se.len());
     let mut worst = 0.0_f64;
     for h in 0..r_se.len() {
@@ -74,7 +77,7 @@ fn assert_half_widths(name: &str, lower: &[f64], upper: &[f64], r_se: &[f64]) ->
         let dev = rel(half, r_half);
         worst = worst.max(dev);
         assert!(
-            dev <= REL_TOL,
+            dev <= tol,
             "{name} h={}: half-width {half} vs R {r_half} (rel {dev:.3e})",
             h + 1
         );
@@ -132,6 +135,7 @@ fn check_case(fixture: &Value, name: &str) {
         fc.lower_series(0).unwrap(),
         fc.upper_series(0).unwrap(),
         &r_se,
+        REL_TOL,
     );
     // Intervals are symmetric around the (unchanged) point forecast.
     let pts = fc.primary();
@@ -203,6 +207,12 @@ fn auto_arima_air_passengers_intervals_match_r() {
             r_mean[i]
         );
     }
+    // Unlike the cases above, AutoARIMA uses its *own* estimates (the
+    // BFGS port of R's optim), which agree with R's coefficients only to
+    // optim's `reltol = 1.5e-8` on the objective, i.e. ~1e-6 in the
+    // parameters (measured: 8e-10 in release, 1.1e-6 in debug builds,
+    // where the optimiser takes a slightly different last step). The
+    // interval tolerance is therefore bounded by coefficient agreement.
     // h=1 variance is sigma2 * Z P_{n+1|n} Z' with the filtered P ~ 0
     // in the ARMA block, so the h=1 half-width also pins sigma2.
     let r_sigma2 = auto["sigma2"].as_f64().unwrap();
@@ -211,6 +221,7 @@ fn auto_arima_air_passengers_intervals_match_r() {
         fc.lower_series(0).unwrap(),
         fc.upper_series(0).unwrap(),
         &r_se,
+        AUTO_REL_TOL,
     );
     eprintln!("auto_arima_air_passengers: R sigma2 {r_sigma2}, PI half-width max rel {worst:.2e}");
 }
