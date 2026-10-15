@@ -1056,6 +1056,28 @@ fn arima_like(
     theta_in: &[f64],
     delta: &[f64],
 ) -> Option<(f64, f64, usize)> {
+    arima_filter(x, phi, theta_in, delta).map(|f| (f.ssq, f.sumlog, f.nu))
+}
+
+/// Result of one `ARIMA_Like` pass, including the filtered state
+/// covariance `P_{n|n}` that R leaves behind in `mod$P` (the state
+/// `KalmanForecast` starts from).
+struct FilterState {
+    ssq: f64,
+    sumlog: f64,
+    nu: usize,
+    /// `sum(residuals^2)` over *all* observations, where R's
+    /// `residuals = resid / sqrt(gain)` (also the diffuse ones with
+    /// `gain >= 1e4` that `ssq` skips).
+    rss_all: f64,
+    /// `rd x rd` filtered state covariance, column-major (`i + rd*j`),
+    /// in units of `sigma2`.
+    pmat: Vec<f64>,
+}
+
+/// Body of R's `ARIMA_Like` (see [`arima_like`]), also returning the
+/// filtered state covariance.
+fn arima_filter(x: &[f64], phi: &[f64], theta_in: &[f64], delta: &[f64]) -> Option<FilterState> {
     let p = phi.len();
     let q0 = theta_in.len();
     let r = p.max(q0 + 1);
@@ -1092,6 +1114,7 @@ fn arima_like(
     let mut mvec = vec![0.0; rd];
     let mut mm = vec![0.0; rd * rd];
     let (mut ssq, mut sumlog, mut nu) = (0.0_f64, 0.0_f64, 0usize);
+    let mut rss_all = 0.0_f64;
     for (l, &yl) in x.iter().enumerate() {
         for i in 0..r {
             let mut tmp = if i < r - 1 { a[i + 1] } else { 0.0 };
@@ -1220,6 +1243,7 @@ fn arima_like(
             ssq += resid * resid / gain;
             sumlog += gain.ln();
         }
+        rss_all += resid * resid / gain;
         for i in 0..rd {
             a[i] = anew[i] + mvec[i] * resid / gain;
         }
@@ -1229,12 +1253,133 @@ fn arima_like(
             }
         }
     }
-    (ssq.is_finite() && sumlog.is_finite() && nu > 0).then_some((ssq, sumlog, nu))
+    (ssq.is_finite() && sumlog.is_finite() && nu > 0).then_some(FilterState {
+        ssq,
+        sumlog,
+        nu,
+        rss_all,
+        pmat,
+    })
+}
+
+/// R's C `KalmanFore` (`stats::KalmanForecast`) restricted to the
+/// variance recursion: starting from the filtered covariance `pmat`
+/// of the `makeARIMA` state-space form (`T` with the AR block and the
+/// differencing polynomial `delta` folded in, `V = R R'` with
+/// `R = (1, theta, 0)`, `Z = (1, 0, ..., delta)`, `h = 0`), returns
+/// `Z P_{n+l|n} Z'` for `l = 1..=horizon`, in units of `sigma2`.
+fn kalman_forecast_var(
+    phi: &[f64],
+    theta_in: &[f64],
+    delta: &[f64],
+    mut pmat: Vec<f64>,
+    horizon: usize,
+) -> Vec<f64> {
+    let p = phi.len();
+    let r = p.max(theta_in.len() + 1);
+    let d = delta.len();
+    let rd = r + d;
+    debug_assert_eq!(pmat.len(), rd * rd);
+    // T (column-major `i + rd*k`).
+    let mut t = vec![0.0; rd * rd];
+    for (i, &v) in phi.iter().enumerate() {
+        t[i] = v;
+    }
+    for i in 0..r.saturating_sub(1) {
+        t[i + rd * (i + 1)] = 1.0;
+    }
+    if d > 0 {
+        t[r] = 1.0;
+        for (j, &v) in delta.iter().enumerate() {
+            t[r + rd * (r + j)] = v;
+        }
+        for i in 1..d {
+            t[(r + i) + rd * (r + i - 1)] = 1.0;
+        }
+    }
+    // V = R R'.
+    let mut rvec = vec![0.0; rd];
+    rvec[0] = 1.0;
+    for (i, &v) in theta_in.iter().enumerate() {
+        rvec[i + 1] = v;
+    }
+    let mut z = vec![0.0; rd];
+    z[0] = 1.0;
+    for (j, &v) in delta.iter().enumerate() {
+        z[r + j] = v;
+    }
+    let mut mm = vec![0.0; rd * rd];
+    let mut out = Vec::with_capacity(horizon);
+    for _ in 0..horizon {
+        for i in 0..rd {
+            for j in 0..rd {
+                let mut tmp = 0.0;
+                for k in 0..rd {
+                    tmp += t[i + rd * k] * pmat[k + rd * j];
+                }
+                mm[i + rd * j] = tmp;
+            }
+        }
+        for i in 0..rd {
+            for j in 0..rd {
+                let mut tmp = rvec[i] * rvec[j];
+                for k in 0..rd {
+                    tmp += mm[i + rd * k] * t[j + rd * k];
+                }
+                pmat[i + rd * j] = tmp;
+            }
+        }
+        let mut var = 0.0;
+        for i in 0..rd {
+            for j in 0..rd {
+                var += z[i] * z[j] * pmat[i + j * rd];
+            }
+        }
+        out.push(var);
+    }
+    out
+}
+
+/// R's ARIMA prediction variances (`forecast::forecast.Arima` ->
+/// `predict.Arima`): one `ARIMA_Like` pass over the regression-adjusted,
+/// undifferenced series `x` gives the standardized residuals and the
+/// filtered state; `KalmanForecast` then propagates the state.
+///
+/// `sigma2` is the `forecast` package's (`Arima` / `auto.arima`'s
+/// `myarima` overwrite `stats::arima`'s `ssq / n.used`):
+/// `sum(residuals^2) / (nstar - npar + 1)` with `nstar = n.used =
+/// n - length(Delta)` and `npar = ncoef + 1`, i.e. `rss / (n.used -
+/// ncoef)` where `ncoef` counts the estimated ARMA + regression
+/// coefficients. Returns
+/// `(sigma2, [sigma2 * Z P_{n+l|n} Z'; l = 1..=horizon])`, i.e. the
+/// squared standard errors `forecast::forecast.Arima` puts into its
+/// intervals. `phi`/`theta` are the expanded (multiplicative-seasonal)
+/// AR/MA polynomials; `delta` comes from [`delta_poly`].
+pub(crate) fn r_prediction_variances(
+    x: &[f64],
+    phi: &[f64],
+    theta: &[f64],
+    delta: &[f64],
+    ncoef: usize,
+    horizon: usize,
+) -> Option<(f64, Vec<f64>)> {
+    let dof = x
+        .len()
+        .checked_sub(delta.len() + ncoef)
+        .filter(|&n| n > 0)?;
+    let state = arima_filter(x, phi, theta, delta)?;
+    let sigma2 = state.rss_all / dof as f64;
+    if !sigma2.is_finite() || sigma2 < 0.0 {
+        return None;
+    }
+    let var = kalman_forecast_var(phi, theta, delta, state.pmat, horizon);
+    let var: Vec<f64> = var.into_iter().map(|v| v * sigma2).collect();
+    var.iter().all(|v| v.is_finite()).then_some((sigma2, var))
 }
 
 /// R's `Delta` for `(1-B)^d (1-B^m)^D`, as the coefficient vector of
 /// `-Delta[-1]` (so `x_t = sum delta_i x_{t-i} + w_t`).
-fn delta_poly(d: usize, cap_d: usize, m: usize) -> Vec<f64> {
+pub(crate) fn delta_poly(d: usize, cap_d: usize, m: usize) -> Vec<f64> {
     let conv = |a: &[f64], b: &[f64]| -> Vec<f64> {
         let mut out = vec![0.0; a.len() + b.len() - 1];
         for (i, &ai) in a.iter().enumerate() {
@@ -1414,5 +1559,33 @@ mod tests {
         assert!(!ar_check(&[1.0]));
         assert!(ar_check(&[0.9465, -0.1449]));
         assert!(!ar_check(&[1.2, -0.1]));
+    }
+
+    /// ARIMA(0,1,0): after the diffuse level state is resolved, the
+    /// h-step variance is exactly `h` (in sigma2 units).
+    #[test]
+    fn kalman_forecast_random_walk_variance_is_h() {
+        let x: Vec<f64> = (0..50)
+            .map(|t| (t as f64 * 0.7).sin() * 3.0 + t as f64)
+            .collect();
+        let delta = delta_poly(1, 0, 1);
+        let state = arima_filter(&x, &[], &[], &delta).unwrap();
+        let var = kalman_forecast_var(&[], &[], &delta, state.pmat, 5);
+        for (h, v) in var.iter().enumerate() {
+            assert!((v - (h + 1) as f64).abs() < 1e-6, "h={}: {v}", h + 1);
+        }
+    }
+
+    /// AR(1) without differencing: `var_h = sum_{j<h} phi^(2j)`.
+    #[test]
+    fn kalman_forecast_ar1_matches_psi_weights() {
+        let phi = 0.6_f64;
+        let x: Vec<f64> = (0..80).map(|t| ((t * 7919) % 13) as f64 - 6.0).collect();
+        let state = arima_filter(&x, &[phi], &[], &[]).unwrap();
+        let var = kalman_forecast_var(&[phi], &[], &[], state.pmat, 6);
+        for (h, v) in var.iter().enumerate() {
+            let expect: f64 = (0..=h).map(|j| phi.powi(2 * j as i32)).sum();
+            assert!((v - expect).abs() < 1e-12, "h={}: {v} vs {expect}", h + 1);
+        }
     }
 }
