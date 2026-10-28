@@ -7317,6 +7317,126 @@ mod ols_impl {
             let results = result.unwrap();
             assert!(results.n_folds >= 1);
         }
+
+        // ── #227: FeatureRowBuilder equivalence ──────────────────────
+
+        /// Deterministic series with three exog columns for the feature-builder
+        /// golden tests: `x` (continuous), `promo` (0/1) and `cat` (codes 0..3).
+        fn feature_rich_ts(n: usize) -> TimeSeries {
+            let x: Vec<f64> = (0..n)
+                .map(|i| (i as f64 * 0.37).sin() * 3.0 + 10.0)
+                .collect();
+            let promo: Vec<f64> = (0..n).map(|i| if i % 9 == 0 { 1.0 } else { 0.0 }).collect();
+            let cat: Vec<f64> = (0..n).map(|i| ((i * 7) % 4) as f64).collect();
+            let values: Vec<f64> = (0..n)
+                .map(|i| {
+                    50.0 + 0.4 * i as f64
+                        + 6.0 * (2.0 * std::f64::consts::PI * i as f64 / 12.0).sin()
+                        + 2.0 * x[i]
+                        + 5.0 * promo[i]
+                        + 0.3 * (i as f64 * 1.3).cos()
+                })
+                .collect();
+            let cal = CalendarAnnotations::new()
+                .with_regressor("x".to_string(), x)
+                .with_regressor("promo".to_string(), promo)
+                .with_regressor("cat".to_string(), cat);
+            TimeSeriesBuilder::new()
+                .timestamps(make_timestamps(n))
+                .values(values)
+                .calendar(cal)
+                .build()
+                .unwrap()
+        }
+
+        fn rich_feature_configs() -> Vec<RegressionFeatures> {
+            let a = RegressionFeatures::new()
+                .trend()
+                .lags(3)
+                .with_trend_component(TrendType::Linear)
+                .with_trend_component(TrendType::TheilSen)
+                .fourier(12, 2)
+                .dummy_seasonal(12)
+                .with_changepoint_steps(vec![30, 60])
+                .with_rolling_mean(4)
+                .unwrap()
+                .with_ewm_std(6, 0.3)
+                .unwrap()
+                .with_event_distance(vec![10, 40, 75], EventDistanceMode::Both)
+                .with_exog_lags("x", &[1, 2])
+                .with_exog_rolling("x", 3, 1, RollingStatKind::Mean)
+                .unwrap()
+                .with_exog_polynomial("x", 3)
+                .unwrap()
+                .with_exog_interaction("x", "promo")
+                .with_categorical(
+                    "cat",
+                    vec![0, 1, 2, 3],
+                    CategoricalStrategy::OneHot { drop_first: true },
+                )
+                .unwrap();
+            let b = RegressionFeatures::new()
+                .no_trend()
+                .specific_lags(&[1, 12])
+                .with_trend_component(TrendType::Quadratic)
+                .with_rolling_quantile(5, 0.75)
+                .unwrap()
+                .with_categorical(
+                    "cat",
+                    vec![0, 1, 2],
+                    CategoricalStrategy::Target { smoothing: 2.0 },
+                )
+                .unwrap()
+                .with_categorical("cat", vec![0, 1, 2, 3], CategoricalStrategy::Count)
+                .unwrap()
+                .with_categorical("cat", vec![1, 2], CategoricalStrategy::Ordinal)
+                .unwrap();
+            vec![a, b]
+        }
+
+        /// FNV-1a over the bit patterns of the design matrix and target, plus
+        /// the row count and exog names: a bit-exact fingerprint of
+        /// `build_matrices`.
+        fn design_fingerprint(f: &RegressionFeatures, ts: &TimeSeries) -> (usize, usize, u64) {
+            let (x, y, n_train, exog_names, _, _) = f.build_matrices(ts).unwrap();
+            let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+            let mut mix = |v: u64| {
+                h ^= v;
+                h = h.wrapping_mul(0x0100_0000_01b3);
+            };
+            for i in 0..x.nrows() {
+                for j in 0..x.ncols() {
+                    mix(x[(i, j)].to_bits());
+                }
+                mix(y[i].to_bits());
+            }
+            mix(n_train as u64);
+            for name in &exog_names {
+                for b in name.bytes() {
+                    mix(b as u64);
+                }
+            }
+            (x.nrows(), x.ncols(), h)
+        }
+
+        /// Bit-exact pins of `build_matrices` captured before the #227
+        /// refactor (design matrix assembled row by row through
+        /// `FeatureRowBuilder`); any change to a feature value fails here.
+        #[test]
+        fn build_matrices_is_bit_identical_to_pre_builder_baseline() {
+            let ts = feature_rich_ts(96);
+            let got: Vec<(usize, usize, u64)> = rich_feature_configs()
+                .iter()
+                .map(|f| design_fingerprint(f, &ts))
+                .collect();
+            eprintln!("design fingerprints: {:?}", got);
+            assert_eq!(got, GOLDEN_DESIGN_FINGERPRINTS.to_vec());
+        }
+
+        const GOLDEN_DESIGN_FINGERPRINTS: [(usize, usize, u64); 2] = [
+            (90, 26, 7_563_152_670_152_882_899),
+            (84, 9, 6_026_034_392_389_225_864),
+        ];
     }
 }
 
