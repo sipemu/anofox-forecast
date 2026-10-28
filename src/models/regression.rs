@@ -1936,6 +1936,19 @@ mod ols_impl {
             }
         }
 
+        /// A copy of this configuration with auto-lag selection
+        /// ([`auto_lags`](Self::auto_lags)) resolved on `series` (the
+        /// selected order becomes a fixed lag set; a no-op without auto
+        /// lags). Use before [`FeatureRowBuilder::fit`], which takes the lag
+        /// set as given (#227).
+        pub fn resolved_for(&self, series: &TimeSeries) -> Result<Self> {
+            let mut resolved = self.clone();
+            resolved.resolve_auto_lags(series)?;
+            // Freeze the selection: the copy carries a fixed lag order.
+            resolved.auto_lag_config = None;
+            Ok(resolved)
+        }
+
         /// Resolve auto-lag selection if configured.
         ///
         /// Tries each lag order 0..=max_lag, builds the feature matrix with that
@@ -2561,390 +2574,29 @@ mod ols_impl {
             Vec<FittedComponentState>,
             HashMap<usize, FittedCategoricalEncoder>,
         )> {
+            // One row per training observation through the shared
+            // row-at-a-time builder (#227).
+            let builder = FeatureRowBuilder::fit(self, series)?;
             let values = series.primary_values();
             let n = values.len();
-            let offset = self.lag_offset();
-
-            if n <= offset {
-                return Err(ForecastError::InsufficientData {
-                    needed: offset + 2,
-                    got: n,
-                    hint: Some(format!(
-                        "need > {} observations for lags {:?}",
-                        offset,
-                        self.effective_lags()
-                    )),
-                });
-            }
-
+            let offset = builder.warmup();
             let n_train = n - offset;
+            let n_features = builder.n_features();
+            let regressors = series.all_regressors();
 
-            // Collect exogenous regressor names (sorted for determinism).
-            // Columns already claimed by an exog_features spec
-            // (Categorical / Lag / Rolling / Polynomial / Interaction)
-            // are excluded from the raw exog block — they're already
-            // represented downstream by the spec's derived columns, so
-            // including them as raw would cause collinearity (clearest
-            // case: Categorical OneHot + raw == singular). Closes #113.
-            let exog_names = if self.use_exog && series.has_regressors() {
-                let claimed: std::collections::HashSet<&str> = self
-                    .exog_features
-                    .iter()
-                    .flat_map(|s| s.referenced_cols())
-                    .collect();
-                let mut names: Vec<String> = series
-                    .all_regressors()
-                    .keys()
-                    .filter(|k| !claimed.contains(k.as_str()))
-                    .cloned()
-                    .collect();
-                names.sort();
-                names
-            } else {
-                Vec::new()
-            };
-
-            let feature_names = self.feature_names(&exog_names);
-            let n_features = feature_names.len();
-
-            if n_features == 0 {
-                return Err(ForecastError::InvalidParameter(
-                    "No features configured — enable at least one of: trend, lags, components, or exog"
-                        .to_string(),
-                ));
-            }
-
-            // ── Fit trend/seasonal components ───────────────────────────
-            let mut fitted_components = Vec::new();
-
-            for trend_type in &self.trend_components {
-                let comp = match trend_type {
-                    TrendType::Linear => {
-                        let mut p = PolynomialTrend::new(1).with_recency(Recency::Full);
-                        p.fit_trend(values)?;
-                        FittedComponentState::Polynomial(p)
-                    }
-                    TrendType::Quadratic => {
-                        let mut p = PolynomialTrend::new(2).with_recency(Recency::Full);
-                        p.fit_trend(values)?;
-                        FittedComponentState::Polynomial(p)
-                    }
-                    TrendType::Cubic => {
-                        let mut p = PolynomialTrend::new(3).with_recency(Recency::Full);
-                        p.fit_trend(values)?;
-                        FittedComponentState::Polynomial(p)
-                    }
-                    TrendType::Exponential => {
-                        let mut e = ExponentialTrend::new().with_recency(Recency::Full);
-                        e.fit_trend(values)?;
-                        FittedComponentState::Exponential(e)
-                    }
-                    TrendType::Logistic => {
-                        let mut l = LogisticTrend::new().with_recency(Recency::Full);
-                        l.fit_trend(values)?;
-                        FittedComponentState::Logistic(l)
-                    }
-                    TrendType::TheilSen => {
-                        let mut t = TheilSenTrend::new().with_recency(Recency::Full);
-                        t.fit_trend(values)?;
-                        FittedComponentState::TheilSen(t)
-                    }
-                };
-                fitted_components.push(comp);
-            }
-
-            for seasonal in &self.seasonal_components {
-                match seasonal {
-                    SeasonalSpec::Fourier { period, order } => {
-                        fitted_components.push(FittedComponentState::Fourier {
-                            period: *period,
-                            order: *order,
-                        });
-                    }
-                    SeasonalSpec::Dummy(period) => {
-                        let mut d = DummySeasonality::new();
-                        d.fit_seasonal(values, *period)?;
-                        fitted_components.push(FittedComponentState::Dummy(d));
-                    }
-                }
-            }
-
-            // ── Build design matrix ─────────────────────────────────────
             let mut x = Mat::zeros(n_train, n_features);
             let mut y = Col::zeros(n_train);
-
-            // Populate target
+            let mut row = Vec::with_capacity(n_features);
             for i in 0..n_train {
+                row.clear();
+                builder.write_row(values, &regressors, offset + i, &mut row)?;
+                for (j, &v) in row.iter().enumerate() {
+                    x[(i, j)] = v;
+                }
                 y[i] = values[offset + i];
             }
 
-            // Populate features
-            let mut col_idx = 0;
-
-            // Trend: index of the observation (relative to full series)
-            if self.use_trend {
-                for i in 0..n_train {
-                    x[(i, col_idx)] = (offset + i) as f64;
-                }
-                col_idx += 1;
-            }
-
-            // Lags: y[t-k] for each specified lag k
-            for lag in self.effective_lags() {
-                for i in 0..n_train {
-                    x[(i, col_idx)] = values[offset + i - lag];
-                }
-                col_idx += 1;
-            }
-
-            // Trend/seasonal component columns
-            for comp in &fitted_components {
-                match comp {
-                    FittedComponentState::Polynomial(p) => {
-                        let fitted = p.fitted_trend();
-                        for i in 0..n_train {
-                            x[(i, col_idx)] = fitted[offset + i];
-                        }
-                        col_idx += 1;
-                    }
-                    FittedComponentState::Exponential(e) => {
-                        let fitted = e.fitted_trend();
-                        for i in 0..n_train {
-                            x[(i, col_idx)] = fitted[offset + i];
-                        }
-                        col_idx += 1;
-                    }
-                    FittedComponentState::Logistic(l) => {
-                        let fitted = l.fitted_trend();
-                        for i in 0..n_train {
-                            x[(i, col_idx)] = fitted[offset + i];
-                        }
-                        col_idx += 1;
-                    }
-                    FittedComponentState::TheilSen(t) => {
-                        let fitted = t.fitted_trend();
-                        for i in 0..n_train {
-                            x[(i, col_idx)] = fitted[offset + i];
-                        }
-                        col_idx += 1;
-                    }
-                    FittedComponentState::Dummy(d) => {
-                        let fitted = d.fitted_seasonal();
-                        for i in 0..n_train {
-                            x[(i, col_idx)] = fitted[offset + i];
-                        }
-                        col_idx += 1;
-                    }
-                    FittedComponentState::Fourier { period, order } => {
-                        let timestamps: Vec<f64> = (0..n).map(|i| i as f64).collect();
-                        let basis = fourier_terms(&timestamps, *period as f64, *order)?;
-                        for basis_vec in &basis {
-                            for i in 0..n_train {
-                                x[(i, col_idx)] = basis_vec[offset + i];
-                            }
-                            col_idx += 1;
-                        }
-                    }
-                    FittedComponentState::Structural { .. } => {
-                        // Handled below via structural_features iteration
-                    }
-                }
-            }
-
-            // Structural feature columns
-            for sf in &self.structural_features {
-                let columns = sf.compute(n);
-                let fill = sf.fill_values(n);
-                for col_vals in &columns {
-                    for i in 0..n_train {
-                        x[(i, col_idx)] = col_vals[offset + i];
-                    }
-                    col_idx += 1;
-                }
-                fitted_components.push(FittedComponentState::Structural { fill_values: fill });
-            }
-
-            // Recursive feature columns (rolling statistics, EWMs, …).
-            // For row i, the "target" is values[offset + i] and the feature
-            // must be computed from strictly-prior values only.
-            for rf in &self.recursive_features {
-                let n_cols = rf.n_columns();
-                let mut scratch = vec![0.0_f64; n_cols];
-                for i in 0..n_train {
-                    rf.compute_fit(values, offset + i, &mut scratch);
-                    for (k, &v) in scratch.iter().enumerate() {
-                        x[(i, col_idx + k)] = v;
-                    }
-                }
-                col_idx += n_cols;
-            }
-
-            // Exogenous regressors (sliced to match after lag offset)
-            if self.use_exog {
-                let regressors = series.all_regressors();
-                for name in &exog_names {
-                    if let Some(reg_values) = regressors.get(name) {
-                        for i in 0..n_train {
-                            let idx = offset + i;
-                            if idx < reg_values.len() {
-                                x[(i, col_idx)] = reg_values[idx];
-                            }
-                        }
-                    }
-                    col_idx += 1;
-                }
-            }
-
-            // Derived exog features (lags, rolling, polynomial, interaction, categorical)
-            let mut categorical_encoders: HashMap<usize, FittedCategoricalEncoder> = HashMap::new();
-            if !self.exog_features.is_empty() {
-                let regressors = series.all_regressors();
-                let lookup_col = |name: &str| -> Result<&Vec<f64>> {
-                    regressors.get(name).ok_or_else(|| {
-                        ForecastError::InvalidParameter(format!(
-                            "exog_features: column '{}' not found in series regressors",
-                            name
-                        ))
-                    })
-                };
-                for (spec_idx, spec) in self.exog_features.iter().enumerate() {
-                    match spec {
-                        ExogFeatureSpec::Lag { col, lags } => {
-                            let reg_values = lookup_col(col)?;
-                            for &k in lags {
-                                for i in 0..n_train {
-                                    let src_idx = offset + i - k;
-                                    x[(i, col_idx)] = reg_values[src_idx];
-                                }
-                                col_idx += 1;
-                            }
-                        }
-                        ExogFeatureSpec::Rolling {
-                            col,
-                            window,
-                            lag,
-                            kind,
-                        } => {
-                            let reg_values = lookup_col(col)?;
-                            for i in 0..n_train {
-                                let end_excl = offset + i + 1 - lag;
-                                let start = end_excl - window;
-                                x[(i, col_idx)] = kind.compute(&reg_values[start..end_excl]);
-                            }
-                            col_idx += 1;
-                        }
-                        ExogFeatureSpec::Polynomial { col, degree } => {
-                            let reg_values = lookup_col(col)?;
-                            for k in 2..=*degree {
-                                for i in 0..n_train {
-                                    x[(i, col_idx)] = reg_values[offset + i].powi(k as i32);
-                                }
-                                col_idx += 1;
-                            }
-                        }
-                        ExogFeatureSpec::Interaction { col_a, col_b } => {
-                            let va = lookup_col(col_a)?;
-                            let vb = lookup_col(col_b)?;
-                            for i in 0..n_train {
-                                x[(i, col_idx)] = va[offset + i] * vb[offset + i];
-                            }
-                            col_idx += 1;
-                        }
-                        ExogFeatureSpec::Categorical {
-                            col,
-                            categories,
-                            strategy,
-                        } => {
-                            let reg_values = lookup_col(col)?;
-                            // Pre-fit encoder for Count / Target strategies.
-                            let encoder = match strategy {
-                                CategoricalStrategy::OneHot { .. }
-                                | CategoricalStrategy::Ordinal => None,
-                                CategoricalStrategy::Count => {
-                                    let mut counts: HashMap<i64, f64> = HashMap::new();
-                                    for i in 0..n_train {
-                                        let cat = reg_values[offset + i].round() as i64;
-                                        *counts.entry(cat).or_insert(0.0) += 1.0;
-                                    }
-                                    Some(FittedCategoricalEncoder {
-                                        map: counts,
-                                        fallback: 0.0,
-                                    })
-                                }
-                                CategoricalStrategy::Target { smoothing } => {
-                                    // Per-category sums and counts, then smooth toward grand mean.
-                                    let mut sums: HashMap<i64, f64> = HashMap::new();
-                                    let mut counts: HashMap<i64, f64> = HashMap::new();
-                                    let mut total = 0.0_f64;
-                                    for i in 0..n_train {
-                                        let cat = reg_values[offset + i].round() as i64;
-                                        *sums.entry(cat).or_insert(0.0) += y[i];
-                                        *counts.entry(cat).or_insert(0.0) += 1.0;
-                                        total += y[i];
-                                    }
-                                    let grand_mean = if n_train > 0 {
-                                        total / n_train as f64
-                                    } else {
-                                        0.0
-                                    };
-                                    let map: HashMap<i64, f64> = counts
-                                        .iter()
-                                        .map(|(cat, &n_c)| {
-                                            let mean_c = sums[cat] / n_c;
-                                            (
-                                                *cat,
-                                                (n_c * mean_c + smoothing * grand_mean)
-                                                    / (n_c + smoothing),
-                                            )
-                                        })
-                                        .collect();
-                                    Some(FittedCategoricalEncoder {
-                                        map,
-                                        fallback: grand_mean,
-                                    })
-                                }
-                            };
-                            // Materialize columns for training rows.
-                            match strategy {
-                                CategoricalStrategy::OneHot { drop_first } => {
-                                    let start = if *drop_first { 1 } else { 0 };
-                                    for cat in &categories[start..] {
-                                        for i in 0..n_train {
-                                            let v = reg_values[offset + i].round() as i64;
-                                            x[(i, col_idx)] = if v == *cat { 1.0 } else { 0.0 };
-                                        }
-                                        col_idx += 1;
-                                    }
-                                }
-                                CategoricalStrategy::Ordinal => {
-                                    let unknown = categories.len() as f64;
-                                    for i in 0..n_train {
-                                        let v = reg_values[offset + i].round() as i64;
-                                        x[(i, col_idx)] = categories
-                                            .iter()
-                                            .position(|c| *c == v)
-                                            .map(|p| p as f64)
-                                            .unwrap_or(unknown);
-                                    }
-                                    col_idx += 1;
-                                }
-                                CategoricalStrategy::Count | CategoricalStrategy::Target { .. } => {
-                                    let enc = encoder.as_ref().unwrap();
-                                    for i in 0..n_train {
-                                        let v = reg_values[offset + i].round() as i64;
-                                        x[(i, col_idx)] = *enc.map.get(&v).unwrap_or(&enc.fallback);
-                                    }
-                                    col_idx += 1;
-                                }
-                            }
-                            if let Some(enc) = encoder {
-                                categorical_encoders.insert(spec_idx, enc);
-                            }
-                        }
-                    }
-                }
-            }
-
+            let (exog_names, fitted_components, categorical_encoders) = builder.into_parts();
             Ok((
                 x,
                 y,
@@ -3268,6 +2920,487 @@ mod ols_impl {
                 )
                 .field("r_squared", &self.model.r_squared())
                 .finish()
+        }
+    }
+
+    // ── Row-at-a-time feature builder (#227) ────────────────────────
+
+    /// Fitted, row-at-a-time feature builder shared by the per-series
+    /// [`RegressionForecaster`] fit and panel / streaming fits (#227).
+    ///
+    /// [`FeatureRowBuilder::fit`] resolves everything data-dependent once —
+    /// fitted trend/seasonal components, structural columns, categorical
+    /// encoders and the exog column set — and [`FeatureRowBuilder::write_row`]
+    /// then appends the feature row for the observation at index `t` into a
+    /// caller-owned buffer. A row reads only `values[..t]` (lags, rolling and
+    /// other recursive features) and the exog columns, so no design matrix is
+    /// materialised: a panel fit can accumulate `XᵀX` one row at a time
+    /// through a single reusable scratch row, and the per-series fit is
+    /// exactly the loop `for t in warmup()..n { write_row(.., t, ..) }`
+    /// (`RegressionFeatures::build_matrices` is built on it).
+    ///
+    /// Column order and names are those of
+    /// [`RegressionFeatures::feature_names`]. Auto-lag selection
+    /// ([`RegressionFeatures::auto_lags`]) is resolved beforehand with
+    /// [`RegressionFeatures::resolved_for`].
+    ///
+    /// `t` may also lie beyond the fitted series (`t >= n_fit()`) when
+    /// `values` has been extended (e.g. with recursive predictions) and the
+    /// exog columns cover `t`: fitted components are then projected forward
+    /// and structural columns are forward-filled, as at prediction time.
+    #[derive(Debug)]
+    pub struct FeatureRowBuilder {
+        use_trend: bool,
+        lags: Vec<usize>,
+        components: Vec<FittedComponentState>,
+        structural: Vec<(Vec<Vec<f64>>, Vec<f64>)>,
+        recursive: Vec<Arc<dyn RecursiveFeature>>,
+        use_exog: bool,
+        exog_names: Vec<String>,
+        exog_features: Vec<ExogFeatureSpec>,
+        categorical_encoders: HashMap<usize, FittedCategoricalEncoder>,
+        feature_names: Vec<String>,
+        warmup: usize,
+        n_fit: usize,
+        recursive_scratch: usize,
+    }
+
+    impl FeatureRowBuilder {
+        /// Fit the data-dependent state of `features` on `series`.
+        ///
+        /// Errors when no feature is configured, when the series is not longer
+        /// than the warmup (lags / rolling windows), when a fitted component
+        /// fails, or when an exog feature references a missing regressor.
+        pub fn fit(features: &RegressionFeatures, series: &TimeSeries) -> Result<Self> {
+            let values = series.primary_values();
+            let n = values.len();
+            let offset = features.lag_offset();
+
+            if n <= offset {
+                return Err(ForecastError::InsufficientData {
+                    needed: offset + 2,
+                    got: n,
+                    hint: Some(format!(
+                        "need > {} observations for lags {:?}",
+                        offset,
+                        features.effective_lags()
+                    )),
+                });
+            }
+
+            // Collect exogenous regressor names (sorted for determinism).
+            // Columns already claimed by an exog_features spec
+            // (Categorical / Lag / Rolling / Polynomial / Interaction)
+            // are excluded from the raw exog block — they're already
+            // represented downstream by the spec's derived columns, so
+            // including them as raw would cause collinearity (clearest
+            // case: Categorical OneHot + raw == singular). Closes #113.
+            let exog_names = if features.use_exog && series.has_regressors() {
+                let claimed: std::collections::HashSet<&str> = features
+                    .exog_features
+                    .iter()
+                    .flat_map(|s| s.referenced_cols())
+                    .collect();
+                let mut names: Vec<String> = series
+                    .all_regressors()
+                    .keys()
+                    .filter(|k| !claimed.contains(k.as_str()))
+                    .cloned()
+                    .collect();
+                names.sort();
+                names
+            } else {
+                Vec::new()
+            };
+
+            let feature_names = features.feature_names(&exog_names);
+            if feature_names.is_empty() {
+                return Err(ForecastError::InvalidParameter(
+                    "No features configured — enable at least one of: trend, lags, components, or exog"
+                        .to_string(),
+                ));
+            }
+
+            // ── Fit trend/seasonal components ───────────────────────────
+            let mut components = Vec::new();
+            for trend_type in &features.trend_components {
+                let comp = match trend_type {
+                    TrendType::Linear => {
+                        let mut p = PolynomialTrend::new(1).with_recency(Recency::Full);
+                        p.fit_trend(values)?;
+                        FittedComponentState::Polynomial(p)
+                    }
+                    TrendType::Quadratic => {
+                        let mut p = PolynomialTrend::new(2).with_recency(Recency::Full);
+                        p.fit_trend(values)?;
+                        FittedComponentState::Polynomial(p)
+                    }
+                    TrendType::Cubic => {
+                        let mut p = PolynomialTrend::new(3).with_recency(Recency::Full);
+                        p.fit_trend(values)?;
+                        FittedComponentState::Polynomial(p)
+                    }
+                    TrendType::Exponential => {
+                        let mut e = ExponentialTrend::new().with_recency(Recency::Full);
+                        e.fit_trend(values)?;
+                        FittedComponentState::Exponential(e)
+                    }
+                    TrendType::Logistic => {
+                        let mut l = LogisticTrend::new().with_recency(Recency::Full);
+                        l.fit_trend(values)?;
+                        FittedComponentState::Logistic(l)
+                    }
+                    TrendType::TheilSen => {
+                        let mut t = TheilSenTrend::new().with_recency(Recency::Full);
+                        t.fit_trend(values)?;
+                        FittedComponentState::TheilSen(t)
+                    }
+                };
+                components.push(comp);
+            }
+            for seasonal in &features.seasonal_components {
+                match seasonal {
+                    SeasonalSpec::Fourier { period, order } => {
+                        // Validate once (period > 0, order >= 1) — rows are
+                        // then computed inline with the same arithmetic.
+                        fourier_terms(&[0.0], *period as f64, *order)?;
+                        components.push(FittedComponentState::Fourier {
+                            period: *period,
+                            order: *order,
+                        });
+                    }
+                    SeasonalSpec::Dummy(period) => {
+                        let mut d = DummySeasonality::new();
+                        d.fit_seasonal(values, *period)?;
+                        components.push(FittedComponentState::Dummy(d));
+                    }
+                }
+            }
+
+            // ── Structural columns (precomputed; forward-filled beyond n) ──
+            let structural = features
+                .structural_features
+                .iter()
+                .map(|sf| (sf.compute(n), sf.fill_values(n)))
+                .collect();
+
+            // ── Exog feature specs: validate columns, fit categorical encoders ──
+            let regressors = series.all_regressors();
+            let lookup_col = |name: &str| -> Result<&Vec<f64>> {
+                regressors.get(name).ok_or_else(|| {
+                    ForecastError::InvalidParameter(format!(
+                        "exog_features: column '{}' not found in series regressors",
+                        name
+                    ))
+                })
+            };
+            let mut categorical_encoders: HashMap<usize, FittedCategoricalEncoder> = HashMap::new();
+            for (spec_idx, spec) in features.exog_features.iter().enumerate() {
+                for col in spec.referenced_cols() {
+                    lookup_col(col)?;
+                }
+                if let ExogFeatureSpec::Categorical { col, strategy, .. } = spec {
+                    let reg_values = lookup_col(col)?;
+                    let encoder = match strategy {
+                        CategoricalStrategy::OneHot { .. } | CategoricalStrategy::Ordinal => None,
+                        CategoricalStrategy::Count => {
+                            let mut counts: HashMap<i64, f64> = HashMap::new();
+                            for t in offset..n {
+                                let cat = reg_values[t].round() as i64;
+                                *counts.entry(cat).or_insert(0.0) += 1.0;
+                            }
+                            Some(FittedCategoricalEncoder {
+                                map: counts,
+                                fallback: 0.0,
+                            })
+                        }
+                        CategoricalStrategy::Target { smoothing } => {
+                            // Per-category sums and counts over the training
+                            // rows, then smooth toward the grand mean.
+                            let n_train = n - offset;
+                            let mut sums: HashMap<i64, f64> = HashMap::new();
+                            let mut counts: HashMap<i64, f64> = HashMap::new();
+                            let mut total = 0.0_f64;
+                            for t in offset..n {
+                                let cat = reg_values[t].round() as i64;
+                                *sums.entry(cat).or_insert(0.0) += values[t];
+                                *counts.entry(cat).or_insert(0.0) += 1.0;
+                                total += values[t];
+                            }
+                            let grand_mean = if n_train > 0 {
+                                total / n_train as f64
+                            } else {
+                                0.0
+                            };
+                            let map: HashMap<i64, f64> = counts
+                                .iter()
+                                .map(|(cat, &n_c)| {
+                                    let mean_c = sums[cat] / n_c;
+                                    (
+                                        *cat,
+                                        (n_c * mean_c + smoothing * grand_mean) / (n_c + smoothing),
+                                    )
+                                })
+                                .collect();
+                            Some(FittedCategoricalEncoder {
+                                map,
+                                fallback: grand_mean,
+                            })
+                        }
+                    };
+                    if let Some(enc) = encoder {
+                        categorical_encoders.insert(spec_idx, enc);
+                    }
+                }
+            }
+
+            let recursive_scratch = features
+                .recursive_features
+                .iter()
+                .map(|rf| rf.n_columns())
+                .max()
+                .unwrap_or(0);
+
+            Ok(Self {
+                use_trend: features.use_trend,
+                lags: features.effective_lags(),
+                components,
+                structural,
+                recursive: features.recursive_features.clone(),
+                use_exog: features.use_exog,
+                exog_names,
+                exog_features: features.exog_features.clone(),
+                categorical_encoders,
+                feature_names,
+                warmup: offset,
+                n_fit: n,
+                recursive_scratch,
+            })
+        }
+
+        /// Number of feature columns per row.
+        pub fn n_features(&self) -> usize {
+            self.feature_names.len()
+        }
+
+        /// Feature column names, in row order.
+        pub fn feature_names(&self) -> &[String] {
+            &self.feature_names
+        }
+
+        /// Raw (contemporaneous) exog column names, sorted.
+        pub fn exog_names(&self) -> &[String] {
+            &self.exog_names
+        }
+
+        /// First row index with a complete feature row (largest lag / rolling
+        /// / exog-feature warmup). Training rows are `warmup()..n_fit()`.
+        pub fn warmup(&self) -> usize {
+            self.warmup
+        }
+
+        /// Length of the series the builder was fitted on.
+        pub fn n_fit(&self) -> usize {
+            self.n_fit
+        }
+
+        /// Value of a fitted trend/seasonal component at index `t`
+        /// (fitted values inside the training range, projected beyond it).
+        fn component_at(fitted: &[f64], project: impl Fn(usize) -> Vec<f64>, t: usize) -> f64 {
+            if t < fitted.len() {
+                fitted[t]
+            } else {
+                let ahead = t + 1 - fitted.len();
+                project(ahead).get(ahead - 1).copied().unwrap_or(f64::NAN)
+            }
+        }
+
+        /// Append the feature row for the observation at index `t` to `out`.
+        ///
+        /// Reads `values[..t]` (lags and recursive features; `values` must hold
+        /// at least `t` entries) and, for exog, `exog[name][..=t]`. Requires
+        /// `t >= warmup()`. Exactly [`n_features`](Self::n_features) values
+        /// are appended.
+        pub fn write_row(
+            &self,
+            values: &[f64],
+            exog: &HashMap<String, Vec<f64>>,
+            t: usize,
+            out: &mut Vec<f64>,
+        ) -> Result<()> {
+            if t < self.warmup || values.len() < t {
+                return Err(ForecastError::InvalidParameter(format!(
+                    "FeatureRowBuilder::write_row: t = {} needs warmup <= t <= values.len() (warmup {}, values {})",
+                    t,
+                    self.warmup,
+                    values.len()
+                )));
+            }
+
+            // Trend index
+            if self.use_trend {
+                out.push(t as f64);
+            }
+
+            // Lags: y[t-k]
+            for &lag in &self.lags {
+                out.push(values[t - lag]);
+            }
+
+            // Trend / seasonal components
+            for comp in &self.components {
+                match comp {
+                    FittedComponentState::Polynomial(p) => out.push(Self::component_at(
+                        p.fitted_trend(),
+                        |h| p.predict_trend(h),
+                        t,
+                    )),
+                    FittedComponentState::Exponential(e) => out.push(Self::component_at(
+                        e.fitted_trend(),
+                        |h| e.predict_trend(h),
+                        t,
+                    )),
+                    FittedComponentState::Logistic(l) => out.push(Self::component_at(
+                        l.fitted_trend(),
+                        |h| l.predict_trend(h),
+                        t,
+                    )),
+                    FittedComponentState::TheilSen(ts) => out.push(Self::component_at(
+                        ts.fitted_trend(),
+                        |h| ts.predict_trend(h),
+                        t,
+                    )),
+                    FittedComponentState::Dummy(d) => out.push(Self::component_at(
+                        d.fitted_seasonal(),
+                        |h| d.predict_seasonal(h),
+                        t,
+                    )),
+                    FittedComponentState::Fourier { period, order } => {
+                        // Same arithmetic as `fourier_terms` (sin_k, cos_k per k).
+                        for k in 1..=*order {
+                            let freq = 2.0 * std::f64::consts::PI * k as f64 / *period as f64;
+                            let angle = freq * t as f64;
+                            out.push(angle.sin());
+                            out.push(angle.cos());
+                        }
+                    }
+                    FittedComponentState::Structural { .. } => {}
+                }
+            }
+
+            // Structural columns (forward-filled beyond the fitted range)
+            for (columns, fill) in &self.structural {
+                for (c, col) in columns.iter().enumerate() {
+                    out.push(if t < col.len() { col[t] } else { fill[c] });
+                }
+            }
+
+            // Recursive features (rolling stats, EWMs, event distance, …)
+            if !self.recursive.is_empty() {
+                let mut scratch = vec![0.0_f64; self.recursive_scratch];
+                for rf in &self.recursive {
+                    let n_cols = rf.n_columns();
+                    rf.compute_fit(values, t, &mut scratch[..n_cols]);
+                    out.extend_from_slice(&scratch[..n_cols]);
+                }
+            }
+
+            // Raw exog regressors (0.0 where a column is shorter than t)
+            if self.use_exog {
+                for name in &self.exog_names {
+                    let v = exog
+                        .get(name)
+                        .and_then(|col| col.get(t))
+                        .copied()
+                        .unwrap_or(0.0);
+                    out.push(v);
+                }
+            }
+
+            // Derived exog features
+            let col = |name: &str| -> Result<&Vec<f64>> {
+                exog.get(name).ok_or_else(|| {
+                    ForecastError::InvalidParameter(format!(
+                        "exog_features: column '{}' not found in exog",
+                        name
+                    ))
+                })
+            };
+            for (spec_idx, spec) in self.exog_features.iter().enumerate() {
+                match spec {
+                    ExogFeatureSpec::Lag { col: c, lags } => {
+                        let reg = col(c)?;
+                        for &k in lags {
+                            out.push(reg[t - k]);
+                        }
+                    }
+                    ExogFeatureSpec::Rolling {
+                        col: c,
+                        window,
+                        lag,
+                        kind,
+                    } => {
+                        let reg = col(c)?;
+                        let end_excl = t + 1 - lag;
+                        out.push(kind.compute(&reg[end_excl - window..end_excl]));
+                    }
+                    ExogFeatureSpec::Polynomial { col: c, degree } => {
+                        let reg = col(c)?;
+                        for k in 2..=*degree {
+                            out.push(reg[t].powi(k as i32));
+                        }
+                    }
+                    ExogFeatureSpec::Interaction { col_a, col_b } => {
+                        out.push(col(col_a)?[t] * col(col_b)?[t]);
+                    }
+                    ExogFeatureSpec::Categorical {
+                        col: c,
+                        categories,
+                        strategy,
+                    } => {
+                        let v = col(c)?[t].round() as i64;
+                        match strategy {
+                            CategoricalStrategy::OneHot { drop_first } => {
+                                let start = if *drop_first { 1 } else { 0 };
+                                for cat in &categories[start..] {
+                                    out.push(if v == *cat { 1.0 } else { 0.0 });
+                                }
+                            }
+                            CategoricalStrategy::Ordinal => {
+                                out.push(
+                                    categories
+                                        .iter()
+                                        .position(|c| *c == v)
+                                        .map(|p| p as f64)
+                                        .unwrap_or(categories.len() as f64),
+                                );
+                            }
+                            CategoricalStrategy::Count | CategoricalStrategy::Target { .. } => {
+                                let enc = &self.categorical_encoders[&spec_idx];
+                                out.push(*enc.map.get(&v).unwrap_or(&enc.fallback));
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        /// Fitted state consumed by the per-series predict path: raw exog
+        /// names, components (with structural fill entries appended in
+        /// structural-feature order) and categorical encoders.
+        fn into_parts(
+            self,
+        ) -> (
+            Vec<String>,
+            Vec<FittedComponentState>,
+            HashMap<usize, FittedCategoricalEncoder>,
+        ) {
+            let mut components = self.components;
+            for (_, fill) in self.structural {
+                components.push(FittedComponentState::Structural { fill_values: fill });
+            }
+            (self.exog_names, components, self.categorical_encoders)
         }
     }
 
@@ -7433,6 +7566,100 @@ mod ols_impl {
             assert_eq!(got, GOLDEN_DESIGN_FINGERPRINTS.to_vec());
         }
 
+        /// The streaming use case of #227: accumulate XᵀX and Xᵀy row by row
+        /// through one reused scratch row — equal to the materialised design.
+        #[test]
+        fn feature_row_builder_streams_the_same_gram_as_build_matrices() {
+            let ts = feature_rich_ts(96);
+            for f in rich_feature_configs() {
+                let (x, y, n_train, _, _, _) = f.build_matrices(&ts).unwrap();
+                let b = FeatureRowBuilder::fit(&f, &ts).unwrap();
+                assert_eq!(b.n_features(), x.ncols());
+                assert_eq!(b.feature_names().len(), x.ncols());
+                assert_eq!(b.n_fit() - b.warmup(), n_train);
+
+                let p = b.n_features();
+                let mut gram = vec![0.0; p * p];
+                let mut xty = vec![0.0; p];
+                let mut row = Vec::with_capacity(p);
+                let values = ts.primary_values();
+                let exog = ts.all_regressors();
+                for t in b.warmup()..b.n_fit() {
+                    row.clear();
+                    b.write_row(values, &exog, t, &mut row).unwrap();
+                    assert_eq!(row.len(), p);
+                    for i in 0..p {
+                        xty[i] += row[i] * values[t];
+                        for j in 0..p {
+                            gram[i * p + j] += row[i] * row[j];
+                        }
+                    }
+                }
+                for i in 0..p {
+                    let mut want_xty = 0.0;
+                    for r in 0..n_train {
+                        want_xty += x[(r, i)] * y[r];
+                    }
+                    assert_eq!(xty[i], want_xty);
+                    for j in 0..p {
+                        let mut want = 0.0;
+                        for r in 0..n_train {
+                            want += x[(r, i)] * x[(r, j)];
+                        }
+                        assert_eq!(gram[i * p + j], want);
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn feature_row_builder_projects_beyond_the_fitted_range() {
+            let ts = feature_rich_ts(60);
+            let f = RegressionFeatures::new()
+                .trend()
+                .lags(2)
+                .with_trend_component(TrendType::Linear)
+                .fourier(12, 1)
+                .with_changepoint_steps(vec![20])
+                .no_exog();
+            let b = FeatureRowBuilder::fit(&f, &ts).unwrap();
+            let mut values = ts.primary_values().to_vec();
+            values.extend([1.0, 2.0, 3.0]); // e.g. recursive predictions
+            let mut row = Vec::new();
+            b.write_row(&values, &HashMap::new(), 62, &mut row).unwrap();
+            // trend index, lag 1, lag 2, linear trend, sin, cos, changepoint step
+            assert_eq!(row.len(), 7);
+            assert_eq!(row[0], 62.0);
+            assert_eq!((row[1], row[2]), (2.0, 1.0));
+            let mut lin = PolynomialTrend::new(1).with_recency(Recency::Full);
+            lin.fit_trend(ts.primary_values()).unwrap();
+            assert_eq!(row[3], lin.predict_trend(3)[2]);
+            let angle = 2.0 * std::f64::consts::PI / 12.0 * 62.0;
+            assert_eq!((row[4], row[5]), (angle.sin(), angle.cos()));
+            assert_eq!(row[6], 1.0); // forward-filled regime after the step at 20
+        }
+
+        #[test]
+        fn feature_row_builder_rejects_rows_inside_the_warmup() {
+            let ts = feature_rich_ts(40);
+            let b = FeatureRowBuilder::fit(&RegressionFeatures::new().lags(5), &ts).unwrap();
+            assert_eq!(b.warmup(), 5);
+            let mut row = Vec::new();
+            assert!(b
+                .write_row(ts.primary_values(), &ts.all_regressors(), 4, &mut row)
+                .is_err());
+        }
+
+        #[test]
+        fn resolved_for_fixes_the_auto_selected_lag_set() {
+            let ts = feature_rich_ts(96);
+            let f = RegressionFeatures::new().auto_lags(4).no_exog();
+            let resolved = f.resolved_for(&ts).unwrap();
+            assert!(resolved.auto_lag_config.is_none());
+            let b = FeatureRowBuilder::fit(&resolved, &ts).unwrap();
+            assert_eq!(b.warmup(), resolved.max_lag);
+        }
+
         const GOLDEN_DESIGN_FINGERPRINTS: [(usize, usize, u64); 2] = [
             (90, 26, 7_563_152_670_152_882_899),
             (84, 9, 6_026_034_392_389_225_864),
@@ -7443,9 +7670,9 @@ mod ols_impl {
 #[cfg(feature = "postprocess")]
 pub use ols_impl::{
     CategoricalStrategy, ChangepointEncoding, ChangepointFeature, EventDistanceFeature,
-    EventDistanceMode, ExogFeatureSpec, FeatureSafety, LagSelectionCriterion, RecursiveFeature,
-    RegressionBackend, RegressionFeatures, RegressionForecaster, RollingFeature, RollingStatKind,
-    SeasonalSpec, StructuralFeature, TrendType, WeightStrategy,
+    EventDistanceMode, ExogFeatureSpec, FeatureRowBuilder, FeatureSafety, LagSelectionCriterion,
+    RecursiveFeature, RegressionBackend, RegressionFeatures, RegressionForecaster, RollingFeature,
+    RollingStatKind, SeasonalSpec, StructuralFeature, TrendType, WeightStrategy,
 };
 // Re-export InformationCriterion so users can configure Dynamic backend without
 // depending on anofox-regression directly.
