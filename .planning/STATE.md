@@ -1,19 +1,19 @@
 ---
-gsd_state_version: 1.0
+gsd_state_version: "1.0"
 milestone: v1.1
-milestone_name: Robustness Fixes & ERM Reconciliation
 status: Awaiting next milestone
 stopped_at: Phase 08 complete — all phases complete
-last_updated: "2026-09-09T11:52:08.570Z"
-last_activity: 2026-09-09
+last_updated: "2026-10-30T20:51:16.734Z"
+last_activity: 2026-10-30
 last_activity_desc: Milestone v1.1 completed and archived
-state_head: 27952f0840022add5f900f4bea41f421ac191bf7
+state_head: 80fff4c224f344629add85e63183a954baa8aeda
 progress:
   total_phases: 4
   completed_phases: 4
   total_plans: 4
   completed_plans: 4
   percent: 100
+milestone_name: Robustness Fixes & ERM Reconciliation
 current_phase: 08
 ---
 
@@ -37,7 +37,7 @@ current_phase: 08
 Phase: Milestone v1.1 complete
 Plan: —
 Status: Awaiting next milestone
-Last activity: 2026-09-09 — Milestone v1.1 completed and archived
+Last activity: 2026-10-30 — Completed quick task 261030-qwn: #216 ERM verified (already on main), biased-forecast benchmark test added
 
 ## Performance Metrics
 
@@ -88,6 +88,12 @@ Last activity: 2026-09-09 — Milestone v1.1 completed and archived
 - ⚠️ (carried, NOT v1.1 scope) v1.0 `iai.json` / `criterion.json` baselines remain structural placeholders pending maintainer hardware capture; `accuracy.json` deferred (ACC-01 gap). Tracked in `baselines/BACKLOG.md`.
 
 ---
+
+### Quick Tasks Completed
+
+| # | Description | Date | Commit | Directory |
+|---|-------------|------|--------|-----------|
+| 261030-qwn | Issue #216 ERM reconciliation: verified shipped variant, added biased-base-forecast comparison test | 2026-10-30 | 80fff4c | [261030-qwn-issue-216-erm-reconciliation-verify-ship](./quick/261030-qwn-issue-216-erm-reconciliation-verify-ship/) |
 
 ## Session Continuity
 
