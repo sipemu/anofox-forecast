@@ -87,6 +87,14 @@ pub struct AutoETSConfig {
     pub additive_only: bool,
     /// When true, exclude additive seasonal — only consider None or Multiplicative.
     pub multiplicative_seasonal_only: bool,
+    /// Spike / intermittency trend guard (default `true`, issue
+    /// DataZooDE/anofox-forecast#259). When [`diagnose_spikes`] flags the
+    /// series as intermittent or as having one-off spikes in its tail, only
+    /// trend-free candidates are considered, so a spike near the end of the
+    /// series cannot be extrapolated as a persistent trend; a spiky tail is
+    /// also fitted with its spikes capped (see [`cap_spikes`]) so the level
+    /// does not chase them. Set `false` for the unguarded selection.
+    pub spike_trend_guard: bool,
 }
 
 impl Default for AutoETSConfig {
@@ -100,6 +108,7 @@ impl Default for AutoETSConfig {
             allow_damped: true,
             additive_only: false,
             multiplicative_seasonal_only: false,
+            spike_trend_guard: true,
         }
     }
 }
@@ -177,6 +186,8 @@ pub struct AutoETS {
     training_values_store: Option<Vec<f64>>,
     /// Training-time exogenous regressors, retained for the residual-Ridge shim.
     training_regressors_store: Option<std::collections::HashMap<String, Vec<f64>>>,
+    /// Whether the spike / intermittency trend guard restricted the last fit.
+    spike_guard_triggered: bool,
 }
 
 impl AutoETS {
@@ -190,6 +201,7 @@ impl AutoETS {
             exog_ols: None,
             training_values_store: None,
             training_regressors_store: None,
+            spike_guard_triggered: false,
         }
     }
 
@@ -203,12 +215,19 @@ impl AutoETS {
             exog_ols: None,
             training_values_store: None,
             training_regressors_store: None,
+            spike_guard_triggered: false,
         }
     }
 
     /// Create AutoETS for non-seasonal data.
     pub fn non_seasonal() -> Self {
         Self::with_config(AutoETSConfig::non_seasonal())
+    }
+
+    /// Whether the spike / intermittency trend guard restricted the last
+    /// fit to trend-free candidates (see [`AutoETSConfig::spike_trend_guard`]).
+    pub fn spike_guard_triggered(&self) -> bool {
+        self.spike_guard_triggered
     }
 
     /// Create AutoETS with a specific seasonal period.
@@ -236,6 +255,7 @@ impl AutoETS {
         &self,
         has_seasonal: bool,
         restrict_multiplicative: bool,
+        trend_free_only: bool,
     ) -> Vec<ETSSpec> {
         let mut candidates = Vec::new();
 
@@ -248,7 +268,9 @@ impl AutoETS {
             vec![ErrorType::Additive, ErrorType::Multiplicative]
         };
 
-        let trend_types = if self.config.allow_damped {
+        let trend_types = if trend_free_only {
+            vec![TrendType::None]
+        } else if self.config.allow_damped {
             vec![
                 TrendType::None,
                 TrendType::Additive,
@@ -383,6 +405,123 @@ impl AutoETS {
     }
 }
 
+/// Multiple of the reference level above which a value counts as a spike.
+pub const SPIKE_FACTOR: f64 = 3.0;
+/// Tail spike share above which the trend guard triggers.
+pub const SPIKE_SHARE_THRESHOLD: f64 = 0.15;
+/// Tail spike share above which the tail is treated as a level change, not
+/// as one-off spikes (the guard then does not trigger).
+pub const SPIKE_SHARE_LEVEL_SHIFT: f64 = 0.5;
+/// Zero fraction above which the series counts as intermittent.
+pub const ZERO_FRACTION_THRESHOLD: f64 = 0.2;
+
+fn median_of(values: &mut [f64]) -> f64 {
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = values.len();
+    if n == 0 {
+        f64::NAN
+    } else if n % 2 == 1 {
+        values[n / 2]
+    } else {
+        (values[n / 2 - 1] + values[n / 2]) / 2.0
+    }
+}
+
+/// Outcome of the spike / intermittency diagnosis (#259).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpikeDiagnosis {
+    /// Neither spiky nor intermittent: selection is unchanged.
+    Clean,
+    /// More than `ZERO_FRACTION_THRESHOLD` of the values are zero.
+    Intermittent,
+    /// The tail window holds one-off spikes (see [`diagnose_spikes`]).
+    SpikyTail,
+}
+
+/// Reference level of each value: the median of the values at the same
+/// seasonal position when at least two full cycles exist (so a regular
+/// seasonal peak is not a spike), otherwise the series median.
+fn spike_references(values: &[f64], seasonal_period: usize) -> Vec<f64> {
+    let n = values.len();
+    let period = seasonal_period.max(1);
+    if period > 1 && n >= 2 * period {
+        let pos_medians: Vec<f64> = (0..period)
+            .map(|p| {
+                let mut pos: Vec<f64> = (p..n).step_by(period).map(|j| values[j]).collect();
+                median_of(&mut pos)
+            })
+            .collect();
+        (0..n).map(|i| pos_medians[i % period]).collect()
+    } else {
+        vec![median_of(&mut values.to_vec()); n]
+    }
+}
+
+/// Spike / intermittency diagnosis behind [`AutoETSConfig::spike_trend_guard`] (#259).
+///
+/// * [`SpikeDiagnosis::Intermittent`]: more than `ZERO_FRACTION_THRESHOLD`
+///   of the values are zero (relative to the series scale).
+/// * [`SpikeDiagnosis::SpikyTail`]: in the tail window (the last
+///   `max(period, 12)` values), the share of values above `SPIKE_FACTOR`
+///   times their reference level (see `spike_references`; positions with a
+///   non-positive reference are skipped) is above `SPIKE_SHARE_THRESHOLD`
+///   but at most `SPIKE_SHARE_LEVEL_SHIFT`. A tail that is mostly above its
+///   reference is a level change or strong growth, which a trend model may
+///   legitimately follow, so it is not flagged.
+pub fn diagnose_spikes(values: &[f64], seasonal_period: usize) -> SpikeDiagnosis {
+    let n = values.len();
+    if n < 4 {
+        return SpikeDiagnosis::Clean;
+    }
+
+    let scale = values.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+    if scale == 0.0 {
+        return SpikeDiagnosis::Clean;
+    }
+    let zeros = values.iter().filter(|v| v.abs() <= 1e-10 * scale).count();
+    if zeros as f64 / n as f64 > ZERO_FRACTION_THRESHOLD {
+        return SpikeDiagnosis::Intermittent;
+    }
+
+    let references = spike_references(values, seasonal_period);
+    let tail = seasonal_period.max(12).min(n);
+    let (mut checked, mut spikes) = (0usize, 0usize);
+    for i in (n - tail)..n {
+        if references[i] > 0.0 {
+            checked += 1;
+            if values[i] > SPIKE_FACTOR * references[i] {
+                spikes += 1;
+            }
+        }
+    }
+    if checked == 0 {
+        return SpikeDiagnosis::Clean;
+    }
+    let share = spikes as f64 / checked as f64;
+    if share > SPIKE_SHARE_THRESHOLD && share <= SPIKE_SHARE_LEVEL_SHIFT {
+        SpikeDiagnosis::SpikyTail
+    } else {
+        SpikeDiagnosis::Clean
+    }
+}
+
+/// Cap every value above `SPIKE_FACTOR` times its reference level at that
+/// bound (the values AutoETS fits on when [`SpikeDiagnosis::SpikyTail`]).
+pub fn cap_spikes(values: &[f64], seasonal_period: usize) -> Vec<f64> {
+    let references = spike_references(values, seasonal_period);
+    values
+        .iter()
+        .zip(&references)
+        .map(|(&v, &r)| {
+            if r > 0.0 && v > SPIKE_FACTOR * r {
+                SPIKE_FACTOR * r
+            } else {
+                v
+            }
+        })
+        .collect()
+}
+
 impl Default for AutoETS {
     fn default() -> Self {
         Self::new()
@@ -415,6 +554,33 @@ impl Forecaster for AutoETS {
         } else {
             self.exog_ols = None;
             Cow::Borrowed(series)
+        };
+
+        // Spike / intermittency trend guard (#259): a one-off spike in the
+        // training tail (or an intermittent series) must not be extrapolated
+        // as a persistent trend. Damping alone does not help (the fitted phi
+        // stays near 1), so a flagged series is restricted to trend-free
+        // candidates; a spiky tail is also fitted with its spikes capped at
+        // SPIKE_FACTOR x their reference, so the level does not chase them.
+        let diagnosis = if self.config.spike_trend_guard {
+            diagnose_spikes(
+                eval_series.primary_values(),
+                self.config.seasonal_period.unwrap_or(1),
+            )
+        } else {
+            SpikeDiagnosis::Clean
+        };
+        self.spike_guard_triggered = diagnosis != SpikeDiagnosis::Clean;
+        let eval_series: Cow<'_, TimeSeries> = if diagnosis == SpikeDiagnosis::SpikyTail {
+            Cow::Owned(TimeSeries::univariate(
+                eval_series.timestamps().to_vec(),
+                cap_spikes(
+                    eval_series.primary_values(),
+                    self.config.seasonal_period.unwrap_or(1),
+                ),
+            )?)
+        } else {
+            eval_series
         };
 
         let values = eval_series.primary_values();
@@ -480,7 +646,8 @@ impl Forecaster for AutoETS {
 
         // Generate candidate models, sorted so non-seasonal (cheap) models run first.
         // This enables early termination for the sequential path.
-        let mut candidates = self.generate_candidates(has_seasonal, has_non_positive);
+        let mut candidates =
+            self.generate_candidates(has_seasonal, has_non_positive, self.spike_guard_triggered);
         candidates.sort_by_key(|spec| if spec.has_seasonal() { 1 } else { 0 });
 
         self.model_scores.clear();
@@ -836,14 +1003,14 @@ mod tests {
     fn auto_ets_candidate_set_matches_r() {
         let auto = AutoETS::new();
 
-        let positive_seasonal = auto.generate_candidates(true, false);
+        let positive_seasonal = auto.generate_candidates(true, false, false);
         let expected_positive_seasonal = notation_set(&[
             "ANN", "AAN", "AAdN", "ANA", "AAA", "AAdA", "MNN", "MAN", "MAdN", "MNA", "MAA", "MAdA",
             "MNM", "MAM", "MAdM",
         ]);
         assert_eq!(spec_set(&positive_seasonal), expected_positive_seasonal);
 
-        let nonpositive_seasonal = auto.generate_candidates(true, true);
+        let nonpositive_seasonal = auto.generate_candidates(true, true, false);
         let expected_nonpositive_seasonal =
             notation_set(&["ANN", "AAN", "AAdN", "ANA", "AAA", "AAdA"]);
         assert_eq!(
@@ -851,7 +1018,7 @@ mod tests {
             expected_nonpositive_seasonal
         );
 
-        let positive_nonseasonal = auto.generate_candidates(false, false);
+        let positive_nonseasonal = auto.generate_candidates(false, false, false);
         let expected_positive_nonseasonal =
             notation_set(&["ANN", "AAN", "AAdN", "MNN", "MAN", "MAdN"]);
         assert_eq!(
@@ -1078,7 +1245,7 @@ mod tests {
     fn auto_ets_positive_data_allows_multiplicative() {
         let model = AutoETS::with_config(AutoETSConfig::with_period(12));
         // Verify multiplicative candidates are generated for positive data
-        let candidates = model.generate_candidates(true, false);
+        let candidates = model.generate_candidates(true, false, false);
         let has_mult = candidates.iter().any(|s| {
             s.error == ErrorType::Multiplicative || s.seasonal == SeasonalType::Multiplicative
         });
@@ -1088,7 +1255,7 @@ mod tests {
         );
 
         // Verify non-positive data restricts to additive-only
-        let restricted = model.generate_candidates(true, true);
+        let restricted = model.generate_candidates(true, true, false);
         let has_mult_restricted = restricted.iter().any(|s| {
             s.error == ErrorType::Multiplicative || s.seasonal == SeasonalType::Multiplicative
         });
@@ -1182,5 +1349,141 @@ mod tests {
             "Should select seasonal model on noisy seasonal data, got {}",
             spec.short_name()
         );
+    }
+
+    // ------------------------------------------------------------------
+    // #259: spike / intermittency trend guard
+    // ------------------------------------------------------------------
+
+    /// Spike-runaway fixture (DataZooDE/anofox-forecast#259): 10 monthly
+    /// series, period 12, level ~10 with seasonality and noise, and one-off
+    /// spikes of 4-5x the median at a quarter of the last 12 months.
+    fn spike_series(s: u64) -> Vec<f64> {
+        let mut x = s.wrapping_mul(2_654_435_761).wrapping_add(1);
+        (0..48)
+            .map(|i| {
+                x = x
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                let noise = ((x >> 33) as f64 / (1u64 << 31) as f64) * 2.0 - 1.0;
+                let spike = if i >= 36 && (i + s as usize) % 4 == 0 {
+                    40.0 + (s % 3) as f64 * 5.0
+                } else {
+                    0.0
+                };
+                (10.0 + 2.0 * (2.0 * std::f64::consts::PI * i as f64 / 12.0).sin() + noise + spike)
+                    .max(0.0)
+            })
+            .collect()
+    }
+
+    fn median(v: &[f64]) -> f64 {
+        median_of(&mut v.to_vec())
+    }
+
+    fn mean_level_ratio(values: &[f64], config: AutoETSConfig) -> (f64, AutoETS) {
+        let ts = TimeSeries::univariate(make_timestamps(values.len()), values.to_vec()).unwrap();
+        let mut model = AutoETS::with_config(config);
+        model.fit(&ts).unwrap();
+        let fc = model.predict(12).unwrap();
+        let level = fc.primary().iter().sum::<f64>() / 12.0;
+        (level / median(values), model)
+    }
+
+    #[test]
+    fn spike_guard_keeps_forecast_level_within_two_medians() {
+        let mut worst_guarded: f64 = 0.0;
+        let mut worst_unguarded: f64 = 0.0;
+        for s in 0..10 {
+            let y = spike_series(s);
+            assert_eq!(
+                diagnose_spikes(&y, 12),
+                SpikeDiagnosis::SpikyTail,
+                "series {s}"
+            );
+
+            let (ratio, model) = mean_level_ratio(&y, AutoETSConfig::with_period(12));
+            assert!(model.spike_guard_triggered());
+            assert!(!model.selected_spec().unwrap().has_trend(), "series {s}");
+            worst_guarded = worst_guarded.max(ratio);
+
+            let unguarded = AutoETSConfig {
+                spike_trend_guard: false,
+                ..AutoETSConfig::with_period(12)
+            };
+            worst_unguarded = worst_unguarded.max(mean_level_ratio(&y, unguarded).0);
+        }
+        // SPIKE_RUNAWAY_LEVEL_K = 2.0 from the orchestration coherence gate.
+        assert!(
+            worst_guarded <= 2.0,
+            "guarded AutoETS forecast level {worst_guarded:.2} x median"
+        );
+        // The fixture does reproduce the runaway without the guard.
+        assert!(
+            worst_unguarded > 2.0,
+            "unguarded AutoETS forecast level {worst_unguarded:.2} x median"
+        );
+    }
+
+    #[test]
+    fn spike_guard_does_not_flag_trend_seasonal_peaks_or_growth() {
+        // Linear trend with seasonality: a trend model must stay available.
+        let trend: Vec<f64> = (0..48)
+            .map(|i| {
+                50.0 + 2.0 * i as f64 + 5.0 * (2.0 * std::f64::consts::PI * i as f64 / 12.0).sin()
+            })
+            .collect();
+        assert_eq!(diagnose_spikes(&trend, 12), SpikeDiagnosis::Clean);
+        let ts = TimeSeries::univariate(make_timestamps(48), trend).unwrap();
+        let mut model = AutoETS::with_period(12);
+        model.fit(&ts).unwrap();
+        assert!(!model.spike_guard_triggered());
+
+        // Regular weekend peaks 4x the weekday level are seasonal, not spikes.
+        let weekly: Vec<f64> = (0..84)
+            .map(|i| if i % 7 >= 5 { 40.0 } else { 10.0 } + (i % 3) as f64 * 0.1)
+            .collect();
+        assert_eq!(diagnose_spikes(&weekly, 7), SpikeDiagnosis::Clean);
+
+        // Strong growth: most of the tail sits far above its reference --
+        // a level change, not one-off spikes.
+        let growth: Vec<f64> = (0..48).map(|i| 1.5_f64.powf(i as f64 / 4.0)).collect();
+        assert_eq!(diagnose_spikes(&growth, 12), SpikeDiagnosis::Clean);
+    }
+
+    #[test]
+    fn spike_guard_restricts_intermittent_series_to_trend_free_models() {
+        let intermittent: Vec<f64> = (0..48)
+            .map(|i| {
+                if i % 3 == 0 {
+                    5.0 + (i % 5) as f64
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        assert_eq!(
+            diagnose_spikes(&intermittent, 1),
+            SpikeDiagnosis::Intermittent
+        );
+        let ts = TimeSeries::univariate(make_timestamps(48), intermittent).unwrap();
+        let mut model = AutoETS::non_seasonal();
+        model.fit(&ts).unwrap();
+        assert!(model.spike_guard_triggered());
+        assert!(!model.selected_spec().unwrap().has_trend());
+    }
+
+    #[test]
+    fn cap_spikes_caps_only_values_above_the_spike_bound() {
+        let y = spike_series(3);
+        let capped = cap_spikes(&y, 12);
+        let refs = spike_references(&y, 12);
+        for i in 0..y.len() {
+            if y[i] > SPIKE_FACTOR * refs[i] {
+                assert!((capped[i] - SPIKE_FACTOR * refs[i]).abs() < 1e-12);
+            } else {
+                assert_eq!(capped[i], y[i]);
+            }
+        }
     }
 }

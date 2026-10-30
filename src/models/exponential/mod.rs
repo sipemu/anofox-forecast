@@ -16,7 +16,10 @@ mod holt_winters;
 mod seasonal_es;
 mod ses;
 
-pub use auto_ets::{AutoETS, AutoETSConfig, ModelPool, SelectionCriterion};
+pub use auto_ets::{
+    cap_spikes, diagnose_spikes, AutoETS, AutoETSConfig, ModelPool, SelectionCriterion,
+    SpikeDiagnosis,
+};
 pub use ets::{ETSSpec, ErrorType, SeasonalType as ETSSeasonalType, TrendType, ETS};
 pub use global_ets::{GlobalAutoETS, GlobalETS};
 pub use holt::HoltLinearTrend;

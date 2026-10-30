@@ -27,6 +27,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   configurations that use every feature family (forecasts are unchanged). The forecast-
   horizon (recursive predict) path is unchanged in this release.
 
+### Fixed — AutoETS no longer extrapolates one-off spikes as a trend
+
+- **Spike / intermittency trend guard (DataZooDE/anofox-forecast#259).** On a series
+  whose last `max(period, 12)` values hold one-off spikes (more than 15% but at most 50%
+  of them above 3× the median of their seasonal position), or that is intermittent (more
+  than 20% zeros), AutoETS now considers only trend-free candidates; a spiky tail is also
+  fitted with its spikes capped at 3× that reference, so the level does not chase them.
+  On the spike-runaway fixture (10 monthly series, a quarter of the last 12 months at
+  4–5× the median) the mean forecast level drops from up to 2.96× to at most 1.48× the
+  series median (gate: 2.0×). Damping alone did not help (fitted φ ≈ 1). Series that are
+  neither spiky nor intermittent select and forecast exactly as before; a regular seasonal
+  peak, a level change or strong growth does not trigger the guard. New public API:
+  `diagnose_spikes` / `SpikeDiagnosis`, `cap_spikes`, `AutoETS::spike_guard_triggered()`,
+  and `AutoETSConfig::spike_trend_guard` (default `true`; `false` restores the unguarded
+  selection). `AutoETSConfig` gained a field, so struct-literal construction needs
+  `..Default::default()`.
+
 ## [0.16.2] - 2026-10-15
 
 ### Fixed — ARIMA prediction intervals
