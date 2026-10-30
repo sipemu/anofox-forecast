@@ -56,7 +56,7 @@ dependencies = [
 
 [[package]]
 name = "anofox-forecast"
-version = "0.18.0"
+version = "0.18.1"
 dependencies = [
  "anofox-regression",
  "anofox-statistics",
@@ -80,7 +80,7 @@ dependencies = [
 
 [[package]]
 name = "anofox-forecast-js"
-version = "0.18.0"
+version = "0.18.1"
 dependencies = [
  "anofox-forecast",
  "chrono",
