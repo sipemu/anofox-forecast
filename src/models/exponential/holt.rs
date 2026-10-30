@@ -7,7 +7,7 @@ use super::ets::{ETSSpec, ETS};
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
 use crate::models::{validate_series_complete, Forecaster};
-use crate::utils::optimization::{nelder_mead, NelderMeadConfig};
+use crate::utils::optimization::{minimize_bounded, NelderMeadConfig};
 use crate::utils::stats::quantile_normal;
 
 /// Holt's Linear Trend forecaster.
@@ -223,7 +223,7 @@ impl HoltLinearTrend {
         };
 
         if with_damping {
-            let result = nelder_mead(
+            let result = minimize_bounded(
                 |params| Self::calculate_sse(values, params[0], params[1], Some(params[2])),
                 &[0.3, 0.1, 0.98],
                 Some(&[(0.0001, 0.9999), (0.0001, 0.9999), (0.8, 1.0)]),
@@ -235,7 +235,7 @@ impl HoltLinearTrend {
                 Some(result.optimal_point[2].clamp(0.8, 1.0)),
             )
         } else {
-            let result = nelder_mead(
+            let result = minimize_bounded(
                 |params| Self::calculate_sse(values, params[0], params[1], None),
                 &[0.3, 0.1],
                 Some(&[(0.0001, 0.9999), (0.0001, 0.9999)]),

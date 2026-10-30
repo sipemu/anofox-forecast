@@ -9,7 +9,7 @@ use crate::error::{ForecastError, Result};
 use crate::models::explain::{Explainable, ForecastExplanation};
 use crate::models::{validate_series_complete, FittedParams, Forecaster};
 use crate::utils::ols::{ols_fit, ols_residuals, OLSResult};
-use crate::utils::optimization::{nelder_mead, NelderMeadConfig};
+use crate::utils::optimization::{minimize_bounded, NelderMeadConfig};
 use statrs::distribution::{ContinuousCDF, Normal};
 use std::collections::HashMap;
 
@@ -555,7 +555,7 @@ impl Theta {
         let mut best_sse = f64::MAX;
 
         for &alpha0 in &[0.1_f64, 0.5, 0.9] {
-            let result = nelder_mead(
+            let result = minimize_bounded(
                 |params| Self::calculate_sse(series, params[0].clamp(0.0001, 0.9999), params[1]),
                 &[alpha0, l0_start],
                 Some(&[(0.0001, 0.9999), (f64::NEG_INFINITY, f64::INFINITY)]),

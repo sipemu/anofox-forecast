@@ -8,7 +8,7 @@ use crate::error::{ForecastError, Result};
 use crate::models::explain::{Explainable, ForecastExplanation};
 use crate::models::{validate_series_complete, FittedParams, Forecaster};
 use crate::utils::ols::{ols_fit, ols_residuals, OLSResult};
-use crate::utils::optimization::{nelder_mead, NelderMeadConfig};
+use crate::utils::optimization::{minimize_bounded, NelderMeadConfig};
 use crate::utils::stats::quantile_normal;
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -1392,7 +1392,7 @@ impl ETS {
                 start.push(init_level);
                 start.push(init_trend);
 
-                let result = nelder_mead(
+                let result = minimize_bounded(
                     |p| {
                         let (alpha, beta, _, _) =
                             Self::map_usual_params(&p[0..2], true, false, false);
@@ -1522,7 +1522,7 @@ impl ETS {
 
                         let start =
                             Self::unmap_usual_params(alpha_init, None, Some(gamma_init), None);
-                        let result = nelder_mead(
+                        let result = minimize_bounded(
                             |p| {
                                 let (alpha, _, gamma, _) =
                                     Self::map_usual_params(&p[0..2], false, true, false);
@@ -1570,7 +1570,7 @@ impl ETS {
                     start.push(init_level);
                     start.extend_from_slice(&init_seasonals);
 
-                    let result = nelder_mead(
+                    let result = minimize_bounded(
                         |p| {
                             let (alpha, _, gamma, _) =
                                 Self::map_usual_params(&p[0..2], false, true, false);
@@ -1647,7 +1647,7 @@ impl ETS {
 
                         let start =
                             Self::unmap_usual_params(alpha_init, Some(0.1), Some(gamma_init), None);
-                        let result = nelder_mead(
+                        let result = minimize_bounded(
                             |p| {
                                 let (alpha, beta, gamma, _) =
                                     Self::map_usual_params(&p[0..3], true, true, false);
@@ -1703,7 +1703,7 @@ impl ETS {
                     start.push(init_trend);
                     start.extend_from_slice(&init_seasonals);
 
-                    let result = nelder_mead(
+                    let result = minimize_bounded(
                         |p| {
                             let (alpha, beta, gamma, _) =
                                 Self::map_usual_params(&p[0..3], true, true, false);
@@ -1788,7 +1788,7 @@ impl ETS {
                             Some(gamma_init),
                             Some(0.98),
                         );
-                        let result = nelder_mead(
+                        let result = minimize_bounded(
                             |p| {
                                 let (alpha, beta, gamma, phi) =
                                     Self::map_usual_params(&p[0..4], true, true, true);
@@ -1856,7 +1856,7 @@ impl ETS {
                         start.push(init_trend);
                         start.extend_from_slice(&init_seasonals);
 
-                        let candidate_result = nelder_mead(
+                        let candidate_result = minimize_bounded(
                             |p| {
                                 let (alpha, beta, gamma, phi) =
                                     Self::map_usual_params(&p[0..4], true, true, true);
@@ -1921,7 +1921,7 @@ impl ETS {
                     // Pass heuristic init states to avoid redundant initialize_state()
                     // calls inside each Nelder-Mead evaluation.
                     let start = Self::unmap_usual_params(0.3, None, None, None);
-                    let result = nelder_mead(
+                    let result = minimize_bounded(
                         |p| {
                             let (alpha, _, _, _) =
                                 Self::map_usual_params(&p[0..1], false, false, false);
@@ -1954,7 +1954,7 @@ impl ETS {
                     // Pass heuristic init states to avoid redundant initialize_state()
                     // calls inside each Nelder-Mead evaluation.
                     let start = Self::unmap_usual_params(0.3, Some(0.1), None, Some(0.98));
-                    let result = nelder_mead(
+                    let result = minimize_bounded(
                         |p| {
                             let (alpha, beta, _, phi) =
                                 Self::map_usual_params(&p[0..3], true, false, true);

@@ -12,7 +12,7 @@ use crate::error::{ForecastError, Result};
 use crate::models::theta::DecompositionType;
 use crate::models::{validate_series_complete, Forecaster};
 use crate::utils::ols::{ols_fit, ols_residuals, OLSResult};
-use crate::utils::optimization::{nelder_mead, NelderMeadConfig};
+use crate::utils::optimization::{minimize_bounded, NelderMeadConfig};
 use crate::utils::stats::quantile_normal;
 use statrs::distribution::{ContinuousCDF, Normal};
 use std::collections::HashMap;
@@ -446,7 +446,7 @@ impl OptimizedTheta {
         };
 
         for start in starts {
-            let result = nelder_mead(
+            let result = minimize_bounded(
                 objective,
                 &start,
                 Some(&[(0.01, 0.99), (1.0, 10.0)]),

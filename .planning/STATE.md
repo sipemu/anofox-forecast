@@ -1,20 +1,20 @@
 ---
-gsd_state_version: 1.0
+gsd_state_version: "1.0"
 milestone: v1.1
-milestone_name: Robustness Fixes & ERM Reconciliation
 status: Awaiting next milestone
 stopped_at: Phase 08 complete — all phases complete
-last_updated: "2026-09-09T11:52:08.570Z"
-last_activity: 2026-09-09
+last_updated: "2026-10-30T20:50:16.066Z"
+last_activity: 2026-10-30
 last_activity_desc: Milestone v1.1 completed and archived
-state_head: 27952f0840022add5f900f4bea41f421ac191bf7
+state_head: 1386b277243f83f4cd12c0fe1ca75b0edb35565f
+milestone_name: Robustness Fixes & ERM Reconciliation
+current_phase: 08
 progress:
   total_phases: 4
   completed_phases: 4
   total_plans: 4
   completed_plans: 4
   percent: 100
-current_phase: 08
 ---
 
 # Project State: anofox-forecast — Performance & Validation Hardening
@@ -37,7 +37,7 @@ current_phase: 08
 Phase: Milestone v1.1 complete
 Plan: —
 Status: Awaiting next milestone
-Last activity: 2026-09-09 — Milestone v1.1 completed and archived
+Last activity: 2026-10-30 - Completed quick task 261030-uba: GH #234 steps 2-3 (BOBYQA + M4 benchmark), decision: keep legacy optimizers
 
 ## Performance Metrics
 
@@ -88,6 +88,13 @@ Last activity: 2026-09-09 — Milestone v1.1 completed and archived
 - ⚠️ (carried, NOT v1.1 scope) v1.0 `iai.json` / `criterion.json` baselines remain structural placeholders pending maintainer hardware capture; `accuracy.json` deferred (ACC-01 gap). Tracked in `baselines/BACKLOG.md`.
 
 ---
+
+### Quick Tasks Completed
+
+| # | Description | Date | Commit | Directory |
+|---|-------------|------|--------|-----------|
+| 261030-go2 | basin-backed optimizer behind feature flag (GH #234 step 1) | 2026-10-30 | 2a4ab80 | [261030-go2-basin-backed-optimizer-behind-feature-fl](./quick/261030-go2-basin-backed-optimizer-behind-feature-fl/) |
+| 261030-uba | GH #234 steps 2-3: BOBYQA + M4 benchmark; decision: do not switch to basin | 2026-10-30 | 1386b27 | [261030-uba-issue-234-steps-2-3-basin-bobyqa-for-smo](./quick/261030-uba-issue-234-steps-2-3-basin-bobyqa-for-smo/) |
 
 ## Session Continuity
 
