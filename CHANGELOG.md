@@ -14,13 +14,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   measures the condition number `κ(XᵀX)` of each fit's design and uses `lambda_small` when
   `κ ≤ cond_threshold`, otherwise `lambda`. A fixed λ over-shrinks coefficients on a
   well-conditioned design. On a 4-cycle seasonal fold, λ = 1.0 shrinks a spike amplitude by
-  4%, while the conditioning-aware fit stays within 0.4% of OLS. Requires anofox-regression 0.6
+  4%, while the conditioning-aware fit stays within 0.4% of OLS. Requires anofox-regression 0.7
   (`RidgeRegressorBuilder::conditioning_aware`). `RegressionBackend` gained a variant, so
   exhaustive matches on it need a new arm.
 
 ### Changed
 
-- **anofox-regression 0.5 → 0.6.** The two `backend_dynamic_*` tests now use a noisy series.
+- **anofox-regression 0.5 → 0.7.** The two `backend_dynamic_*` tests now use a noisy series.
   On the noise-free one, a correct OLS fits exactly and agrees with the Dynamic average.
   They only differed before because of an OLS coefficient-order bug fixed in
   anofox-regression 0.5.13 (sipemu/anofox-regression#171).
