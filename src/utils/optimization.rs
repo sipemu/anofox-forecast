@@ -1,4 +1,41 @@
 //! Optimization utilities for parameter estimation.
+//!
+//! GH #234, step 1: an evaluation backend for the `basin` crate sits behind
+//! the public `nelder_mead` / `lbfgs_optimize` signatures in
+//! [`basin_backend`]. Compiling it needs the `basin` cargo feature; routing
+//! model fits to it additionally needs the compiler cfg
+//! `anofox_basin_optimizer` (see [`optimizer_backend`]). The hand-rolled
+//! `nelder_mead_legacy` / `lbfgs_optimize_legacy` optimizers remain the
+//! default path in every configuration CI exercises without that cfg.
+
+#[cfg(feature = "basin")]
+mod basin_backend;
+#[cfg(feature = "basin")]
+pub use basin_backend::nelder_mead_basin;
+
+#[cfg(all(anofox_basin_optimizer, not(feature = "basin")))]
+compile_error!(
+    "cfg(anofox_basin_optimizer) requires the `basin` feature: build with \
+     `--features basin` and `RUSTFLAGS=\"--cfg anofox_basin_optimizer\"`"
+);
+
+/// Which optimizer backend `nelder_mead`/`lbfgs_optimize` currently route to.
+///
+/// Returns `"basin"` only when both the `basin` cargo feature and the
+/// `anofox_basin_optimizer` compiler cfg are active; otherwise `"legacy"`.
+/// Exists so the parity probe (GH #234) can label its output with the
+/// backend it actually exercised instead of trusting build flags alone.
+#[doc(hidden)]
+pub fn optimizer_backend() -> &'static str {
+    #[cfg(all(feature = "basin", anofox_basin_optimizer))]
+    {
+        "basin"
+    }
+    #[cfg(not(all(feature = "basin", anofox_basin_optimizer)))]
+    {
+        "legacy"
+    }
+}
 
 /// Result of Nelder-Mead optimization.
 #[derive(Debug, Clone)]
@@ -119,6 +156,28 @@ fn sanitize_objective(value: f64) -> f64 {
 /// assert!((result.optimal_point[1] - 3.0).abs() < 0.01);
 /// ```
 pub fn nelder_mead<F>(
+    objective: F,
+    initial: &[f64],
+    bounds: Option<&[(f64, f64)]>,
+    config: NelderMeadConfig,
+) -> NelderMeadResult
+where
+    F: Fn(&[f64]) -> f64,
+{
+    #[cfg(all(feature = "basin", anofox_basin_optimizer))]
+    {
+        basin_backend::nelder_mead_basin(objective, initial, bounds, config)
+    }
+    #[cfg(not(all(feature = "basin", anofox_basin_optimizer)))]
+    {
+        nelder_mead_legacy(objective, initial, bounds, config)
+    }
+}
+
+/// Hand-rolled Nelder-Mead simplex optimization (the default implementation
+/// of [`nelder_mead`]). See that function's doc comment for the algorithm
+/// contract; this body is unchanged from before GH #234, step 1.
+fn nelder_mead_legacy<F>(
     objective: F,
     initial: &[f64],
     bounds: Option<&[(f64, f64)]>,
@@ -699,6 +758,20 @@ mod tests {
         assert!(result.converged);
         assert!(result.optimal_value.is_finite());
         assert_relative_eq!(result.optimal_point[0], 2.0, epsilon = 0.1);
+    }
+
+    // GH #234, step 1: `optimizer_backend()` must agree with which cfg/feature
+    // combination this test binary was actually built with.
+    #[cfg(all(feature = "basin", anofox_basin_optimizer))]
+    #[test]
+    fn optimizer_backend_is_basin_when_routed() {
+        assert_eq!(optimizer_backend(), "basin");
+    }
+
+    #[cfg(not(all(feature = "basin", anofox_basin_optimizer)))]
+    #[test]
+    fn optimizer_backend_is_legacy_by_default() {
+        assert_eq!(optimizer_backend(), "legacy");
     }
 }
 

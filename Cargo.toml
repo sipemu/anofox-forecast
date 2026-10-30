@@ -40,6 +40,15 @@ distributional = []
 # Streaming Mahalanobis anomaly detection (docs/ANOMALY_PLAN.md).
 # Port of microprediction/timemachines heads/mahalanobis.py.
 anomaly = ["distributional"]
+# Evaluation backend for `utils::optimization` (GH #234, step 1). Compiles the
+# `basin` dependency and the `basin_backend` module, but does NOT by itself
+# route `nelder_mead`/`lbfgs_optimize` to basin — that additionally requires
+# the compiler cfg `RUSTFLAGS="--cfg anofox_basin_optimizer"`. basin requires
+# rustc >= 1.87.
+basin = ["dep:basin"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anofox_basin_optimizer)'] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
@@ -54,6 +63,7 @@ rand = "0.8.6"
 anofox-regression = { version = "0.5.3", optional = true }
 anofox-statistics = "0.4"
 lbfgs = "0.3"
+basin = { version = "=3.1.0", optional = true, default-features = false }
 fdars-core = { version = "0.9", optional = true, default-features = false }
 faer = { version = "0.23", optional = true, default-features = false, features = ["std", "linalg"] }
 serde = { version = "1.0", features = ["derive"], optional = true }
