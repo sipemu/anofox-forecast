@@ -3,18 +3,18 @@ gsd_state_version: "1.0"
 milestone: v1.1
 status: Awaiting next milestone
 stopped_at: Phase 08 complete — all phases complete
-last_updated: "2026-10-30T18:30:09.930Z"
+last_updated: "2026-10-30T20:51:16.734Z"
 last_activity: 2026-10-30
 last_activity_desc: Milestone v1.1 completed and archived
-state_head: ebd583f62687da12f042640a1a5170858c5bd50d
-milestone_name: Robustness Fixes & ERM Reconciliation
-current_phase: 08
+state_head: 80fff4c224f344629add85e63183a954baa8aeda
 progress:
   total_phases: 4
   completed_phases: 4
   total_plans: 4
   completed_plans: 4
   percent: 100
+milestone_name: Robustness Fixes & ERM Reconciliation
+current_phase: 08
 ---
 
 # Project State: anofox-forecast — Performance & Validation Hardening
@@ -37,7 +37,7 @@ progress:
 Phase: Milestone v1.1 complete
 Plan: —
 Status: Awaiting next milestone
-Last activity: 2026-10-30 — Completed quick task 261030-qnn: #233 incremental update + compact state (ES family)
+Last activity: 2026-10-30 — Completed quick task 261030-qwn: #216 ERM verified (already on main), biased-forecast benchmark test added
 
 ## Performance Metrics
 
@@ -94,6 +94,8 @@ Last activity: 2026-10-30 — Completed quick task 261030-qnn: #233 incremental 
 | # | Description | Date | Commit | Directory |
 |---|-------------|------|--------|-----------|
 | 261030-qnn | Issue #233 incremental update + compact serializable state (SES/Holt/HW/ETS/AutoETS) | 2026-10-30 | ebd583f | [261030-qnn-issue-233-incremental-update-and-compact](./quick/261030-qnn-issue-233-incremental-update-and-compact/) |
+| 261030-q87 | Issue #219 MFLES multiplicative blow-up: verified existing fix (v0.15.10) before/after; no code change | 2026-10-30 | 94e65da | [261030-q87-issue-219-mfles-multiplicative-blow-up-v](./quick/261030-q87-issue-219-mfles-multiplicative-blow-up-v/) |
+| 261030-qwn | Issue #216 ERM reconciliation: verified shipped variant, added biased-base-forecast comparison test | 2026-10-30 | 80fff4c | [261030-qwn-issue-216-erm-reconciliation-verify-ship](./quick/261030-qwn-issue-216-erm-reconciliation-verify-ship/) |
 
 ## Session Continuity
 
