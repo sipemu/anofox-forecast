@@ -7,6 +7,27 @@
 
 use super::dist::Gaussian;
 
+/// Interns a composite leaf label as a `&'static str` for [`Leaf::name`].
+///
+/// Each distinct label is allocated once and kept in a global table, so calling
+/// `name()` repeatedly (once per forecast step) no longer leaks a fresh string
+/// every time, and the strings stay reachable (no LeakSanitizer reports).
+pub(crate) fn intern_label(label: &str) -> &'static str {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static LABELS: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
+    let mut labels = LABELS
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(&existing) = labels.get(label) {
+        return existing;
+    }
+    let leaked: &'static str = Box::leak(label.to_owned().into_boxed_str());
+    labels.insert(leaked);
+    leaked
+}
+
 /// Streaming per-horizon predictor.
 pub trait Leaf {
     fn name(&self) -> &'static str;
@@ -30,4 +51,18 @@ pub trait Leaf {
 
     /// Absorb one observation and update internal state.
     fn observe(&mut self, y: f64);
+}
+
+#[cfg(test)]
+mod intern_tests {
+    use super::intern_label;
+
+    #[test]
+    fn intern_label_returns_one_allocation_per_label() {
+        let a = intern_label("ets@sd7");
+        let b = intern_label(&String::from("ets@sd7"));
+        assert_eq!(a, "ets@sd7");
+        assert!(std::ptr::eq(a, b), "same label must reuse one allocation");
+        assert_ne!(intern_label("ets@sd12"), a);
+    }
 }

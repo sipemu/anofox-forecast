@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Laplace leaf labels no longer leak on every `name()` call.** Seven composite leaf
+  wrappers (standardize, seasonal difference, STL decomposition, ADIDA, GARCH, power
+  transform, Yeo-Johnson) returned their label through `Box::leak`, which allocated a
+  new string on each call. Labels are now interned once per distinct label, so memory
+  stays bounded and LeakSanitizer reports nothing (found by the DuckDB extension's
+  ASAN job, DataZooDE/anofox-forecast#306). `Leaf::name` keeps its `&'static str`
+  signature.
+
 ## [0.18.0] - 2026-10-30
 
 ### Added — conditioning-aware ridge backend

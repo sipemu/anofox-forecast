@@ -44,7 +44,7 @@ impl SeasonalDifferenceWrapper {
 
 impl Leaf for SeasonalDifferenceWrapper {
     fn name(&self) -> &'static str {
-        Box::leak(self.label.clone().into_boxed_str())
+        crate::models::laplace::leaf::intern_label(&self.label)
     }
 
     fn predict(&self, horizon: usize) -> Vec<Gaussian> {
