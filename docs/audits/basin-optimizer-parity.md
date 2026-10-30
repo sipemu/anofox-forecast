@@ -1,4 +1,4 @@
-# basin-Backed Optimizer Parity (GH #234, Step 1)
+# basin-Backed Optimizer Parity (GH #234, Steps 1-3)
 
 **Scope:** evaluate `basin` 3.1.0 as a drop-in evaluation backend for `utils::optimization`'s
 `nelder_mead` / `lbfgs_optimize`, behind the public signatures, with the hand-rolled optimizers
@@ -300,3 +300,139 @@ the plan's `<behavior>` spec assumed Rosenbrock converges at `max_iter: 500` and
 `memory_size: 0` falls back to a working legacy result — both measured directly to be false for
 **legacy itself**, independent of basin; test expectations were corrected to match measured
 reality rather than tuned to hide a basin-specific failure (there was none to hide).
+
+---
+
+# Step 2: BOBYQA for the box-bounded smoothing parameters
+
+**What was added.** `basin_backend::bobyqa_basin` (basin `Bobyqa`, Powell 2009) with the
+`NelderMeadResult` contract, and a router `utils::optimization::minimize_bounded` that the
+smoothing-parameter optimizers of SES, Holt, Holt-Winters, ETS (all 9 call sites) and the Theta
+family (Theta / OptimizedTheta / DynamicOptimizedTheta) now call instead of `nelder_mead`.
+`minimize_bounded` is `nelder_mead` unless the build has `--features basin` **and**
+`RUSTFLAGS="--cfg anofox_basin_bobyqa"`; the default build is unchanged (3795/3795 tests pass,
+identical to step 1 plus 4 new BOBYQA unit tests).
+
+**Adapter design.**
+- BOBYQA uses one isotropic trust region, but ETS's joint box mixes `[0, 1]` smoothing parameters
+  with data-scaled initial-state bounds (level `y_min - range .. y_max + range`). The adapter
+  optimizes in the unit cube `u = (x - lower) / width`, so `rho_beg = 0.1`, `rho_end = 1e-6` are
+  relative to each coordinate's width.
+- The ETS / HW objectives return `f64::MAX` in inadmissible regions; such values (>= 1e100 or
+  non-finite) are replaced by a finite penalty `f(x0) + 1e3 (1 + |f(x0)|)` so the quadratic model
+  does not overflow. `optimal_value` is always re-evaluated on the raw objective.
+- Evaluation budget `max_iter * (n + 1)` (the NM worst case); falls back to `nelder_mead` when the
+  box is not fully finite (e.g. `Theta`'s `(-inf, inf)` drift coordinate), the point is empty, or
+  the start point is inadmissible.
+
+**Reference-test parity (full `cargo test --all-features --no-fail-fast` under BOBYQA routing).**
+3788 passed, **3 failed**, all in `tests/ets_r_reference.rs`:
+
+| test | assertion | legacy NM | BOBYQA | R |
+|---|---|--:|--:|--:|
+| `ets_mam_parameters_near_r` | MAM loglik within 5 of R | -681.11 | **-705.77** | -682.40 |
+| `ets_optimised_fit_quality` | same MAM check (loop over 15 specs) | -681.11 | **-705.77** | -682.40 |
+| `auto_ets_airpassengers_selection` | chosen AICc within 2 of R | 1401.07 (M,A,M) | **1415.49** (M,Ad,M) | 1400.64 (M,Ad,M) |
+
+Per-spec loglik on AirPassengers (higher is better), legacy vs BOBYQA: additive-error specs
+equal to <1e-4; multiplicative-error specs move both ways — MNA -744.06 -> -715.39 (better),
+MNM -687.75 -> -703.58, MAA -701.16 -> -740.78, MAM -681.11 -> -705.77 (worse). A sweep of
+`rho_beg in {0.05, 0.1, 0.25}`, the penalty scale `{0.1, 1, 1e3}` and a full quadratic model
+(`npt = (n+1)(n+2)/2`) did not find a setting that is at least as good as legacy on all four
+(e.g. `rho_beg = 0.05`: MAM -719.67; full model: MAM -771.23). The penalty is never hit on these
+fits, so the differences are local-optimum selection on a multimodal likelihood, not the
+inadmissible-region handling. The legacy NM + the ETS multi-start structure finds better optima
+for MAM; BOBYQA from the same starts does not.
+
+**Timing.** Release, 100 synthetic AutoETS (Reduced pool, n=200, p=12) fits:
+legacy 12.7 s vs BOBYQA 19.7 s (1.55x slower; machine shared with other jobs). In the debug full
+suite, `global_models_bench` (1600 such AutoETS fits) took 4215 s under BOBYQA routing versus
+512 s for legacy in step 1 (not same-load conditions, so only the direction is reliable). On
+M4 (below) BOBYQA is faster for AutoETS on long Hourly/Daily series and slower on short
+Yearly/Quarterly ones.
+
+# Step 3: M4 accuracy + time benchmark
+
+**Data.** The M4 competition train/test CSVs already present locally at
+`~/.datasetsforecast/m4/datasets` (nothing was downloaded). Deterministic sample: every k-th
+series, 300 per frequency (Yearly, Quarterly, Monthly, Weekly, Daily, Hourly = 1800 series),
+official horizons (6/8/18/13/14/48), seasonal periods 1/4/12/1/1/24. AutoARIMA on the first 50 of
+Yearly/Quarterly/Monthly (150 series). Metrics: M4 sMAPE and MASE on the holdout, in-sample MSE of
+the one-step residuals (backend-independent proxy for the fit objective), wall time of
+fit+predict. Tool: `examples/m4_optimizer_benchmark.rs` (`run` per routing, `compare` paired).
+Release builds, single-threaded, run sequentially on a machine shared with other jobs; the
+legacy run was repeated at the end to measure timing noise.
+
+```text
+cargo build --release --features basin --example m4_optimizer_benchmark            # legacy
+RUSTFLAGS="--cfg anofox_basin_optimizer" CARGO_TARGET_DIR=target/basin-route ...   # basin NM/L-BFGS
+RUSTFLAGS="--cfg anofox_basin_bobyqa" CARGO_TARGET_DIR=target/bobyqa ...           # BOBYQA
+RUSTFLAGS="--cfg anofox_basin_optimizer --cfg anofox_basin_bobyqa" CARGO_TARGET_DIR=target/basin-all ...
+PER_FREQ=300 ARIMA_PER_FREQ=50 <binary> run <out.json>; <binary> compare a.json b.json
+```
+
+Total wall time: legacy 574 s, basin 575 s, BOBYQA 444 s, basin+BOBYQA 446 s, legacy repeat 515 s.
+**Timing noise:** legacy vs its repeat differs by 8-16% per model with bit-identical forecasts,
+so per-model time ratios within about +-15% are not significant.
+
+**Legacy vs basin Nelder-Mead / L-BFGS-B (step-1 routing), all 1800 series:**
+
+| model | n | sMAPE legacy | sMAPE basin | MASE legacy | MASE basin | in-sample MSE better/same/worse | time ratio vs legacy run 1 / run 2 |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| AutoARIMA | 150 | 11.156 | 11.156 | 1.923 | 1.923 | 0 / 150 / 0 | 1.00 / 1.13 |
+| AutoETS | 1800 | 11.714 | 11.714 | 2.500 | 2.500 | 125 / 1557 / 118 | 1.00 / 1.11 |
+| DynamicOptimizedTheta | 1800 | 10.522 | 10.522 | 2.438 | 2.438 | 0 / 1800 / 0 | 0.99 / 1.17 |
+| Holt | 1800 | 26.139 | 26.139 | 9.567 | 9.567 | 0 / 1800 / 0 | 1.02 / 1.13 |
+| HoltWinters | 900 | 13.160 | 13.160 | 1.254 | 1.254 | 0 / 900 / 0 | 1.01 / 1.10 |
+| OptimizedTheta | 1800 | 10.277 | 10.277 | 2.302 | 2.302 | 0 / 1800 / 0 | 0.97 / 1.16 |
+| SES | 1800 | 14.498 | 14.498 | 4.215 | 4.215 | 0 / 1800 / 0 | 1.10 / 1.19 |
+
+Accuracy parity holds on M4 (every mean sMAPE / MASE identical to 3 decimals; AutoETS's
+in-sample MSE differs on 243/1800 series in both directions, its mean holdout metrics do not).
+Speed: basin is 0-19% slower (never faster beyond noise); SES is 1.25-2.1x slower on short
+Yearly/Quarterly/Monthly series where per-call overhead dominates.
+
+**Legacy vs BOBYQA (basin+BOBYQA is the same to 3 decimals in accuracy; times within noise):**
+
+| model | n | sMAPE legacy | sMAPE BOBYQA | MASE legacy | MASE BOBYQA | in-sample MSE better/same/worse | time ratio |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| AutoARIMA | 150 | 11.156 | 11.156 | 1.923 | 1.923 | 0 / 150 / 0 | 0.98 |
+| AutoETS | 1800 | 11.714 | **10.781** | 2.500 | **2.305** | 718 / 526 / 556 | 0.72 |
+| DynamicOptimizedTheta | 1800 | 10.522 | 10.526 | 2.438 | 2.439 | 731 / 390 / 679 | 1.03 |
+| Holt | 1800 | 26.139 | **30.096** | 9.567 | **11.747** | 530 / 1258 / 12 | 1.07 |
+| HoltWinters | 900 | 13.160 | **15.635** | 1.254 | **1.882** | 350 / 531 / 19 | 1.57 |
+| OptimizedTheta | 1800 | 10.277 | 10.278 | 2.302 | 2.303 | 769 / 31 / 1000 | 1.12 |
+| SES | 1800 | 14.498 | 14.493 | 4.215 | 4.214 | 172 / 1628 / 0 | 1.82 |
+
+Per frequency (sMAPE legacy -> BOBYQA; time ratio):
+
+| model | Yearly | Quarterly | Monthly | Weekly | Daily | Hourly |
+|---|---|---|---|---|---|---|
+| AutoETS | 16.00 -> 16.61; 5.49x | 9.70 -> 9.96; 2.93x | 13.21 -> 13.42; 1.04x | 7.94 -> 7.82; 1.04x | 2.65 -> 2.68; 0.62x | 20.79 -> **14.19**; 0.68x |
+| Holt | 16.21 -> 16.82 | 13.75 -> 13.34 | 18.75 -> 18.43 | 9.28 -> 9.19 | 2.79 -> 2.66 | 96.06 -> **120.14** |
+| HoltWinters | – | 10.85 -> 11.04 | 14.45 -> 13.72 | – | – | 14.18 -> **22.14** |
+
+Reading: BOBYQA is the better *optimizer* — it reaches a lower in-sample objective far more
+often than it reaches a higher one (Holt 530 vs 12 series, HoltWinters 350 vs 19) — but a
+lower in-sample SSE does not translate into better forecasts: Holt/HW holdout error gets worse
+(driven by Hourly, where tighter SSE minimization picks more aggressive trend/seasonal
+smoothing). AutoETS's aggregate gain is entirely the Hourly subset (20.79 -> 14.19 sMAPE); on
+Yearly, Quarterly, Monthly and Daily it is slightly worse, and it is 3-5x slower on the short
+Yearly/Quarterly series. Theta family and SES: accuracy ties, SES 1.8x slower.
+
+# Decision (per the GH #234 rule: switch only if parity AND speed hold)
+
+**Do not switch over; do not delete the hand-rolled optimizers or the `lbfgs` dependency.**
+
+- basin Nelder-Mead / L-BFGS-B: accuracy parity holds (step 1 reference suite and M4), but speed
+  does not improve — 0-19% slower on M4, 1.0-1.7x per single fit (step 1). Switching would add 6
+  crates, a third `rand` major and an MSRV of 1.87 for no measured gain.
+- basin BOBYQA: fails parity — 3 R-reference tests (`ets_r_reference`) fail, Holt / Holt-Winters
+  M4 holdout accuracy degrades (sMAPE +15% / +19%), and it is slower for SES/HW and short-series
+  AutoETS. Its one win (AutoETS on M4 Hourly) is frequency-specific and comes with the MAM
+  reference failure, so it is not a safe default.
+
+Both basin routings stay available behind `--features basin` + the respective cfg for further
+evaluation. Possible follow-ups if the maintainer wants to pursue BOBYQA: understand the AutoETS
+Hourly gain (which specs get selected differently), and try BOBYQA only as an extra candidate
+start inside ETS's multi-start (keeping the best of NM and BOBYQA) rather than as a replacement.
