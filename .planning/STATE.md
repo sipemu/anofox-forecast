@@ -93,6 +93,7 @@ Last activity: 2026-10-30 — Completed quick task 261030-qwn: #216 ERM verified
 
 | # | Description | Date | Commit | Directory |
 |---|-------------|------|--------|-----------|
+| 261030-q87 | Issue #219 MFLES multiplicative blow-up: verified existing fix (v0.15.10) before/after; no code change | 2026-10-30 | 94e65da | [261030-q87-issue-219-mfles-multiplicative-blow-up-v](./quick/261030-q87-issue-219-mfles-multiplicative-blow-up-v/) |
 | 261030-qwn | Issue #216 ERM reconciliation: verified shipped variant, added biased-base-forecast comparison test | 2026-10-30 | 80fff4c | [261030-qwn-issue-216-erm-reconciliation-verify-ship](./quick/261030-qwn-issue-216-erm-reconciliation-verify-ship/) |
 
 ## Session Continuity
