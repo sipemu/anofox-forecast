@@ -6,7 +6,7 @@ use super::ets::{ETSSpec, ETS};
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
 use crate::models::{validate_series_complete, FittedParams, Forecaster};
-use crate::utils::optimization::{nelder_mead, NelderMeadConfig};
+use crate::utils::optimization::{minimize_bounded, NelderMeadConfig};
 use crate::utils::stats::quantile_normal;
 use std::collections::HashMap;
 
@@ -172,7 +172,7 @@ impl SimpleExponentialSmoothing {
             ..Default::default()
         };
 
-        let result = nelder_mead(
+        let result = minimize_bounded(
             |params| Self::calculate_sse(values, params[0]),
             &[0.5],
             Some(&[(0.0001, 0.9999)]),

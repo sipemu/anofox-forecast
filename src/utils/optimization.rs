@@ -11,7 +11,13 @@
 #[cfg(feature = "basin")]
 mod basin_backend;
 #[cfg(feature = "basin")]
-pub use basin_backend::{lbfgs_optimize_basin, nelder_mead_basin};
+pub use basin_backend::{bobyqa_basin, lbfgs_optimize_basin, nelder_mead_basin};
+
+#[cfg(all(anofox_basin_bobyqa, not(feature = "basin")))]
+compile_error!(
+    "cfg(anofox_basin_bobyqa) requires the `basin` feature: build with \
+     `--features basin` and `RUSTFLAGS=\"--cfg anofox_basin_bobyqa\"`"
+);
 
 #[cfg(all(anofox_basin_optimizer, not(feature = "basin")))]
 compile_error!(
@@ -171,6 +177,33 @@ where
     #[cfg(not(all(feature = "basin", anofox_basin_optimizer)))]
     {
         nelder_mead_legacy(objective, initial, bounds, config)
+    }
+}
+
+/// Minimize a box-bounded smoothing-parameter objective (ETS / SES / Holt /
+/// Holt-Winters / Theta).
+///
+/// Same contract as [`nelder_mead`], to which it routes by default. With the
+/// `basin` feature **and** the compiler cfg `anofox_basin_bobyqa` it routes
+/// to basin's BOBYQA instead ([`bobyqa_basin`], GH #234 step 2 evaluation);
+/// BOBYQA itself falls back to [`nelder_mead`] when the box is not fully
+/// finite.
+pub fn minimize_bounded<F>(
+    objective: F,
+    initial: &[f64],
+    bounds: Option<&[(f64, f64)]>,
+    config: NelderMeadConfig,
+) -> NelderMeadResult
+where
+    F: Fn(&[f64]) -> f64,
+{
+    #[cfg(all(feature = "basin", anofox_basin_bobyqa))]
+    {
+        basin_backend::bobyqa_basin(objective, initial, bounds, config)
+    }
+    #[cfg(not(all(feature = "basin", anofox_basin_bobyqa)))]
+    {
+        nelder_mead(objective, initial, bounds, config)
     }
 }
 

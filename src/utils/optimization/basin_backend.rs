@@ -953,3 +953,216 @@ mod lbfgs_tests {
         );
     }
 }
+
+// =========================================================================
+// BOBYQA for box-bounded smoothing parameters (GH #234, step 2)
+// =========================================================================
+
+/// Objective values at or above this are treated as "inadmissible" markers
+/// (the ETS / Holt-Winters objectives return `f64::MAX` outside their
+/// admissible region). BOBYQA interpolates a quadratic model through the
+/// sampled values, so a raw `f64::MAX` would overflow the model; such values
+/// are replaced by a finite penalty instead (see [`ScaledObjective`]).
+const INADMISSIBLE: f64 = 1e100;
+
+/// BOBYQA adapter: works in the unit cube `u in [0, 1]^n` (mapped to the
+/// caller's box by `x = lower + u * (upper - lower)`), so one trust-region
+/// radius fits every coordinate even when the box mixes `[0, 1]` smoothing
+/// parameters with data-scaled initial-state bounds, and replaces
+/// inadmissible objective values by `penalty`.
+struct ScaledObjective<'a, F: Fn(&[f64]) -> f64> {
+    f: &'a F,
+    lower: Vec<f64>,
+    width: Vec<f64>,
+    penalty: f64,
+}
+
+impl<F: Fn(&[f64]) -> f64> ScaledObjective<'_, F> {
+    fn to_x(&self, u: &[f64]) -> Vec<f64> {
+        u.iter()
+            .zip(self.lower.iter().zip(&self.width))
+            .map(|(u, (lo, w))| lo + u.clamp(0.0, 1.0) * w)
+            .collect()
+    }
+}
+
+impl<F: Fn(&[f64]) -> f64> basin::CostFunction for ScaledObjective<'_, F> {
+    type Param = Vec<f64>;
+    type Output = f64;
+    type Error = std::convert::Infallible;
+
+    fn cost(&self, u: &Vec<f64>) -> Result<f64, Self::Error> {
+        let v = (self.f)(&self.to_x(u));
+        Ok(if v.is_finite() && v < INADMISSIBLE {
+            v
+        } else {
+            self.penalty
+        })
+    }
+}
+
+/// Basin BOBYQA (Powell 2009) for a fully box-bounded problem, returning a
+/// [`NelderMeadResult`] so callers can swap it in for [`super::nelder_mead`].
+///
+/// Requirements (otherwise the call falls back to [`super::nelder_mead`] with
+/// the same arguments): `bounds` present, one finite `(lower, upper)` pair
+/// per coordinate with `upper > lower`, a non-empty start point, and a
+/// finite, admissible objective value at the (clamped) start point.
+///
+/// Termination mapping from [`NelderMeadConfig`]: the trust region shrinks
+/// from `rho_beg = 0.1` to `rho_end = 1e-6` in unit-cube coordinates (i.e.
+/// relative to each coordinate's box width); the evaluation budget is
+/// `max_iter * (n + 1)` objective calls, the worst-case budget of the
+/// Nelder-Mead iterations it replaces (a shrink step costs `n + 1` calls).
+/// `optimal_value` is the raw objective at the returned point (never the
+/// internal penalty).
+pub fn bobyqa_basin<F>(
+    objective: F,
+    initial: &[f64],
+    bounds: Option<&[(f64, f64)]>,
+    config: NelderMeadConfig,
+) -> NelderMeadResult
+where
+    F: Fn(&[f64]) -> f64,
+{
+    let n = initial.len();
+    let usable = bounds.filter(|b| {
+        n > 0
+            && b.len() == n
+            && b.iter()
+                .all(|&(lo, hi)| lo.is_finite() && hi.is_finite() && hi > lo)
+    });
+    let Some(b) = usable else {
+        return super::nelder_mead(objective, initial, bounds, config);
+    };
+    if config.max_iter == 0 {
+        return super::nelder_mead(objective, initial, bounds, config);
+    }
+
+    let lower: Vec<f64> = b.iter().map(|&(lo, _)| lo).collect();
+    let width: Vec<f64> = b.iter().map(|&(lo, hi)| hi - lo).collect();
+    let u0: Vec<f64> = initial
+        .iter()
+        .zip(lower.iter().zip(&width))
+        .map(|(x, (lo, w))| ((x - lo) / w).clamp(0.0, 1.0))
+        .collect();
+
+    let mut scaled = ScaledObjective {
+        f: &objective,
+        lower,
+        width,
+        penalty: 0.0,
+    };
+    let f0 = objective(&scaled.to_x(&u0));
+    if !f0.is_finite() || f0 >= INADMISSIBLE {
+        return super::nelder_mead(objective, initial, bounds, config);
+    }
+    scaled.penalty = f0 + 1e3 * (1.0 + f0.abs());
+
+    let constraints = basin::ConstraintSet::new().with_bounds(basin::BoxBounds::new(
+        Some(vec![0.0; n]),
+        Some(vec![1.0; n]),
+    ));
+    let problem = basin::Constrained::new(scaled, constraints);
+    let solver = basin::Bobyqa::new()
+        .with_initial_radius(0.1)
+        .with_final_radius(1e-6);
+    let max_evals = (config.max_iter as u64).saturating_mul(n as u64 + 1);
+    let run = basin::Executor::new(problem, solver, basin::PointState::new(u0))
+        .max_cost_evals(max_evals)
+        .run();
+
+    match run {
+        Ok(result) => {
+            let u = result.best_param();
+            let x: Vec<f64> = u
+                .iter()
+                .zip(b)
+                .map(|(u, &(lo, hi))| lo + u.clamp(0.0, 1.0) * (hi - lo))
+                .collect();
+            let value = objective(&x);
+            NelderMeadResult {
+                optimal_point: x,
+                optimal_value: super::sanitize_objective(value),
+                iterations: result.iter() as usize,
+                converged: result.report.termination.is_converged(),
+            }
+        }
+        Err(_) => super::nelder_mead(objective, initial, bounds, config),
+    }
+}
+
+#[cfg(test)]
+mod bobyqa_tests {
+    use super::*;
+    use approx::assert_relative_eq;
+
+    #[test]
+    fn bobyqa_basin_bounded_quadratic() {
+        let result = bobyqa_basin(
+            |x| (x[0] - 0.3).powi(2) + (x[1] - 0.7).powi(2),
+            &[0.5, 0.5],
+            Some(&[(0.0, 1.0), (0.0, 1.0)]),
+            NelderMeadConfig::default(),
+        );
+        assert!(result.converged);
+        assert_relative_eq!(result.optimal_point[0], 0.3, epsilon = 1e-5);
+        assert_relative_eq!(result.optimal_point[1], 0.7, epsilon = 1e-5);
+    }
+
+    #[test]
+    fn bobyqa_basin_active_bound_and_mixed_scales() {
+        // Optimum outside the box in x[0] (active lower bound) and a second
+        // coordinate on a data-sized scale, as in ETS's joint state bounds.
+        let result = bobyqa_basin(
+            |x| (x[0] + 1.0).powi(2) + ((x[1] - 250.0) / 100.0).powi(2),
+            &[0.5, 0.0],
+            Some(&[(0.0, 1.0), (-500.0, 500.0)]),
+            NelderMeadConfig::default(),
+        );
+        assert_relative_eq!(result.optimal_point[0], 0.0, epsilon = 1e-9);
+        assert_relative_eq!(result.optimal_point[1], 250.0, epsilon = 1e-2);
+        assert_relative_eq!(result.optimal_value, 1.0, epsilon = 1e-8);
+    }
+
+    #[test]
+    fn bobyqa_basin_inadmissible_region_reports_raw_value() {
+        // f64::MAX marks an inadmissible region (x[0] > 0.8), as the ETS
+        // objectives do; the minimum is inside the admissible part.
+        let result = bobyqa_basin(
+            |x| {
+                if x[0] > 0.8 {
+                    f64::MAX
+                } else {
+                    (x[0] - 0.75).powi(2)
+                }
+            },
+            &[0.2],
+            Some(&[(0.0, 1.0)]),
+            NelderMeadConfig::default(),
+        );
+        assert!(result.optimal_point[0] <= 0.8);
+        assert_relative_eq!(result.optimal_point[0], 0.75, epsilon = 1e-4);
+        assert!(result.optimal_value < 1e-6);
+    }
+
+    #[test]
+    fn bobyqa_basin_falls_back_without_finite_box() {
+        let f = |x: &[f64]| (x[0] - 2.0).powi(2) + (x[1] - 3.0).powi(2);
+        for bounds in [
+            None,
+            Some(&[(0.0, 10.0), (f64::NEG_INFINITY, f64::INFINITY)][..]),
+        ] {
+            let a = bobyqa_basin(f, &[0.0, 0.0], bounds, NelderMeadConfig::default());
+            let b = crate::utils::optimization::nelder_mead(
+                f,
+                &[0.0, 0.0],
+                bounds,
+                NelderMeadConfig::default(),
+            );
+            assert_eq!(a.optimal_point, b.optimal_point);
+        }
+        let empty = bobyqa_basin(f, &[], Some(&[]), NelderMeadConfig::default());
+        assert!(empty.optimal_point.is_empty());
+    }
+}

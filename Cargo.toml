@@ -48,7 +48,7 @@ anomaly = ["distributional"]
 basin = ["dep:basin"]
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anofox_basin_optimizer)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anofox_basin_optimizer)', 'cfg(anofox_basin_bobyqa)'] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
