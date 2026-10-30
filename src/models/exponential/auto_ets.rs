@@ -6,6 +6,7 @@
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
 use crate::models::exponential::ets::{ETSSpec, ErrorType, SeasonalType, TrendType, ETS};
+use crate::models::incremental::{exog_update_error, IncrementalForecaster, ModelState};
 use crate::models::inspect::{EtsExplanation, Explanation, Inspectable};
 use crate::models::{validate_series_complete, Forecaster};
 use crate::utils::ols::{ols_fit, ols_residuals, OLSResult};
@@ -925,6 +926,49 @@ impl Forecaster for AutoETS {
             }
             Ok(base_forecast)
         }
+    }
+}
+
+/// Incremental updates act on the selected [`ETS`] model at its fitted
+/// specification and parameters; no model re-selection happens. `state()`
+/// exports that ETS model's state, and `from_state()` accepts an ETS state
+/// and restores an `AutoETS` (default configuration) wrapping it.
+impl IncrementalForecaster for AutoETS {
+    fn update(&mut self, new_obs: &[f64]) -> Result<()> {
+        if self.exog_ols.is_some() {
+            return Err(exog_update_error(self.name()));
+        }
+        let model = self
+            .selected_model
+            .as_mut()
+            .ok_or(ForecastError::FitRequired {
+                model: Some("AutoETS".into()),
+            })?;
+        model.update(new_obs)?;
+        if let Some(values) = self.training_values_store.as_mut() {
+            values.extend_from_slice(new_obs);
+        }
+        Ok(())
+    }
+
+    fn state(&self) -> Result<ModelState> {
+        if self.exog_ols.is_some() {
+            return Err(exog_update_error(self.name()));
+        }
+        self.selected_model
+            .as_ref()
+            .ok_or(ForecastError::FitRequired {
+                model: Some(self.name().into()),
+            })?
+            .state()
+    }
+
+    fn from_state(state: ModelState) -> Result<Self> {
+        let model = ETS::from_state(state)?;
+        let mut auto = Self::new();
+        auto.selected_spec = Some(model.spec());
+        auto.selected_model = Some(model);
+        Ok(auto)
     }
 }
 

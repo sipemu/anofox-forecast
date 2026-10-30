@@ -5,6 +5,10 @@
 use super::ets::{ETSSpec, ETS};
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
+use crate::models::incremental::{
+    check_finite_state, exog_update_error, validate_update_obs, wrong_state_error,
+    IncrementalForecaster, ModelState, SesState,
+};
 use crate::models::{validate_series_complete, FittedParams, Forecaster};
 use crate::utils::optimization::{nelder_mead, NelderMeadConfig};
 use crate::utils::stats::quantile_normal;
@@ -69,6 +73,10 @@ pub struct SimpleExponentialSmoothing {
     training_values_store: Option<Vec<f64>>,
     /// Training-time exogenous regressors, retained for the residual-Ridge shim.
     training_regressors_store: Option<std::collections::HashMap<String, Vec<f64>>>,
+    /// Sum of squared one-step residuals (first observation excluded), kept
+    /// so `update()` can extend the variance estimates without the history.
+    #[cfg_attr(feature = "serde", serde(default))]
+    sse: Option<f64>,
 }
 
 impl SimpleExponentialSmoothing {
@@ -89,6 +97,7 @@ impl SimpleExponentialSmoothing {
             skip_optimization: false,
             training_values_store: None,
             training_regressors_store: None,
+            sse: None,
         }
     }
 
@@ -108,6 +117,7 @@ impl SimpleExponentialSmoothing {
             skip_optimization: false,
             training_values_store: None,
             training_regressors_store: None,
+            sse: None,
         }
     }
 
@@ -133,6 +143,7 @@ impl SimpleExponentialSmoothing {
             skip_optimization: true,
             training_values_store: None,
             training_regressors_store: None,
+            sse: None,
         }
     }
 
@@ -144,6 +155,33 @@ impl SimpleExponentialSmoothing {
     /// Get the current level.
     pub fn level(&self) -> Option<f64> {
         self.level
+    }
+
+    /// One step of the level recursion.
+    fn step(alpha: f64, level: f64, y: f64) -> f64 {
+        alpha * y + (1.0 - alpha) * level
+    }
+
+    /// Store `sse` and derive the residual variance and the interval sigma2
+    /// from it for the current `n`.
+    fn set_variances(&mut self, sse: f64) {
+        self.sse = Some(sse);
+        let n_resid = self.n.saturating_sub(1);
+        if n_resid == 0 {
+            return;
+        }
+        self.residual_variance = Some(sse / n_resid as f64);
+
+        // D-08 (plan 11-08): degrees-of-freedom-corrected sigma2 for
+        // `predict_with_intervals`'s ETS(A,N,N) interval, matching R
+        // `ses()`'s convention (`sigma2 = SSE/(n - p)`). `p = 2` when
+        // alpha was estimated by this `fit()` call (alpha and the
+        // initial level both count as estimated parameters, as in R);
+        // `p = 1` when alpha was supplied fixed via `with_alpha` and
+        // is not re-estimated here (only the level is "fresh").
+        let df_params = if self.skip_optimization { 1.0 } else { 2.0 };
+        let denom = (self.n as f64 - df_params).max(1.0);
+        self.interval_sigma2 = Some(sse / denom);
     }
 
     /// Calculate SSE for a given alpha value.
@@ -222,31 +260,15 @@ impl Forecaster for SimpleExponentialSmoothing {
             let forecast = level;
             fitted.push(forecast);
             residuals.push(y - forecast);
-            level = alpha * y + (1.0 - alpha) * level;
+            level = Self::step(alpha, level, y);
         }
 
         self.level = Some(level);
         self.fitted = Some(fitted);
 
         // Calculate residual variance (excluding first observation)
-        let valid_residuals: Vec<f64> = residuals[1..].to_vec();
-        if !valid_residuals.is_empty() {
-            let sse = crate::simd::sum_of_squares(&valid_residuals);
-            let variance = sse / valid_residuals.len() as f64;
-            self.residual_variance = Some(variance);
-
-            // D-08 (plan 11-08): degrees-of-freedom-corrected sigma2 for
-            // `predict_with_intervals`'s ETS(A,N,N) interval, matching R
-            // `ses()`'s convention (`sigma2 = SSE/(n - p)`). `p = 2` when
-            // alpha was estimated by this `fit()` call (alpha and the
-            // initial level both count as estimated parameters, as in R);
-            // `p = 1` when alpha was supplied fixed via `with_alpha` and
-            // is not re-estimated here (only the level is "fresh").
-            let df_params = if self.skip_optimization { 1.0 } else { 2.0 };
-            let denom = (self.n as f64 - df_params).max(1.0);
-            self.interval_sigma2 = Some(sse / denom);
-        }
-
+        let sse = crate::simd::sum_of_squares(&residuals[1..]);
+        self.set_variances(sse);
         self.residuals = Some(residuals);
 
         self.training_values_store = Some(values.to_vec());
@@ -390,6 +412,75 @@ impl Forecaster for SimpleExponentialSmoothing {
             params,
             seasonal: None,
         })
+    }
+}
+
+impl IncrementalForecaster for SimpleExponentialSmoothing {
+    fn update(&mut self, new_obs: &[f64]) -> Result<()> {
+        validate_update_obs(new_obs)?;
+        if self.training_regressors_store.is_some() {
+            return Err(exog_update_error(self.name()));
+        }
+        let (Some(alpha), Some(mut level), Some(mut sse)) = (self.alpha, self.level, self.sse)
+        else {
+            return Err(ForecastError::FitRequired {
+                model: Some(self.name().into()),
+            });
+        };
+        if new_obs.is_empty() {
+            return Ok(());
+        }
+
+        for &y in new_obs {
+            let err = y - level;
+            sse += err * err;
+            if let Some(fitted) = self.fitted.as_mut() {
+                fitted.push(level);
+            }
+            if let Some(residuals) = self.residuals.as_mut() {
+                residuals.push(err);
+            }
+            level = Self::step(alpha, level, y);
+        }
+        if let Some(values) = self.training_values_store.as_mut() {
+            values.extend_from_slice(new_obs);
+        }
+
+        self.level = Some(level);
+        self.n += new_obs.len();
+        self.set_variances(sse);
+        Ok(())
+    }
+
+    fn state(&self) -> Result<ModelState> {
+        let (Some(alpha), Some(level), Some(sse)) = (self.alpha, self.level, self.sse) else {
+            return Err(ForecastError::FitRequired {
+                model: Some(self.name().into()),
+            });
+        };
+        Ok(ModelState::SimpleExponentialSmoothing(SesState {
+            alpha,
+            level,
+            n: self.n,
+            sse,
+            optimize: self.optimize,
+            warm_start: self.skip_optimization,
+        }))
+    }
+
+    fn from_state(state: ModelState) -> Result<Self> {
+        let ModelState::SimpleExponentialSmoothing(st) = state else {
+            return Err(wrong_state_error("SimpleExponentialSmoothing", &state));
+        };
+        check_finite_state("SimpleExponentialSmoothing", &[st.alpha, st.level, st.sse])?;
+        let mut model = Self::auto();
+        model.alpha = Some(st.alpha);
+        model.optimize = st.optimize;
+        model.skip_optimization = st.warm_start;
+        model.level = Some(st.level);
+        model.n = st.n;
+        model.set_variances(st.sse);
+        Ok(model)
     }
 }
 
