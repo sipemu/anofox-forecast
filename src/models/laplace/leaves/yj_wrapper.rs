@@ -82,7 +82,7 @@ impl Leaf for YjWrappedLeaf {
     fn name(&self) -> &'static str {
         // Leak the label so the trait's &'static str contract is honoured.
         // This is O(unique lambdas), typically 3-5 leaks per process — fine.
-        Box::leak(self.label.clone().into_boxed_str())
+        crate::models::laplace::leaf::intern_label(&self.label)
     }
 
     fn predict(&self, horizon: usize) -> Vec<Gaussian> {
