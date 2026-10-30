@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — row-at-a-time regression feature builder
+
+- **`FeatureRowBuilder` (DataZooDE/anofox-forecast#227).** The regression feature
+  engineering is now available as a standalone, streaming-friendly builder:
+  `FeatureRowBuilder::fit(&features, &series)` resolves the data-dependent state once
+  (fitted trend / seasonal components, structural columns, categorical encoders, the exog
+  column set), and `write_row(values, exog, t, &mut row)` appends the feature row for
+  observation `t` into a caller-owned buffer, reading only `values[..t]` and the exog
+  columns. No design matrix is materialised, so a panel fit can accumulate `XᵀX` one row at
+  a time through a single reusable scratch row and reuse every local feature (lags,
+  `trend_type` components, Fourier / dummy seasonality, rolling / EWM, `event_distance`,
+  raw and derived exog incl. all categorical encodings). Rows beyond the fitted range
+  project fitted components forward and forward-fill structural columns.
+  `RegressionFeatures::resolved_for(&series)` freezes an `auto_lags` selection into a fixed
+  lag set for use with the builder.
+- `RegressionForecaster`'s design matrix is now built through `FeatureRowBuilder`, pinned
+  bit-identical to the previous implementation by a golden fingerprint over two
+  configurations that use every feature family (forecasts are unchanged). The forecast-
+  horizon (recursive predict) path is unchanged in this release.
+
 ### Fixed — AutoETS no longer extrapolates one-off spikes as a trend
 
 - **Spike / intermittency trend guard (DataZooDE/anofox-forecast#259).** On a series
