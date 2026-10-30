@@ -990,6 +990,20 @@ mod ols_impl {
             /// Regularization strength (λ ≥ 0).
             lambda: f64,
         },
+        /// Ridge regression with a conditioning-aware λ (DataZooDE/anofox-forecast#258):
+        /// each fit measures the condition number `κ(XᵀX)` of its design and uses
+        /// `lambda_small` when `κ ≤ cond_threshold`, `lambda` otherwise. A fixed λ
+        /// over-shrinks coefficients (e.g. a seasonal spike amplitude) on a
+        /// well-conditioned design, where the penalty buys no stability. See
+        /// [`RegressionForecaster::ridge_conditioning_aware`].
+        RidgeConditioningAware {
+            /// λ used on an ill-conditioned design (`κ > cond_threshold`).
+            lambda: f64,
+            /// λ used on a well-conditioned design (`κ ≤ cond_threshold`).
+            lambda_small: f64,
+            /// `κ(XᵀX)` at or below which the design counts as well-conditioned.
+            cond_threshold: f64,
+        },
         /// Elastic Net (L1 + L2 regularization).
         ElasticNet {
             /// Combined regularization strength.
@@ -1067,6 +1081,7 @@ mod ols_impl {
             match self {
                 Self::Ols => "OLS",
                 Self::Ridge { .. } => "Ridge",
+                Self::RidgeConditioningAware { .. } => "RidgeConditioningAware",
                 Self::ElasticNet { .. } => "ElasticNet",
                 Self::Quantile { .. } => "Quantile",
                 Self::Wls { .. } => "WLS",
@@ -1095,6 +1110,19 @@ mod ols_impl {
                     let model = RidgeRegressor::builder()
                         .with_intercept(true)
                         .lambda(*lambda)
+                        .build();
+                    let fitted = model.fit(x, y).map_err(|e| format!("Ridge: {}", e))?;
+                    Ok(Box::new(fitted))
+                }
+                Self::RidgeConditioningAware {
+                    lambda,
+                    lambda_small,
+                    cond_threshold,
+                } => {
+                    let model = RidgeRegressor::builder()
+                        .with_intercept(true)
+                        .lambda(*lambda)
+                        .conditioning_aware(*lambda_small, *cond_threshold)
                         .build();
                     let fitted = model.fit(x, y).map_err(|e| format!("Ridge: {}", e))?;
                     Ok(Box::new(fitted))
@@ -3418,6 +3446,7 @@ mod ols_impl {
     /// |---|---|
     /// | [`Ols`](RegressionBackend::Ols) | Default — unregularized |
     /// | [`Ridge`](RegressionBackend::Ridge) | L2 regularization — many features |
+    /// | [`RidgeConditioningAware`](RegressionBackend::RidgeConditioningAware) | Ridge with λ chosen by the design's conditioning |
     /// | [`ElasticNet`](RegressionBackend::ElasticNet) | L1+L2 — feature selection |
     /// | [`Quantile`](RegressionBackend::Quantile) | Conditional quantile estimation |
     /// | [`Wls`](RegressionBackend::Wls) | Observation weighting / recency |
@@ -3467,6 +3496,26 @@ mod ols_impl {
         /// Create a Ridge regression forecaster (L2 regularization).
         pub fn ridge(lambda: f64, features: RegressionFeatures) -> Self {
             Self::new(RegressionBackend::Ridge { lambda }, features)
+        }
+
+        /// Create a Ridge forecaster whose λ follows the design's conditioning
+        /// (DataZooDE/anofox-forecast#258): `lambda_small` when `κ(XᵀX) ≤ cond_threshold`,
+        /// `lambda` otherwise. `anofox_regression::solvers::ridge::DEFAULT_LAMBDA_SMALL` (0.1)
+        /// and `DEFAULT_CONDITION_THRESHOLD` (1000) are the upstream defaults.
+        pub fn ridge_conditioning_aware(
+            lambda: f64,
+            lambda_small: f64,
+            cond_threshold: f64,
+            features: RegressionFeatures,
+        ) -> Self {
+            Self::new(
+                RegressionBackend::RidgeConditioningAware {
+                    lambda,
+                    lambda_small,
+                    cond_threshold,
+                },
+                features,
+            )
         }
 
         /// Create an Elastic Net forecaster (L1 + L2 regularization).
@@ -5309,6 +5358,28 @@ mod ols_impl {
 
         // ── Component integration tests ─────────────────────────────
 
+        /// [`make_seasonal_ts`] plus deterministic noise (sd ≈ 1). The noise-free
+        /// series is fitted exactly by several candidate models, so a correct OLS
+        /// and the Dynamic average agree on it (sipemu/anofox-regression#171); the
+        /// "Dynamic differs from OLS" tests need a series no model fits exactly.
+        fn make_noisy_seasonal_ts(n: usize, period: usize) -> TimeSeries {
+            let mut state = 42u64;
+            let values: Vec<f64> = (0..n)
+                .map(|i| {
+                    state = state
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    let noise = ((state >> 11) as f64 / (1u64 << 53) as f64 - 0.5) * 3.46;
+                    let t = i as f64;
+                    2.0 * t
+                        + 10.0 * (2.0 * std::f64::consts::PI * t / period as f64).sin()
+                        + 5.0
+                        + noise
+                })
+                .collect();
+            TimeSeries::univariate(make_timestamps(n), values).unwrap()
+        }
+
         fn make_seasonal_ts(n: usize, period: usize) -> TimeSeries {
             // y = 2*t + 10 * sin(2*pi*t/period) + 5
             let values: Vec<f64> = (0..n)
@@ -6288,6 +6359,54 @@ mod ols_impl {
             assert!(model.r_squared().unwrap() > 0.9);
         }
 
+        /// Seasonal-dummy fit over 4 full cycles: well conditioned, so the
+        /// conditioning-aware backend uses `lambda_small` and keeps the spike
+        /// amplitude, while a fixed λ = 1.0 shrinks it (#258).
+        #[test]
+        fn ridge_conditioning_aware_keeps_spike_on_well_conditioned_design() {
+            let period = 12;
+            let values: Vec<f64> = (0..4 * period)
+                .map(|i| if i % period == 11 { 60.0 } else { 10.0 })
+                .collect();
+            let ts = TimeSeries::univariate(make_timestamps(values.len()), values).unwrap();
+            let features = RegressionFeatures::new()
+                .no_trend()
+                .with_seasonal(SeasonalSpec::Fourier { period, order: 5 })
+                .no_exog();
+            let spike = |mut model: RegressionForecaster| {
+                model.fit(&ts).unwrap();
+                let f = model.predict(period).unwrap();
+                let p = f.primary();
+                p[11] - p[0]
+            };
+            let fixed = spike(RegressionForecaster::ridge(1.0, features.clone()));
+            let aware = spike(RegressionForecaster::ridge_conditioning_aware(
+                1.0,
+                0.1,
+                1000.0,
+                features.clone(),
+            ));
+            let ols = spike(RegressionForecaster::ols(features));
+            assert!((aware - ols).abs() < 0.03 * ols, "aware {aware}, ols {ols}");
+            assert!(
+                fixed < aware,
+                "fixed {fixed} should shrink below aware {aware}"
+            );
+        }
+
+        #[test]
+        fn ridge_conditioning_aware_name() {
+            let ts = make_linear_ts(40);
+            let mut model = RegressionForecaster::ridge_conditioning_aware(
+                1.0,
+                0.1,
+                1000.0,
+                RegressionFeatures::new().trend().no_exog(),
+            );
+            model.fit(&ts).unwrap();
+            assert_eq!(model.name(), "RidgeConditioningAware");
+        }
+
         #[test]
         fn backend_model_registry_integration() {
             use crate::models::{ModelRegistry, ModelSpec};
@@ -6382,7 +6501,7 @@ mod ols_impl {
             // v0.10.1 regression. Use a noisy seasonal signal where
             // OLS and the IC-weighted dynamic fit demonstrably diverge.
             let n = DYNAMIC_FAST_PATH_THRESHOLD - 5;
-            let ts = make_seasonal_ts(n, 7);
+            let ts = make_noisy_seasonal_ts(n, 7);
             let features = || RegressionFeatures::new().trend().fourier(7, 2).no_exog();
 
             let mut dynamic = RegressionForecaster::dynamic(features());
@@ -6413,7 +6532,7 @@ mod ols_impl {
             // Above the fast-path threshold the Dynamic backend must
             // actually do the IC-weighted fit and (in general) diverge
             // from a plain OLS fit on a non-linear signal.
-            let ts = make_seasonal_ts(200, 7);
+            let ts = make_noisy_seasonal_ts(200, 7);
             let features = || RegressionFeatures::new().trend().fourier(7, 2).no_exog();
 
             let mut dynamic = RegressionForecaster::dynamic(features());
