@@ -2,7 +2,7 @@
 //!
 //! GH #234, step 1: an evaluation backend for the `basin` crate sits behind
 //! the public `nelder_mead` / `lbfgs_optimize` signatures in
-//! [`basin_backend`]. Compiling it needs the `basin` cargo feature; routing
+//! `basin_backend`. Compiling it needs the `basin` cargo feature; routing
 //! model fits to it additionally needs the compiler cfg
 //! `anofox_basin_optimizer` (see [`optimizer_backend`]). The hand-rolled
 //! `nelder_mead_legacy` / `lbfgs_optimize_legacy` optimizers remain the
@@ -11,7 +11,7 @@
 #[cfg(feature = "basin")]
 mod basin_backend;
 #[cfg(feature = "basin")]
-pub use basin_backend::nelder_mead_basin;
+pub use basin_backend::{lbfgs_optimize_basin, nelder_mead_basin};
 
 #[cfg(all(anofox_basin_optimizer, not(feature = "basin")))]
 compile_error!(
@@ -820,6 +820,28 @@ impl Default for LbfgsConfig {
 /// Much faster than Nelder-Mead for smooth objectives (ARIMA CSS): converges in
 /// ~30 iterations vs NM's 200-1000.
 pub fn lbfgs_optimize<F>(
+    objective: F,
+    initial: &[f64],
+    bounds: Option<&[(f64, f64)]>,
+    config: LbfgsConfig,
+) -> NelderMeadResult
+where
+    F: Fn(&[f64]) -> f64,
+{
+    #[cfg(all(feature = "basin", anofox_basin_optimizer))]
+    {
+        basin_backend::lbfgs_optimize_basin(objective, initial, bounds, config)
+    }
+    #[cfg(not(all(feature = "basin", anofox_basin_optimizer)))]
+    {
+        lbfgs_optimize_legacy(objective, initial, bounds, config)
+    }
+}
+
+/// Hand-rolled L-BFGS (the default implementation of [`lbfgs_optimize`]). See
+/// that function's doc comment for the algorithm contract; this body is
+/// unchanged from before GH #234, step 1.
+fn lbfgs_optimize_legacy<F>(
     objective: F,
     initial: &[f64],
     bounds: Option<&[(f64, f64)]>,

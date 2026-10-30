@@ -183,7 +183,7 @@ fn nelder_mead_result_from_basin(
 ///
 /// Routes bounded problems through basin's `Projected` (clamping) variant via
 /// a `Constrained` box-bounds problem, and unbounded problems through plain
-/// `NelderMead`. Falls back to [`super::nelder_mead_legacy`] when the point is
+/// `NelderMead`. Falls back to `nelder_mead_legacy` when the point is
 /// empty, the configuration is outside basin's admissible coefficient ranges
 /// (threat T-go2-01), or the basin solver run itself returns `Err` (e.g. an
 /// invalid box under basin's stricter bounds validation).
@@ -248,6 +248,201 @@ where
         // stricter bounds validation); preserve legacy behavior rather than
         // propagate a panic or a silently wrong result.
         None => super::nelder_mead_legacy(objective, initial, bounds, config),
+    }
+}
+
+// =========================================================================
+// L-BFGS / L-BFGS-B backend with bound-aware finite-difference gradients
+// =========================================================================
+
+use super::LbfgsConfig;
+
+/// Objective + bound-aware finite-difference gradient adapter for
+/// [`lbfgs_optimize_basin`]. Unlike [`Objective`], this always carries a
+/// `lower`/`upper` pair (filled with `(-inf, inf)` for the unbounded path),
+/// so the central-difference probe can detect when it would step outside a
+/// finite box and switch to a one-sided difference without ever leaving it.
+struct GradientObjective<'a, F: Fn(&[f64]) -> f64> {
+    f: &'a F,
+    lower: &'a [f64],
+    upper: &'a [f64],
+    fd_step: f64,
+}
+
+impl<F: Fn(&[f64]) -> f64> basin::CostFunction for GradientObjective<'_, F> {
+    type Param = Vec<f64>;
+    type Output = f64;
+    type Error = std::convert::Infallible;
+
+    fn cost(&self, x: &Vec<f64>) -> Result<f64, Self::Error> {
+        Ok(super::sanitize_objective((self.f)(x)))
+    }
+}
+
+impl<F: Fn(&[f64]) -> f64> basin::Gradient for GradientObjective<'_, F> {
+    type Gradient = Vec<f64>;
+
+    fn gradient(&self, x: &Vec<f64>) -> Result<Vec<f64>, Self::Error> {
+        let n = x.len();
+        let mut grad = vec![0.0; n];
+        let mut probe = x.clone();
+
+        for i in 0..n {
+            let h = self.fd_step * (1.0 + x[i].abs());
+            // `cost()` sanitizes NaN/Inf to f64::MAX for basin's own calls,
+            // but the Gradient impl below reads `self.f` directly, so every
+            // probe here re-sanitizes independently (same as legacy's
+            // `finite_difference_gradient`).
+            let can_step_up = x[i] + h <= self.upper[i];
+            let can_step_down = x[i] - h >= self.lower[i];
+
+            let g = if can_step_up && can_step_down {
+                probe[i] = x[i] + h;
+                let f_plus = super::sanitize_objective((self.f)(&probe));
+                probe[i] = x[i] - h;
+                let f_minus = super::sanitize_objective((self.f)(&probe));
+                probe[i] = x[i];
+                (f_plus - f_minus) / (2.0 * h)
+            } else if can_step_down {
+                // Upper bound would be exceeded: backward difference.
+                let f_x = super::sanitize_objective((self.f)(x));
+                probe[i] = x[i] - h;
+                let f_minus = super::sanitize_objective((self.f)(&probe));
+                probe[i] = x[i];
+                (f_x - f_minus) / h
+            } else if can_step_up {
+                // Lower bound would be exceeded: forward difference.
+                probe[i] = x[i] + h;
+                let f_plus = super::sanitize_objective((self.f)(&probe));
+                probe[i] = x[i];
+                let f_x = super::sanitize_objective((self.f)(x));
+                (f_plus - f_x) / h
+            } else {
+                // Box narrower than the step on both sides; no safe probe.
+                0.0
+            };
+
+            grad[i] = if g.is_finite() { g } else { 0.0 };
+        }
+
+        Ok(grad)
+    }
+}
+
+/// Whether the L-BFGS configuration is inside basin's admissible ranges.
+/// basin's constructors `assert!` on violations (threat T-go2-01); checking
+/// first lets the caller fall back to the legacy optimizer.
+fn lbfgs_config_valid(config: &LbfgsConfig) -> bool {
+    config.memory_size >= 1
+        && config.backtrack_rho > 0.0
+        && config.backtrack_rho < 1.0
+        && config.armijo_c > 0.0
+        && config.armijo_c < 1.0
+        && config.max_linesearch >= 1
+        && config.max_iter > 0
+        && config.tolerance.is_finite()
+        && config.tolerance >= 0.0
+        && config.fd_step.is_finite()
+        && config.fd_step > 0.0
+}
+
+/// Basin-backed L-BFGS / L-BFGS-B, matching [`super::lbfgs_optimize`]'s
+/// signature.
+///
+/// Bounded problems route through basin's native L-BFGS-B (box constraints
+/// handled directly by the Cauchy-point/subspace-minimization machinery)
+/// instead of legacy's logit/exp reparametrization — the largest semantic
+/// difference between the two backends; see `docs/audits/basin-optimizer-parity.md`.
+/// Unbounded problems route through basin's unconstrained L-BFGS (two-loop
+/// recursion). Both share `GradientObjective`'s bound-aware finite-difference
+/// gradient. Falls back to `lbfgs_optimize_legacy` when the point is
+/// empty, the configuration is outside basin's admissible ranges (threat
+/// T-go2-01), or the basin solver run itself returns `Err`.
+pub fn lbfgs_optimize_basin<F>(
+    objective: F,
+    initial: &[f64],
+    bounds: Option<&[(f64, f64)]>,
+    config: LbfgsConfig,
+) -> NelderMeadResult
+where
+    F: Fn(&[f64]) -> f64,
+{
+    let n = initial.len();
+    if n == 0 {
+        return super::lbfgs_optimize_legacy(objective, initial, bounds, config);
+    }
+
+    if !lbfgs_config_valid(&config) {
+        return super::lbfgs_optimize_legacy(objective, initial, bounds, config);
+    }
+
+    let (lower, upper) = match bounds {
+        Some(b) => normalize_bounds(b, n),
+        None => (vec![f64::NEG_INFINITY; n], vec![f64::INFINITY; n]),
+    };
+
+    let run_result = match bounds {
+        Some(_) => {
+            let obj = GradientObjective {
+                f: &objective,
+                lower: &lower,
+                upper: &upper,
+                fd_step: config.fd_step,
+            };
+            let constraints = basin::ConstraintSet::new().with_bounds(basin::BoxBounds::new(
+                Some(lower.clone()),
+                Some(upper.clone()),
+            ));
+            let problem = basin::Constrained::new(obj, constraints);
+            let initial_point: Vec<f64> = initial
+                .iter()
+                .zip(lower.iter().zip(upper.iter()))
+                .map(|(&x, (&lo, &hi))| x.clamp(lo, hi))
+                .collect();
+            let line_search = basin::Backtracking::new()
+                .rho(config.backtrack_rho)
+                .with_sufficient_decrease_coefficient(config.armijo_c)
+                .max_iter(config.max_linesearch as u32);
+            let solver = basin::Lbfgs::with_line_search(line_search)
+                .with_m_capacity(config.memory_size)
+                .with_absolute_projected_gradient_tolerance(config.tolerance);
+            basin::Executor::new(problem, solver, basin::FirstOrderState::new(initial_point))
+                .max_iter(config.max_iter as u64)
+                .run()
+                .ok()
+        }
+        None => {
+            let obj = GradientObjective {
+                f: &objective,
+                lower: &lower,
+                upper: &upper,
+                fd_step: config.fd_step,
+            };
+            let line_search = basin::Backtracking::new()
+                .rho(config.backtrack_rho)
+                .with_sufficient_decrease_coefficient(config.armijo_c)
+                .max_iter(config.max_linesearch as u32);
+            let solver = basin::Lbfgs::with_line_search(line_search)
+                .with_m_capacity(config.memory_size)
+                .unbounded()
+                .with_absolute_gradient_tolerance(config.tolerance);
+            basin::Executor::new(obj, solver, basin::FirstOrderState::new(initial.to_vec()))
+                .max_iter(config.max_iter as u64)
+                .run()
+                .ok()
+        }
+    };
+
+    match run_result {
+        Some(result) => NelderMeadResult {
+            optimal_point: result.best_param().clone(),
+            optimal_value: result.best_cost(),
+            iterations: result.iter() as usize,
+            converged: result.report.termination.is_converged(),
+        },
+        // basin's `run()` returned `Err`; preserve legacy behavior rather
+        // than propagate a panic or a silently wrong result.
+        None => super::lbfgs_optimize_legacy(objective, initial, bounds, config),
     }
 }
 
@@ -584,5 +779,177 @@ mod tests {
 
         assert!(result.converged);
         assert_relative_eq!(result.optimal_point[0], 4.0, epsilon = 1e-3);
+    }
+}
+
+#[cfg(test)]
+mod lbfgs_tests {
+    use super::*;
+    use crate::utils::optimization::LbfgsConfig;
+    use approx::assert_relative_eq;
+
+    #[test]
+    fn lbfgs_basin_unbounded_quadratic() {
+        let result = lbfgs_optimize_basin(
+            |x| (x[0] - 5.0).powi(2) + (x[1] - 3.0).powi(2),
+            &[0.0, 0.0],
+            None,
+            LbfgsConfig::default(),
+        );
+
+        assert!(result.converged);
+        assert_relative_eq!(result.optimal_point[0], 5.0, epsilon = 1e-4);
+        assert_relative_eq!(result.optimal_point[1], 3.0, epsilon = 1e-4);
+    }
+
+    #[test]
+    fn lbfgs_basin_unbounded_rosenbrock() {
+        // Deviation from the plan's `<behavior>` spec: `max_iter: 500` does
+        // not converge Rosenbrock from (-1.2, 1.0) under either backend with
+        // finite-difference gradients (legacy needs ~786 iterations, basin
+        // ~675, both measured directly); 500 was an incorrect assumption in
+        // the plan, not a basin-specific shortfall. Using a budget that
+        // actually lets both backends reach the minimum, documented in
+        // docs/audits/basin-optimizer-parity.md.
+        let config = LbfgsConfig {
+            max_iter: 5000,
+            ..Default::default()
+        };
+        let result = lbfgs_optimize_basin(
+            |x| (1.0 - x[0]).powi(2) + 100.0 * (x[1] - x[0].powi(2)).powi(2),
+            &[-1.2, 1.0],
+            None,
+            config,
+        );
+
+        assert_relative_eq!(result.optimal_point[0], 1.0, epsilon = 1e-3);
+        assert_relative_eq!(result.optimal_point[1], 1.0, epsilon = 1e-3);
+    }
+
+    #[test]
+    fn lbfgs_basin_bounded_corner() {
+        // ARIMA's AR-coefficient bound shape: a tight box on one coordinate,
+        // unbounded on the other. The unconstrained minimum (5, 3) lies
+        // outside the box on x, so the solver should settle at the x
+        // boundary and the unconstrained optimum on y.
+        let result = lbfgs_optimize_basin(
+            |x| (x[0] - 5.0).powi(2) + (x[1] - 3.0).powi(2),
+            &[0.0, 0.0],
+            Some(&[(-0.995, 0.995), (f64::NEG_INFINITY, f64::INFINITY)]),
+            LbfgsConfig::default(),
+        );
+
+        assert_relative_eq!(result.optimal_point[0], 0.995, epsilon = 1e-6);
+        assert_relative_eq!(result.optimal_point[1], 3.0, epsilon = 1e-4);
+    }
+
+    #[test]
+    fn lbfgs_basin_nan_objective_handled() {
+        let result = lbfgs_optimize_basin(
+            |x| {
+                if x[0] < 0.0 {
+                    f64::NAN
+                } else {
+                    (x[0] - 2.0).powi(2)
+                }
+            },
+            &[1.0],
+            None,
+            LbfgsConfig::default(),
+        );
+
+        assert!(result.optimal_value.is_finite());
+    }
+
+    #[test]
+    fn lbfgs_basin_empty_initial() {
+        let result = lbfgs_optimize_basin(|_| 0.0, &[], None, LbfgsConfig::default());
+
+        assert!(!result.converged);
+        assert!(result.optimal_value.is_nan());
+    }
+
+    #[test]
+    fn lbfgs_basin_invalid_config_falls_back_to_legacy() {
+        // `backtrack_rho` outside (0, 1) is invalid for basin's `Backtracking`
+        // line search (threat T-go2-01). Deviation from the plan's
+        // `<behavior>` spec, found during this task: legacy does not
+        // actually recover a usable minimum for this input either — an
+        // ever-growing step (rho > 1) never satisfies the Armijo condition,
+        // so legacy's own line search fails on iteration 1 and breaks
+        // immediately (measured directly: `[0.0]`, not converged). The
+        // fallback therefore cannot "still find the quadratic minimum"; what
+        // it must do, and does, is reproduce legacy's own (poor) result
+        // exactly rather than basin's, without panicking.
+        //
+        // `memory_size: 0` is NOT exercised here for the same reason, one
+        // level further: `lbfgs_config_valid` correctly routes it to
+        // `lbfgs_optimize_legacy` to avoid basin's own panic, but the
+        // `lbfgs` crate legacy itself depends on panics
+        // (`assertion failed: buffer_size > 0`) on `memory_size: 0`
+        // regardless of basin — a pre-existing legacy limitation, not
+        // introduced by this backend. Both are recorded in
+        // docs/audits/basin-optimizer-parity.md.
+        let config = LbfgsConfig {
+            backtrack_rho: 1.5,
+            ..Default::default()
+        };
+        let basin_result = lbfgs_optimize_basin(|x| (x[0] - 5.0).powi(2), &[0.0], None, config);
+        let legacy_result = super::super::lbfgs_optimize_legacy(
+            |x: &[f64]| (x[0] - 5.0).powi(2),
+            &[0.0],
+            None,
+            config,
+        );
+
+        assert!(basin_result.optimal_value.is_finite());
+        assert_eq!(basin_result.optimal_point, legacy_result.optimal_point);
+        assert_eq!(basin_result.optimal_value, legacy_result.optimal_value);
+        assert_eq!(basin_result.converged, legacy_result.converged);
+    }
+
+    #[test]
+    fn lbfgs_basin_matches_legacy_unbounded_quadratic() {
+        let basin_result = lbfgs_optimize_basin(
+            |x| (x[0] - 5.0).powi(2) + (x[1] - 3.0).powi(2),
+            &[0.0, 0.0],
+            None,
+            LbfgsConfig::default(),
+        );
+        let legacy_result = super::super::lbfgs_optimize_legacy(
+            |x: &[f64]| (x[0] - 5.0).powi(2) + (x[1] - 3.0).powi(2),
+            &[0.0, 0.0],
+            None,
+            LbfgsConfig::default(),
+        );
+
+        assert_relative_eq!(
+            basin_result.optimal_value,
+            legacy_result.optimal_value,
+            epsilon = 1e-6
+        );
+    }
+
+    #[test]
+    fn lbfgs_basin_matches_legacy_bounded_corner() {
+        let bounds = [(-0.995, 0.995), (f64::NEG_INFINITY, f64::INFINITY)];
+        let basin_result = lbfgs_optimize_basin(
+            |x| (x[0] - 5.0).powi(2) + (x[1] - 3.0).powi(2),
+            &[0.0, 0.0],
+            Some(&bounds),
+            LbfgsConfig::default(),
+        );
+        let legacy_result = super::super::lbfgs_optimize_legacy(
+            |x: &[f64]| (x[0] - 5.0).powi(2) + (x[1] - 3.0).powi(2),
+            &[0.0, 0.0],
+            Some(&bounds),
+            LbfgsConfig::default(),
+        );
+
+        assert_relative_eq!(
+            basin_result.optimal_value,
+            legacy_result.optimal_value,
+            epsilon = 1e-6
+        );
     }
 }
