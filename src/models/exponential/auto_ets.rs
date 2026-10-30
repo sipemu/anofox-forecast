@@ -432,7 +432,7 @@ fn median_of(values: &mut [f64]) -> f64 {
 pub enum SpikeDiagnosis {
     /// Neither spiky nor intermittent: selection is unchanged.
     Clean,
-    /// More than [`ZERO_FRACTION_THRESHOLD`] of the values are zero.
+    /// More than `ZERO_FRACTION_THRESHOLD` of the values are zero.
     Intermittent,
     /// The tail window holds one-off spikes (see [`diagnose_spikes`]).
     SpikyTail,
@@ -459,13 +459,13 @@ fn spike_references(values: &[f64], seasonal_period: usize) -> Vec<f64> {
 
 /// Spike / intermittency diagnosis behind [`AutoETSConfig::spike_trend_guard`] (#259).
 ///
-/// * [`SpikeDiagnosis::Intermittent`]: more than [`ZERO_FRACTION_THRESHOLD`]
+/// * [`SpikeDiagnosis::Intermittent`]: more than `ZERO_FRACTION_THRESHOLD`
 ///   of the values are zero (relative to the series scale).
 /// * [`SpikeDiagnosis::SpikyTail`]: in the tail window (the last
-///   `max(period, 12)` values), the share of values above [`SPIKE_FACTOR`]
+///   `max(period, 12)` values), the share of values above `SPIKE_FACTOR`
 ///   times their reference level (see `spike_references`; positions with a
-///   non-positive reference are skipped) is above [`SPIKE_SHARE_THRESHOLD`]
-///   but at most [`SPIKE_SHARE_LEVEL_SHIFT`]. A tail that is mostly above its
+///   non-positive reference are skipped) is above `SPIKE_SHARE_THRESHOLD`
+///   but at most `SPIKE_SHARE_LEVEL_SHIFT`. A tail that is mostly above its
 ///   reference is a level change or strong growth, which a trend model may
 ///   legitimately follow, so it is not flagged.
 pub fn diagnose_spikes(values: &[f64], seasonal_period: usize) -> SpikeDiagnosis {
@@ -505,7 +505,7 @@ pub fn diagnose_spikes(values: &[f64], seasonal_period: usize) -> SpikeDiagnosis
     }
 }
 
-/// Cap every value above [`SPIKE_FACTOR`] times its reference level at that
+/// Cap every value above `SPIKE_FACTOR` times its reference level at that
 /// bound (the values AutoETS fits on when [`SpikeDiagnosis::SpikyTail`]).
 pub fn cap_spikes(values: &[f64], seasonal_period: usize) -> Vec<f64> {
     let references = spike_references(values, seasonal_period);
