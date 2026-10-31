@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-10-31
+
+### Added — incremental updates and compact model state
+
+- **`IncrementalForecaster` and `ModelState` (#233).** A new trait, built on `Forecaster`, for
+  models that can take new observations without a full refit:
+  - `update(&mut self, new_obs)` runs the model's state recursion over the new points only and
+    keeps the fitted parameters.
+  - `state()` / `from_state(ModelState)` export and restore a compact model state: parameters,
+    the final state vector and the running error sums used for prediction intervals. It
+    derives serde under the `serde` feature.
+  - `ModelState::restore()` returns a `Box<dyn IncrementalForecaster>`, for callers that store
+    states from mixed model types.
+
+  Supported models are `SimpleExponentialSmoothing`, `HoltLinearTrend` (including damped),
+  `HoltWinters` (additive and multiplicative), `ETS` (all 18 specs) and `AutoETS`, which
+  exports the state of the ETS model it selected.
+
+  Fitting on n points and then updating with k more gives the same states, point forecasts,
+  fitted values and residuals as fitting on n + k points with the same parameters, to 1e-9.
+  Interval widths match to 1e-9 for ETS and to 1e-6 for SES, Holt and Holt-Winters, whose
+  `fit()` sums squared residuals in f32. A stored state takes 38–204 bytes, compared with
+  2.9–288 KB for a fully serialized model. Restoring a state and adding 30 points takes under
+  1 µs; a refit takes between 0.4 ms and 0.58 s.
+
+  `Forecaster` itself is unchanged. The new private running-sum fields are `#[serde(default)]`,
+  so models serialized by earlier versions still deserialize. Calling `update()` on such a
+  model returns `FitRequired`.
+
+### Tests
+
+- **ERM reconciliation with biased base forecasts (#216).** The test uses a 7-node hierarchy
+  whose leaf forecasts are scaled ×1.25 and aggregate forecasts ×0.90. `Erm` scores 0.020 mean
+  relative holdout RMSE; the best MinT variant scores 0.055 and BottomUp 0.251.
+
 ## [0.18.1] - 2026-10-30
 
 ### Fixed
