@@ -6,6 +6,10 @@
 use super::ets::{ETSSpec, ETS};
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
+use crate::models::incremental::{
+    check_finite_state, exog_update_error, validate_update_obs, wrong_state_error, HoltState,
+    IncrementalForecaster, ModelState,
+};
 use crate::models::{validate_series_complete, Forecaster};
 use crate::utils::optimization::{nelder_mead, NelderMeadConfig};
 use crate::utils::stats::quantile_normal;
@@ -59,6 +63,10 @@ pub struct HoltLinearTrend {
     training_values_store: Option<Vec<f64>>,
     /// Training-time exogenous regressors, retained for the residual-Ridge shim.
     training_regressors_store: Option<std::collections::HashMap<String, Vec<f64>>>,
+    /// Sum of squared one-step residuals (first observation excluded), kept
+    /// so `update()` can extend the variance estimates without the history.
+    #[cfg_attr(feature = "serde", serde(default))]
+    sse: Option<f64>,
 }
 
 impl HoltLinearTrend {
@@ -82,6 +90,7 @@ impl HoltLinearTrend {
             n: 0,
             training_values_store: None,
             training_regressors_store: None,
+            sse: None,
         }
     }
 
@@ -106,6 +115,7 @@ impl HoltLinearTrend {
             n: 0,
             training_values_store: None,
             training_regressors_store: None,
+            sse: None,
         }
     }
 
@@ -125,6 +135,7 @@ impl HoltLinearTrend {
             n: 0,
             training_values_store: None,
             training_regressors_store: None,
+            sse: None,
         }
     }
 
@@ -144,6 +155,7 @@ impl HoltLinearTrend {
             n: 0,
             training_values_store: None,
             training_regressors_store: None,
+            sse: None,
         }
     }
 
@@ -192,9 +204,7 @@ impl HoltLinearTrend {
             let error = y - forecast;
             sse += error * error;
 
-            let l_prev = l;
-            l = alpha * y + (1.0 - alpha) * (l_prev + phi * b);
-            b = beta * (l - l_prev) + (1.0 - beta) * phi * b;
+            (l, b) = Self::step(alpha, beta, phi, l, b, y);
         }
 
         sse
@@ -250,6 +260,43 @@ impl HoltLinearTrend {
     }
 
     /// Calculate damped sum: phi + phi^2 + ... + phi^h.
+    /// One step of the level/trend recursion; returns the new `(level, trend)`.
+    fn step(alpha: f64, beta: f64, phi: f64, l: f64, b: f64, y: f64) -> (f64, f64) {
+        let l_new = alpha * y + (1.0 - alpha) * (l + phi * b);
+        let b_new = beta * (l_new - l) + (1.0 - beta) * phi * b;
+        (l_new, b_new)
+    }
+
+    /// Store `sse` and derive the residual variance and the interval sigma2
+    /// from it for the current `n`.
+    fn set_variances(&mut self, sse: f64) {
+        self.sse = Some(sse);
+        let n_resid = self.n.saturating_sub(1);
+        if n_resid == 0 {
+            return;
+        }
+        self.residual_variance = Some(sse / n_resid as f64);
+
+        // D-08 (plan 11-08): degrees-of-freedom-corrected sigma2 for
+        // `predict_with_intervals`'s ETS(A,A,N)/(A,Ad,N) interval. `p`
+        // always counts the initial level and trend (2); when `fit()`
+        // optimized the smoothing parameters, `p` also counts alpha,
+        // beta, and (if damped) phi -- matching R `holt()`'s
+        // convention that the smoothing parameters and the initial
+        // states are jointly the estimated parameters.
+        let df_params = if self.optimize {
+            if self.phi.is_some() {
+                5.0
+            } else {
+                4.0
+            }
+        } else {
+            2.0
+        };
+        let denom = (self.n as f64 - df_params).max(1.0);
+        self.interval_sigma2 = Some(sse / denom);
+    }
+
     fn damped_sum(phi: f64, h: usize) -> f64 {
         if (phi - 1.0).abs() < 1e-10 {
             h as f64
@@ -324,31 +371,8 @@ impl Forecaster for HoltLinearTrend {
         self.fitted = Some(fitted);
 
         // Calculate residual variance
-        let valid_residuals: Vec<f64> = residuals[1..].to_vec();
-        if !valid_residuals.is_empty() {
-            let sse = crate::simd::sum_of_squares(&valid_residuals);
-            let variance = sse / valid_residuals.len() as f64;
-            self.residual_variance = Some(variance);
-
-            // D-08 (plan 11-08): degrees-of-freedom-corrected sigma2 for
-            // `predict_with_intervals`'s ETS(A,A,N)/(A,Ad,N) interval. `p`
-            // always counts the initial level and trend (2); when `fit()`
-            // optimized the smoothing parameters, `p` also counts alpha,
-            // beta, and (if damped) phi -- matching R `holt()`'s
-            // convention that the smoothing parameters and the initial
-            // states are jointly the estimated parameters.
-            let df_params = if self.optimize {
-                if self.phi.is_some() {
-                    5.0
-                } else {
-                    4.0
-                }
-            } else {
-                2.0
-            };
-            let denom = (self.n as f64 - df_params).max(1.0);
-            self.interval_sigma2 = Some(sse / denom);
-        }
+        let sse = crate::simd::sum_of_squares(&residuals[1..]);
+        self.set_variances(sse);
 
         self.residuals = Some(residuals);
 
@@ -506,6 +530,95 @@ impl Forecaster for HoltLinearTrend {
         } else {
             "HoltLinearTrend"
         }
+    }
+}
+
+impl IncrementalForecaster for HoltLinearTrend {
+    fn update(&mut self, new_obs: &[f64]) -> Result<()> {
+        validate_update_obs(new_obs)?;
+        if self.training_regressors_store.is_some() {
+            return Err(exog_update_error(self.name()));
+        }
+        let (Some(alpha), Some(beta), Some(mut l), Some(mut b), Some(mut sse)) =
+            (self.alpha, self.beta, self.level, self.trend, self.sse)
+        else {
+            return Err(ForecastError::FitRequired {
+                model: Some(self.name().into()),
+            });
+        };
+        if new_obs.is_empty() {
+            return Ok(());
+        }
+        let phi = self.phi.unwrap_or(1.0);
+
+        for &y in new_obs {
+            let forecast = l + phi * b;
+            let err = y - forecast;
+            sse += err * err;
+            if let Some(fitted) = self.fitted.as_mut() {
+                fitted.push(forecast);
+            }
+            if let Some(residuals) = self.residuals.as_mut() {
+                residuals.push(err);
+            }
+            (l, b) = Self::step(alpha, beta, phi, l, b, y);
+        }
+        if let Some(values) = self.training_values_store.as_mut() {
+            values.extend_from_slice(new_obs);
+        }
+
+        self.level = Some(l);
+        self.trend = Some(b);
+        self.n += new_obs.len();
+        self.set_variances(sse);
+        Ok(())
+    }
+
+    fn state(&self) -> Result<ModelState> {
+        let (Some(alpha), Some(beta), Some(level), Some(trend), Some(sse)) =
+            (self.alpha, self.beta, self.level, self.trend, self.sse)
+        else {
+            return Err(ForecastError::FitRequired {
+                model: Some(self.name().into()),
+            });
+        };
+        Ok(ModelState::HoltLinearTrend(HoltState {
+            alpha,
+            beta,
+            phi: self.phi,
+            level,
+            trend,
+            n: self.n,
+            sse,
+            optimize: self.optimize,
+        }))
+    }
+
+    fn from_state(state: ModelState) -> Result<Self> {
+        let ModelState::HoltLinearTrend(st) = state else {
+            return Err(wrong_state_error("HoltLinearTrend", &state));
+        };
+        check_finite_state(
+            "HoltLinearTrend",
+            &[
+                st.alpha,
+                st.beta,
+                st.phi.unwrap_or(1.0),
+                st.level,
+                st.trend,
+                st.sse,
+            ],
+        )?;
+        let mut model = Self::auto();
+        model.alpha = Some(st.alpha);
+        model.beta = Some(st.beta);
+        model.phi = st.phi;
+        model.optimize = st.optimize;
+        model.level = Some(st.level);
+        model.trend = Some(st.trend);
+        model.n = st.n;
+        model.set_variances(st.sse);
+        Ok(model)
     }
 }
 

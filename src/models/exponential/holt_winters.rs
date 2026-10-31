@@ -6,6 +6,10 @@
 use super::ets::{ETSSpec, ETS};
 use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
+use crate::models::incremental::{
+    check_finite_state, exog_update_error, validate_update_obs, wrong_state_error,
+    HoltWintersState, IncrementalForecaster, ModelState,
+};
 use crate::models::{validate_series_complete, Forecaster};
 use crate::utils::optimization::{nelder_mead, NelderMeadConfig};
 use crate::utils::stats::quantile_normal;
@@ -78,6 +82,10 @@ pub struct HoltWinters {
     training_values_store: Option<Vec<f64>>,
     /// Training-time exogenous regressors, retained for the residual-Ridge shim.
     training_regressors_store: Option<std::collections::HashMap<String, Vec<f64>>>,
+    /// Sum of squared one-step residuals (first season excluded), kept so
+    /// `update()` can extend the variance estimates without the history.
+    #[cfg_attr(feature = "serde", serde(default))]
+    sse: Option<f64>,
 }
 
 impl HoltWinters {
@@ -106,6 +114,7 @@ impl HoltWinters {
             n: 0,
             training_values_store: None,
             training_regressors_store: None,
+            sse: None,
         }
     }
 
@@ -144,6 +153,7 @@ impl HoltWinters {
             n: 0,
             training_values_store: None,
             training_regressors_store: None,
+            sse: None,
         }
     }
 
@@ -186,6 +196,78 @@ impl HoltWinters {
     }
 
     /// Initialize state from first complete season(s).
+    /// One step of the level/trend/seasonal recursion at time index `t`:
+    /// updates the states in place and returns the one-step forecast of `y`.
+    fn step(
+        &self,
+        (alpha, beta, gamma): (f64, f64, f64),
+        level: &mut f64,
+        trend: &mut f64,
+        seasonals: &mut [f64],
+        t: usize,
+        y: f64,
+    ) -> f64 {
+        let season_idx = t % self.seasonal_period;
+        let s = seasonals[season_idx];
+
+        let forecast = match self.seasonal_type {
+            SeasonalType::Additive => *level + *trend + s,
+            SeasonalType::Multiplicative => (*level + *trend) * s,
+        };
+
+        let level_prev = *level;
+
+        // Update equations
+        match self.seasonal_type {
+            SeasonalType::Additive => {
+                *level = alpha * (y - s) + (1.0 - alpha) * (level_prev + *trend);
+                *trend = beta * (*level - level_prev) + (1.0 - beta) * *trend;
+                seasonals[season_idx] = gamma * (y - *level) + (1.0 - gamma) * s;
+            }
+            SeasonalType::Multiplicative => {
+                let y_deseasonalized = if s.abs() > 1e-10 { y / s } else { y };
+                *level = alpha * y_deseasonalized + (1.0 - alpha) * (level_prev + *trend);
+                *trend = beta * (*level - level_prev) + (1.0 - beta) * *trend;
+                let s_new = if level.abs() > 1e-10 {
+                    gamma * (y / *level) + (1.0 - gamma) * s
+                } else {
+                    s
+                };
+                seasonals[season_idx] = s_new;
+            }
+        }
+
+        forecast
+    }
+
+    /// Store `sse` and derive the residual variance and the interval sigma2
+    /// from it for the current `n`.
+    fn set_variances(&mut self, sse: f64) {
+        self.sse = Some(sse);
+        let period = self.seasonal_period;
+        let n_resid = self.n.saturating_sub(period);
+        if n_resid == 0 {
+            return;
+        }
+        self.residual_variance = Some(sse / n_resid as f64);
+
+        // D-08 (plan 11-08): degrees-of-freedom-corrected sigma2 for
+        // `predict_with_intervals`'s ETS(A,A,A)/(A,A,M) interval. `p`
+        // always counts the initial level, trend, and the free
+        // (period-1) seasonal states; when `fit()` optimized the
+        // smoothing parameters, `p` also counts alpha, beta and
+        // gamma -- matching `ETS::num_params()`'s structural
+        // convention for the optimized case.
+        let base_params = 2.0 + (period as f64 - 1.0);
+        let df_params = if self.optimize {
+            base_params + 3.0
+        } else {
+            base_params
+        };
+        let denom = (self.n as f64 - df_params).max(1.0);
+        self.interval_sigma2 = Some(sse / denom);
+    }
+
     fn initialize_state(
         values: &[f64],
         period: usize,
@@ -406,38 +488,16 @@ impl Forecaster for HoltWinters {
 
         // Process remaining data
         for (t, &y) in values.iter().enumerate().skip(period) {
-            let season_idx = t % period;
-            let s = seasonals[season_idx];
-
-            let forecast = match self.seasonal_type {
-                SeasonalType::Additive => level + trend + s,
-                SeasonalType::Multiplicative => (level + trend) * s,
-            };
-
+            let forecast = self.step(
+                (alpha, beta, gamma),
+                &mut level,
+                &mut trend,
+                &mut seasonals,
+                t,
+                y,
+            );
             fitted.push(forecast);
             residuals.push(y - forecast);
-
-            let level_prev = level;
-
-            // Update equations
-            match self.seasonal_type {
-                SeasonalType::Additive => {
-                    level = alpha * (y - s) + (1.0 - alpha) * (level_prev + trend);
-                    trend = beta * (level - level_prev) + (1.0 - beta) * trend;
-                    seasonals[season_idx] = gamma * (y - level) + (1.0 - gamma) * s;
-                }
-                SeasonalType::Multiplicative => {
-                    let y_deseasonalized = if s.abs() > 1e-10 { y / s } else { y };
-                    level = alpha * y_deseasonalized + (1.0 - alpha) * (level_prev + trend);
-                    trend = beta * (level - level_prev) + (1.0 - beta) * trend;
-                    let s_new = if level.abs() > 1e-10 {
-                        gamma * (y / level) + (1.0 - gamma) * s
-                    } else {
-                        s
-                    };
-                    seasonals[season_idx] = s_new;
-                }
-            }
         }
 
         self.level = Some(level);
@@ -446,28 +506,8 @@ impl Forecaster for HoltWinters {
         self.fitted = Some(fitted);
 
         // Calculate residual variance
-        let valid_residuals: Vec<f64> = residuals[period..].to_vec();
-        if !valid_residuals.is_empty() {
-            let sse = crate::simd::sum_of_squares(&valid_residuals);
-            let variance = sse / valid_residuals.len() as f64;
-            self.residual_variance = Some(variance);
-
-            // D-08 (plan 11-08): degrees-of-freedom-corrected sigma2 for
-            // `predict_with_intervals`'s ETS(A,A,A)/(A,A,M) interval. `p`
-            // always counts the initial level, trend, and the free
-            // (period-1) seasonal states; when `fit()` optimized the
-            // smoothing parameters, `p` also counts alpha, beta and
-            // gamma -- matching `ETS::num_params()`'s structural
-            // convention for the optimized case.
-            let base_params = 2.0 + (period as f64 - 1.0);
-            let df_params = if self.optimize {
-                base_params + 3.0
-            } else {
-                base_params
-            };
-            let denom = (self.n as f64 - df_params).max(1.0);
-            self.interval_sigma2 = Some(sse / denom);
-        }
+        let sse = crate::simd::sum_of_squares(&residuals[period..]);
+        self.set_variances(sse);
 
         self.residuals = Some(residuals);
 
@@ -658,6 +698,109 @@ impl Forecaster for HoltWinters {
             SeasonalType::Additive => "HoltWinters(additive)",
             SeasonalType::Multiplicative => "HoltWinters(multiplicative)",
         }
+    }
+}
+
+impl IncrementalForecaster for HoltWinters {
+    fn update(&mut self, new_obs: &[f64]) -> Result<()> {
+        validate_update_obs(new_obs)?;
+        if self.training_regressors_store.is_some() {
+            return Err(exog_update_error(self.name()));
+        }
+        let (Some(alpha), Some(beta), Some(gamma), Some(mut level), Some(mut trend), Some(mut sse)) = (
+            self.alpha, self.beta, self.gamma, self.level, self.trend, self.sse,
+        ) else {
+            return Err(ForecastError::FitRequired {
+                model: Some(self.name().into()),
+            });
+        };
+        let mut seasonals = self.seasonals.take().ok_or(ForecastError::FitRequired {
+            model: Some(self.name().into()),
+        })?;
+
+        for (i, &y) in new_obs.iter().enumerate() {
+            let forecast = self.step(
+                (alpha, beta, gamma),
+                &mut level,
+                &mut trend,
+                &mut seasonals,
+                self.n + i,
+                y,
+            );
+            let err = y - forecast;
+            sse += err * err;
+            if let Some(fitted) = self.fitted.as_mut() {
+                fitted.push(forecast);
+            }
+            if let Some(residuals) = self.residuals.as_mut() {
+                residuals.push(err);
+            }
+        }
+        if let Some(values) = self.training_values_store.as_mut() {
+            values.extend_from_slice(new_obs);
+        }
+
+        self.seasonals = Some(seasonals);
+        self.level = Some(level);
+        self.trend = Some(trend);
+        self.n += new_obs.len();
+        self.set_variances(sse);
+        Ok(())
+    }
+
+    fn state(&self) -> Result<ModelState> {
+        let (Some(alpha), Some(beta), Some(gamma), Some(level), Some(trend), Some(sse)) = (
+            self.alpha, self.beta, self.gamma, self.level, self.trend, self.sse,
+        ) else {
+            return Err(ForecastError::FitRequired {
+                model: Some(self.name().into()),
+            });
+        };
+        let seasonals = self.seasonals.clone().ok_or(ForecastError::FitRequired {
+            model: Some(self.name().into()),
+        })?;
+        Ok(ModelState::HoltWinters(HoltWintersState {
+            alpha,
+            beta,
+            gamma,
+            seasonal_period: self.seasonal_period,
+            seasonal_type: self.seasonal_type,
+            level,
+            trend,
+            seasonals,
+            n: self.n,
+            sse,
+            optimize: self.optimize,
+        }))
+    }
+
+    fn from_state(state: ModelState) -> Result<Self> {
+        let ModelState::HoltWinters(st) = state else {
+            return Err(wrong_state_error("HoltWinters", &state));
+        };
+        check_finite_state(
+            "HoltWinters",
+            &[st.alpha, st.beta, st.gamma, st.level, st.trend, st.sse],
+        )?;
+        check_finite_state("HoltWinters", &st.seasonals)?;
+        if st.seasonal_period < 2 || st.seasonals.len() != st.seasonal_period {
+            return Err(ForecastError::InvalidParameter(format!(
+                "HoltWinters state: expected {} seasonal values (period >= 2), got {}",
+                st.seasonal_period,
+                st.seasonals.len()
+            )));
+        }
+        let mut model = Self::auto(st.seasonal_period, st.seasonal_type);
+        model.alpha = Some(st.alpha);
+        model.beta = Some(st.beta);
+        model.gamma = Some(st.gamma);
+        model.optimize = st.optimize;
+        model.level = Some(st.level);
+        model.trend = Some(st.trend);
+        model.seasonals = Some(st.seasonals);
+        model.n = st.n;
+        model.set_variances(st.sse);
+        Ok(model)
     }
 }
 

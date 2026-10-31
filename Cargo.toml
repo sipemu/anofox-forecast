@@ -295,6 +295,11 @@ name = "serialization"
 path = "examples/validation/serialization.rs"
 required-features = ["serde"]
 
+[[example]]
+name = "incremental_update_cost"
+path = "examples/validation/incremental_update_cost.rs"
+required-features = ["serde"]
+
 # Trend Components
 [[example]]
 name = "trend_components"

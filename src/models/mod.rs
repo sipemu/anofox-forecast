@@ -12,6 +12,7 @@ pub mod cv_select;
 pub mod ensemble;
 pub mod exponential;
 pub mod garch;
+pub mod incremental;
 pub mod intermittent;
 pub mod kalman;
 pub mod kalman_forecaster;
@@ -28,6 +29,7 @@ pub mod var_forecaster;
 
 pub use cv_select::{Candidate, CvSelectForecaster};
 pub use garch::GARCH;
+pub use incremental::{IncrementalForecaster, ModelState};
 #[cfg(feature = "distributional")]
 pub use inspect::LaplaceExplanation;
 pub use inspect::{
