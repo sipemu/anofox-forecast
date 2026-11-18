@@ -68,6 +68,10 @@ pub enum ModelPool {
     Reduced,
 }
 
+/// Default for [`AutoETSConfig::min_seasonal_cycles`]; also the floor, since
+/// ETS needs two full cycles to initialise its seasonal states.
+pub const DEFAULT_MIN_SEASONAL_CYCLES: usize = 2;
+
 /// Configuration for AutoETS.
 #[derive(Debug, Clone)]
 pub struct AutoETSConfig {
@@ -96,6 +100,16 @@ pub struct AutoETSConfig {
     /// also fitted with its spikes capped (see [`cap_spikes`]) so the level
     /// does not chase them. Set `false` for the unguarded selection.
     pub spike_trend_guard: bool,
+    /// Minimum number of full seasonal cycles before seasonal candidates are
+    /// considered (default `2`, issue #245). Below `min_seasonal_cycles *
+    /// period` observations only non-seasonal models are searched; above it
+    /// the seasonal-strength pre-check and the information criterion decide.
+    ///
+    /// R's `forecast::ets` drops seasonal models only when `n <= m`; ETS here
+    /// needs two full cycles to initialise its seasonal states, so values
+    /// below `2` are treated as `2`. Raise it (e.g. to `3`, the previous
+    /// hard-coded rule) for a more conservative search on short series.
+    pub min_seasonal_cycles: usize,
 }
 
 impl Default for AutoETSConfig {
@@ -110,6 +124,7 @@ impl Default for AutoETSConfig {
             additive_only: false,
             multiplicative_seasonal_only: false,
             spike_trend_guard: true,
+            min_seasonal_cycles: DEFAULT_MIN_SEASONAL_CYCLES,
         }
     }
 }
@@ -124,6 +139,11 @@ impl AutoETSConfig {
     }
 
     /// Create a configuration with a specific seasonal period.
+    ///
+    /// Seasonal candidates are only searched once the series spans at least
+    /// [`min_seasonal_cycles`](Self::min_seasonal_cycles) full cycles (two by
+    /// default, e.g. 24 monthly observations for `period = 12`); shorter
+    /// series are fitted with non-seasonal models only.
     pub fn with_period(period: usize) -> Self {
         Self {
             seasonal_period: Some(period),
@@ -157,6 +177,15 @@ impl AutoETSConfig {
     /// for large-scale forecasting.
     pub fn with_model_pool(mut self, pool: ModelPool) -> Self {
         self.model_pool = pool;
+        self
+    }
+
+    /// Set the minimum number of full seasonal cycles required before
+    /// seasonal candidates are considered (see
+    /// [`min_seasonal_cycles`](Self::min_seasonal_cycles); values below `2`
+    /// are treated as `2`).
+    pub fn with_min_seasonal_cycles(mut self, cycles: usize) -> Self {
+        self.min_seasonal_cycles = cycles;
         self
     }
 
@@ -590,10 +619,16 @@ impl Forecaster for AutoETS {
         // Matches Theta::determine_decomposition() and R's forecast::ets()
         let has_non_positive = values.iter().any(|&v| v <= 0.0);
 
-        // Determine seasonal period — require at least 3 full cycles for meaningful
-        // seasonal estimation (stricter than the 2× minimum to avoid overfitting)
+        // Seasonal candidates need `min_seasonal_cycles` full cycles (#245;
+        // default 2, never below the 2 cycles ETS needs for its initial
+        // seasonal states). R's forecast::ets only requires n > m and leaves
+        // the rest to the information criterion.
         let seasonal_period = self.config.seasonal_period.unwrap_or(1);
-        let has_seasonal = seasonal_period > 1 && values.len() >= 3 * seasonal_period;
+        let min_cycles = self
+            .config
+            .min_seasonal_cycles
+            .max(DEFAULT_MIN_SEASONAL_CYCLES);
+        let has_seasonal = seasonal_period > 1 && values.len() >= min_cycles * seasonal_period;
 
         // Quick seasonal strength check: compare between-cycle variance to
         // within-cycle variance (one-way ANOVA F-ratio). If seasonal signal
@@ -601,7 +636,7 @@ impl Forecaster for AutoETS {
         let has_seasonal = if has_seasonal {
             let period = seasonal_period;
             let n_cycles = values.len() / period;
-            if n_cycles >= 3 {
+            if n_cycles >= 2 {
                 // Compute seasonal means
                 let mut seasonal_means = vec![0.0; period];
                 for j in 0..period {
@@ -1335,6 +1370,66 @@ mod tests {
                 spec.short_name()
             );
         }
+    }
+
+    /// Strongly seasonal monthly series (peak ~6x the trough, same every year).
+    fn strongly_seasonal_monthly(n: usize) -> TimeSeries {
+        let values: Vec<f64> = (0..n)
+            .map(|i| {
+                let s = (2.0 * std::f64::consts::PI * i as f64 / 12.0).sin();
+                let noise = 2.0 * ((i * 7919) % 13) as f64 / 13.0 - 1.0;
+                100.0 + 70.0 * s + 3.0 * noise
+            })
+            .collect();
+        TimeSeries::univariate(make_timestamps(n), values).unwrap()
+    }
+
+    /// Issue #245: two full cycles are enough for seasonal candidates to
+    /// compete (R's forecast::ets lets the information criterion decide).
+    #[test]
+    fn auto_ets_seasonal_with_two_cycles() {
+        for n in [24, 30, 35] {
+            let mut model = AutoETS::with_period(12);
+            model.fit(&strongly_seasonal_monthly(n)).unwrap();
+            let spec = model.selected_spec().unwrap();
+            assert!(
+                spec.has_seasonal(),
+                "n={n}: expected a seasonal model, got {}",
+                spec.short_name()
+            );
+        }
+    }
+
+    /// Issue #245: below two full cycles no seasonal candidate is fitted.
+    #[test]
+    fn auto_ets_no_seasonal_below_two_cycles() {
+        let mut model = AutoETS::with_period(12);
+        model.fit(&strongly_seasonal_monthly(23)).unwrap();
+        assert!(model.model_scores().iter().all(|(s, _)| !s.has_seasonal()));
+    }
+
+    /// Issue #245: `min_seasonal_cycles` restores a stricter rule, and values
+    /// below the 2-cycle floor are clamped to it.
+    #[test]
+    fn auto_ets_min_seasonal_cycles_configurable() {
+        assert_eq!(
+            AutoETSConfig::default().min_seasonal_cycles,
+            DEFAULT_MIN_SEASONAL_CYCLES
+        );
+        let series = strongly_seasonal_monthly(30);
+
+        let mut strict =
+            AutoETS::with_config(AutoETSConfig::with_period(12).with_min_seasonal_cycles(3));
+        strict.fit(&series).unwrap();
+        assert!(strict.model_scores().iter().all(|(s, _)| !s.has_seasonal()));
+
+        let mut clamped =
+            AutoETS::with_config(AutoETSConfig::with_period(12).with_min_seasonal_cycles(0));
+        clamped.fit(&strongly_seasonal_monthly(23)).unwrap();
+        assert!(clamped
+            .model_scores()
+            .iter()
+            .all(|(s, _)| !s.has_seasonal()));
     }
 
     /// Issue #12: AutoETS should select seasonal components on monthly data
