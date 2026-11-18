@@ -43,6 +43,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   above, selecting the same model as R with `approximation = TRUE`.
 - `examples/validation/autoarima_seasonal_timing.rs` reproduces these timings.
 
+### Maintenance
+
+- `cargo deny` / `cargo audit` ignore RUSTSEC-2026-0543 (chrono is unmaintained, no vulnerability).
+  chrono is a direct dependency and part of the public `TimeSeries` API, so replacing it is a
+  breaking change and is left for a separate release.
+- Fixed a `clippy::needless_bool` finding new in clippy 1.100 (`src/models/arima/model.rs`).
+
 ## [0.19.0] - 2026-10-31
 
 ### Added — incremental updates and compact model state
