@@ -3,10 +3,10 @@ gsd_state_version: "1.0"
 milestone: v1.1
 status: Awaiting next milestone
 stopped_at: Phase 08 complete — all phases complete
-last_updated: "2026-10-30T20:51:16.734Z"
+last_updated: "2026-11-18T21:13:54.433Z"
 last_activity: 2026-10-30
 last_activity_desc: Milestone v1.1 completed and archived
-state_head: 80fff4c224f344629add85e63183a954baa8aeda
+state_head: 4e9db9f3ff221043b6901c7fbf0a6345f56d3ae4
 progress:
   total_phases: 4
   completed_phases: 4
@@ -37,7 +37,7 @@ current_phase: 08
 Phase: Milestone v1.1 complete
 Plan: —
 Status: Awaiting next milestone
-Last activity: 2026-10-30 — Completed quick task 261030-qwn: #216 ERM verified (already on main), biased-forecast benchmark test added
+Last activity: 2026-11-18 - Completed quick task 261118-tx2: issues #245, #246, #247
 
 ## Performance Metrics
 
@@ -96,6 +96,7 @@ Last activity: 2026-10-30 — Completed quick task 261030-qwn: #216 ERM verified
 | 261030-qnn | Issue #233 incremental update + compact serializable state (SES/Holt/HW/ETS/AutoETS) | 2026-10-30 | ebd583f | [261030-qnn-issue-233-incremental-update-and-compact](./quick/261030-qnn-issue-233-incremental-update-and-compact/) |
 | 261030-q87 | Issue #219 MFLES multiplicative blow-up: verified existing fix (v0.15.10) before/after; no code change | 2026-10-30 | 94e65da | [261030-q87-issue-219-mfles-multiplicative-blow-up-v](./quick/261030-q87-issue-219-mfles-multiplicative-blow-up-v/) |
 | 261030-qwn | Issue #216 ERM reconciliation: verified shipped variant, added biased-base-forecast comparison test | 2026-10-30 | 80fff4c | [261030-qwn-issue-216-erm-reconciliation-verify-ship](./quick/261030-qwn-issue-216-erm-reconciliation-verify-ship/) |
+| 261118-tx2 | Issues #246 AutoETS scale invariance, #245 min_seasonal_cycles (default 2), #247 seasonal AutoARIMA 1.6x + approximation option | 2026-11-18 | 4e9db9f | [261118-tx2-fix-autoets-aicc-scale-dependence-246-se](./quick/261118-tx2-fix-autoets-aicc-scale-dependence-246-se/) |
 
 ## Session Continuity
 
