@@ -1349,6 +1349,19 @@ impl ETS {
         out
     }
 
+    /// Multi-start early exit: skip a start whose initial negative
+    /// log-likelihood is worse than the best optimum found so far by more
+    /// than `2n` (an SSE ratio of e^4 for additive errors).
+    ///
+    /// The margin is a difference in log-likelihood units, which is invariant
+    /// to rescaling the data (issue #246). A ratio test (`init > 3 * best`)
+    /// is not: the objective contains `n ln(SSE)` and, for multiplicative
+    /// errors, `sum ln|fc|`, so its sign flips with the data's units and small-
+    /// scale series skipped every start after the first.
+    fn start_is_hopeless(init_nll: f64, best_nll: f64, n: usize) -> bool {
+        init_nll - best_nll > 2.0 * n as f64
+    }
+
     fn optimize_params(
         &self,
         values: &[f64],
@@ -1407,7 +1420,7 @@ impl ETS {
                         Some(init_trend),
                         None,
                     );
-                    if init_ll > best_value * 3.0 {
+                    if Self::start_is_hopeless(init_ll, best_value, values.len()) {
                         continue;
                     }
                 }
@@ -1539,7 +1552,7 @@ impl ETS {
                                 &mut buf,
                             );
                             drop(buf);
-                            if init_ll > best_stage1 * 3.0 {
+                            if Self::start_is_hopeless(init_ll, best_stage1, values.len()) {
                                 continue;
                             }
                         }
@@ -1664,7 +1677,7 @@ impl ETS {
                                 &mut buf,
                             );
                             drop(buf);
-                            if init_ll > best_stage1 * 3.0 {
+                            if Self::start_is_hopeless(init_ll, best_stage1, values.len()) {
                                 continue;
                             }
                         }
@@ -1801,7 +1814,7 @@ impl ETS {
                                 &mut buf,
                             );
                             drop(buf);
-                            if init_ll > best_stage1 * 3.0 {
+                            if Self::start_is_hopeless(init_ll, best_stage1, values.len()) {
                                 continue;
                             }
                         }

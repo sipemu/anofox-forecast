@@ -714,10 +714,9 @@ impl ARIMA {
             .enumerate()
             .map(|(i, a)| if i % 2 == 0 { -a } else { *a })
             .sum();
-        if 1.0 + alt_sum <= 0.0 {
-            return false;
-        }
-        true
+        // `!(x <= 0)`, spelled so a NaN sum still passes as before.
+        let at_minus_one = 1.0 + alt_sum;
+        at_minus_one > 0.0 || at_minus_one.is_nan()
     }
 
     /// Jones (1980) parameter transform: unconstrained → stationary AR coefficients.

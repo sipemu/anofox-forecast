@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "anofox-forecast"
-version = "0.19.0"
+version = "0.20.0"
 edition = "2021"
 authors = ["Simon Müller"]
 description = "Time series forecasting library"
@@ -299,6 +299,10 @@ required-features = ["serde"]
 name = "incremental_update_cost"
 path = "examples/validation/incremental_update_cost.rs"
 required-features = ["serde"]
+
+[[example]]
+name = "autoarima_seasonal_timing"
+path = "examples/validation/autoarima_seasonal_timing.rs"
 
 # Trend Components
 [[example]]

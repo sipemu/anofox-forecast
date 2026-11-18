@@ -1113,8 +1113,21 @@ fn arima_filter(x: &[f64], phi: &[f64], theta_in: &[f64], delta: &[f64]) -> Opti
     let mut anew = vec![0.0; rd];
     let mut mvec = vec![0.0; rd];
     let mut mm = vec![0.0; rd * rd];
+    // Non-zero coefficients of the differencing polynomial. Seasonal
+    // differencing makes `delta` mostly zeros (D = 1, m = 12: one non-zero
+    // in twelve); skipping them leaves every sum below unchanged (#247).
+    let delta_nz: Vec<(usize, f64)> = delta
+        .iter()
+        .enumerate()
+        .filter(|&(_, &dk)| dk != 0.0)
+        .map(|(k, &dk)| (k, dk))
+        .collect();
+    // `vi` of `V = R R'` with `R = (1, theta)`.
+    let rvec: Vec<f64> = std::iter::once(1.0).chain(theta.iter().copied()).collect();
     let (mut ssq, mut sumlog, mut nu) = (0.0_f64, 0.0_f64, 0usize);
     let mut rss_all = 0.0_f64;
+    // Matrices are column-major (`i + rd * j`); the loops below walk
+    // columns contiguously but keep R's per-element arithmetic order.
     for (l, &yl) in x.iter().enumerate() {
         for i in 0..r {
             let mut tmp = if i < r - 1 { a[i + 1] } else { 0.0 };
@@ -1135,24 +1148,15 @@ fn arima_filter(x: &[f64], phi: &[f64], theta_in: &[f64], delta: &[f64]) -> Opti
         }
         if l > 0 {
             if d == 0 {
-                for i in 0..r {
-                    let vi = if i == 0 {
-                        1.0
-                    } else if i - 1 < q {
-                        theta[i - 1]
-                    } else {
-                        0.0
-                    };
-                    for j in 0..r {
-                        let mut tmp = if j == 0 {
-                            vi
-                        } else if j - 1 < q {
-                            vi * theta[j - 1]
-                        } else {
-                            0.0
-                        };
+                // `theta` is padded to `r - 1`, so `rvec` covers every `i < r`.
+                let pm0 = pmat[0];
+                for j in 0..r {
+                    let vj = rvec[j];
+                    for i in 0..r {
+                        let vi = rvec[i];
+                        let mut tmp = if j == 0 { vi } else { vi * vj };
                         if i < p && j < p {
-                            tmp += phi[i] * phi[j] * pmat[0];
+                            tmp += phi[i] * phi[j] * pm0;
                         }
                         if i < r - 1 && j < r - 1 {
                             tmp += pmat[i + 1 + r * (j + 1)];
@@ -1167,58 +1171,60 @@ fn arima_filter(x: &[f64], phi: &[f64], theta_in: &[f64], delta: &[f64]) -> Opti
                     }
                 }
             } else {
+                // mm = T P, column by column.
+                for j in 0..rd {
+                    let col = &pmat[rd * j..rd * (j + 1)];
+                    let mcol = &mut mm[rd * j..rd * (j + 1)];
+                    let p0 = col[0];
+                    for i in 0..r {
+                        let mut tmp = 0.0;
+                        if i < p {
+                            tmp += phi[i] * p0;
+                        }
+                        if i < r - 1 {
+                            tmp += col[i + 1];
+                        }
+                        mcol[i] = tmp;
+                    }
+                    let mut tmp = p0;
+                    for &(k, dk) in &delta_nz {
+                        tmp += dk * col[r + k];
+                    }
+                    mcol[r] = tmp;
+                    mcol[r + 1..rd].copy_from_slice(&col[r..rd - 1]);
+                }
+                // pnew = T mm' (+ V below), column by column.
                 for i in 0..r {
+                    let out = &mut pnew[rd * i..rd * (i + 1)];
+                    let m0 = &mm[..rd];
+                    let next = (i < r - 1).then(|| &mm[rd * (i + 1)..rd * (i + 2)]);
                     for j in 0..rd {
                         let mut tmp = 0.0;
                         if i < p {
-                            tmp += phi[i] * pmat[rd * j];
+                            tmp += phi[i] * m0[j];
                         }
-                        if i < r - 1 {
-                            tmp += pmat[i + 1 + rd * j];
+                        if let Some(next) = next {
+                            tmp += next[j];
                         }
-                        mm[i + rd * j] = tmp;
+                        out[j] = tmp;
                     }
                 }
-                for j in 0..rd {
-                    let mut tmp = pmat[rd * j];
-                    for k in 0..d {
-                        tmp += delta[k] * pmat[r + k + rd * j];
-                    }
-                    mm[r + rd * j] = tmp;
-                }
-                for i in 1..d {
-                    for j in 0..rd {
-                        mm[r + i + rd * j] = pmat[r + i - 1 + rd * j];
-                    }
-                }
-                for i in 0..r {
-                    for j in 0..rd {
-                        let mut tmp = 0.0;
-                        if i < p {
-                            tmp += phi[i] * mm[j];
+                {
+                    let out = &mut pnew[rd * r..rd * (r + 1)];
+                    out.copy_from_slice(&mm[..rd]);
+                    for &(k, dk) in &delta_nz {
+                        let src = &mm[rd * (r + k)..rd * (r + k + 1)];
+                        for (o, &v) in out.iter_mut().zip(src) {
+                            *o += dk * v;
                         }
-                        if i < r - 1 {
-                            tmp += mm[rd * (i + 1) + j];
-                        }
-                        pnew[j + rd * i] = tmp;
                     }
                 }
-                for j in 0..rd {
-                    let mut tmp = mm[j];
-                    for k in 0..d {
-                        tmp += delta[k] * mm[rd * (r + k) + j];
-                    }
-                    pnew[rd * r + j] = tmp;
-                }
-                for i in 1..d {
-                    for j in 0..rd {
-                        pnew[rd * (r + i) + j] = mm[rd * (r + i - 1) + j];
-                    }
-                }
-                for i in 0..=q {
-                    let vi = if i == 0 { 1.0 } else { theta[i - 1] };
-                    for j in 0..=q {
-                        pnew[i + rd * j] += vi * if j == 0 { 1.0 } else { theta[j - 1] };
+                pnew[rd * (r + 1)..rd * rd].copy_from_slice(&mm[rd * r..rd * (rd - 1)]);
+                for j in 0..=q {
+                    let vj = rvec[j];
+                    let out = &mut pnew[rd * j..rd * j + q + 1];
+                    for (o, &vi) in out.iter_mut().zip(&rvec) {
+                        *o += vi * vj;
                     }
                 }
             }
@@ -1227,12 +1233,12 @@ fn arima_filter(x: &[f64], phi: &[f64], theta_in: &[f64], delta: &[f64]) -> Opti
         for i in 0..d {
             resid -= delta[i] * anew[r + i];
         }
-        for i in 0..rd {
-            let mut tmp = pnew[i];
-            for j in 0..d {
-                tmp += pnew[i + (r + j) * rd] * delta[j];
+        mvec.copy_from_slice(&pnew[..rd]);
+        for &(jj, dj) in &delta_nz {
+            let src = &pnew[rd * (r + jj)..rd * (r + jj + 1)];
+            for (m, &v) in mvec.iter_mut().zip(src) {
+                *m += v * dj;
             }
-            mvec[i] = tmp;
         }
         let mut gain = mvec[0];
         for j in 0..d {
@@ -1247,9 +1253,12 @@ fn arima_filter(x: &[f64], phi: &[f64], theta_in: &[f64], delta: &[f64]) -> Opti
         for i in 0..rd {
             a[i] = anew[i] + mvec[i] * resid / gain;
         }
-        for i in 0..rd {
-            for j in 0..rd {
-                pmat[i + j * rd] = pnew[i + j * rd] - mvec[i] * mvec[j] / gain;
+        for j in 0..rd {
+            let mj = mvec[j];
+            let src = &pnew[rd * j..rd * (j + 1)];
+            let dst = &mut pmat[rd * j..rd * (j + 1)];
+            for ((o, &pv), &mi) in dst.iter_mut().zip(src).zip(&mvec) {
+                *o = pv - mi * mj / gain;
             }
         }
     }

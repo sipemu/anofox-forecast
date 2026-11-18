@@ -44,6 +44,14 @@ pub struct AutoARIMAConfig {
     pub max_order: usize,
     /// Selection criterion (use AIC for selection).
     pub use_aic: bool,
+    /// R `auto.arima`'s `approximation` argument (issue #247). `None`
+    /// (default) applies R's rule: approximate when `n > 150 || m > 12`.
+    /// `Some(true)` searches with the cheap CSS criterion and refits only
+    /// the best visited models by exact ML -- much faster for seasonal
+    /// series (no Kalman filter per search step), at the cost of the search
+    /// possibly visiting a different path than the exact-likelihood one.
+    /// `Some(false)` always searches with the exact likelihood.
+    pub approximation: Option<bool>,
 }
 
 impl Default for AutoARIMAConfig {
@@ -65,6 +73,7 @@ impl Default for AutoARIMAConfig {
             true_stepwise: true, // R's Hyndman-Khandakar stepwise search (D-06, 11-11)
             max_order: 5,
             use_aic: true,
+            approximation: None,
         }
     }
 }
@@ -105,6 +114,14 @@ impl AutoARIMAConfig {
     pub fn with_true_stepwise(mut self) -> Self {
         self.stepwise = true;
         self.true_stepwise = true;
+        self
+    }
+
+    /// Force R's `approximation` on or off (see
+    /// [`approximation`](Self::approximation)); the default follows R's
+    /// `n > 150 || m > 12` rule.
+    pub fn with_approximation(mut self, approximation: bool) -> Self {
+        self.approximation = Some(approximation);
         self
     }
 
@@ -456,6 +473,13 @@ impl AutoARIMA {
     /// winner is refit by exact ML (D-06).
     fn approximation_for_series(n: usize, s: usize) -> bool {
         n > 150 || s > 12
+    }
+
+    /// The configured `approximation` override, else R's default rule.
+    fn approximation(&self, n: usize) -> bool {
+        self.config
+            .approximation
+            .unwrap_or_else(|| Self::approximation_for_series(n, self.config.seasonal_period))
     }
 
     /// Score a single order at an EXPLICIT constant choice (no
@@ -1035,7 +1059,7 @@ impl AutoARIMA {
         Option<(SelectedModel, ModelOrder, f64)>,
     ) {
         let use_aic = self.config.use_aic;
-        let approximation = Self::approximation_for_series(n_values, self.config.seasonal_period);
+        let approximation = self.approximation(n_values);
 
         // Filter candidates by data requirements
         let valid_candidates: Vec<_> = candidates
@@ -1256,7 +1280,7 @@ impl Forecaster for AutoARIMA {
         // R's default `approximation` rule (D-06): computed once per
         // `fit()` call from the undifferenced training length and the
         // configured seasonal period.
-        let approximation = Self::approximation_for_series(values.len(), s);
+        let approximation = self.approximation(values.len());
 
         // Phase 1: Score-only evaluation to find the best order
         if self.config.stepwise && self.config.true_stepwise {

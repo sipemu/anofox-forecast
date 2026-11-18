@@ -18,7 +18,7 @@ mod ses;
 
 pub use auto_ets::{
     cap_spikes, diagnose_spikes, AutoETS, AutoETSConfig, ModelPool, SelectionCriterion,
-    SpikeDiagnosis,
+    SpikeDiagnosis, DEFAULT_MIN_SEASONAL_CYCLES,
 };
 pub use ets::{ETSSpec, ErrorType, SeasonalType as ETSSeasonalType, TrendType, ETS};
 pub use global_ets::{GlobalAutoETS, GlobalETS};
