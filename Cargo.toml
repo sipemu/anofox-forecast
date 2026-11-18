@@ -300,6 +300,10 @@ name = "incremental_update_cost"
 path = "examples/validation/incremental_update_cost.rs"
 required-features = ["serde"]
 
+[[example]]
+name = "autoarima_seasonal_timing"
+path = "examples/validation/autoarima_seasonal_timing.rs"
+
 # Trend Components
 [[example]]
 name = "trend_components"
