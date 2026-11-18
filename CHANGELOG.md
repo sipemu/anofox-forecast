@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **AutoETS considers seasonal models from two full cycles (#245).** Seasonal candidates used to
+  require three full cycles (36 monthly observations), so shorter, clearly seasonal series always
+  got a non-seasonal (often flat) model. The threshold is now `AutoETSConfig::min_seasonal_cycles`
+  (default `2`, which is also the floor because ETS needs two cycles to initialise its seasonal
+  states), set with `with_min_seasonal_cycles(n)`. R's `forecast::ets` only requires `n > m` and
+  leaves the rest to the information criterion. The seasonal-strength pre-check now also runs on
+  two cycles. Use `with_min_seasonal_cycles(3)` for the previous behaviour.
+
+### Fixed
+
+- **AutoETS model choice no longer depends on the units of the data (#246).** The multi-start
+  optimiser skipped a start when its initial negative log-likelihood exceeded `3x` the best so
+  far. That objective changes sign with the scale of the data, so on small-valued series every
+  start after the first was skipped, and multiplicative-error models were scored on a worse
+  optimum. The test is now a margin in log-likelihood units (`2n`), which rescaling does not
+  change. Seasonal and non-seasonal candidates have been scored on the same `n` residuals since
+  0.16.0. A new regression test checks that the selected model is unchanged when a 60-series
+  panel is multiplied or divided by 1000.
+
+### Performance
+
+- **Seasonal AutoARIMA about 1.6x faster (#247).** The R `ARIMA_Like` Kalman filter port now walks
+  its column-major matrices contiguously and skips the zero coefficients of the seasonal
+  differencing polynomial. The arithmetic is unchanged and the results are bitwise identical.
+  `AutoARIMA::seasonal(12)` on 96 monthly values: 3.9-4.3 s → 2.6-2.7 s (best of 5, runs
+  interleaved on the same shared machine; R's `auto.arima` took about 6.5 s there).
+- **`AutoARIMAConfig::approximation` / `with_approximation(bool)` (#247)**, R `auto.arima`'s
+  `approximation` argument. `None` (default) keeps R's rule (`n > 150 || m > 12`). `Some(true)`
+  searches with CSS and refits only the best visited models by exact ML: 33 ms on the series
+  above, selecting the same model as R with `approximation = TRUE`.
+- `examples/validation/autoarima_seasonal_timing.rs` reproduces these timings.
+
 ## [0.19.0] - 2026-10-31
 
 ### Added — incremental updates and compact model state
