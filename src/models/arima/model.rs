@@ -3231,6 +3231,7 @@ pub fn r_arima_aicc_for_tests(
         m,
         with_constant,
         method,
+        None,
     )
     .map(|fit| fit.aicc)
 }

@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-11-19
+
+### Added
+
+- **Bounding the cost of one seasonal `AutoARIMA` fit (#250).** With long seasonal periods
+  (m = 30 or 52 on 550 weekly points) one fit took 1.5 to 3.5 minutes, which stalls batch
+  callers. Profiling showed that the CSS stepwise search takes under a second; the rest is R's
+  exact-likelihood refit of the visited models, where Gardner's initial-covariance routine on a
+  state of dimension ~65 dominates. New `AutoARIMAConfig` options:
+  - `with_time_budget(Duration)`: once the budget is spent, the search and the refits stop and
+    the best model found so far is returned (R's own fallback when no refit succeeds: the CSS
+    winner, with its CSS estimates if its exact fit did not finish). Fits can overrun by about
+    one optimiser iteration. A budgeted result depends on machine speed and load. It applies
+    to the default stepwise search and is ignored on `wasm32`, which has no clock.
+  - `with_max_models(n)`: R's `nmodels` cap on the stepwise search (default 94, as before).
+  
+  On M4 Weekly W118 with m = 30, budgets of 10 s and 30 s returned after 10.2 s and 30.3 s.
+  Unbudgeted, the fit selects the same model as before and takes 72-89 s (80-133 s before, on
+  a heavily loaded machine).
+- The final model now reuses the exact fit computed during the refit pass instead of fitting
+  the same order again (about 3 s of the m = 30 fit above). The result is unchanged.
+- `examples/validation/autoarima_long_season_timing.rs` reproduces the timings.
+
 ## [0.20.0] - 2026-11-18
 
 ### Changed
