@@ -59,6 +59,28 @@ pub(crate) enum RMethod {
     CssMl,
 }
 
+/// Wall-clock deadline for the fits of one `AutoARIMA` search (#250).
+/// Checked once per optimiser iteration and Hessian row, so a fit that
+/// runs past it ends early and counts as failed (`None`, R's `ic = Inf`).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Deadline(std::time::Instant);
+
+impl Deadline {
+    /// A deadline `budget` from now.
+    pub(crate) fn after(budget: std::time::Duration) -> Self {
+        Self(std::time::Instant::now() + budget)
+    }
+
+    pub(crate) fn passed(self) -> bool {
+        std::time::Instant::now() >= self.0
+    }
+}
+
+/// `true` once an optional deadline has passed (never for `None`).
+pub(crate) fn expired(deadline: Option<Deadline>) -> bool {
+    deadline.is_some_and(Deadline::passed)
+}
+
 /// A candidate fitted the way `myarima` fits it, with R's information
 /// criteria. `None` from [`r_arima_fit`] is R's `ic = Inf`.
 #[derive(Debug, Clone)]
@@ -309,7 +331,12 @@ struct OptimResult {
 /// R `src/appl/optim.c::vmmin` (variable-metric BFGS), in scaled
 /// coordinates. `None` reproduces R's errors (non-finite initial value
 /// or non-finite finite-difference gradient).
-fn vmmin<F: Fn(&[f64]) -> f64>(f: &F, init: &[f64], parscale: &[f64]) -> Option<OptimResult> {
+fn vmmin<F: Fn(&[f64]) -> f64>(
+    f: &F,
+    init: &[f64],
+    parscale: &[f64],
+    deadline: Option<Deadline>,
+) -> Option<OptimResult> {
     const STEPREDN: f64 = 0.2;
     const ACCTOL: f64 = 0.0001;
     const RELTEST: f64 = 10.0;
@@ -334,6 +361,9 @@ fn vmmin<F: Fn(&[f64]) -> f64>(f: &F, init: &[f64], parscale: &[f64]) -> Option<
     let mut count;
 
     loop {
+        if expired(deadline) {
+            return None;
+        }
         if ilast == gradcount {
             for (i, row) in bmat.iter_mut().enumerate() {
                 row.iter_mut().take(i).for_each(|v| *v = 0.0);
@@ -449,12 +479,20 @@ fn vmmin<F: Fn(&[f64]) -> f64>(f: &F, init: &[f64], parscale: &[f64]) -> Option<
 }
 
 /// R `optimhess` at `par` (unscaled), symmetrised, in original units.
-fn optimhess<F: Fn(&[f64]) -> f64>(f: &F, par: &[f64], parscale: &[f64]) -> Option<Vec<Vec<f64>>> {
+fn optimhess<F: Fn(&[f64]) -> f64>(
+    f: &F,
+    par: &[f64],
+    parscale: &[f64],
+    deadline: Option<Deadline>,
+) -> Option<Vec<Vec<f64>>> {
     let sc = Scaled { f, parscale };
     let n = par.len();
     let mut dpar: Vec<f64> = par.iter().zip(parscale).map(|(a, s)| a / s).collect();
     let mut h = vec![vec![0.0; n]; n];
     for i in 0..n {
+        if expired(deadline) {
+            return None;
+        }
         let eps = NDEPS / parscale[i];
         dpar[i] += eps;
         let df1 = sc.grad(&dpar)?;
@@ -608,7 +646,8 @@ impl Layout {
 /// Fit one candidate exactly as `forecast:::myarima` -> `stats::arima`
 /// would, on the already (d, D)-differenced series `w`. `creg` is the
 /// differenced value of the constant regressor (1 for a mean or a d=1
-/// drift, `m` for a D=1 drift) or `None` without a constant.
+/// drift, `m` for a D=1 drift) or `None` without a constant. A fit still
+/// running when `deadline` passes returns `None` (#250).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn r_arima_fit(
     x: &[f64],
@@ -621,6 +660,7 @@ pub(crate) fn r_arima_fit(
     m: usize,
     with_constant: bool,
     method: RMethod,
+    deadline: Option<Deadline>,
 ) -> Option<RArimaFit> {
     let m_full = m.max(1);
     let cap_d = if m_full > 1 { cap_d } else { 0 };
@@ -702,8 +742,8 @@ pub(crate) fn r_arima_fit(
         let (coef, hess) = if ncoef == 0 {
             (vec![], None)
         } else {
-            let res = vmmin(&css_obj, &init, &parscale)?;
-            let h = optimhess(&css_obj, &res.par, &parscale)?;
+            let res = vmmin(&css_obj, &init, &parscale, deadline)?;
+            let h = optimhess(&css_obj, &res.par, &parscale, deadline)?;
             (res.par, Some(h))
         };
         if let Some(h) = hess {
@@ -735,7 +775,7 @@ pub(crate) fn r_arima_fit(
 
     // ---- CSS-ML ----
     if narma > 0 || creg.is_some() {
-        let res = vmmin(&css_obj, &init, &parscale)?;
+        let res = vmmin(&css_obj, &init, &parscale, deadline)?;
         if res.convergence == 0 {
             init = res.par;
         }
@@ -796,7 +836,7 @@ pub(crate) fn r_arima_fit(
     let (mut coef, mut value) = if ncoef == 0 {
         (vec![], armafn(&[]))
     } else {
-        let res = vmmin(&armafn, &init, &parscale)?;
+        let res = vmmin(&armafn, &init, &parscale, deadline)?;
         (res.par, res.value)
     };
 
@@ -824,7 +864,7 @@ pub(crate) fn r_arima_fit(
         }
         let _ = cq_;
         // checkarima: var = A' (H * n.used)^-1 A, A = ARIMA_Gradtrans.
-        let h = optimhess(&armafn, &coef, &parscale)?;
+        let h = optimhess(&armafn, &coef, &parscale, deadline)?;
         let hn: Vec<Vec<f64>> = h
             .iter()
             .map(|r| r.iter().map(|v| v * n_used as f64).collect())

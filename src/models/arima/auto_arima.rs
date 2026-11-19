@@ -4,6 +4,7 @@ use crate::core::{Forecast, TimeSeries};
 use crate::error::{ForecastError, Result};
 use crate::models::arima::diff::{ndiffs_kpss, nsdiffs_seas};
 use crate::models::arima::model::{ARIMA, SARIMA};
+use crate::models::arima::r_arima::{expired, Deadline, RArimaFit, RMethod};
 use crate::models::inspect::{ArimaExplanation, Explanation, Inspectable};
 use crate::models::{validate_series_complete, Forecaster};
 use crate::utils::ols::OLSResult;
@@ -52,6 +53,18 @@ pub struct AutoARIMAConfig {
     /// possibly visiting a different path than the exact-likelihood one.
     /// `Some(false)` always searches with the exact likelihood.
     pub approximation: Option<bool>,
+    /// Maximum number of models the stepwise search visits (R
+    /// `auto.arima`'s `nmodels`, default 94; issue #250).
+    pub max_models: usize,
+    /// Wall-clock budget for one `fit()` of the stepwise search (issue
+    /// #250, default `None` = unbounded). Once it runs out, the search
+    /// and the exact-likelihood refits stop and the best model found so
+    /// far is returned; if the selected order has no finished exact fit,
+    /// the final model uses its CSS estimates. Fits may overrun by one
+    /// optimiser iteration. A budgeted fit is not reproducible across
+    /// machines or load. Applies to the default (true) stepwise search;
+    /// ignored on `wasm32`, which has no clock.
+    pub time_budget: Option<std::time::Duration>,
 }
 
 impl Default for AutoARIMAConfig {
@@ -74,6 +87,8 @@ impl Default for AutoARIMAConfig {
             max_order: 5,
             use_aic: true,
             approximation: None,
+            max_models: 94,
+            time_budget: None,
         }
     }
 }
@@ -125,6 +140,20 @@ impl AutoARIMAConfig {
         self
     }
 
+    /// Set the maximum number of models the stepwise search visits (see
+    /// [`max_models`](Self::max_models)).
+    pub fn with_max_models(mut self, max_models: usize) -> Self {
+        self.max_models = max_models;
+        self
+    }
+
+    /// Bound the wall-clock time of one `fit()` (see
+    /// [`time_budget`](Self::time_budget)).
+    pub fn with_time_budget(mut self, budget: std::time::Duration) -> Self {
+        self.time_budget = Some(budget);
+        self
+    }
+
     /// Use the crate's legacy fixed-grid stepwise search instead of R's
     /// Hyndman-Khandakar stepwise search (opt-in; not R's algorithm).
     pub fn with_grid_stepwise(mut self) -> Self {
@@ -142,7 +171,7 @@ enum SelectedModel {
 }
 
 /// Model order (p, d, q, P, D, Q, s).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ModelOrder {
     /// Non-seasonal AR order.
     pub p: usize,
@@ -164,6 +193,50 @@ impl ModelOrder {
     /// Check if this is a seasonal model.
     pub fn is_seasonal(&self) -> bool {
         self.s > 1 && (self.cap_p > 0 || self.cap_d > 0 || self.cap_q > 0)
+    }
+}
+
+/// Per-`fit()` state of the R stepwise path: the approximation rule, the
+/// optional deadline (#250) and the exact (CSS-ML) fits already computed,
+/// so the final model reuses the refit's estimates instead of repeating
+/// the same fit.
+struct RSearchCtx {
+    approximation: bool,
+    deadline: Option<Deadline>,
+    cssml_fits: std::collections::HashMap<(ModelOrder, bool), RArimaFit>,
+}
+
+impl RSearchCtx {
+    fn new(approximation: bool, deadline: Option<Deadline>) -> Self {
+        Self {
+            approximation,
+            deadline,
+            cssml_fits: std::collections::HashMap::new(),
+        }
+    }
+
+    fn fit(
+        &mut self,
+        order: ModelOrder,
+        values: &[f64],
+        with_constant: bool,
+        method: RMethod,
+    ) -> Option<RArimaFit> {
+        let key = (order, with_constant);
+        if method == RMethod::CssMl {
+            if let Some(fit) = self.cssml_fits.get(&key) {
+                return Some(fit.clone());
+            }
+        }
+        let fit = AutoARIMA::fit_r_candidate(order, values, with_constant, method, self.deadline)?;
+        if method == RMethod::CssMl {
+            self.cssml_fits.insert(key, fit.clone());
+        }
+        Some(fit)
+    }
+
+    fn expired(&self) -> bool {
+        expired(self.deadline)
     }
 }
 
@@ -494,19 +567,22 @@ impl AutoARIMA {
         use_aic: bool,
         approximation: bool,
         with_constant: bool,
+        ctx: &mut RSearchCtx,
     ) -> Option<f64> {
         let method = if approximation {
-            super::r_arima::RMethod::Css
+            RMethod::Css
         } else {
-            super::r_arima::RMethod::CssMl
+            RMethod::CssMl
         };
-        Self::fit_r_candidate(order, values, with_constant, method).map(|fit| {
-            if use_aic {
-                fit.aicc
-            } else {
-                fit.bic
-            }
-        })
+        ctx.fit(order, values, with_constant, method).map(
+            |fit| {
+                if use_aic {
+                    fit.aicc
+                } else {
+                    fit.bic
+                }
+            },
+        )
     }
 
     /// Fit one candidate the way R's `myarima` does (see
@@ -534,10 +610,22 @@ impl AutoARIMA {
         series: &TimeSeries,
         order: ModelOrder,
         with_constant: bool,
+        ctx: &mut RSearchCtx,
     ) -> Option<SelectedModel> {
         let values = series.primary_values();
-        let fit =
-            Self::fit_r_candidate(order, values, with_constant, super::r_arima::RMethod::CssMl)?;
+        // R's `bestfit` is the exact CSS-ML fit (cached when the search or
+        // its refit already computed it). If the time budget ran out
+        // before it finished (#250), fall back to the order's CSS fit,
+        // which is cheap and not subject to the deadline.
+        let fit = ctx
+            .fit(order, values, with_constant, RMethod::CssMl)
+            .or_else(|| {
+                ctx.expired()
+                    .then(|| {
+                        Self::fit_r_candidate(order, values, with_constant, RMethod::Css, None)
+                    })
+                    .flatten()
+            })?;
         let m = if order.s > 1 { order.s } else { 1 };
         // R's constant is a regression on 1 (mean) or the time index
         // (drift); on the differenced scale it is the mean `mu` of `w`.
@@ -577,8 +665,9 @@ impl AutoARIMA {
         order: ModelOrder,
         values: &[f64],
         with_constant: bool,
-        method: super::r_arima::RMethod,
-    ) -> Option<super::r_arima::RArimaFit> {
+        method: RMethod,
+        deadline: Option<Deadline>,
+    ) -> Option<RArimaFit> {
         let m = if order.s > 1 { order.s } else { 1 };
         super::r_arima::r_arima_fit(
             values,
@@ -591,6 +680,7 @@ impl AutoARIMA {
             m,
             with_constant,
             method,
+            deadline,
         )
     }
 
@@ -747,13 +837,13 @@ impl AutoARIMA {
         values: &[f64],
         d: usize,
         cap_d: usize,
-        approximation: bool,
+        ctx: &mut RSearchCtx,
     ) -> Option<(ModelOrder, f64, bool)> {
         let s = self.config.seasonal_period;
         let use_aic = self.config.use_aic;
-        let max_models = 94; // matching R's nmodels limit
-                             // R: `allowdrift <- allowdrift && (d+D)==1; allowmean <- allowmean && (d+D)==0;
-                             // constant <- allowdrift || allowmean` -- i.e. TRUE whenever d+D<=1.
+        let max_models = self.config.max_models; // R's nmodels (default 94)
+                                                 // R: `allowdrift <- allowdrift && (d+D)==1; allowmean <- allowmean && (d+D)==0;
+                                                 // constant <- allowdrift || allowmean` -- i.e. TRUE whenever d+D<=1.
         let allow_constant = d + cap_d <= 1;
 
         let max_p = self.config.max_p;
@@ -808,7 +898,7 @@ impl AutoARIMA {
             trail: &mut Vec<(ModelOrder, bool, f64)>,
             values: &[f64],
             use_aic: bool,
-            approximation: bool,
+            ctx: &mut RSearchCtx,
         ) -> Option<f64> {
             let key = (order.p, order.q, order.cap_p, order.cap_q, with_constant);
             if visited.contains(&key) {
@@ -816,12 +906,14 @@ impl AutoARIMA {
             }
             visited.insert(key);
             *n_models += 1;
+            let approximation = ctx.approximation;
             let score = AutoARIMA::score_order_explicit(
                 order,
                 values,
                 use_aic,
                 approximation,
                 with_constant,
+                ctx,
             );
             trail.push((order, with_constant, score.unwrap_or(f64::INFINITY)));
             let score = score?;
@@ -839,7 +931,7 @@ impl AutoARIMA {
             &mut trail,
             values,
             use_aic,
-            approximation,
+            ctx,
         ) {
             current_score = score;
             best_constant = current_constant;
@@ -864,7 +956,7 @@ impl AutoARIMA {
             &mut trail,
             values,
             use_aic,
-            approximation,
+            ctx,
         ) {
             if score < current_score {
                 current_score = score;
@@ -893,7 +985,7 @@ impl AutoARIMA {
                 &mut trail,
                 values,
                 use_aic,
-                approximation,
+                ctx,
             ) {
                 if score < current_score {
                     current_score = score;
@@ -923,7 +1015,7 @@ impl AutoARIMA {
                 &mut trail,
                 values,
                 use_aic,
-                approximation,
+                ctx,
             ) {
                 if score < current_score {
                     current_score = score;
@@ -945,7 +1037,7 @@ impl AutoARIMA {
                 &mut trail,
                 values,
                 use_aic,
-                approximation,
+                ctx,
             ) {
                 // R (`auto.arima`): `bestfit <- fit; p <- q <- P <- Q <- 0`
                 // -- deliberately WITHOUT `constant <- FALSE`: the
@@ -963,13 +1055,13 @@ impl AutoARIMA {
         // (R's structural moves), with a dedicated constant-toggle move
         // at the end of each scan (R's `allowdrift || allowmean` block).
         let mut start_k = 0usize;
-        while start_k < n_models && n_models < max_models {
+        while start_k < n_models && n_models < max_models && !ctx.expired() {
             start_k = n_models;
             let neighbors = self.get_neighbors(current_order);
             let mut improved = false;
 
             for neighbor in neighbors {
-                if n_models >= max_models {
+                if n_models >= max_models || ctx.expired() {
                     break;
                 }
                 if let Some(score) = record_candidate(
@@ -981,7 +1073,7 @@ impl AutoARIMA {
                     &mut trail,
                     values,
                     use_aic,
-                    approximation,
+                    ctx,
                 ) {
                     if score < current_score {
                         current_score = score;
@@ -1000,7 +1092,7 @@ impl AutoARIMA {
             // Dedicated constant-toggle move (R: no `next` after this,
             // so it is tried once per scan, after every structural move
             // has failed to improve).
-            if allow_constant && n_models < max_models {
+            if allow_constant && n_models < max_models && !ctx.expired() {
                 if let Some(score) = record_candidate(
                     current_order,
                     !current_constant,
@@ -1010,7 +1102,7 @@ impl AutoARIMA {
                     &mut trail,
                     values,
                     use_aic,
-                    approximation,
+                    ctx,
                 ) {
                     if score < current_score {
                         current_score = score;
@@ -1024,7 +1116,7 @@ impl AutoARIMA {
         if !current_score.is_finite() {
             return None;
         }
-        if approximation {
+        if ctx.approximation {
             // R: "Now re-fitting the best model(s) without
             // approximations": walk the visited models in increasing
             // CSS-ic order (`order()` is stable; `Inf` sorts last but is
@@ -1033,9 +1125,14 @@ impl AutoARIMA {
             let mut idx: Vec<usize> = (0..trail.len()).collect();
             idx.sort_by(|&a, &b| trail[a].2.total_cmp(&trail[b].2));
             for i in idx {
+                // Out of time budget (#250): keep the CSS winner, as R
+                // does when no refit succeeds.
+                if ctx.expired() {
+                    break;
+                }
                 let (order, with_constant, _) = trail[i];
                 if let Some(score) =
-                    Self::score_order_explicit(order, values, use_aic, false, with_constant)
+                    Self::score_order_explicit(order, values, use_aic, false, with_constant, ctx)
                 {
                     return Some((order, score, with_constant));
                 }
@@ -1281,6 +1378,12 @@ impl Forecaster for AutoARIMA {
         // `fit()` call from the undifferenced training length and the
         // configured seasonal period.
         let approximation = self.approximation(values.len());
+        // Time budget (#250); wasm32 has no clock, so it is ignored there.
+        #[cfg(not(target_arch = "wasm32"))]
+        let deadline = self.config.time_budget.map(Deadline::after);
+        #[cfg(target_arch = "wasm32")]
+        let deadline: Option<Deadline> = None;
+        let mut ctx = RSearchCtx::new(approximation, deadline);
 
         // Phase 1: Score-only evaluation to find the best order
         if self.config.stepwise && self.config.true_stepwise {
@@ -1289,7 +1392,7 @@ impl Forecaster for AutoARIMA {
                     if let Some(diff_series) = diff_series_map.get(&(d, cap_d)) {
                         let _ = diff_series;
                         if let Some((order, score, with_constant)) =
-                            self.true_stepwise_search(values, d, cap_d, approximation)
+                            self.true_stepwise_search(values, d, cap_d, &mut ctx)
                         {
                             if score < best_score {
                                 best_score = score;
@@ -1346,7 +1449,8 @@ impl Forecaster for AutoARIMA {
         if self.selected_model.is_none() && self.config.stepwise && self.config.true_stepwise {
             if let Some(order) = best_order {
                 if !series.has_regressors() {
-                    self.selected_model = Self::r_final_model(series, order, best_constant);
+                    self.selected_model =
+                        Self::r_final_model(series, order, best_constant, &mut ctx);
                 }
             }
         }

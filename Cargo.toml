@@ -304,6 +304,10 @@ required-features = ["serde"]
 name = "autoarima_seasonal_timing"
 path = "examples/validation/autoarima_seasonal_timing.rs"
 
+[[example]]
+name = "autoarima_long_season_timing"
+path = "examples/validation/autoarima_long_season_timing.rs"
+
 # Trend Components
 [[example]]
 name = "trend_components"
