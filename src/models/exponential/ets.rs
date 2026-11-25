@@ -547,6 +547,10 @@ pub struct ETS {
     /// Time-0 states of the last `fit()`.
     #[cfg_attr(feature = "serde", serde(default))]
     initial_states: Option<EtsInitialStates>,
+    /// Fixed smoothing parameters, estimate only the initial states by
+    /// likelihood on `fit()` (see [`ETS::with_fixed_params`]).
+    #[cfg_attr(feature = "serde", serde(default))]
+    estimate_states: bool,
 }
 
 /// Time-0 states of an ETS fit (before the first observation), R
@@ -605,6 +609,7 @@ impl ETS {
             trend_part: None,
             seasonal_part: None,
             initial_states: None,
+            estimate_states: false,
         }
     }
 
@@ -643,6 +648,160 @@ impl ETS {
             trend_part: None,
             seasonal_part: None,
             initial_states: None,
+            estimate_states: false,
+        }
+    }
+
+    /// Create an ETS model whose smoothing parameters are fixed at the given
+    /// values (not clamped), while `fit()` estimates the initial states
+    /// (`l_0`, `b_0`, `s_0..s_{m-1}`) by maximum likelihood. This is R
+    /// `ets(y, model, alpha = , beta = , gamma = , phi = )` with every
+    /// smoothing parameter supplied.
+    ///
+    /// Each parameter must be given exactly when the spec uses it: `beta`
+    /// for a trend, `gamma` for seasonality, `phi` for a damped trend.
+    /// `alpha`, `beta` and `gamma` must lie in `(0, 1)` and `phi` in
+    /// `(0, 1]`.
+    pub fn with_fixed_params(
+        spec: ETSSpec,
+        seasonal_period: usize,
+        alpha: f64,
+        beta: Option<f64>,
+        gamma: Option<f64>,
+        phi: Option<f64>,
+    ) -> Result<Self> {
+        fn check(
+            name: &str,
+            value: Option<f64>,
+            used: bool,
+            what: &str,
+            upper_closed: bool,
+        ) -> Result<()> {
+            match (value, used) {
+                (Some(v), true) => {
+                    let ok = v.is_finite() && v > 0.0 && (v < 1.0 || (upper_closed && v == 1.0));
+                    if ok {
+                        Ok(())
+                    } else {
+                        Err(ForecastError::InvalidParameter(format!(
+                            "ETS {name} = {v} must lie in (0, {})",
+                            if upper_closed { "1]" } else { "1)" }
+                        )))
+                    }
+                }
+                (None, true) => Err(ForecastError::InvalidParameter(format!(
+                    "ETS spec with {what} requires a fixed {name}"
+                ))),
+                (Some(_), false) => Err(ForecastError::InvalidParameter(format!(
+                    "ETS spec without {what} does not use {name}"
+                ))),
+                (None, false) => Ok(()),
+            }
+        }
+        check("alpha", Some(alpha), true, "a level", false)?;
+        check("beta", beta, spec.has_trend(), "a trend", false)?;
+        check("gamma", gamma, spec.has_seasonal(), "seasonality", false)?;
+        check("phi", phi, spec.is_damped(), "a damped trend", true)?;
+        if spec.has_seasonal() && seasonal_period < 2 {
+            return Err(ForecastError::InvalidParameter(format!(
+                "seasonal ETS needs seasonal_period >= 2, got {seasonal_period}"
+            )));
+        }
+
+        let mut model = Self::new(spec, seasonal_period);
+        model.alpha = Some(alpha);
+        model.beta = beta;
+        model.gamma = gamma;
+        model.phi = phi;
+        model.optimize = false;
+        model.estimate_states = true;
+        Ok(model)
+    }
+
+    /// `true` for a model built with [`ETS::with_fixed_params`].
+    pub fn has_fixed_params(&self) -> bool {
+        self.estimate_states
+    }
+
+    /// Maximum-likelihood initial states for the fixed smoothing parameters
+    /// (`with_fixed_params`), using the same likelihood, bounds and
+    /// heuristic start as the joint optimiser.
+    fn optimize_states(&self, values: &[f64]) -> (f64, f64, Vec<f64>) {
+        let (alpha, beta, gamma, phi) =
+            (self.alpha.unwrap_or(0.3), self.beta, self.gamma, self.phi);
+        let has_trend = self.spec.has_trend();
+        let has_seasonal = self.spec.has_seasonal();
+        let period = if has_seasonal {
+            self.seasonal_period
+        } else {
+            0
+        };
+        let (init_level, init_trend, init_seasonals) = self.initialize_state(values);
+
+        let (y_min, y_max) = values
+            .iter()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(min, max), &y| {
+                (min.min(y), max.max(y))
+            });
+        let y_range = (y_max - y_min).max(f64::EPSILON);
+
+        let mut start = vec![init_level];
+        let mut bounds = vec![(y_min - y_range, y_max + y_range)];
+        if has_trend {
+            start.push(init_trend);
+            bounds.push((-y_range, y_range));
+        }
+        if has_seasonal {
+            start.extend_from_slice(&init_seasonals[..period]);
+            let b = if self.spec.seasonal == SeasonalType::Multiplicative {
+                (0.01, 100.0)
+            } else {
+                (-2.0 * y_range, 2.0 * y_range)
+            };
+            bounds.extend(std::iter::repeat_n(b, period));
+        }
+
+        let config = NelderMeadConfig {
+            max_iter: 2000 + 300 * period,
+            tolerance: 1e-10,
+            stagnation_window: 200,
+            ..Default::default()
+        };
+        let buf = RefCell::new(vec![0.0; period.max(1)]);
+        let s_off = if has_trend { 2 } else { 1 };
+        let result = nelder_mead(
+            |p| {
+                let mut buf = buf.borrow_mut();
+                self.calculate_likelihood_with_init_buf(
+                    values,
+                    alpha,
+                    beta,
+                    gamma,
+                    phi,
+                    Some(p[0]),
+                    has_trend.then(|| p[1]),
+                    has_seasonal.then(|| &p[s_off..s_off + period]),
+                    &mut buf,
+                )
+            },
+            &start,
+            Some(&bounds),
+            config,
+        );
+
+        if result.optimal_value < f64::MAX && result.optimal_point.iter().all(|v| v.is_finite()) {
+            let p = &result.optimal_point;
+            (
+                p[0],
+                if has_trend { p[1] } else { 0.0 },
+                if has_seasonal {
+                    p[s_off..s_off + period].to_vec()
+                } else {
+                    init_seasonals
+                },
+            )
+        } else {
+            (init_level, init_trend, init_seasonals)
         }
     }
 
@@ -695,6 +854,7 @@ impl ETS {
             trend_part: None,
             seasonal_part: None,
             initial_states: None,
+            estimate_states: false,
         }
     }
 
@@ -778,6 +938,7 @@ impl ETS {
             trend_part: None,
             seasonal_part: None,
             initial_states: None,
+            estimate_states: false,
         }
     }
 
@@ -2286,17 +2447,22 @@ impl ETS {
     }
 
     fn num_params(&self) -> usize {
-        let mut count = 1; // alpha
-        if self.spec.has_trend() {
-            count += 1;
-        } // beta
-        if self.spec.has_seasonal() {
-            count += 1;
-        } // gamma
-        if self.spec.is_damped() {
-            count += 1;
-        } // phi
-          // Add initial states
+        let mut count = 0;
+        // Fixed smoothing parameters (`with_fixed_params`) are not
+        // estimated, so they do not count (R `ets()` with alpha/beta/... given).
+        if !self.estimate_states {
+            count += 1; // alpha
+            if self.spec.has_trend() {
+                count += 1;
+            } // beta
+            if self.spec.has_seasonal() {
+                count += 1;
+            } // gamma
+            if self.spec.is_damped() {
+                count += 1;
+            } // phi
+        }
+        // Add initial states
         count += 1; // initial level
         if self.spec.has_trend() {
             count += 1;
@@ -2909,6 +3075,11 @@ impl Forecaster for ETS {
             init_level = opt_level;
             init_trend = opt_trend;
             seasonals = opt_seasonals.unwrap_or_default();
+        } else if self.estimate_states {
+            let (sl, st, ss) = self.optimize_states(values);
+            init_level = sl;
+            init_trend = st;
+            seasonals = ss;
         } else {
             let (hl, ht, hs) = self.initialize_state(values);
             init_level = hl;
@@ -3126,6 +3297,10 @@ impl Forecaster for ETS {
         "ETS"
     }
 
+    fn explanation(&self) -> Result<crate::models::inspect::Explanation> {
+        <Self as crate::models::inspect::Inspectable>::explanation(self)
+    }
+
     fn fitted_params(&self) -> Option<FittedParams> {
         let level = self.level?;
         let mut params = HashMap::new();
@@ -3319,6 +3494,36 @@ impl IncrementalForecaster for ETS {
             sum_log_fc: st.sum_log_fc,
         });
         Ok(model)
+    }
+}
+
+impl crate::models::inspect::Inspectable for ETS {
+    /// Fit snapshot of a fixed-spec ETS (same payload as `AutoETS`).
+    fn explanation(&self) -> Result<crate::models::inspect::Explanation> {
+        use crate::models::inspect::{EtsExplanation, Explanation};
+        let fitted_values = self.fitted.clone().ok_or(ForecastError::FitRequired {
+            model: Some("ETS".into()),
+        })?;
+        let initial = self.initial_states.as_ref();
+        Ok(Explanation::Ets(EtsExplanation {
+            spec: self.spec.short_name(),
+            alpha: self.alpha.unwrap_or(f64::NAN),
+            beta: self.beta,
+            gamma: self.gamma,
+            phi: self.phi,
+            seasonal_period: if self.spec.has_seasonal() {
+                self.seasonal_period
+            } else {
+                0
+            },
+            fitted_values,
+            trend_component: self.trend_part.clone().unwrap_or_default(),
+            seasonal_component: self.seasonal_part.clone(),
+            residuals: self.residuals.clone().unwrap_or_default(),
+            initial_level: initial.map(|s| s.level),
+            initial_trend: initial.and_then(|s| s.trend),
+            initial_seasonals: initial.and_then(|s| s.seasonals.clone()),
+        }))
     }
 }
 
