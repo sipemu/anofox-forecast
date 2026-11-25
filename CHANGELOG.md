@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`ETS` / `AutoETS` in-sample components (DataZooDE/anofox-forecast-extension#316).**
+  `seasonal_component()` was not implemented for either model, so
+  `AutoETS::explanation()` always reported `seasonal_component: None`, even for seasonal
+  fits. `AutoETS::trend_component()` returned the fitted values. Both now split each
+  one-step fitted value into a level/trend part (`l`, `l + b` or `l + phi*b` before the
+  update) and a seasonal part (`fitted - trend`: `s` for additive and `(l + phi*b)(s - 1)`
+  for multiplicative seasonality), so `trend_component + seasonal_component + residuals`
+  equals the training values for every spec. `update()` extends both. For non-seasonal
+  specs `trend_component` equals `fitted_values` as before, and `seasonal_component` is
+  `Err`.
+
+### Added
+
+- **ETS initial states.** `ETS::initial_states()` returns the time-0 states (`l_0`, `b_0`,
+  `s_0..s_{m-1}`, the R `ets()` `initstate` convention) as `EtsInitialStates`, and
+  `EtsExplanation` gains `initial_level`, `initial_trend` and `initial_seasonals`
+  (`#[serde(default)]`, so older JSON still deserialises). With the smoothing parameters,
+  `ETS::with_params_and_states` replays the fit exactly from these values.
+
 ## [0.21.0] - 2026-11-19
 
 ### Added
