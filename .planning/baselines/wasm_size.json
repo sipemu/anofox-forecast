@@ -1,13 +1,13 @@
 {
   "provenance": {
-    "git_sha": "0209c80",
-    "timestamp_iso": "2026-10-14T11:16:20Z",
-    "rustc_version": "CI stable (GitHub Actions, run 38555127803)",
+    "git_sha": "ee70b0c",
+    "timestamp_iso": "2026-11-25T21:50:00Z",
+    "rustc_version": "CI stable (GitHub Actions, run 45707571452)",
     "host_cpu": "GitHub Actions ubuntu-latest",
     "host_os": "Linux (GitHub Actions)",
     "active_features": [],
-    "note": "Re-baselined for the r_arima port (PR #223): R stats::arima estimation path adds ~100 KB (+3.53%). Size taken from the CI measurement so the gate compares like with like."
+    "note": "Re-baselined for v0.23.0 (PR #253, ETS::with_fixed_params + Inspectable for ETS): +34 KB (+1.16%) over the 2026-10-14 baseline, which also absorbs growth from 0.17-0.22. Size taken from the CI measurement so the gate compares like with like."
   },
   "filename": "anofox_forecast_js_bg.wasm",
-  "bytes": 2939273
+  "bytes": 2973381
 }
