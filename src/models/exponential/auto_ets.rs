@@ -809,10 +809,25 @@ impl Forecaster for AutoETS {
     /// invariant we use trend_component = fitted_values; per-spec
     /// structural decomposition (level/trend/seasonal split) is a
     /// follow-up.
+    /// The selected ETS model's trend component (see [`ETS`]).
     fn trend_component(&self) -> Result<&[f64]> {
-        self.fitted_values().ok_or(ForecastError::FitRequired {
-            model: Some("AutoETS".into()),
-        })
+        self.selected_model
+            .as_ref()
+            .ok_or(ForecastError::FitRequired {
+                model: Some("AutoETS".into()),
+            })?
+            .trend_component()
+    }
+
+    /// The selected ETS model's seasonal component; `Err` when the
+    /// selected spec is non-seasonal.
+    fn seasonal_component(&self) -> Result<&[f64]> {
+        self.selected_model
+            .as_ref()
+            .ok_or(ForecastError::FitRequired {
+                model: Some("AutoETS".into()),
+            })?
+            .seasonal_component()
     }
 
     fn name(&self) -> &str {
@@ -1036,6 +1051,7 @@ impl Inspectable for AutoETS {
         } else {
             None
         };
+        let initial = model.initial_states();
 
         Ok(Explanation::Ets(EtsExplanation {
             spec: spec.short_name(),
@@ -1048,6 +1064,9 @@ impl Inspectable for AutoETS {
             trend_component,
             seasonal_component,
             residuals,
+            initial_level: initial.map(|s| s.level),
+            initial_trend: initial.and_then(|s| s.trend),
+            initial_seasonals: initial.and_then(|s| s.seasonals.clone()),
         }))
     }
 }

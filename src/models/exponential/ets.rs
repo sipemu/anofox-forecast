@@ -529,6 +529,39 @@ pub struct ETS {
     /// so `update()` can extend them without the history.
     #[cfg_attr(feature = "serde", serde(default))]
     error_sums: Option<EtsErrorSums>,
+    /// Per-step level/trend part of each one-step fitted value: `l`,
+    /// `l + b` or `l + phi*b` at time `t-1`.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, with = "crate::utils::persistence::nan_vec")
+    )]
+    trend_part: Option<Vec<f64>>,
+    /// Per-step seasonal part of each one-step fitted value, `fitted -
+    /// trend_part`: `s` for additive and `(l + phi*b) * (s - 1)` for
+    /// multiplicative seasonality. `None` for non-seasonal specs.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, with = "crate::utils::persistence::nan_vec")
+    )]
+    seasonal_part: Option<Vec<f64>>,
+    /// Time-0 states of the last `fit()`.
+    #[cfg_attr(feature = "serde", serde(default))]
+    initial_states: Option<EtsInitialStates>,
+}
+
+/// Time-0 states of an ETS fit (before the first observation), R
+/// `ets()`'s `initstate` convention: with these and the smoothing
+/// parameters, the in-sample recursion reproduces the fit exactly.
+#[derive(Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct EtsInitialStates {
+    /// Initial level `l_0`.
+    pub level: f64,
+    /// Initial slope `b_0`; `None` for specs without a trend.
+    pub trend: Option<f64>,
+    /// Initial seasonal states; in-sample step `t` (0-based) uses
+    /// `seasonals[t % period]`. `None` for non-seasonal specs.
+    pub seasonals: Option<Vec<f64>>,
 }
 
 /// Running error sums of an ETS fit (see `ETS::set_fit_statistics`).
@@ -569,6 +602,9 @@ impl ETS {
             exog_ols: None,
             skip_optimization: false,
             error_sums: None,
+            trend_part: None,
+            seasonal_part: None,
+            initial_states: None,
         }
     }
 
@@ -604,6 +640,9 @@ impl ETS {
             exog_ols: None,
             skip_optimization: false,
             error_sums: None,
+            trend_part: None,
+            seasonal_part: None,
+            initial_states: None,
         }
     }
 
@@ -653,6 +692,9 @@ impl ETS {
             exog_ols: None,
             skip_optimization: true,
             error_sums: None,
+            trend_part: None,
+            seasonal_part: None,
+            initial_states: None,
         }
     }
 
@@ -733,6 +775,9 @@ impl ETS {
             exog_ols: None,
             skip_optimization: true,
             error_sums: None,
+            trend_part: None,
+            seasonal_part: None,
+            initial_states: None,
         }
     }
 
@@ -753,6 +798,21 @@ impl ETS {
     }
     pub fn phi(&self) -> Option<f64> {
         self.phi
+    }
+
+    /// Time-0 states (`l_0`, `b_0`, `s_0..s_{m-1}`) of the last `fit()`;
+    /// `None` before a fit or for a model restored from a state.
+    pub fn initial_states(&self) -> Option<&EtsInitialStates> {
+        self.initial_states.as_ref()
+    }
+
+    /// Level/trend part of a one-step forecast from states `level`, `trend`.
+    fn trend_part_of(&self, level: f64, trend: f64, phi: f64) -> f64 {
+        match self.spec.trend {
+            TrendType::None => level,
+            TrendType::Additive => level + trend,
+            TrendType::AdditiveDamped => level + phi * trend,
+        }
     }
 
     /// Get information criteria.
@@ -2870,13 +2930,23 @@ impl Forecaster for ETS {
         let start_idx = 0;
         let is_mult_error = self.spec.error == ErrorType::Multiplicative;
 
+        let has_seasonal = self.spec.has_seasonal();
+        self.initial_states = Some(EtsInitialStates {
+            level,
+            trend: self.spec.has_trend().then_some(trend),
+            seasonals: has_seasonal.then(|| seasonals.clone()),
+        });
+
         let mut fitted = Vec::with_capacity(self.n);
         let mut residuals = Vec::with_capacity(self.n);
+        let mut trend_part = Vec::with_capacity(self.n);
+        let mut seasonal_part = Vec::with_capacity(if has_seasonal { self.n } else { 0 });
         let mut sum_sq_errors = 0.0_f64;
         let mut sum_log_fc = 0.0_f64;
 
         // Process remaining data
         for (t, &y) in values.iter().enumerate().skip(start_idx) {
+            let base = self.trend_part_of(level, trend, phi);
             let forecast = self.step(
                 (alpha, beta, gamma, phi),
                 &mut level,
@@ -2887,6 +2957,10 @@ impl Forecaster for ETS {
             );
 
             fitted.push(forecast);
+            trend_part.push(base);
+            if has_seasonal {
+                seasonal_part.push(forecast - base);
+            }
             let err = y - forecast;
             residuals.push(err);
 
@@ -2911,6 +2985,8 @@ impl Forecaster for ETS {
             self.seasonals = Some(seasonals);
         }
         self.fitted = Some(fitted);
+        self.trend_part = Some(trend_part);
+        self.seasonal_part = has_seasonal.then_some(seasonal_part);
 
         self.set_fit_statistics(EtsErrorSums {
             sse: crate::simd::sum_of_squares(&residuals[start_idx..]),
@@ -2991,6 +3067,34 @@ impl Forecaster for ETS {
 
     fn fitted_values(&self) -> Option<&[f64]> {
         self.fitted.as_deref()
+    }
+
+    /// Level/trend part of each one-step fitted value (`l`, `l + b` or
+    /// `l + phi*b` before the update at `t`), so `trend_component +
+    /// seasonal_component + residuals == training values` exactly. Equal to
+    /// `fitted_values` for non-seasonal specs.
+    fn trend_component(&self) -> Result<&[f64]> {
+        self.trend_part
+            .as_deref()
+            .ok_or(ForecastError::FitRequired {
+                model: Some(self.name().into()),
+            })
+    }
+
+    /// Seasonal part of each one-step fitted value (`fitted -
+    /// trend_component`); `Err` for non-seasonal specs.
+    fn seasonal_component(&self) -> Result<&[f64]> {
+        if !self.spec.has_seasonal() {
+            return Err(ForecastError::InvalidParameter(format!(
+                "{} has no seasonal component",
+                self.name()
+            )));
+        }
+        self.seasonal_part
+            .as_deref()
+            .ok_or(ForecastError::FitRequired {
+                model: Some(self.name().into()),
+            })
     }
 
     fn fitted_values_with_intervals(&self, level: f64) -> Option<Forecast> {
@@ -3083,6 +3187,7 @@ impl IncrementalForecaster for ETS {
         let is_mult_error = self.spec.error == ErrorType::Multiplicative;
 
         for (i, &y) in new_obs.iter().enumerate() {
+            let base = self.trend_part_of(level, trend, params.3);
             let forecast = self.step(
                 params,
                 &mut level,
@@ -3108,6 +3213,12 @@ impl IncrementalForecaster for ETS {
             }
             if let Some(residuals) = self.residuals.as_mut() {
                 residuals.push(err);
+            }
+            if let Some(trend_part) = self.trend_part.as_mut() {
+                trend_part.push(base);
+            }
+            if let Some(seasonal_part) = self.seasonal_part.as_mut() {
+                seasonal_part.push(forecast - base);
             }
         }
 

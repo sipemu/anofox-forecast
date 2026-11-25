@@ -101,12 +101,26 @@ pub struct EtsExplanation {
     /// In-sample fitted values.
     pub fitted_values: Vec<f64>,
     /// Trend component (from the #106 accessor). Same length as
-    /// `fitted_values` or shorter (warmup-dropped).
+    /// `fitted_values` or shorter (warmup-dropped). For `ETS`/`AutoETS`
+    /// this is the level/trend part of each one-step fitted value, so
+    /// `trend_component + seasonal_component + residuals` equals the
+    /// training values.
     pub trend_component: Vec<f64>,
     /// Seasonal component if available; `None` for non-seasonal fits.
     pub seasonal_component: Option<Vec<f64>>,
     /// In-sample residuals.
     pub residuals: Vec<f64>,
+    /// Initial level `l_0`; `None` when the model does not expose it.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub initial_level: Option<f64>,
+    /// Initial slope `b_0`; `None` for specs without a trend.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub initial_trend: Option<f64>,
+    /// Initial seasonal states; in-sample step `t` (0-based) uses
+    /// `initial_seasonals[t % seasonal_period]`. `None` for non-seasonal
+    /// specs.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub initial_seasonals: Option<Vec<f64>>,
 }
 
 /// Interpretable state for ARIMA / SARIMA forecasters.
@@ -304,6 +318,9 @@ mod tests {
             trend_component: vec![1.0; 5],
             seasonal_component: Some(vec![0.5; 5]),
             residuals: vec![0.0; 5],
+            initial_level: Some(9.0),
+            initial_trend: Some(0.5),
+            initial_seasonals: Some(vec![0.1; 12]),
         });
         let json = serde_json::to_string(&e).unwrap();
         let e2: Explanation = serde_json::from_str(&json).unwrap();

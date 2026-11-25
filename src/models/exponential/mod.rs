@@ -20,7 +20,9 @@ pub use auto_ets::{
     cap_spikes, diagnose_spikes, AutoETS, AutoETSConfig, ModelPool, SelectionCriterion,
     SpikeDiagnosis, DEFAULT_MIN_SEASONAL_CYCLES,
 };
-pub use ets::{ETSSpec, ErrorType, SeasonalType as ETSSeasonalType, TrendType, ETS};
+pub use ets::{
+    ETSSpec, ErrorType, EtsInitialStates, SeasonalType as ETSSeasonalType, TrendType, ETS,
+};
 pub use global_ets::{GlobalAutoETS, GlobalETS};
 pub use holt::HoltLinearTrend;
 pub use holt_winters::{HoltWinters, SeasonalType};
