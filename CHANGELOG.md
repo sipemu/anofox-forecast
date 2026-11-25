@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-11-25
+
+### Added
+
+- **`ETS::with_fixed_params` (DataZooDE/anofox-forecast-extension#317).** Fixes the
+  smoothing parameters at the given values and estimates only the initial states (`l_0`,
+  `b_0`, `s_0..s_{m-1}`) by maximum likelihood, like R `ets(y, model, alpha = , beta = ,
+  gamma = , phi = )` with every smoothing parameter supplied. This is for hyper-model
+  forecasting, where a global learner predicts the parameters.
+  - The values are used exactly. `with_params` clamps them (phi to [0.8, 0.98]) and uses
+    heuristic states instead.
+  - Each parameter must be given exactly when the spec uses it. `alpha`, `beta` and `gamma`
+    must lie in (0, 1) and `phi` in (0, 1]; anything else is an error.
+  - AIC and the interval variance count only the estimated states.
+  - `ETS::has_fixed_params()` reports the mode.
+  - At the jointly optimised parameters, the states-only fit matches the joint fit (SSE
+    within 5%, forecasts within 3% on 8 specs) and is never worse than the heuristic states.
+- **`Inspectable` for `ETS`.** A fixed-spec `ETS`, optimised or with fixed parameters, now
+  returns the same `EtsExplanation` as `AutoETS`, also through `Forecaster::explanation`.
+
 ## [0.22.0] - 2026-11-25
 
 ### Fixed
